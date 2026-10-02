@@ -38,7 +38,7 @@ const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt, directEstimatesSentAfter } = require('../services/call-commitments');
 const {
-  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, ROLLING_KEY,
+  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, scopePromise, quoteHintIds, quoteEstimateIds, callbackOwnQuoteIds, ROLLING_KEY,
 } = require('../services/followup-sla-watcher');
 
 // ET is UTC-4 in late September.
@@ -851,5 +851,36 @@ describe('an estimate sent to the customer keeps a quote promise; a callback onl
     mockDb({ activity: { estimates: { handed_off_at: et('13:00').toISOString() } } });
     listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', call_started_at: et('14:00').toISOString() })]);
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+});
+
+describe('followedUpIds evidence decisions, one per evidence kind', () => {
+  test('scopePromise: a renewal after the call moves both evidence floors; before it, neither', () => {
+    const r = row('a', { kind: 'schedule_visit', call_started_at: et('14:00').toISOString() });
+    expect(scopePromise(r, null).since.toISOString()).toBe(et('14:00').toISOString());
+    expect(scopePromise(r, et('15:00')).since.toISOString()).toBe(et('15:00').toISOString());
+    expect(scopePromise(r, et('15:00')).slotFloor.toISOString()).toBe(et('15:00').toISOString());
+    expect(scopePromise(r, et('13:00')).since.toISOString()).toBe(et('14:00').toISOString());
+    // A linked caller matches by customer; an unlinked one only by a usable number.
+    expect(scopePromise(r, null).phone).toBeNull();
+    expect(scopePromise(row('u', { customer_id: null, from_phone: '+19415550123' }), null).phone).toBe('9415550123');
+  });
+
+  test('quoteHintIds: a stored estimate_sent hint keeps a quote promise only after the evidence floor', async () => {
+    mockDb({ hints: {
+      fresh: JSON.stringify({ kind: 'estimate_sent', matched_at: et('15:00').toISOString() }),
+      stale: JSON.stringify({ kind: 'estimate_sent', matched_at: et('13:00').toISOString() }),
+      other: JSON.stringify({ kind: 'sms_sent', matched_at: et('15:00').toISOString() }),
+    } });
+    const scoped = ['fresh', 'stale', 'other'].map((id) => scopePromise(row(id, { kind: 'send_estimate' }), null));
+    expect([...await quoteHintIds(db, scoped)]).toEqual(['fresh']);
+  });
+
+  test('quoteEstimateIds reads nothing for callbacks; callbackOwnQuoteIds reads nothing for quote promises', async () => {
+    mockDb();
+    expect((await quoteEstimateIds(db, [scopePromise(row('a', { kind: 'callback' }), null)])).size).toBe(0);
+    expect((await callbackOwnQuoteIds(db, [scopePromise(row('b', { kind: 'send_estimate' }), null)])).size).toBe(0);
+    expect(queriesOn('estimates')).toHaveLength(0);
+    expect(directEstimatesSentAfter).not.toHaveBeenCalled();
   });
 });

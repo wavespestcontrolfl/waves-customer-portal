@@ -229,61 +229,52 @@ function minuteOfDay(time) {
   return h * 60 + m;
 }
 
-// `renewed`: a caller that already loaded every row's renewal time (a
-// Map of id -> Date, promise-chaser-bell) passes it to skip a second
-// serial lookup per row.
-async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
-  const renewed = preloaded || await renewedFloors(conn, rows);
-  // A caller with no customer record is matched by a USABLE number only —
-  // an 'anonymous' or client: caller ID normalizes to nothing and gives the
-  // row no contact to match on (never a match between two unusable values).
-  // A renewal floor (below) now applies to every alertable SLA kind, not
-  // only callbacks (Codex #5019 r11/r12 P2/P1) — including schedule_visit,
-  // which also carries its own appointment slot. The two matching paths
-  // (`since`, and the exact-slot booking check below) each carry the
-  // renewal forward in their own terms — `since` directly, `slotFloor`
-  // below — so a schedule_visit reopened after an earlier matching-slot
-  // booking is never read as already kept by that stale booking (Codex
-  // #5019 r13 P1: the exact-slot path used to ignore the renewal floor
-  // entirely, checking only against the ORIGINAL promisedAt).
-  const scoped = (rows || []).map((r) => {
-    const base = evidenceFrom(r);
-    const floor = renewed.get(String(r.id));
-    const since = floor && (!base || floor.getTime() > base.getTime()) ? floor : base;
-    const promised = promisedAt(r);
-    // The exact-slot booking match counts from the call's end — or a
-    // renewal, whichever is LATER — never from evidenceFrom's own
-    // separately-stated floor ("send it after the inspection"): booking
-    // the promised slot IS the fulfillment, regardless of any other
-    // stated floor time, but a booking from before staff reopened the
-    // promise is not fulfillment for the reopened one. appointmentSlot
-    // itself never returns non-null without a valid promisedAt, so
-    // `slot` implies `promised` is set whenever this value is read.
-    const slotFloor = floor && promised && floor.getTime() > promised.getTime() ? floor : promised;
-    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)),
-      // The number the promise was made on, for a LINKED caller too: only the
-      // estimate_sent witness may match an unowned (customer_id NULL) text by it.
-      callerPhone: phoneKey(contactPhone(r)) };
-  }).filter((x) => x.since && (x.r.customer_id || x.phone));
-  const done = new Set();
-  if (!scoped.length) return done;
-  const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
-  // A booking for a scheduling promise's own slot counts from the call's
-  // end, or its renewal (slotFloor, above), whichever is later.
-  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? x.slotFloor : x.since).getTime())));
-  const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
-  // Numbers match however they were written (9415550123, +19415550123,
-  // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
-  const phones = [...new Set(scoped.filter((x) => x.phone).map((x) => x.phone))];
-  // A caller with no customer record when the promise was made is usually
-  // linked (or created) by the very follow-up that keeps it, so their later
-  // calls and texts match by number whether or not they carry a customer now.
-  const byContact = (qb) => qb.where(function contact() {
-    if (customerIds.length) this.whereIn('customer_id', customerIds);
-    if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
-  });
-  // …and a booking made for them lands under the customer that number
-  // belongs to by then.
+// The promise as the evidence checks read it: its evidence floor, with any
+// staff renewal moving it forward. A renewal floor applies to every alertable
+// SLA kind, not only callbacks (Codex #5019 r11/r12 P2/P1), including
+// schedule_visit, which also carries its own appointment slot. The two
+// matching paths (`since`, and the exact-slot booking check) each carry the
+// renewal forward in their own terms — `since` directly, `slotFloor` — so a
+// schedule_visit reopened after an earlier matching-slot booking is never
+// read as already kept by that stale booking (Codex #5019 r13 P1).
+function scopePromise(r, renewedAt) {
+  const base = evidenceFrom(r);
+  const since = renewedAt && (!base || renewedAt.getTime() > base.getTime()) ? renewedAt : base;
+  const promised = promisedAt(r);
+  // The exact-slot booking match counts from the call's end — or a renewal,
+  // whichever is LATER — never from evidenceFrom's own separately-stated
+  // floor ("send it after the inspection"): booking the promised slot IS the
+  // fulfillment, but a booking from before staff reopened the promise is not
+  // fulfillment for the reopened one. appointmentSlot itself never returns
+  // non-null without a valid promisedAt, so `slot` implies `promised`.
+  const slotFloor = renewedAt && promised && renewedAt.getTime() > promised.getTime() ? renewedAt : promised;
+  return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)),
+    // The number the promise was made on, for a LINKED caller too: only the
+    // estimate_sent witness may match an unowned (customer_id NULL) text by it.
+    callerPhone: phoneKey(contactPhone(r)) };
+}
+
+const createdAfter = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
+// Whose record this is: the promise's customer, or — for a caller with no
+// customer record when the promise was made — the number it was made on.
+const belongsTo = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
+  : phoneKey(rec.to_phone) === x.phone);
+
+// A caller with no customer record when the promise was made is usually
+// linked (or created) by the very follow-up that keeps it, so their later
+// calls and texts match by number whether or not they carry a customer now.
+// Numbers match however they were written (9415550123, +19415550123,
+// (941) 555-0123) — call-commitments' phoneWhere rule, batched.
+const byContact = (qb, { customerIds, phones }) => qb.where(function contact() {
+  if (customerIds.length) this.whereIn('customer_id', customerIds);
+  if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
+});
+
+// A booking someone made — never a visit the system generated on its own
+// (the nightly series top-up, a booking's seeded follow-ups) and never one
+// later cancelled (the proof's own rule). A booking made for a caller with no
+// customer record lands under the customer that number belongs to by then.
+async function bookedVisits(conn, scoped, { customerIds, phones }, bookedFloor) {
   const phoneCustomers = phones.length ? await commitments.phoneWhereAny(conn('customers'), 'phone', phones).select('id', 'phone') : [];
   const customersByPhone = new Map();
   for (const c of phoneCustomers) {
@@ -291,18 +282,23 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
     customersByPhone.set(k, [...(customersByPhone.get(k) || []), String(c.id)]);
   }
   const visitCustomerIds = [...new Set([...customerIds.map(String), ...phoneCustomers.map((c) => String(c.id))])];
-  // A booking someone made — never a visit the system generated on its own
-  // (the nightly series top-up, a booking's seeded follow-ups) and never one
-  // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
     .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
-  // A call a person placed that reached the customer: the proof's bar for a
-  // returned callback (staff-contact.js personCallBack: a staff-bridge
-  // source, a live conversation in the reviewed extraction, a card call's
-  // customer leg completed at 60 s or more), applied to every SLA kind;
-  // never an automated outbound call, never a voice-relay sandbox call.
-  const calls = (await byContact(conn('call_log'))
+  const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
+    : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
+  return (x) => visits.some((v) => visitFor(v, x) && (createdAfter(v, x.since)
+    || (!!x.slot && !!v.scheduled_date && !!v.window_start && createdAfter(v, x.slotFloor)
+      && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute)));
+}
+
+// A call a person placed that reached the customer: the proof's bar for a
+// returned callback (staff-contact.js personCallBack: a staff-bridge source,
+// a live conversation in the reviewed extraction, a card call's customer leg
+// completed at 60 s or more), applied to every SLA kind; never an automated
+// outbound call, never a voice-relay sandbox call.
+async function staffCalls(conn, contact, floor) {
+  return (await byContact(conn('call_log'), contact)
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .whereRaw("direction LIKE 'outbound%'").whereIn('source', STAFF_CALL_SOURCES).where('created_at', '>', floor)
     // The proof's two connected-call arms: a callback-card bridge whose
@@ -320,43 +316,48 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
       });
     })
     .select('id', 'customer_id', 'to_phone', 'created_at', ...callContactSelects(conn))).filter(personCallBack);
-  // A text a person sent that reached the customer: the proof's rule
-  // (staff-contact.js operatorReply + smsDelivered: the composer's stamp,
-  // the sending admin or a staff-approved draft, and a delivered text). A
-  // bare 'manual' type is reused by automated senders, and a queued text
-  // reached no one yet.
-  // An estimate sent while unowned (parked on a lead) logs its estimate_sent
-  // text with no customer_id (admin-estimates), so a linked promise would
-  // never select it by customer. Its delivery text alone also matches an
-  // UNOWNED row by the number the promise was made on, in this same query.
-  const linkedQuotePhones = [...new Set(scoped.filter((x) => x.r.customer_id && x.r.kind === 'send_estimate' && x.callerPhone).map((x) => x.callerPhone))];
+}
+
+// The delivered texts that can keep a promise, in one read: a text a person
+// sent that reached the customer (the proof's rule — staff-contact.js
+// operatorReply + smsDelivered: the composer's stamp, the sending admin or a
+// staff-approved draft, and a delivered text; a bare 'manual' type is reused
+// by automated senders and a queued text reached no one yet), plus the
+// estimate's own delivery text (sms_log 'estimate_sent'), which keeps a quote
+// promise only. An estimate sent while unowned (parked on a lead) logs that
+// text with no customer_id (admin-estimates), so a linked quote promise would
+// never select it by customer: it also matches an UNOWNED row by the number
+// the promise was made on, in this same query.
+async function deliveredTexts(conn, scoped, contact, floor) {
+  const unownedPhones = [...new Set(scoped.filter((x) => x.r.customer_id && x.r.kind === 'send_estimate' && x.callerPhone).map((x) => x.callerPhone))];
   const smsContact = (qb) => qb.where(function smsContactClause() {
-    if (customerIds.length) this.whereIn('customer_id', customerIds);
-    if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
-    if (linkedQuotePhones.length) {
+    if (contact.customerIds.length) this.whereIn('customer_id', contact.customerIds);
+    if (contact.phones.length) commitments.phoneWhereAny(this, 'to_phone', contact.phones, { or: true });
+    if (unownedPhones.length) {
       this.orWhere(function unownedEstimateText() {
         this.whereNull('customer_id').where('message_type', ESTIMATE_SENT_SMS_TYPE);
-        commitments.phoneWhereAny(this, 'to_phone', linkedQuotePhones);
+        commitments.phoneWhereAny(this, 'to_phone', unownedPhones);
       });
     }
   });
   const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(smsContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
     .where(function personSent() {
-      // The estimate's own delivery text rides the same read (see the
-      // estimate evidence below): it keeps callback and quote promises only.
       this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES)
         .orWhere('message_type', ESTIMATE_SENT_SMS_TYPE);
     })
     .whereIn('status', ['sent', 'delivered'])
     .select('customer_id', 'to_phone', 'created_at', 'status', 'message_type', 'from_phone', ...smsContactSelects(conn)))
     .filter((t) => smsDelivered(t));
-  const estimateTexts = texts.filter((t) => t.message_type === ESTIMATE_SENT_SMS_TYPE);
-  const personTexts = texts.filter(operatorReply);
-  // A quote delivered to the customer rather than linked to this call: the
-  // canonical proof records it as an association hint on the promise
-  // (fulfillment kind estimate_sent, status still open) — its ownership rules
-  // (customer FK, lead mirror, caller phone) are the Owed queue's own.
+  return { personTexts: texts.filter(operatorReply), estimateTexts: texts.filter((t) => t.message_type === ESTIMATE_SENT_SMS_TYPE) };
+}
+
+// A quote delivered to the customer rather than linked to this call: the
+// canonical proof records it as an association hint on the promise
+// (fulfillment kind estimate_sent, status still open) — its ownership rules
+// (customer FK, lead mirror, caller phone) are the Owed queue's own.
+async function quoteHintIds(conn, scoped) {
+  const done = new Set();
   const quoteIds = scoped.filter((x) => x.r.kind === 'send_estimate').map((x) => x.r.id);
   const hints = await conn('call_commitments').whereIn('id', quoteIds).select('id', 'fulfillment');
   const sinceById = new Map(scoped.map((x) => [String(x.r.id), x.since]));
@@ -367,90 +368,117 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
     const matched = new Date(f?.matched_at || 0).getTime();
     if (f?.kind === 'estimate_sent' && matched > (sinceById.get(String(h.id))?.getTime() ?? Infinity)) done.add(h.id);
   }
-  // A quote promise staff confirmed, edited or typed has a human verdict,
-  // which refreshFulfillment never rewrites — so its stored hint above is
-  // never populated, and a quote sent after the review would read as still
-  // owed. Look the delivery up live for those rows, read-only (the verdict
-  // stays the office's). A lookup that throws propagates: every caller
-  // already treats that as unverified, never as kept.
-  const reviewedQuotes = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.human_state && !done.has(x.r.id) && x.r.call_log_id);
-  if (reviewedQuotes.length) {
-    const quoteCalls = await conn('call_log').whereIn('id', [...new Set(reviewedQuotes.map((x) => x.r.call_log_id))])
-      .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'bridged_at', 'duration_seconds', 'metadata');
-    const callById = new Map(quoteCalls.map((c) => [String(c.id), c]));
-    for (const x of reviewedQuotes) {
-      const call = callById.get(String(x.r.call_log_id));
-      if (!call) continue;
-      const live = await conn('call_commitments').where({ id: x.r.id }).first();
-      if (!live) continue;
-      const proof = await commitments.resolveFulfillment(conn, live, call);
-      if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
-    }
+  return done;
+}
+
+// A quote promise staff confirmed, edited or typed has a human verdict, which
+// refreshFulfillment never rewrites — so its stored hint is never populated,
+// and a quote sent after the review would read as still owed. Look the
+// delivery up live for those rows, read-only (the verdict stays the
+// office's). A lookup that throws propagates: every caller already treats
+// that as unverified, never as kept.
+async function reviewedQuoteIds(conn, scoped, alreadyDone) {
+  const done = new Set();
+  const reviewed = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.human_state && !alreadyDone.has(x.r.id) && x.r.call_log_id);
+  if (!reviewed.length) return done;
+  const quoteCalls = await conn('call_log').whereIn('id', [...new Set(reviewed.map((x) => x.r.call_log_id))])
+    .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'bridged_at', 'duration_seconds', 'metadata');
+  const callById = new Map(quoteCalls.map((c) => [String(c.id), c]));
+  for (const x of reviewed) {
+    const call = callById.get(String(x.r.call_log_id));
+    const live = call ? await conn('call_commitments').where({ id: x.r.id }).first() : null;
+    const proof = live ? await commitments.resolveFulfillment(conn, live, call) : null;
+    if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
   }
-  // An estimate SENT after the promise keeps it, by kind (Codex #5543 r3):
-  // - send_estimate: ANY estimate sent to the customer ("send me the quote" is
-  //   kept by the quote arriving, linked to this call or not). A linked caller
-  //   is read through the canonical ownership fence (whereEstimateCustomerOwnership:
-  //   the customer's own rows plus live lead-owned ones, never one another
-  //   lead claims or a deleted lead's), so an estimate parked on a lead and
-  //   sent by email only still counts; an unlinked caller matches only an
-  //   UNOWNED estimate on the caller's phone, as estimateSentTo does.
-  // - callback ("call back to discuss the quote"): only the promise call's OWN
-  //   quote — an estimate stamped with that call, or on the lead that call
-  //   minted or linked (commitments.directEstimatesSentAfter, the same direct
-  //   proof the canonical fulfillment uses). An unrelated estimate going out
-  //   never closes "we'll call back with availability".
-  // Both use the canonical delivery witness (handedOffWithin / witnessAt: a
-  // real handoff or an acceptance, never a suppressed send's bare sent_at)
-  // after the evidence boundary `since`. send_estimate's delivery text
-  // (sms_log 'estimate_sent', read with the texts above) is a second witness.
-  const estimateDone = new Set();
-  const quoteScoped = scoped.filter((x) => x.r.kind === 'send_estimate');
-  const linkedQuotes = quoteScoped.filter((x) => x.r.customer_id);
-  for (const customerId of [...new Set(linkedQuotes.map((x) => String(x.r.customer_id)))]) {
-    const group = linkedQuotes.filter((x) => String(x.r.customer_id) === customerId);
+  return done;
+}
+
+// send_estimate: ANY estimate sent to the customer after the promise ("send me
+// the quote" is kept by the quote arriving, linked to this call or not;
+// Codex #5543 r3). A linked caller is read through the canonical ownership
+// fence (whereEstimateCustomerOwnership: the customer's own rows plus live
+// lead-owned ones, never one another lead claims or a deleted lead's), so an
+// estimate parked on a lead and sent by email only still counts; an unlinked
+// caller matches only an UNOWNED estimate on the caller's phone, as
+// estimateSentTo does. The canonical delivery witness (handedOffWithin /
+// witnessAt: a real handoff or an acceptance, never a suppressed send's bare
+// sent_at) after the evidence boundary `since`.
+async function quoteEstimateIds(conn, scoped) {
+  const done = new Set();
+  const quotes = scoped.filter((x) => x.r.kind === 'send_estimate');
+  const linked = quotes.filter((x) => x.r.customer_id);
+  for (const customerId of [...new Set(linked.map((x) => String(x.r.customer_id)))]) {
+    const group = linked.filter((x) => String(x.r.customer_id) === customerId);
     const lowest = new Date(Math.min(...group.map((x) => x.since.getTime())));
     const sent = await commitments.handedOffWithin(conn('estimates'), lowest)
       .modify((b) => commitments.whereEstimateCustomerOwnership(b, customerId))
       .select(...commitments.HANDOFF_COLS(conn));
-    for (const x of group) if (sent.some((e) => commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
+    for (const x of group) if (sent.some((e) => commitments.witnessAt(e, x.since))) done.add(x.r.id);
   }
-  const quotePhones = [...new Set(quoteScoped.filter((x) => x.phone).map((x) => x.phone))];
-  if (quotePhones.length) {
-    const lowest = new Date(Math.min(...quoteScoped.filter((x) => x.phone).map((x) => x.since.getTime())));
-    const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereNull('customer_id')
-      .modify((b) => commitments.phoneWhereAny(b, 'customer_phone', quotePhones))
-      .select(...commitments.HANDOFF_COLS(conn), 'customer_phone');
-    for (const x of quoteScoped.filter((y) => y.phone)) {
-      if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
-    }
+  const unlinked = quotes.filter((x) => x.phone);
+  if (!unlinked.length) return done;
+  const lowest = new Date(Math.min(...unlinked.map((x) => x.since.getTime())));
+  const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereNull('customer_id')
+    .modify((b) => commitments.phoneWhereAny(b, 'customer_phone', [...new Set(unlinked.map((x) => x.phone))]))
+    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone');
+  for (const x of unlinked) {
+    if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since))) done.add(x.r.id);
   }
-  const callbackQuotes = scoped.filter((x) => x.r.kind === 'callback' && x.r.call_log_id);
-  if (callbackQuotes.length) {
-    const callRows = await conn('call_log').whereIn('id', [...new Set(callbackQuotes.map((x) => x.r.call_log_id))])
-      .select('id', 'twilio_call_sid', 'created_at', 'customer_id', 'from_phone', 'to_phone', 'direction');
-    const callById = new Map(callRows.map((c) => [String(c.id), c]));
-    const probes = callbackQuotes.filter((x) => callById.has(String(x.r.call_log_id))).map((x) => {
-      const call = callById.get(String(x.r.call_log_id));
-      return { key: String(x.r.id), callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at,
-        customerId: call.customer_id || x.r.customer_id || null, phone: contactPhone(call), after: x.since };
-    });
-    if (probes.length) for (const key of (await commitments.directEstimatesSentAfter(conn, probes)).keys()) estimateDone.add(key);
-  }
-  const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
-  const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
-    : phoneKey(rec.to_phone) === x.phone);
-  const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
-    : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
-  const booked = (v, x) => after(v, x.since)
-    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, x.slotFloor)
-      && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute);
+  return done;
+}
+
+// callback ("call back to discuss the quote"): only the promise call's OWN
+// quote — an estimate stamped with that call, or on the lead that call minted
+// or linked (commitments.directEstimatesSentAfter, the same direct proof the
+// canonical fulfillment uses). An unrelated estimate going out never closes
+// "we'll call back with availability" (Codex #5543 r3).
+async function callbackOwnQuoteIds(conn, scoped) {
+  const callbacks = scoped.filter((x) => x.r.kind === 'callback' && x.r.call_log_id);
+  if (!callbacks.length) return new Set();
+  const callRows = await conn('call_log').whereIn('id', [...new Set(callbacks.map((x) => x.r.call_log_id))])
+    .select('id', 'twilio_call_sid', 'created_at', 'customer_id', 'from_phone', 'to_phone', 'direction');
+  const callById = new Map(callRows.map((c) => [String(c.id), c]));
+  const probes = callbacks.filter((x) => callById.has(String(x.r.call_log_id))).map((x) => {
+    const call = callById.get(String(x.r.call_log_id));
+    return { key: String(x.r.id), callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at,
+      customerId: call.customer_id || x.r.customer_id || null, phone: contactPhone(call), after: x.since };
+  });
+  return new Set(probes.length ? (await commitments.directEstimatesSentAfter(conn, probes)).keys() : []);
+}
+
+// `renewed`: a caller that already loaded every row's renewal time (a
+// Map of id -> Date, promise-chaser-bell) passes it to skip a second
+// serial lookup per row.
+async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
+  const renewed = preloaded || await renewedFloors(conn, rows);
+  // A caller with no customer record is matched by a USABLE number only — an
+  // 'anonymous' or client: caller ID normalizes to nothing and gives the row
+  // no contact to match on (never a match between two unusable values).
+  const scoped = (rows || []).map((r) => scopePromise(r, renewed.get(String(r.id))))
+    .filter((x) => x.since && (x.r.customer_id || x.phone));
+  const done = new Set();
+  if (!scoped.length) return done;
+  const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
+  // A booking for a scheduling promise's own slot counts from the call's
+  // end, or its renewal (slotFloor), whichever is later.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? x.slotFloor : x.since).getTime())));
+  const contact = {
+    customerIds: [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))],
+    phones: [...new Set(scoped.filter((x) => x.phone).map((x) => x.phone))],
+  };
+  const visitBooked = await bookedVisits(conn, scoped, contact, bookedFloor);
+  const calls = await staffCalls(conn, contact, floor);
+  const { personTexts, estimateTexts } = await deliveredTexts(conn, scoped, contact, floor);
+  const hinted = await quoteHintIds(conn, scoped);
+  const quoteKept = new Set([...hinted, ...await reviewedQuoteIds(conn, scoped, hinted),
+    ...await quoteEstimateIds(conn, scoped), ...await callbackOwnQuoteIds(conn, scoped)]);
+  const quoteTextKept = (x) => x.r.kind === 'send_estimate' && estimateTexts.some((t) => (belongsTo(t, x)
+    || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && createdAfter(t, x.since));
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && booked(v, x))
-      || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
-      || personTexts.some((t) => mine(t, x) && after(t, x.since))
-      || estimateDone.has(x.r.id)
-      || (x.r.kind === 'send_estimate' && estimateTexts.some((t) => (mine(t, x) || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && after(t, x.since)))) done.add(x.r.id);
+    if (visitBooked(x)
+      || calls.some((c) => c.id !== x.r.call_log_id && belongsTo(c, x) && createdAfter(c, x.since))
+      || personTexts.some((t) => belongsTo(t, x) && createdAfter(t, x.since))
+      || quoteKept.has(x.r.id) || quoteTextKept(x)) done.add(x.r.id);
   }
   return done;
 }
@@ -714,6 +742,11 @@ module.exports = {
   pagerHealthy,
   lastScheduledTick,
   followedUpIds,
+  // One decision per evidence kind, each testable on its own.
+  scopePromise,
+  quoteHintIds,
+  quoteEstimateIds,
+  callbackOwnQuoteIds,
   SLA_KINDS,
   ROLLING_KEY,
   WHAT,
