@@ -22,7 +22,7 @@ const { loadVisitLoops, emptyVisitLoops } = require('../services/visit-loops-fac
 
 // 2026-10-01 12:00 ET (EDT, UTC-4).
 const NOW = new Date('2026-10-01T16:00:00Z');
-const minutesAgo = (n) => new Date(NOW.getTime() - n * 60000);
+const _minutesAgo = (n) => new Date(NOW.getTime() - n * 60000);
 
 // A chainable fake knex: every builder method records itself and returns the
 // chain; `first` / awaiting resolves whatever handlers[table] returns for the
@@ -324,6 +324,14 @@ describe('pastWindow', () => {
     // the customer was told 3 PM (a communicated move): not passed at noon
     loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T19:00:00.000Z', communicated_at: '2026-10-01T12:00:00Z' }]);
     expect((await run({ status: 'confirmed', window_start: '09:00:00' })).pastWindow).toBeNull();
+  });
+
+  test('a promise whose window is UNKNOWN (a newer notice superseded it, start_at null) is never "passed"', async () => {
+    // the schedule says 9 AM (passed at noon), but the customer's latest notice named no time we recorded
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: null, communicated_at: '2026-10-01T11:00:00Z' }]);
+    expect((await run({ status: 'confirmed', window_start: '09:00:00' })).pastWindow).toBeNull();
+    // no promise event at all: the schedule is what booking showed them, so it still counts
+    expect((await run({ status: 'confirmed', window_start: '09:00:00' })).pastWindow).toMatchObject({ visitId: 'visit-1' });
   });
 
   test('every passed visit rides in the signature keys; the earliest is rendered', async () => {

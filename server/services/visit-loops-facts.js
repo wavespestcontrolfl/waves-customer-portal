@@ -232,14 +232,19 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
 // The occurrence the customer was PROMISED for each candidate: the no-show detector's
 // own promise evidence (loadPromiseEvents + latestPromises: the newest window a
 // message actually delivered), so an uncommunicated internal move never changes it.
-// No known promise: the row's schedule (what booking showed them). { date, startHms }.
+// No promise event: the row's schedule (what booking showed them). { date, startHms }.
+// A promise event with start_at null (a newer notice superseded the window without
+// recording its replacement) means the promised time is UNKNOWN: null, and the row
+// is skipped — never substitute the schedule and apologise for a window we can't name.
 async function promisedOccurrences(conn, rows, now) {
   const detector = require('./no-show-detector');
   const events = await detector.loadPromiseEvents(conn, rows.map((r) => r.id), { now });
   const latest = detector.latestPromises(events || [], now);
   const out = new Map();
   for (const row of rows) {
-    const start = toDate(latest.get(String(row.id))?.start_at);
+    const promise = latest.get(String(row.id));
+    const start = toDate(promise?.start_at);
+    if (promise && !start) { out.set(String(row.id), null); continue; }
     out.set(String(row.id), start
       ? { date: etDateString(start), startHms: `${start.toLocaleTimeString('en-US', ET_HHMM)}:00` }
       : { date: calendarDay(row.scheduled_date), startHms: row.window_start || null });
@@ -270,7 +275,7 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
   // the promised occurrence is today (or yesterday's, running past midnight)
   const candidates = rows.filter((row) => {
     const occ = promised.get(String(row.id));
-    return occ.date === today || occ.date === yesterday;
+    return !!occ && (occ.date === today || occ.date === yesterday);
   });
   if (!candidates.length) return null;
   const ids = candidates.map((r) => r.id);
