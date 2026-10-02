@@ -765,13 +765,18 @@ function headingsOf(markdown) {
 // index treats as ownership evidence (meta description, secondary keywords,
 // H2/H3 headings), from the frontmatter and/or a markdown body. Ownership is
 // judged on these symmetrically; geo framing stays on title/slug/keyword.
+// Field boundary inside extraTargetingOf's joined text: an ASCII record
+// separator, which no field contains (a field may itself contain newlines)
+// and every tokenizer treats as whitespace.
+const TARGETING_FIELD_SEP = '\u001e';
+
 function extraTargetingOf({ frontmatter = {}, body = '', meta_description = null, secondary_keywords = null } = {}) {
   const fromBody = parseTargetingFields(body);
   return [
     meta_description ?? frontmatter.meta_description ?? fromBody.meta_description,
     ...asStringList(secondary_keywords ?? frontmatter.secondary_keywords), ...fromBody.secondary_keywords,
     ...fromBody.headings,
-  ].filter(Boolean).map((v) => String(v).trim()).join('\n'); // one field per line
+  ].filter(Boolean).map((v) => String(v).trim()).join(TARGETING_FIELD_SEP);
 }
 
 function targetingText(fields) {
@@ -1219,20 +1224,16 @@ function retiredIndex() {
       if (key && !byTopic.has(key)) byTopic.set(key, post);
     }
   }
-  // Live topic owners also match by containment ("dollar spot management"
-  // contains the owned "dollar spot"): a kept post owns every angle on its
-  // multi-word topic. Retired topics stay exact-only (containment blocked 12
-  // of 82 curated planned topics when tried for them).
-  const liveOwners = [...byTopic]
-    .filter(([key, post]) => post.live && key.includes(' '))
-    .map(([key, post]) => ({ words: key.split(' '), post }));
-  // Ordered phrases of each live owner, for matching inside free targeting
-  // text (a word set across fields would read "dollar weed" + "gray leaf
-  // spot" as "dollar spot").
+  // Live topic owners also match when their phrase appears, in order, in a
+  // field ("dollar spot management" contains the owned "dollar spot"): a
+  // kept post owns every angle on its topic. Retired topics stay exact-only
+  // (containment blocked 12 of 82 curated planned topics when tried for
+  // them). Ordered, per field: loose words would read "dollar weed vs gray
+  // leaf spot" as "dollar spot".
   const livePhrases = RETIRED_POSTS.filter((p) => p.live)
     .flatMap((post) => (post.topics || []).map((t) => ({ phrase: topicWords(t), post })))
     .filter((x) => x.phrase.length > 1);
-  retiredIndexCache = { byUrl, byLeaf, byTopic, liveOwners, livePhrases };
+  retiredIndexCache = { byUrl, byLeaf, byTopic, livePhrases };
   return retiredIndexCache;
 }
 
@@ -1246,9 +1247,12 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
   if (!hit && !urlOnly) {
     for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
       const key = text ? topicKey(text) : '';
-      const words = new Set(key ? key.split(' ') : []);
+      // Exact key first; a live owner also matches when its phrase appears,
+      // in order, inside this field ("dollar spot management") — never as
+      // loose words ("dollar weed vs gray leaf spot").
+      const fieldWords = key ? topicWords(text) : [];
       const post = key
-        ? (idx.byTopic.get(key) || (idx.liveOwners.find((o) => o.words.every((w) => words.has(w))) || {}).post || null)
+        ? (idx.byTopic.get(key) || (idx.livePhrases.find((o) => containsPhrase(fieldWords, o.phrase)) || {}).post || null)
         : null;
       // Scoped to the categories the topic was retired from (the post's own
       // and its merge target's): category nouns and framing drop out of the
@@ -1259,9 +1263,9 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
     // A live owner's topic also counts when it appears only in the other
     // targeting fields (meta description, secondary keywords, H2/H3s).
     if (!hit && targeting) {
-      // Phrase, field by field (extraTargetingOf joins fields with newlines),
+      // Phrase, field by field (extraTargetingOf joins fields with a record separator),
       // so words from two different fields never combine.
-      const fields = String(targeting).split(/\n+/).map(topicWords);
+      const fields = String(targeting).split(TARGETING_FIELD_SEP).map(topicWords);
       const owner = idx.livePhrases.find((o) => fields.some((f) => containsPhrase(f, o.phrase))
         && (!category || [o.post.url, o.post.merged_into].some((u) => categoryFromSlug(u) === category)));
       if (owner) { hit = owner.post; where = 'targeting (meta description / secondary keywords / headings)'; }
@@ -1299,4 +1303,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, extraTargetingOf, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

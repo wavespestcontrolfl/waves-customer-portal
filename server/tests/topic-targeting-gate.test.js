@@ -1295,7 +1295,17 @@ describe('retired topics', () => {
     }
     expect(gate.evaluate(blog({ query: 'dollar weed control', category: 'lawn-care' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
     // Words from different fields never combine into the phrase (codex r5).
-    expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting: 'dollar weed control\nGray leaf spot treatment' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting: 'dollar weed control\u001eGray leaf spot treatment' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // Nor in a primary field (codex r6).
+    expect(gate.evaluate(blog({ query: 'dollar weed vs gray leaf spot', category: 'lawn-care' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // A field that itself spans lines still matches (codex r6).
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting: 'What is\nDollar\nspot?' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toBeTruthy();
+    // Through the real extractor: frontmatter meta + headings.
+    const { extraTargetingOf } = gate._internals;
+    if (extraTargetingOf) {
+      const targeting = extraTargetingOf({ frontmatter: { meta_description: 'Dollar weed guide', secondary_keywords: ['gray leaf spot'] } });
+      expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    }
     // Only in the other targeting fields (codex r4).
     expect(gate.evaluate(blog({ query: 'lawn fungus guide', title: 'Lawn Fungus in Venice', category: 'lawn-care', targeting: 'Dollar spot on St. Augustine: what to do' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
     const row = await gate.evaluateBlogPostRow({ slug: 'venice-dollar-spot-fungus-lawn-treatment', status: 'published' });
