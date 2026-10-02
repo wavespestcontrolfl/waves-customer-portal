@@ -47,6 +47,7 @@ function fakeKnex(db) {
     hasColumn: async (t, c) => c === 'property_id' && t in db,
   };
   knex.fn = { now: () => 'NOW' };
+  knex.raw = async (sql) => { (db.__raw = db.__raw || []).push(sql); };
   knex.transaction = async (fn) => fn(knex);
   return knex;
 }
@@ -104,6 +105,12 @@ describe('20261001200000 recompute property address keys', () => {
     await migration.up(fakeKnex(db));
     for (const r of db.customer_properties) expect(r.address_key).toBe(addressKey(r));
     expect(row(db, 'keep-a').address_key).toBe(row(db, 'dup-a').address_key);
+  });
+
+  test('up() locks customer_properties before it reads', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    expect(db.__raw[0]).toBe('LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE');
   });
 
   test('up() is idempotent', async () => {

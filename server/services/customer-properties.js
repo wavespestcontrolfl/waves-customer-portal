@@ -114,8 +114,11 @@ const stripUnitDesignators = (s) => String(s || '')
  * change here needs a migration that recomputes the stored keys.
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  const street = streetKey(address_line1);
-  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(address_line1);
+  // Punctuation first, so the unit is found the same way however it was
+  // typed: "Apt 4." / "St#4" / "St, #4" all read as "St #4".
+  const line1 = String(address_line1 || '').replace(/[.,]/g, ' ').replace(/#/g, ' #').replace(/\s+/g, ' ').trim();
+  const street = streetKey(line1);
+  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(line1);
   const locality = normalizeZip(zip) || normStreet(city);
   return `${street}${unit}${locality}`;
 }

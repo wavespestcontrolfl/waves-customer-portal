@@ -132,6 +132,11 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit PT', zip: '34219' }], { address_line1: '700 Demo Glen', address_line2: 'Unit Point', zip: '34219' })).toBe(true);
     expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit 4', zip: '34219' }], { address_line1: '700 Demo Glen Apt 4', zip: '34219' })).toBe(false);
     expect(addressKey({ address_line1: '700 Demo Pt', zip: '34219' })).toBe(addressKey({ address_line1: '700 Demo Point', zip: '34219' }));
+    // a unit typed inline keys like the split form, whatever the punctuation
+    const split = addressKey({ address_line1: '100 Main St', address_line2: 'Apt 4', zip: '34219' });
+    for (const line1 of ['100 Main St Apt 4', '100 Main St Apt 4.', '100 Main St#4', '100 Main St, #4', '100 Main St. Apt. 4']) {
+      expect(addressKey({ address_line1: line1, zip: '34219' })).toBe(split);
+    }
   });
 });
 
