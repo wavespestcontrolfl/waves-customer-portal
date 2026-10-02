@@ -710,7 +710,7 @@ const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more
 const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?|inch(?:es)?|cm|centimet(?:er|re)s?|met(?:er|re)s?|mm))';
 // A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
 // 85 Fahrenheit.
-const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius))?\\b|\\s*(?:fahrenheit|celsius)\\b)';
+const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius|centigrade))?\\b|\\s*(?:fahrenheit|celsius|centigrade)\\b)';
 // A degree figure followed by a geometry noun is an angle, not a temperature:
 // "a 90-degree arc around a sprinkler head", "at a 90° angle" (codex #5414
 // round 3). Only the bare-unit trigger needs this; a folded range or bound
@@ -732,9 +732,11 @@ const isHotValue = (n) => n >= 80 && n <= 129;
 // The 80-degree line is Fahrenheit. A Celsius figure is converted before it
 // is judged, so "thrives at 30°C" (86°F) is the claim and "20°C" is not
 // (codex #5414 round 4).
-const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+celsius\\b|\\s*celsius\\b)';
-const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius/i;
-const toFahrenheit = (celsius) => (celsius * 9) / 5 + 32;
+const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+(?:celsius|centigrade)\\b|\\s*(?:celsius|centigrade)\\b)';
+const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius|centigrade/i;
+// Clamped at 129°F: 80°C is 176°F, which is heat, not an implausible
+// figure to drop (codex #5561 rounds 6-7). Every fold shares this.
+const toFahrenheit = (celsius) => Math.min((celsius * 9) / 5 + 32, 129);
 const tempValueF = (text, ...units) => (units.some((u) => u && IS_CELSIUS.test(u)) ? toFahrenheit(tempValue(text)) : tempValue(text));
 
 // Temperatures are judged at SENTENCE level, once, BEFORE the sentence is
@@ -762,10 +764,10 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 // of 80°F or less" is cool through the trailing "or less" fold.
 const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
-// A ceiling named AFTER the figure, closing its clause: "80°F max", "80
-// degrees maximum", "80°F at most" — the same cap as "a maximum of 80°F".
-// It must end the clause: "90°F maximum damage" is not a ceiling.
-const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
+// A ceiling named AFTER the figure ("80°F max", "an 80°F maximum
+// temperature") is NOT folded: three review rounds each found a new suffix
+// that slipped past it (owner 2026-10-02, #5561). Such copy stays a false
+// block the proof surfaces to the owner, as on the parent.
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -787,7 +789,6 @@ function foldTemperatures(sentence) {
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
   text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
-  text = text.replace(TEMP_POSTFIX_CEILING, (match) => token('cooltemp', match));
   // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
   // judged on its Fahrenheit value, so the raw-number triggers never see it.
   text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
@@ -829,6 +830,10 @@ const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
 const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+// "anything but active" is NOT read as a negation (codex #5561 rounds 1-2):
+// every reading of the idiom either let "never anything but active" or
+// "thrives in anything but dry summers" pass, so it stays a false block,
+// which the proof surfaces to the owner, rather than a false pass.
 const MYTH_WORD = /\b(?:myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
 
 // The clause is the fact that large patch recedes: a receding verb, not
