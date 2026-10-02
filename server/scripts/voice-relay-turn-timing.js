@@ -87,10 +87,11 @@ function printGroup(label, g) {
   console.log(`  ${label.padEnd(13)} ${g.turns} turns`);
   console.log(`    heard gap   ${row('', g.heard_gap)}   ← release criterion: p50 ≤ 0.80s, p95 ≤ 1.50s (plain)`);
   console.log(`    hearing/STT ${row('', g.stt)}`);
-  console.log(`    us (app)    ${row('', g.app)}`);
-  console.log(`      model     ${row('', g.model)}`);
-  console.log(`      tools     ${row('', g.tools)}`);
+  console.log(`    us (app)    ${row('', g.app)}   ← prompt → first text back`);
   console.log(`    voice/TTS   ${row('', g.voice)}`);
+  console.log('    whole-turn work (all rounds, incl. after the first reply — not slices of the gap):');
+  console.log(`      model     ${row('', g.model_turn_total)}`);
+  console.log(`      tools     ${row('', g.tools_turn_total)}`);
 }
 
 function printSummary(title, s) {

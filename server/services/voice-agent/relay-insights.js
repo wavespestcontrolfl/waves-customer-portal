@@ -100,7 +100,20 @@ function buildTurnTimeline(events = []) {
     else turn.outcome = turn.firstTokenAt != null ? 'no_audio_event' : 'silent';
   };
 
+  let sessionId = null;
   for (const e of evs) {
+    // A reconnected call (GATE_VOICE_RELAY_RECOVERY) runs a second relay
+    // session on the same CallSid: nothing carries across the boundary.
+    if (e.sessionId && sessionId && e.sessionId !== sessionId) {
+      close(current, { byNextPrompt: false });
+      current = null;
+      customerSpeaking = false;
+      agentSpeaking = false;
+      lastEndOfCustomerSpeech = null;
+      lastSttMs = null;
+      pendingTtsMs = null;
+    }
+    if (e.sessionId) sessionId = e.sessionId;
     switch (e.name) {
       case 'start_of_customer_speech':
         customerSpeaking = true;
@@ -260,8 +273,10 @@ function summarizeTimeline(joined = []) {
     stt: stage(rows.map((t) => t.sttMs)),
     app: stage(rows.map((t) => t.appMs)),
     voice: stage(rows.map((t) => t.voiceMs)),
-    model: stage(rows.map((t) => t.ours && t.ours.modelMs)),
-    tools: stage(rows.map((t) => t.ours && t.ours.toolMs)),
+    // WHOLE-TURN work (every model round and tool call, including any after
+    // the first reply was sent), not slices of the first-response gap.
+    model_turn_total: stage(rows.map((t) => t.ours && t.ours.modelMs)),
+    tools_turn_total: stage(rows.map((t) => t.ours && t.ours.toolMs)),
   });
   const plain = spoke.filter((t) => t.ours && t.ours.toolCount === 0);
   const tool = spoke.filter((t) => t.ours && t.ours.toolCount > 0);

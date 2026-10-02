@@ -120,6 +120,18 @@ describe('buildTurnTimeline', () => {
     expect(buildTurnTimeline([ev(0, 'prompt_sent')])[0].outcome).toBe('silent');
   });
 
+  test('a new relay session (reconnect) closes the old one\'s pending turn and carries no state across', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1800, 'first_token_received'), // session A replies, then drops
+      { ...ev(9000, 'start_of_agent_speech'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 1 } }, // B's resume greeting
+      { ...ev(12000, 'end_of_customer_speech'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 2 } },
+      { ...ev(12000, 'prompt_sent'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 3 } },
+    ]);
+    expect(turns[0]).toMatchObject({ outcome: 'no_audio_event', heardGapMs: null });
+    expect(turns[1]).toMatchObject({ endOfCustomerSpeechAt: T0 + 12000 });
+  });
+
   test('connection events and garbage are ignored', () => {
     expect(buildTurnTimeline([connection(0, 'answered'), null, { group: 'conversation_relay', name: 'prompt_sent', timestamp: 'nope' }])).toEqual([]);
     expect(buildTurnTimeline(undefined)).toEqual([]);
@@ -146,7 +158,7 @@ describe('joinTurnStats', () => {
     expect(s.plain.turns).toBe(1);
     expect(s.plain.heard_gap.p50).toBe(1200);
     expect(s.tool.turns).toBe(1);
-    expect(s.tool.tools.p50).toBe(1800);
+    expect(s.tool.tools_turn_total.p50).toBe(1800);
     expect(s.unclassified).toBe(0);
   });
 
