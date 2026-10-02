@@ -75,12 +75,12 @@ describe('buildCallTimeline — reply attribution comes from our stats only', ()
       ev(1000, 'prompt_sent'),
       ev(1400, 'first_token_received'), // A's text
       ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
-      ev(1600, 'first_token_received'), // B's text
-      ev(1650, 'start_of_agent_speech'), // A's audio (after B's text, before any later text)
-      ev(1900, 'start_of_agent_speech'), ev(2400, 'end_of_agent_speech'), // the other one
+      ev(1900, 'first_token_received'), // B's text
+      ev(1950, 'start_of_agent_speech'), // A's or B's audio
+      ev(2200, 'start_of_agent_speech'), ev(2400, 'end_of_agent_speech'), // the other one
       ev(2600, 'end_of_customer_speech'), ev(2600, 'prompt_sent'), // C
       ev(3000, 'first_token_received'), ev(3100, 'start_of_agent_speech'), // C's — nothing else owed
-    ], [ours(1, 1000, 400), ours(2, 1500, 100), ours(3, 2600, 400)]);
+    ], [ours(1, 1000, 400), ours(2, 1500, 400), ours(3, 2600, 400)]);
     // Two texts were waiting when audio started: either could own it.
     expect(rows.map((t) => t.outcome)).toEqual(['audio_unclear', 'audio_unclear', 'spoke']);
     expect(rows[2].heardGapMs).toBe(500);
@@ -90,11 +90,11 @@ describe('buildCallTimeline — reply attribution comes from our stats only', ()
   test('audio still owed to an unclear reply is never credited to a later one', () => {
     const rows = buildCallTimeline([
       ev(1000, 'prompt_sent'), ev(1400, 'first_token_received'),
-      ev(1500, 'prompt_sent'), ev(1600, 'first_token_received'),
-      ev(1650, 'start_of_agent_speech'), ev(2000, 'end_of_agent_speech'), // one of A/B
-      ev(2100, 'prompt_sent'), ev(2200, 'first_token_received'), // C, while the other A/B audio is still owed
-      ev(2300, 'start_of_agent_speech'), // could be the owed one
-    ], [ours(1, 1000, 400), ours(2, 1500, 100), ours(3, 2100, 100)]);
+      ev(1500, 'prompt_sent'), ev(1900, 'first_token_received'),
+      ev(1950, 'start_of_agent_speech'), ev(2000, 'end_of_agent_speech'), // one of A/B
+      ev(2100, 'prompt_sent'), ev(2500, 'first_token_received'), // C, while the other A/B audio is still owed
+      ev(2600, 'start_of_agent_speech'), // could be the owed one
+    ], [ours(1, 1000, 400), ours(2, 1500, 400), ours(3, 2100, 400)]);
     expect(rows.map((t) => t.outcome)).toEqual(['audio_unclear', 'audio_unclear', 'audio_unclear']);
   });
 
@@ -118,6 +118,27 @@ describe('buildCallTimeline — reply attribution comes from our stats only', ()
       ev(5200, 'first_token_received'), ev(5300, 'start_of_agent_speech'), // turn 2's reply
     ], [ours(1, 1000, 300), ours(2, 2200, 3000)]);
     expect(rows.map((t) => [t.outcome, t.heardGapMs])).toEqual([['spoke', 400], ['spoke', 3100]]);
+  });
+
+  test('a text that predates the prompt, or a second text in the window, is never matched', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'prompt_sent'), ev(1300, 'first_token_received'), ev(1400, 'start_of_agent_speech'), ev(2000, 'end_of_agent_speech'),
+      ev(2190, 'first_token_received'), // a later chunk of the earlier reply
+      ev(2200, 'end_of_customer_speech'), ev(2200, 'prompt_sent'),
+      ev(2450, 'first_token_received'), ev(2500, 'start_of_agent_speech'),
+    ], [ours(1, 1000, 300), ours(2, 2200, 250)]);
+    // B's text is the one after B's prompt, never the earlier chunk at 2190 …
+    expect(rows[1]).toMatchObject({ firstTokenAt: T0 + 2450, appMs: 250 });
+    // … and with that chunk still waiting to play, the audio at 2500 could be
+    // either one's: no latency sample.
+    expect(rows[1]).toMatchObject({ outcome: 'audio_unclear', heardGapMs: null });
+
+    const crowded = buildCallTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1100, 'first_token_received'), ev(1300, 'first_token_received'), // two candidates for one send
+      ev(1400, 'start_of_agent_speech'),
+    ], [ours(1, 1000, 200)]);
+    expect(crowded[0].outcome).toBe('unattributed');
   });
 
   test('clock skew between our server and Twilio is measured on the prompts and removed', () => {

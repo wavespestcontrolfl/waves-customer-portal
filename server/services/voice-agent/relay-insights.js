@@ -24,8 +24,10 @@ const REQUEST_TIMEOUT_MS = 15000;
 // two machines; anything further apart than this is a different turn.
 const JOIN_WINDOW_MS = 2000;
 // Our first send vs Twilio's first_token_received, after removing the clock
-// offset measured on the prompts: the same instant plus one network hop.
-const SEND_WINDOW_MS = 750;
+// offset measured on the prompts: the same instant give or take the
+// difference between the two network directions. Too tight shows up as
+// unattributed turns in the report, never as a wrong latency.
+const SEND_WINDOW_MS = 300;
 
 /** Fetch every ConversationRelay event for one call (all pages, carrier edge). */
 async function fetchConversationRelayEvents(callSid, {
@@ -205,8 +207,9 @@ function oursView(s) {
  *   1. prompts ↔ our turns by wall clock (promptWallAt vs prompt_sent);
  *   2. the clock offset between the two machines = median of those pairs;
  *   3. each turn's first send (promptWallAt + firstSendAt − promptAt, offset
- *      applied) ↔ Twilio's first_token_received — the reply that answers
- *      that prompt, whatever else was in flight;
+ *      applied) ↔ the ONE first_token_received that arrived after that prompt
+ *      and within SEND_WINDOW_MS of the send — the reply that answers that
+ *      prompt, whatever else was in flight (any doubt: unattributed);
  *   4. an agent audio start is that reply's audio only when its text is the
  *      ONLY one waiting to be heard (parseTimeline); a barge-in, preemption
  *      or new relay session drops everything still waiting.
@@ -230,14 +233,21 @@ function buildCallTimeline(events = [], turnStats = []) {
   const promptPairs = alignByTime(parsed.prompts, ours, (p) => p.promptSentAt, (s) => s.promptWallAt, JOIN_WINDOW_MS);
   const offset = median([...promptPairs].map(([i, j]) => parsed.prompts[i].promptSentAt - ours[j].promptWallAt));
 
-  const sends = [];
+  // Each send's text: the ONE Twilio text in the window that arrived after
+  // that prompt went out. Zero or several candidates, or a text that fits two
+  // sends, leaves the turn unattributed — never the nearest guess.
+  const candidates = new Map(); // prompt index → token indexes
   for (const [i, j] of promptPairs) {
     const s = ours[j];
-    if (Number.isFinite(s.firstSendAt) && Number.isFinite(s.promptAt)) sends.push({ i, at: s.promptWallAt + offset + (s.firstSendAt - s.promptAt) });
+    if (!Number.isFinite(s.firstSendAt) || !Number.isFinite(s.promptAt)) continue;
+    const sendAt = s.promptWallAt + offset + (s.firstSendAt - s.promptAt);
+    const promptSentAt = parsed.prompts[i].promptSentAt;
+    candidates.set(i, parsed.tokens.flatMap((t, ti) => (t.at >= promptSentAt && Math.abs(t.at - sendAt) <= SEND_WINDOW_MS ? [ti] : [])));
   }
-  sends.sort((a, b) => a.at - b.at);
-  const sendPairs = alignByTime(sends, parsed.tokens, (x) => x.at, (t) => t.at, SEND_WINDOW_MS);
-  const tokenFor = new Map([...sendPairs].map(([k, ti]) => [sends[k].i, ti]));
+  const claims = new Map(); // token index → how many sends it fits
+  for (const list of candidates.values()) for (const ti of list) claims.set(ti, (claims.get(ti) || 0) + 1);
+  const tokenFor = new Map();
+  for (const [i, list] of candidates) if (list.length === 1 && claims.get(list[0]) === 1) tokenFor.set(i, list[0]);
 
   return parsed.prompts.map((p, i) => {
     const j = promptPairs.get(i);
