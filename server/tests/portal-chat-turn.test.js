@@ -204,6 +204,19 @@ test('GATE_PORTAL_CHAT_VISIT_FACTS on: structured facts to the model, the summar
   expect(both.system[0].text).toMatch(/PAST VISITS:/);
 });
 
+test('visits gate alone: a billing keyword hand-off shows no payment card (the payment gate is off)', async () => {
+  process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+  wire('portal_chat', 'cust-1');
+  const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent', escalated: true, teamNotified: true });
+
+  const result = await assistant.processMessage({ message: 'Please refund my last payment', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  expect(mockListPayments).not.toHaveBeenCalled();
+  expect(result).not.toHaveProperty('cards');
+  expect(result).not.toHaveProperty('actions');
+  escalate.mockRestore();
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });

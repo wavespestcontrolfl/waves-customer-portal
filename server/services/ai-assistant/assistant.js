@@ -110,6 +110,8 @@ function portalLane(channel) {
     tools: portalToolsFor({ payments, visits }),
     actions: [],
     cards: payments || visits ? [] : null,
+    // Whether the payment card tool is in this lane (its own gate).
+    payments,
   };
 }
 
@@ -332,7 +334,7 @@ class WavesAssistant {
       // A billing keyword ("refund", "dispute") hands off, but under the facts
       // lane the customer still gets the payment card and Open Billing
       // button under the hand-off reply, as a model-led hand-off would give.
-      if (topic === 'billing' && lane.cards) {
+      if (topic === 'billing' && lane.payments) {
         await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
       }
       const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
