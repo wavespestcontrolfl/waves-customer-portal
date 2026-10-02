@@ -9463,17 +9463,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let deferredPrepayCovered = false;
     if (!visitIsPayerBilled && !svc.prepaid_method) {
       try {
-        if (svc.paf_held_term_id) {
+        // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
+        // (first run, or a visit reopened and completed again, possibly
+        // repriced or moved off the sold coverage) re-decides and rewrites
+        // it (GitHub Codex #5567 r15).
+        if (svc.paf_held_term_id && resumingCommittedCompletion) {
           deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
         } else {
           const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
             || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
-          if (heldTerm) {
-            await db('scheduled_services').where({ id: svc.id }).whereNull('paf_held_term_id')
-              .update({ paf_held_term_id: heldTerm.id });
-            svc.paf_held_term_id = heldTerm.id;
-            deferredPrepayCovered = true;
+          const heldTermId = heldTerm?.id || null;
+          if (String(svc.paf_held_term_id || '') !== String(heldTermId || '')) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: heldTermId });
+            svc.paf_held_term_id = heldTermId;
           }
+          deferredPrepayCovered = !!heldTerm;
         }
       } catch (lookupErr) {
         logger.error(`[dispatch] deferred annual-prepay check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);

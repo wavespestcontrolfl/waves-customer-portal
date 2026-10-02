@@ -21412,7 +21412,8 @@ function buildAcceptNotificationCopy({
     if (prepayChargeOutcome === 'after_first_visit') {
       // GATE_PAF_PREPAY: nothing charged at approval by design — the saved
       // method is charged after the first visit is performed. No pay ask.
-      const bank = prepayChargeMethodType === 'us_bank_account' || prepayChargeMethodType === 'ach';
+      // Every bank alias, legacy 'bank' / 'bank_account' included (GitHub Codex #5567 r15).
+      const bank = require('../services/autopay-eligibility').isBankMethodType(prepayChargeMethodType);
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — ${bank ? 'saved bank account is debited' : 'card on file is charged'} after the first visit; nothing charged today.`,

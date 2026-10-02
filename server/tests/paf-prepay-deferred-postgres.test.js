@@ -332,6 +332,23 @@ postgres('annual prepay charged after the first visit', () => {
     expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
   });
 
+  it('a reopened visit completed again re-decides its stamp, never trusting a stale one (Codex r15)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Mosquito Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    // Stamped by an earlier closeout, then reopened and moved off the sold
+    // coverage (a service the term does not cover).
+    await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId, service_type: 'Mosquito Control',
+      technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
+
   describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
     async function completeWithText(f, visitId, visitOutcome = 'completed') {
       const techId = randomUUID();
@@ -413,6 +430,17 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
       await trx('payment_methods').where({ id: f.pmId }).update({ method_type: 'bank_account' });
       expect(await facts(f.parentId)).toMatchObject({ methodLine: 'saved bank account' });
+    });
+
+    it('a different Auto Pay method than the bound one keeps the regular text (Codex r15)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const otherPm = randomUUID();
+      await trx('payment_methods').insert({ id: otherPm, customer_id: f.customerId, stripe_payment_method_id: `pm_${otherPm.slice(0, 8)}`, method_type: 'card', last_four: '1111' });
+      await trx('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: otherPm });
+      expect(await facts(f.parentId)).toBeNull();
     });
 
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
@@ -583,6 +611,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await release()).toMatchObject({ released: 0 });
       expect((await jobOf(f)).status).toBe('awaiting_first_visit');
       await trx('service_completion_attempts').where({ id: attemptId }).update({ status: 'succeeded' });
+      expect(await release()).toMatchObject({ released: 1 });
+    });
+
+    it('an abandoned closeout attempt past the stale window never blocks the release (Codex r15)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'pending',
+        updated_at: new Date(Date.now() - 30 * 60 * 1000) });
       expect(await release()).toMatchObject({ released: 1 });
     });
 
@@ -950,6 +987,10 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
         invoice_number: `TEST-ADDON-${f.parentId.slice(0, 6)}`, token: randomUUID().replace(/-/g, ''), status: 'paid', paid_at: new Date(),
         total: 20, subtotal: 20, line_items: JSON.stringify([{ client_id: `scheduled_${f.parentId}_addon_${addonId}`, description: 'Wasp nest removal', amount: 20, quantity: 1, unit_price: 20 }]) });
+      // The add-ons are then edited: the editor deletes and reinserts the
+      // rows, so their ids change (GitHub Codex #5567 r15).
+      await trx('scheduled_service_addons').where({ id: addonId }).del();
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: f.parentId, service_name: 'Wasp nest removal', estimated_price: 20, base_price: 20 });
       const credit = require('../services/customer-credit');
       const creditSpy = jest.spyOn(credit, 'postCreditMovement');
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });

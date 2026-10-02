@@ -2989,8 +2989,12 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       // other invoice (an office invoice with free-text lines included) keeps
       // the normal reconciliation.
       if (pafDeferredTerm) {
+        // Classified from the invoice's own line ids (every add-on line is
+        // `scheduled_<visit>_addon_<row>`), never the visit's current add-on
+        // rows, which an edit deletes and reinserts (GitHub Codex #5567 r15).
         const AddonBilling = require('./annual-prepay-addon-billing');
-        const addons = await AddonBilling.annualPrepayAddonRows(row, conn);
+        const addonPrefix = `scheduled_${row.id}_addon_`;
+        const addons = { clientIds: { has: (id) => typeof id === 'string' && id.startsWith(addonPrefix) } };
         if (AddonBilling.classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons) continue;
       }
       // Payer-billed visit: the money (owed or collected) is the PAYER's AR,

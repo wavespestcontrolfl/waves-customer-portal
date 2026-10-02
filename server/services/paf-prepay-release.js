@@ -110,13 +110,19 @@ async function performedVisitCandidates(estimateId, customerId) {
     .select('s.*');
 }
 
+// An attempt untouched past the completion-attempt stale window was abandoned
+// (a crash before it committed or finished): it never blocks the release
+// forever (GitHub Codex #5567 r15). A resumed one stamps its visit, and the
+// stamp or the activated-year check keeps it covered either way.
 async function planHasUnfinishedCompletion(estimateId, customerId) {
+  const staleCutoff = new Date(Date.now() - require('./completion-attempts').STALE_SIDE_EFFECTS_MS);
   const row = await db('service_completion_attempts as a')
     .join('scheduled_services as s', 's.id', 'a.service_id')
     .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
     .where('s.customer_id', customerId)
     .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
     .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+    .where('a.updated_at', '>=', staleCutoff)
     .first('a.id');
   return !!row;
 }
@@ -521,6 +527,13 @@ async function firstChargeCompletionFacts(svc, conn = db) {
       .first('id');
     if (optedOut) return null;
     if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(svc.customer_id, conn)) return null;
+    // The bound method must still be the customer's Auto Pay method (or none
+    // is set yet, which recovery enrollment fills): a different default means
+    // the charge refuses the bound row and falls to the pay link (GitHub
+    // Codex #5567 r15).
+    const autopayRow = await conn('customers').where({ id: svc.customer_id }).first('autopay_payment_method_id');
+    if (autopayRow?.autopay_payment_method_id && job.payment_method_row_id
+      && String(autopayRow.autopay_payment_method_id) !== String(job.payment_method_row_id)) return null;
     const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
     // The acknowledged total is a CEILING (owner R1): account credit the
     // charge will draw lowers it. Credit that covers the year means nothing
