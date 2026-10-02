@@ -308,9 +308,12 @@ postgres('annual prepay charged after the first visit', () => {
     const prefilter = await renewals.deferredPrepayHoldCustomerIds(trx, [f.customerId]);
     expect(prefilter.has(String(f.customerId))).toBe(true);
     expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: prefilter })).toBe(true);
-    // A paid year cancelled to end at term rides out its window (coveredTermsAsOf).
+    // A paid year cancelled to end at term rides out its window (coveredTermsAsOf),
+    // board prediction included (pre-push audit).
     await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
     expect(await covers(f.parentId)).toBe(true);
+    const cancelledPrefilter = await renewals.deferredPrepayHoldCustomerIds(trx, [f.customerId]);
+    expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: cancelledPrefilter })).toBe(true);
     // A year voided after the fact no longer covers the stamped visit.
     await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
     expect(await covers(f.parentId)).toBe(false);
