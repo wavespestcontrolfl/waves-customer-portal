@@ -7,6 +7,8 @@ import React, {
   useState,
 } from "react";
 
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 /**
@@ -39,6 +41,7 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
   },
   ref,
 ) {
+  const canAccessCalls = useCanAccessCalls();
   const id = recordingId == null ? "" : String(recordingId);
   const requestNumberRef = useRef(0);
   const audioRef = useRef(null);
@@ -149,6 +152,10 @@ const AuthenticatedCallAudio = forwardRef(function AuthenticatedCallAudio(
   }, [id, request]);
 
   const label = audioProps["aria-label"] || "Call recording";
+
+  // Call audio is admin-only: a technician is shown no player at all (the
+  // audio proxy would refuse the fetch).
+  if (!canAccessCalls) return null;
 
   return (
     <div

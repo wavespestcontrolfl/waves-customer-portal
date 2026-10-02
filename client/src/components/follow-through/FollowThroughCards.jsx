@@ -35,7 +35,8 @@ const EMPTY_TEXT = { true: 'Loading follow-through…', false: 'No follow-throug
 //   of tech tabs polls far less often than the office queue; onSummary reports
 //   whether the cards loaded enabled, their open/overdue counts, and whether
 //   more pages remain, so a host can fold them into its own summary.
-export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs = DEFAULT_POLL_MS }) {
+// `openCall` = the viewer may open the call behind a promise (admin-only).
+export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs = DEFAULT_POLL_MS, openCall = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -156,7 +157,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
           if (snooze) act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'snooze', snooze, expected_at: r.updated_at }));
         }}><option value="">Snooze…</option><option value="two_hours">2 hours</option><option value="tomorrow">Next working morning</option></Select>
       </div>
-      <Link href={`/admin/communications#tab=calls&call=${r.call_log_id}`}>Open call</Link>
+      {openCall && <Link href={`/admin/communications#tab=calls&call=${r.call_log_id}`}>Open call</Link>}
     </Card>;
   };
   return <section aria-label="Follow-through" className="space-y-3 mb-5">

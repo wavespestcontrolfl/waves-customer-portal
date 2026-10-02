@@ -160,7 +160,7 @@ function PreviewReview({ preview, who, Text }) {
 }
 
 
-function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPreview, onApply, onDismiss }) {
+function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPreview, onApply, onDismiss, openCall }) {
   const { Card, Button, Text, Link } = ui;
   const who = nameFor(preview?.customer || row);
   const candidates = (row.candidates || []).map((candidate) => candidate.id === preview?.selected.id ? preview.selected : candidate);
@@ -185,11 +185,12 @@ function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPrevie
       {preview && <Button disabled={!!busy} onClick={() => onApply(row, preview)}>Apply change</Button>}
       <Button secondary disabled={!!busy} onClick={() => onDismiss(row)}>Dismiss proposal</Button>
     </div>
-    <Link href={`/admin/communications#tab=calls&call=${row.call_log_id}`}>Open call</Link>
+    {openCall && <Link href={`/admin/communications#tab=calls&call=${row.call_log_id}`}>Open call</Link>}
   </Card>;
 }
 
-export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }) {
+// `openCall` = the viewer may open the call behind a proposal (admin-only).
+export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS, openCall = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -388,6 +389,7 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
     {error && <div role="alert"><Text tone="alert">{error}</Text></div>}
     {notice && <div role="status"><Text>{notice}</Text></div>}
     {proposals.map((row) => <ProposalCard
+      openCall={openCall}
       key={row.id}
       row={row}
       ui={ui}

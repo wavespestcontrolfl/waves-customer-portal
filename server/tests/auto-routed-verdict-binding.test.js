@@ -10,6 +10,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  // The call-log routes mount with requireAdmin; the router needs it defined to load.
+  requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../middleware/auth', () => ({ authenticate: (req, res, next) => next() }));
 jest.mock('../services/ai-assistant/assistant', () => ({}));
