@@ -207,8 +207,8 @@ function oursView(s) {
  *   1. prompts ↔ our turns by wall clock (promptWallAt vs prompt_sent);
  *   2. the clock offset between the two machines = median of those pairs;
  *   3. each turn's first send (promptWallAt + firstSendAt − promptAt, offset
- *      applied) ↔ the ONE first_token_received that arrived after that prompt
- *      and within SEND_WINDOW_MS of the send — the reply that answers that
+ *      applied) ↔ the ONE first_token_received in the same relay session that
+ *      arrived after that prompt and within SEND_WINDOW_MS of the send — the reply that answers that
  *      prompt, whatever else was in flight (any doubt: unattributed);
  *   4. an agent audio start is that reply's audio only when its text is the
  *      ONLY one waiting to be heard (parseTimeline); a barge-in, preemption
@@ -241,8 +241,9 @@ function buildCallTimeline(events = [], turnStats = []) {
     const s = ours[j];
     if (!Number.isFinite(s.firstSendAt) || !Number.isFinite(s.promptAt)) continue;
     const sendAt = s.promptWallAt + offset + (s.firstSendAt - s.promptAt);
-    const promptSentAt = parsed.prompts[i].promptSentAt;
-    candidates.set(i, parsed.tokens.flatMap((t, ti) => (t.at >= promptSentAt && Math.abs(t.at - sendAt) <= SEND_WINDOW_MS ? [ti] : [])));
+    const { promptSentAt, sessionId } = parsed.prompts[i];
+    candidates.set(i, parsed.tokens.flatMap((t, ti) => (
+      t.sessionId === sessionId && t.at >= promptSentAt && Math.abs(t.at - sendAt) <= SEND_WINDOW_MS ? [ti] : [])));
   }
   const claims = new Map(); // token index → how many sends it fits
   for (const list of candidates.values()) for (const ti of list) claims.set(ti, (claims.get(ti) || 0) + 1);

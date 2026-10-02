@@ -141,6 +141,15 @@ describe('buildCallTimeline — reply attribution comes from our stats only', ()
     expect(crowded[0].outcome).toBe('unattributed');
   });
 
+  test('a reply text from a newer relay session is never matched to an older session\'s prompt', () => {
+    const second = (atMs, name, n) => ({ ...ev(atMs, name), conversation_relay_data: { session_id: 'VX-second', sequence_number: n } });
+    const rows = buildCallTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'), // session A: our send is lost with the socket
+      second(1250, 'first_token_received', 1), second(1300, 'start_of_agent_speech', 2), // session B's resume text
+    ], [ours(1, 1000, 200)]);
+    expect(rows[0].outcome).toBe('unattributed');
+  });
+
   test('clock skew between our server and Twilio is measured on the prompts and removed', () => {
     const rows = buildCallTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
