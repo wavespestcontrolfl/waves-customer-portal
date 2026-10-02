@@ -600,23 +600,24 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   // dated that day (month + day; the year too when the customer gave one)
   const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
   const namedDates = inboundDates(inbound, todayParts);
+  const invoiceNamed = named.full.length > 0 || named.tail.length > 0;
   return copied.some((sentence) => {
     const t = String(sentence);
-    if (namedDates.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t)) {
-      const d = sentenceDate(t);
-      if (!d || !namedDates.some((n) => n.month === d.month && n.day === d.day && (n.year == null || n.year === d.year))) return true;
-    }
-    if (namedTenders.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
-    // Codex round-64 P2: the customer named an invoice - a receipt that does not name it is not proven to be that invoice's payment
-    if (!inv && (named.full.length || named.tail.length) && /\bpayment\b/i.test(t)) return true;
-    if (inv && (named.full.length || named.tail.length)) {
-      const num = inv[1].toUpperCase();
-      return !(named.full.includes(num) || namedTails.has(stripZeros(num.split('-').pop())));
-    }
-    if (!inv && amounts.size && /\bpayment\b/i.test(t)) return !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
-    return false;
+    if (inv) return invoiceNamed && !(named.full.includes(inv[1].toUpperCase()) || namedTails.has(stripZeros(inv[1].toUpperCase().split('-').pop())));
+    return /\bpayment\b/i.test(t) && receiptOffTarget(t, { namedDates, namedTenders, invoiceNamed, amounts });
   });
+}
+// A copied RECEIPT (a payment sentence naming no invoice) against what the customer named: its date, its tender, an invoice (Codex
+// round-64 P2: a receipt that names no invoice is never proven to be the named invoice's payment), its amount.
+function receiptOffTarget(t, { namedDates, namedTenders, invoiceNamed, amounts }) {
+  if (namedDates.length) {
+    const d = sentenceDate(t);
+    if (!d || !namedDates.some((n) => n.month === d.month && n.day === d.day && (n.year == null || n.year === d.year))) return true;
+  }
+  if (namedTenders.length && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
+  if (invoiceNamed) return true;
+  return amounts.size > 0 && !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
 }
 
 // MONEY CONTENT (owner 2026-10-01 ~23:58Z): once the verbatim copies are removed, an unedited AI reply carries no dollar figure, no price
