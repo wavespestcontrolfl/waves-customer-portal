@@ -740,3 +740,38 @@ describe('unavailable frozen decisions are explicit, never "no hides"', () => {
     expect(off.status).toBe('scored');
   });
 });
+
+describe('saved report text gets the crown backstop at render', () => {
+  const { crownSafeTodaysResult } = require('../services/service-report/report-data');
+  const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+
+  test('a frozen result card loses its crown claims and keeps everything else', () => {
+    const out = crownSafeTodaysResult({
+      headline: 'Shrubs treated',
+      body: 'The palm crown looks healthy. Older fronds show some yellowing.',
+      nextStep: 'We will recheck the oldest fronds next visit.',
+      bodySource: 'technician_report',
+    });
+    expect(out).toEqual({
+      headline: 'Shrubs treated',
+      body: 'Older fronds show some yellowing.',
+      nextStep: 'We will recheck the oldest fronds next visit.',
+      bodySource: 'technician_report',
+    });
+    expect(crownSafeTodaysResult(null)).toBeNull();
+  });
+
+  test('saved technician notes are stripped before the section parse, which still parses', () => {
+    const notes = 'WHAT WE DID:\nTreated the hedge.\n\nWHAT WE FOUND:\nThe palm crown looks healthy. Scale on the ixora.';
+    const copy = technicianReportCustomerCopy(stripCrownHealthClaims(notes));
+    expect(copy).not.toBeNull();
+    expect(JSON.stringify(copy)).not.toMatch(/crown/i);
+    expect(JSON.stringify(copy)).toMatch(/Scale on the ixora/);
+  });
+
+  test('report-data applies it only on the gated T&S path', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(src).toContain('const technicianReport = technicianReportCustomerCopy(tsCopyFindings\n      ? stripCrownHealthClaims(service.technician_notes)\n      : service.technician_notes);');
+    expect(src).toContain('todaysResult: tsCopyFindings\n          ? crownSafeTodaysResult(typedSnapshot.todaysResult)\n          : (typedSnapshot.todaysResult || null),');
+  });
+});

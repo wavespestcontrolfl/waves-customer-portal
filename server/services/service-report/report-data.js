@@ -22,6 +22,7 @@ const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
+  stripCrownHealthClaims,
 } = require('./tree-shrub-tech-findings');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
@@ -2101,6 +2102,18 @@ function withoutDarkFourSectionBody(snapshot) {
   if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
   const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
   return { ...snapshot, todaysResult: rest };
+}
+
+// GATE_TS_TECH_FINDINGS_COPY: a frozen T&S result card's free text gets the
+// crown backstop at render, so a card saved before the gate cannot vouch for
+// an unseen palm crown.
+function crownSafeTodaysResult(result) {
+  if (!result || typeof result !== 'object') return result || null;
+  const next = { ...result };
+  for (const field of ['headline', 'body', 'nextStep']) {
+    if (typeof next[field] === 'string') next[field] = stripCrownHealthClaims(next[field]);
+  }
+  return next;
 }
 
 // The report's next-appointment shape for a scheduled_services row.
@@ -6296,7 +6309,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
   // snapshot) never resurfaces via the summary.
   {
-    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
+    // GATE_TS_TECH_FINDINGS_COPY: a saved T&S report (written before the
+    // gate, or edited by hand) gets the crown backstop at render, BEFORE the
+    // section parse, the same order the writer applies it.
+    const technicianReport = technicianReportCustomerCopy(tsCopyFindings
+      ? stripCrownHealthClaims(service.technician_notes)
+      : service.technician_notes);
     // THE rule (activity-indicators technicianReportDrivesSummary): the
     // completion-time rejection frozen into service_data (codex r58), the
     // governing typed story's acceptance (codex r26/r42/r78/r80) and the
@@ -6713,7 +6731,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         reportTypeLabel: typedSnapshot.reportTypeLabel || null,
         visitSequence: typedSnapshot.visitSequence || 1,
         isProgressVisit: (typedSnapshot.visitSequence || 1) > 1,
-        todaysResult: typedSnapshot.todaysResult || null,
+        todaysResult: tsCopyFindings
+          ? crownSafeTodaysResult(typedSnapshot.todaysResult)
+          : (typedSnapshot.todaysResult || null),
         // Empty on lawn callbacks whose narrative owns the story — hides
         // the "What we found & did" tiles on web AND PDF from one point.
         findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
@@ -6954,6 +6974,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 
 module.exports = {
   buildReportV1Data,
+  crownSafeTodaysResult,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
   resolveProjectApplicatorTechnician,
