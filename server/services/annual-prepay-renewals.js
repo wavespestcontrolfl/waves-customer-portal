@@ -4196,19 +4196,30 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, opts = {}) {
 }
 
 // A visit completion stamped as held by a waiting year (paf_held_term_id):
-// covered while that year is still the plan's live bill (waiting, charging,
-// or paid), not once it is voided, cancelled, refunded or dispute-suspended.
-// Returns null for an unstamped visit. Throws on a failed read.
+// while the year still waits or charges (payment_pending), covered unless its
+// bill is voided / cancelled / refunded or a dispute suspended it; once past
+// that, covered exactly when the term carries paid coverage by the canonical
+// rules (coveredTermsAsOf: a paid end-at-term cancellation rides out its
+// window, a refund or lost dispute does not). Reads the stamp itself when a
+// caller's row does not carry the column. Returns null for an unstamped
+// visit. Throws on a failed read.
 async function pafHeldStampCovers(scheduledService, conn = db) {
-  if (!scheduledService?.paf_held_term_id) return null;
-  const term = await conn('annual_prepay_terms')
-    .where({ id: scheduledService.paf_held_term_id, customer_id: scheduledService.customer_id })
-    .first('status', 'prepay_invoice_id', 'dispute_suspended_at');
-  if (!term || String(term.status || '') === 'cancelled' || term.dispute_suspended_at) return false;
-  const invoice = term.prepay_invoice_id
-    ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status')
-    : null;
-  return !!invoice && !PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
+  if (!scheduledService) return null;
+  let termId = scheduledService.paf_held_term_id;
+  if (termId === undefined && scheduledService.id) {
+    termId = (await conn('scheduled_services').where({ id: scheduledService.id }).first('paf_held_term_id'))?.paf_held_term_id;
+  }
+  if (!termId) return null;
+  const term = await conn('annual_prepay_terms').where({ id: termId }).first('id', 'customer_id', 'status', 'prepay_invoice_id', 'dispute_suspended_at');
+  if (!term || (scheduledService.customer_id && String(term.customer_id) !== String(scheduledService.customer_id))) return false;
+  if (String(term.status || '') === PAYMENT_PENDING_STATUS) {
+    if (term.dispute_suspended_at) return false;
+    const invoice = term.prepay_invoice_id
+      ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status')
+      : null;
+    return !!invoice && !PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
+  }
+  return !!(await coveredTermsAsOf(conn).where('t.id', term.id).first('t.id'));
 }
 
 
@@ -4225,6 +4236,9 @@ async function annualCoverageVerdictForPrediction(visit, conn = db, { deferredCu
   if (visit?.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
     return annualPrepayCoversVisit(visit, conn, { throwOnError: true });
   }
+  // A visit completion stamped as held keeps its coverage after the year is
+  // paid (the payment_pending prefilter below no longer matches it).
+  if (await pafHeldStampCovers(visit, conn)) return true;
   if (deferredCustomerIds && !deferredCustomerIds.has(String(visit?.customer_id))) return null;
   return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
 }

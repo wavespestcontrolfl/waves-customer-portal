@@ -300,6 +300,14 @@ postgres('annual prepay charged after the first visit', () => {
     await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid' });
     await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'active' });
     expect(await covers(f.parentId)).toBe(true);
+    // A reader whose query never selected the stamp (billing recovery's
+    // narrow visit row) still sees it, through the prediction verdict too.
+    const renewals = require('../services/annual-prepay-renewals');
+    const narrow = { id: f.parentId, customer_id: f.customerId, service_type: 'Quarterly Pest Control' };
+    expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: new Set() })).toBe(true);
+    // A paid year cancelled to end at term rides out its window (coveredTermsAsOf).
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await covers(f.parentId)).toBe(true);
     // A year voided after the fact no longer covers the stamped visit.
     await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
     expect(await covers(f.parentId)).toBe(false);
