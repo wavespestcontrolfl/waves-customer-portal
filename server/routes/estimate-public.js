@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+const { greetingFirstToken, estimateGreetingFirstToken, estimateGreetingFirstName } = require('../utils/greeting-first-name');
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
@@ -4778,6 +4779,26 @@ async function buildShowYourWork(estimate = {}, estData = {}) {
   return { facts, parcelLine, qualityNote, overlaySatelliteUrl };
 }
 
+// The name an estimate greeting uses ('' = none; callers fall back to
+// 'there'). A linked customer with a blank first_name must not be greeted by
+// the surname customerName starts with, so this reads the linked customer's
+// first_name (customer_id) alongside the resolved contact name. Never throws.
+function resolveEstimateGreetingFirstName(estimate, contact = {}, opts = {}) {
+  return estimateGreetingFirstToken(opts.database || db, estimate, {
+    customerName: contact.customerName || estimate.customer_name,
+  });
+}
+
+// First name for a rendered estimate view. Callers that resolved the linked
+// customer pass greetingFirstName ('' = a blank first name on file); anything
+// else keeps the first token of customerName.
+function viewGreetingFirstName(view) {
+  const resolved = view && typeof view.greetingFirstName === 'string'
+    ? view.greetingFirstName
+    : greetingFirstToken({ customerName: view?.customerName });
+  return resolved || 'there';
+}
+
 function renderExpiredPage(estimate) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Expired — Waves</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
@@ -4798,7 +4819,7 @@ function renderExpiredPage(estimate) {
 ${shellTopBar()}
 <div class="wrap"><div class="box">
   <h1>This estimate has expired</h1>
-  <p>Hi ${escapeHtml((estimate.customerName || '').split(' ')[0] || 'there')} — the estimate for <strong>${escapeHtml(estimate.address || 'your property')}</strong> is no longer active. Give us a call and we'll put together a fresh one.</p>
+  <p>Hi ${escapeHtml(viewGreetingFirstName(estimate))} — the estimate for <strong>${escapeHtml(estimate.address || 'your property')}</strong> is no longer active. Give us a call and we'll put together a fresh one.</p>
   <a class="btn" href="${WAVES_SUPPORT_PHONE_TEL}">Call ${WAVES_SUPPORT_PHONE_DISPLAY}</a>
 </div></div>
 </body></html>`;
@@ -4953,7 +4974,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const payAfterFirstVisitCopy = opts.payAfterFirstVisitCopy === true;
   const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
-  const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
+  const firstName = escapeHtml(viewGreetingFirstName(est));
   const fullName = escapeHtml(est.customerName || '');
   const address = escapeHtml(est.address || '');
   const customerEmail = escapeHtml(est.customerEmail || '');
@@ -6414,7 +6435,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // states outrank it, same as the React TERMINAL_HERO rule.
   const heroCity = (/,\s*([^,]+),\s*FL\b/i.exec(String(est.address || '')) || [])[1]?.trim() || null;
   const fillOneTimeHero = (str) => escapeHtml(String(str || '')
-    .replace(/\{first\}/g, (est.customerName || '').split(' ')[0] || 'there')
+    .replace(/\{first\}/g, viewGreetingFirstName(est))
     .replace(/\s+in \{city\}/gi, heroCity ? ` in ${heroCity}` : '')
     .replace(/\{city\}/g, heroCity || '')
     .replace(/ {2,}/g, ' '));
@@ -9008,7 +9029,11 @@ async function handleEstimateView(req, res, next) {
 
     if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
       return res.set('Content-Type', 'text/html').send(
-        renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
+        renderExpiredPage({
+          address: estimate.address,
+          customerName: estimate.customer_name,
+          greetingFirstName: await estimateGreetingFirstToken(db, estimate),
+        })
       );
     }
     // The /api/estimates/:token mount renders legacy HTML regardless of the
@@ -9228,6 +9253,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     let rateReviewTermsRendered = false;
+    const legacyGreetingFirstName = await resolveEstimateGreetingFirstName(estimate, contact);
     const renderLegacyPage = (renderOpts = {}) => renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -9242,6 +9268,7 @@ async function handleEstimateView(req, res, next) {
       quoteRequired: pageQuoteRequirement.quoteRequired,
       quoteRequiredReason: pageQuoteRequirement.reason || null,
       customerName: contact.customerName,
+      greetingFirstName: legacyGreetingFirstName,
       customerEmail: contact.customerEmail,
       customerPhone: contact.customerPhone,
       address: contact.address,
@@ -9683,7 +9710,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 
     // Reassigned after the accept-card contact patch lands (below), so the
     // confirmation texts greet with the name the customer just supplied.
-    let firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+    let firstName = await estimateGreetingFirstName(db, estimate);
 
     // Commercial auto-priced lawn/tree: approval-only manual-billing workflow.
     // No booking deposit/card, no auto-schedule, no auto-invoice; the converter
@@ -27943,7 +27970,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // so an estimate whose email/phone lives on the linked record doesn't
     // show buttons that 400.
     const contact = await resolveEstimateContactFields(estimate);
-    const firstName = String(contact.customerName || estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
+    const firstName = (await resolveEstimateGreetingFirstName(estimate, contact)) || 'there';
     const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
     // The pre-read verdict above is re-asserted IMMEDIATELY before each
     // provider handoff (codex r14 P0 on #3804): a clarify re-price hold —
@@ -29317,7 +29344,7 @@ async function composeEstimateDataPayload(estimate, {
         id: estimate.id,
         token: estimate.token,
         slug: estimate.estimate_slug || null,
-        customerFirstName: (contact.customerName || '').split(' ')[0] || null,
+        customerFirstName: (await resolveEstimateGreetingFirstName(estimate, contact)) || null,
         customerName: contact.customerName,
         customerPhone: contact.customerPhone,
         customerEmail: contact.customerEmail,
@@ -30079,6 +30106,7 @@ module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
+module.exports.resolveEstimateGreetingFirstName = resolveEstimateGreetingFirstName;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 module.exports.attachTermiteStationRental = attachTermiteStationRental;

@@ -15,6 +15,7 @@ const DELIVERY_HISTORY_MAX = 25;
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
+const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
@@ -867,7 +868,7 @@ function estimateEmailPriceLine(estimate) {
 // auditing a template issue, or calling a transport. Only the link is shortened
 // at handoff; the manual send pins the base SMS template shown here.
 async function buildEstimateSendPreview(estimate) {
-  const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+  const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = estimateEmailPriceLine(estimate);
@@ -2800,7 +2801,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const emailViewUrl = (sendMethod !== 'sms' && estimate.customer_email)
     ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
     : longUrl;
-  const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+  const firstName = await estimateGreetingFirstName(db, estimate);
   // Residential sends use the compliant summary (codex 2642 r1: the old
   // "$X/mo · $Y/yr" priceLine bypassed moneySummary's residential branch).
   // Commercial proposals rebuild their own totals line below (freshPriceLine).
@@ -5088,7 +5089,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
       leadId: await leadIdForEstimate(estimate),
       channel: 'sms', purpose: 'estimate_followup_manual',
     });
-    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+    const firstName = await estimateGreetingFirstName(db, estimate);
 
     const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
       first_name: firstName,
@@ -5255,7 +5256,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
       leadId: await leadIdForEstimate(estimate),
       channel: 'sms', purpose: 'estimate_booking_link',
     });
-    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+    const firstName = await estimateGreetingFirstName(db, estimate);
 
     // Use the same template as the post-accept SMS so the customer sees a
     // consistent voice. Admin can still override via req.body.message.
