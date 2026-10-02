@@ -169,10 +169,12 @@ describe('decideDisposition — two models, different providers, same failure mo
     }
   });
 
-  test('when the first reader clears the draft, a price or placeholder signal keeps it visible as a lead', () => {
+  test('one reader cannot clear a draft: a clearance is a lead; a price or placeholder signal names its mode', () => {
     const cleared = { disposition: 'not_a_mistake', surface: 'other', failure_mode: 'other', quote: '' };
     expect(decideDisposition({ model: cleared, predicates: [{ mode: 'invented_schedule_eta', token: '9am' }, { mode: 'invented_commitment', token: 'x' }], draft }))
-      .toMatchObject({ disposition: 'not_a_mistake', rule: 'model' });
+      .toMatchObject({ disposition: 'lead', rule: 'model_cleared' });
+    expect(decideDisposition({ model: cleared, predicates: [], draft }))
+      .toMatchObject({ disposition: 'lead', rule: 'model_cleared' });
     expect(decideDisposition({ model: cleared, predicates: [{ mode: 'price_quote', token: '$149' }], draft: 'It is $149.' }))
       .toMatchObject({ disposition: 'lead', rule: 'predicate_only', failure_mode: 'price_quote' });
     expect(decideDisposition({ model: cleared, predicates: [{ mode: 'placeholder_leak', token: '[name]' }], draft: 'Hi [name]' }))
@@ -189,6 +191,21 @@ describe('parseAdjudicatorResponse / prompt framing', () => {
     expect(parseAdjudicatorResponse('no json')).toBeNull();
     expect(parseAdjudicatorResponse('```json\n{"disposition":"lead","surface":"vibes","failure_mode":"novel","quote":7}\n```'))
       .toEqual({ disposition: 'lead', surface: 'other', failure_mode: 'other', quote: '', summary: null });
+  });
+
+  test('a confirmation with an omitted or invented failure mode is read as a lead, never an agreeing "other"', () => {
+    const base = { disposition: 'confirmed_mistake', surface: 'facts_block_gap', quote: 'Tuesday at 2pm', summary: 's' };
+    for (const failure_mode of [undefined, 'made_up_mode', '']) {
+      expect(parseAdjudicatorResponse(JSON.stringify({ ...base, failure_mode })))
+        .toMatchObject({ disposition: 'lead', failure_mode: 'other' });
+    }
+    expect(parseAdjudicatorResponse(JSON.stringify({ ...base, failure_mode: 'other' })))
+      .toMatchObject({ disposition: 'confirmed_mistake', failure_mode: 'other' });
+    // Two readers inventing different modes cannot confirm together.
+    const draft = 'See you Tuesday at 2pm.';
+    const a = parseAdjudicatorResponse(JSON.stringify({ ...base, failure_mode: 'novel_a' }));
+    const b = parseAdjudicatorResponse(JSON.stringify({ ...base, failure_mode: 'novel_b' }));
+    expect(decideDisposition({ model: a, predicates: [], draft, second: b }).disposition).toBe('lead');
   });
 
   test('the migration CHECK, the module and the model list agree', () => {
@@ -384,12 +401,26 @@ describe('adjudicateHumanBetter — run contract', () => {
     expect(dbi.inserts.map((r) => r.evidence_id)).toEqual(['j2']);
   });
 
-  test('a cleared row is stored as not_a_mistake with one call', async () => {
+  test('a single-reader clearance is stored as a lead with one call', async () => {
     const dbi = makeDb({ candidates: [candidate('j1', { draft_response: 'Happy to help with that!' })] });
     dispatch.mockResolvedValueOnce(answer('openai', { disposition: 'not_a_mistake', surface: 'other', failure_mode: 'other', quote: '', summary: 's' }));
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
-    expect(out.byDisposition).toEqual({ not_a_mistake: 1 });
+    expect(out.byDisposition).toEqual({ lead: 1 });
     expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('no Anthropic key and no injected client: the OpenAI leg still runs and stores its lead', async () => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const dbi = makeDb({ candidates: [candidate('j1', { draft_response: 'Happy to help with that!' })] });
+      dispatch.mockResolvedValueOnce(answer('openai', { disposition: 'lead', surface: 'other', failure_mode: 'other', quote: '', summary: 's' }));
+      const out = await adjudicateHumanBetter({ dbi, now: NOW });
+      expect(out.byDisposition).toEqual({ lead: 1 });
+      expect(dispatch.mock.calls[0][1].anthropicClient).toBeUndefined();
+    } finally {
+      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+    }
   });
 
   test('an empty draft is a lead with no model call', async () => {

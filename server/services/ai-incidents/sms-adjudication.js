@@ -195,9 +195,10 @@ function quoteInDraft(quote, draft) {
  *                verified quote the result carries `needsSecondReader: true`
  *                and the caller asks for one, then calls again with it (null
  *                = the second reader answered but was unusable).
- *   predicates — runPredicates' output. Used ONLY to keep a draft that
- *                breaks a house rule (a price, a placeholder) visible as a
- *                lead when the first reader waved it through.
+ *   predicates — runPredicates' output. Used ONLY to name the failure mode
+ *                of the lead when the first reader waved a draft that breaks
+ *                a house rule (a price, a placeholder) through.
+ * Every outcome short of two agreeing confirmations is a lead.
  */
 function decideDisposition({ model, predicates = [], draft, second }) {
   const quoteVerified = quoteInDraft(model.quote, draft);
@@ -219,7 +220,11 @@ function decideDisposition({ model, predicates = [], draft, second }) {
   if (hard) {
     return { disposition: 'lead', rule: 'predicate_only', quoteVerified, surface: model.surface, failure_mode: hard.mode };
   }
-  return { disposition: model.disposition, rule: 'model', quoteVerified, ...cell };
+  // One reader cannot clear a draft any more than it can confirm one: a
+  // clearance is stored as a lead (rule `model_cleared`) so the person's
+  // correction stays in the investigation queue.
+  const rule = model.disposition === 'not_a_mistake' ? 'model_cleared' : 'model';
+  return { disposition: 'lead', rule, quoteVerified, ...cell };
 }
 
 module.exports = {

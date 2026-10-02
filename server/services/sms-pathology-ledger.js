@@ -514,10 +514,16 @@ function parseAdjudicatorResponse(text) {
   // A disposition outside the closed list is unusable (retried next run) — a
   // guessed default here would silently confirm or clear a real incident.
   if (!MODEL_DISPOSITIONS.includes(parsed.disposition)) return null;
+  // A confirmation must name a mode from the closed list. An omitted or
+  // invented mode is NOT folded into 'other' (two readers inventing different
+  // modes would then "agree"); the answer is read as a lead, which can never
+  // confirm.
+  const modeKnown = FAILURE_MODES.includes(parsed.failure_mode);
+  const disposition = parsed.disposition === 'confirmed_mistake' && !modeKnown ? 'lead' : parsed.disposition;
   return {
-    disposition: parsed.disposition,
+    disposition,
     surface: SURFACES.includes(parsed.surface) ? parsed.surface : 'other',
-    failure_mode: FAILURE_MODES.includes(parsed.failure_mode) ? parsed.failure_mode : 'other',
+    failure_mode: modeKnown ? parsed.failure_mode : 'other',
     quote: typeof parsed.quote === 'string' ? parsed.quote.slice(0, 300) : '',
     summary: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 400) : null,
   };
@@ -580,7 +586,7 @@ async function readWithTwoReaders({ judgmentId, draft, predicates, payload }) {
  * Nightly, after the classifier: every un-adjudicated `human_better` judgment
  * on a recent, non-backfill draft becomes ONE ai_incidents row — a confirmed
  * mistake only under the two-model rule in ai-incidents/sms-adjudication.js,
- * otherwise a lead or not_a_mistake. Idempotent (anti-join + the evidence
+ * otherwise a lead (one reader cannot clear a draft either). Idempotent (anti-join + the evidence
  * unique key); an unparseable or failed adjudication, or a second reader that
  * could not be reached, leaves the judgment un-adjudicated for the next run.
  *
@@ -623,7 +629,6 @@ async function adjudicateHumanBetter({ batchLimit = ADJUDICATE_BATCH, lookbackDa
     return { adjudicated: 0, ms: Date.now() - startedAt };
   }
 
-  let client = anthropicClient;
   const byDisposition = {};
   let adjudicated = 0;
 
@@ -697,10 +702,6 @@ async function adjudicateHumanBetter({ batchLimit = ADJUDICATE_BATCH, lookbackDa
       }
       const predicates = runPredicates({ draft, facts: row.facts_block });
       const contradicts = humanContradictsSchedule({ draft, humanReply: row.human_reply_text });
-      if (!client) {
-        const Anthropic = require('@anthropic-ai/sdk');
-        client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-      }
       const reading = await readWithTwoReaders({
         judgmentId: row.judgment_id,
         draft,
@@ -718,7 +719,10 @@ async function adjudicateHumanBetter({ batchLimit = ADJUDICATE_BATCH, lookbackDa
           }),
           jsonMode: false,
           maxTokens: 500,
-          anthropicClient: client,
+          // Undefined unless injected: the Anthropic adapter builds its own
+          // client, or reports no_key as a failed leg, so a missing key never
+          // blocks the OpenAI leg.
+          anthropicClient,
         },
       });
       if (!reading) continue; // logged; the judgment stays un-adjudicated for the next run
