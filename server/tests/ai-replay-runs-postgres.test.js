@@ -139,6 +139,8 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
     await record();
     await expect(holdout({ codeRef: 'abcdef1234' })).rejects.toMatchObject({ code: 'dev_not_passed' });
+    // Same commit, different gates: a different prompt version is a different candidate.
+    await expect(holdout({ promptVersion: V13 })).rejects.toMatchObject({ code: 'dev_not_passed' });
     const { run } = await holdout();
     // Two clean holdout cases are not enough to call it proof.
     expect(run).toMatchObject({ status: 'underpowered', case_count: 2 });

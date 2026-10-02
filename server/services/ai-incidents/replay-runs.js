@@ -121,11 +121,13 @@ async function recordReplayRun({
     if (!keys.length) throw new TransitionError('empty_split', `the proposal has no ${split} incidents`);
 
     if (split === 'holdout') {
-      // The candidate must clear its dev cases first, on the same code.
+      // The candidate must clear its dev cases first, on the same code AND
+      // the same prompt version (gates change the prompt without a commit).
       const dev = await trx('ai_replay_runs')
         .where({ proposal_id: proposalId, split: 'dev', status: 'passed', code_ref: codeRef })
+        .modify((q) => (promptVersion == null ? q.whereNull('prompt_version') : q.where('prompt_version', promptVersion)))
         .first();
-      if (!dev) throw new TransitionError('dev_not_passed', 'a holdout run needs a passed dev run on the same code_ref');
+      if (!dev) throw new TransitionError('dev_not_passed', 'a holdout run needs a passed dev run on the same code_ref and prompt version');
     }
 
     const rows = keys.map((k) => {
