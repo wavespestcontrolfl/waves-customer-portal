@@ -13272,7 +13272,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let sentSmsType = null;
         // The regular annual-prepay body, kept beside a first-charge body so a
         // quiet-hours hold queues text that is still true in the morning.
-        let firstChargeFallbackBody = null;
+        let firstChargeFallbackBase = null;
         // includePayLink === false omits the pay link from the completion SMS
         // (e.g. customer paid in person) — report-only. This is scoped to the
         // SMS body only; the mobile in-person payment sheet
@@ -13538,12 +13538,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)) {
               const firstCharge = await require('../services/paf-prepay-release').firstChargeCompletionFacts(svc);
               if (firstCharge) {
-                sentSmsType = 'service_complete_annual_prepay_first_charge';
-                body = await renderTemplate(sentSmsType, {
-                  ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
-                }, paidTemplateContext);
-                const fallback = body ? await renderTemplate('service_complete_annual_prepay', paidTemplateVars, paidTemplateContext) : null;
-                firstChargeFallbackBody = fallback ? `${fallback}${reviewSuffix}`.trim() : null;
+                // Only with its safe fallback in hand: a quiet-hours hold must
+                // be able to queue the regular text instead (GitHub Codex #5640 r3).
+                firstChargeFallbackBase = await renderTemplate('service_complete_annual_prepay', paidTemplateVars, paidTemplateContext);
+                if (firstChargeFallbackBase) {
+                  sentSmsType = 'service_complete_annual_prepay_first_charge';
+                  body = await renderTemplate(sentSmsType, {
+                    ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
+                  }, paidTemplateContext);
+                }
               }
             }
             if (!body && annualPrepayCovered) {
@@ -13800,9 +13803,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // A held "being charged now" text would land after an overnight
               // charge: the queued replay is the regular annual-prepay body
               // instead (GitHub Codex #5640 r2).
-              if (sentSmsType === 'service_complete_annual_prepay_first_charge' && firstChargeFallbackBody) {
+              // The review ask rides along only if the send-time review
+              // decision kept it on the body (a rejected ask was stripped).
+              if (sentSmsType === 'service_complete_annual_prepay_first_charge' && firstChargeFallbackBase) {
+                const keptReview = reviewSuffix && sentSmsBody.includes(reviewSuffix.trim());
                 sentSmsType = 'service_complete_annual_prepay';
-                sentSmsBody = firstChargeFallbackBody;
+                sentSmsBody = `${firstChargeFallbackBase}${keptReview ? reviewSuffix : ''}`.trim();
               }
               const deferredReplayBody = require('../services/open-balance')
                 .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);

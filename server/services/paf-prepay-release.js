@@ -561,13 +561,21 @@ async function autoChargeMethod(job, customerId, conn) {
       : null);
   if (!boundId) return null;
   const method = await Eligibility.getChargeableAutopayMethod(customer, conn, { rethrow: true });
-  return method && String(method.id) === String(boundId) ? method : null;
+  if (!method || String(method.id) !== String(boundId)) return null;
+  // The authorization the sweep requires before charging (GitHub Codex #5640
+  // r3): no recordable or recorded after-visit consent means a pay link.
+  try {
+    await require('./recurring-card-on-file').resolvePrepayRecoveryAuthorization(job, customerId);
+  } catch {
+    return null;
+  }
+  return method;
 }
 
 // The amount to announce: the acknowledged total, a CEILING (owner R1), so
 // "up to" it when account credit has been or will be applied; null when the
 // year is not still owed (paid, processing, dead) or credit covers it all.
-async function announcedAmount(job, conn) {
+async function announcedAmount(job, svc, conn) {
   const invoice = job.invoice_id
     ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied', 'payer_id')
     : null;
@@ -578,7 +586,9 @@ async function announcedAmount(job, conn) {
   // one the sweep's own payer check would resolve.
   if (invoice.payer_id) return null;
   const livePayer = await require('./payer').resolveForInvoice({
-    database: conn, customerId: invoice.customer_id, scheduledServiceId: job.payer_scope_scheduled_service_id || null, throwOnError: true,
+    // The visit producing this text is the one the release scopes the payer
+    // to (GitHub Codex #5640 r3).
+    database: conn, customerId: invoice.customer_id, scheduledServiceId: svc.id, throwOnError: true,
   });
   if (livePayer?.payerId) return null;
   const credit = require('./customer-credit');
@@ -586,6 +596,10 @@ async function announcedAmount(job, conn) {
   // retotaled since the approval, or credit applied to it, makes the amount
   // a ceiling too (GitHub Codex #5640 r2).
   const currentDueCents = Math.round((Number(invoice.total) - (Number(invoice.credit_applied) || 0)) * 100);
+  // A bill retotaled to zero has nothing to charge, and one retotaled above
+  // the authorized base would exceed the ceiling the sweep enforces (it falls
+  // to the pay link): no charge-now text for either (GitHub Codex #5640 r3).
+  if (currentDueCents <= 0 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
   let creditLowers = Number(invoice.credit_applied) > 0
     || (Number.isInteger(job.authorized_base_cents) && currentDueCents !== job.authorized_base_cents);
   if (await credit.autoApplyWouldApply(invoice, conn)) {
@@ -610,14 +624,17 @@ async function announcedAmount(job, conn) {
 async function firstChargeCompletionFacts(svc, conn = db) {
   try {
     if (!svc || svc.prepaid_method || !svc.customer_id) return null;
-    if (!require('./messaging/send-window').isWithinSendWindowET(new Date())) return null;
+    // Only when the send can actually be deferred (the completion route's own
+    // predicate): with the send-window gate off it goes out now.
+    if (require('../config/feature-gates').isEnabled('smsSendWindow')
+      && !require('./messaging/send-window').isWithinSendWindowET(new Date())) return null;
     const found = await awaitingDeferredJobForVisit(svc, conn);
     if (!found) return null;
     const { estimateId, job } = found;
     const term = await conn('annual_prepay_terms').where({ prepay_invoice_id: job.invoice_id || null }).first('id');
     if (!term || String(svc.paf_held_term_id || '') !== String(term.id)) return null;
     const method = await autoChargeMethod(job, svc.customer_id, conn);
-    const amount = method ? await announcedAmount(job, conn) : null;
+    const amount = method ? await announcedAmount(job, svc, conn) : null;
     if (!amount) return null;
     const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
       .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);

@@ -463,6 +463,41 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('a year bill retotaled above the authorization, or to zero, keeps the regular text (GitHub Codex #5640 r3)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const up = await deferredAccept();
+      await trx('scheduled_services').where({ id: up.parentId }).update({ paf_held_term_id: up.termId });
+      await trx('invoices').where({ id: up.invoiceId }).update({ total: 520, subtotal: 520 });
+      expect(await facts(up.parentId)).toBeNull();
+      const zero = await deferredAccept();
+      await trx('scheduled_services').where({ id: zero.parentId }).update({ paf_held_term_id: zero.termId });
+      await trx('invoices').where({ id: zero.invoiceId }).update({ total: 0, subtotal: 0 });
+      expect(await facts(zero.parentId)).toBeNull();
+    });
+
+    it('no recorded or recordable after-visit authorization keeps the regular text (GitHub Codex #5640 r3)', async () => {
+      const f = await deferredAccept({ jobPatch: { consent_variant_version: 'v0_old_after_visit' } });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toBeNull();
+    });
+
+    it('the payer is checked against the visit being completed (GitHub Codex #5640 r3)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      const payer = require('../services/payer');
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === f.childId ? 7 : null }));
+      try {
+        const facts = await require('../services/paf-prepay-release')
+          .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.childId }).first(), trx);
+        expect(facts).toBeNull();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+      }
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
@@ -474,11 +509,25 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('outside the send window the text never says "being charged now" (GitHub Codex #5640 r1)', async () => {
       windowSpy.mockReturnValue(false);
-      const f = await deferredAccept();
-      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
-      const facts = await require('../services/paf-prepay-release')
-        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
-      expect(facts).toBeNull();
+      const gates = require('../config/feature-gates');
+      const realIsEnabled = gates.isEnabled;
+      const gateSpy = jest.spyOn(gates, 'isEnabled');
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      try {
+        // Send-window gate on: the text would be queued, so the regular text.
+        gateSpy.mockImplementation((name) => (name === 'smsSendWindow' ? true : realIsEnabled(name)));
+        const held = await deferredAccept();
+        await trx('scheduled_services').where({ id: held.parentId }).update({ paf_held_term_id: held.termId });
+        expect(await facts(held.parentId)).toBeNull();
+        // Gate off: it goes out now, so the charge notice stands (Codex r3).
+        gateSpy.mockImplementation((name) => (name === 'smsSendWindow' ? false : realIsEnabled(name)));
+        const now = await deferredAccept();
+        await trx('scheduled_services').where({ id: now.parentId }).update({ paf_held_term_id: now.termId });
+        expect(await facts(now.parentId)).toMatchObject({ amount: '$480.00' });
+      } finally {
+        gateSpy.mockRestore();
+      }
     });
 
     it('an Auto Pay pause through today, or an expired bound card, keeps the regular text (GitHub Codex #5640 r1)', async () => {
