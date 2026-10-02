@@ -1359,6 +1359,14 @@ router.get('/:id', async (req, res, next) => {
       )
       .first();
     if (!d) return res.status(404).json({ error: 'Draft not found' });
+    // Technician scope (codex #5568 r3 P1): the draft carries the customer's
+    // name, phone and both message bodies, so a technician reads only drafts
+    // for customers on their own route; a customerless draft is office work.
+    if (req.techRole !== 'admin') {
+      if (!d.customer_id) return res.status(403).json({ error: 'Admin access required' });
+      const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+      if (!(await technicianServicesCustomer(req, d.customer_id))) return res.status(404).json({ error: 'Draft not found' });
+    }
 
     const flags = parseFlags(d.flags);
     // Same resolved recipient/from contract as the list (see GET / above).

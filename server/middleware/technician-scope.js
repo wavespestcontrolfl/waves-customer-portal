@@ -61,8 +61,9 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/customers(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/intelligence-bar(\/.*)?$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/(services|technicians|discounts)$/ },
-  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/estimates\/[^/]+\/schedule-source$/ },
-  { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/estimator(\/.*)?$/ },
+  // Not on the list: estimate reads (schedule-source returns lead PII and
+  // pricing with no visit to scope by) and the estimator (its /verify persists
+  // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
   // Pay at the visit (owner: card on file, pay after the first visit).

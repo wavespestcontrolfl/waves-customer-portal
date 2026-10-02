@@ -10,10 +10,6 @@ jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
   return { ...actual, adminAuthenticate: (req, _res, next) => { req.technician = { id: 'tech-A', role: mockRole }; req.technicianId = 'tech-A'; req.techRole = mockRole; next(); } };
 });
-jest.mock('../services/technician-visit-scope', () => {
-  const actual = jest.requireActual('../services/technician-visit-scope');
-  return { ...actual, technicianCurrentVisitFilter: jest.fn((req, q) => q) };
-});
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => {
     const c = {};
@@ -54,7 +50,7 @@ test('a technician reading /:serviceId/card-hold for a visit that does not exist
 });
 
 test("a technician reading another technician's visit gets the router's 403 service_not_assigned before the handler", async () => {
-  mockOwnedRow = { id: SERVICE, technician_id: 'tech-B', scheduled_date: new Date().toISOString().slice(0, 10) };
+  mockOwnedRow = { id: SERVICE, technician_id: 'tech-B', scheduled_date: new Date().toISOString().slice(0, 10), status: 'confirmed' };
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
     expect(res.status).toBe(403);
@@ -64,7 +60,7 @@ test("a technician reading another technician's visit gets the router's 403 serv
 });
 
 test('a technician whose route includes the visit reaches the handler', async () => {
-  mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10) };
+  mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10), status: 'confirmed' };
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
     expect(res.status).not.toBe(404);
@@ -80,4 +76,14 @@ test('an admin is not scoped by the param guard', async () => {
 
 test('GET /reschedules/log is admin-only', async () => {
   await withServer(async (base) => { expect((await fetch(`${base}/reschedules/log`)).status).toBe(403); });
+});
+
+test("a technician's own CANCELLED visit is refused on a read (dead status), but PUT /:serviceId/status still reaches the status route's own retry logic", async () => {
+  mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10), status: 'cancelled' };
+  await withServer(async (base) => {
+    expect((await fetch(`${base}/${SERVICE}/card-hold`)).status).toBe(403);
+    const retry = await fetch(`${base}/${SERVICE}/status`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'cancelled' }) });
+    expect([403, 404]).not.toContain(retry.status);
+  });
+  expect(mockCancelPreview).not.toHaveBeenCalled();
 });

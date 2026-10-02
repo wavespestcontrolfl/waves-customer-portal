@@ -75,6 +75,8 @@ describe('matcher', () => {
     ['GET', '/api/admin/communications/stats', false],
     ['GET', '/api/dispatch/jobs', true],
     ['POST', '/api/admin/review-requests/trigger', true],
+    ['GET', '/api/admin/estimates/11111111-2222-4333-8444-555555555555/schedule-source', false],
+    ['POST', '/api/admin/estimator/property-lookup/verify', false],
     ['GET', '/api/admin/review-requests', false],
     ['GET', '/api/dispatch/routes', false],
     ['GET', '/api/dispatch/insights', false],

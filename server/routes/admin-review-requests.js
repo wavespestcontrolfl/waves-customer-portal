@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const { REVIEW_LINK_CLICKED_REASON } = require('../services/review-click-guard');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -49,6 +50,10 @@ router.post('/trigger', async (req, res, next) => {
     // metric + audit provenance count triggered_by='tech' (codex #3285 r8).
     const triggeredBy = ['admin', 'csr', 'tech'].includes(req.body.triggeredBy) ? req.body.triggeredBy : 'admin';
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    // A technician triggers a review ask only for a customer on their own
+    // current/recent route (codex #5568 r3 P1). 404 so an id seen elsewhere
+    // confirms nothing; admins are unscoped.
+    if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     let resolvedServiceRecordId = serviceRecordId || null;
     let serviceContext = {};
 
@@ -114,6 +119,7 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     const sr = await db('service_records').where({ id: serviceRecordId }).first();
     if (!sr) return res.status(404).json({ error: 'Service record not found' });
+    if (!(await technicianServicesCustomer(req, sr.customer_id))) return res.status(404).json({ error: 'Service record not found' });
 
     const request = await ReviewService.create({
       customerId: sr.customer_id,

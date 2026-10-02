@@ -208,12 +208,14 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // Every /:serviceId route is pinned to the technician's own visit here, once,
-// before the handler (codex #5568 r2 P1: a few per-visit reads — card-hold,
-// recap context — had no check of their own). Assignment + the 7-day access
-// window only: status is deliberately NOT part of this gate, because the
-// status route's own terminal-transition logic must still see a same-status
-// retry on a cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1);
-// every handler keeps its stricter live-visit predicate for writes. Admins pass.
+// before the handler (codex #5568 r2/r3 P1). The canonical row predicate
+// (technicianVisitRowInScope: assigned to the caller, not a dead status, inside
+// the 7-day window) decides; the ONE carve-out is PUT /:serviceId/status, whose
+// own terminal-transition logic must still see a same-status retry on a
+// cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1) — there only
+// assignment + window are checked. A missing row is 404; an existing visit
+// that is not the caller's answers this router's documented 403
+// service_not_assigned. Admins pass.
 router.param('serviceId', async (req, res, next, serviceId) => {
   try {
     if (!isTechnicianRequest(req)) return next();
@@ -221,13 +223,12 @@ router.param('serviceId', async (req, res, next, serviceId) => {
     const { dateOnly } = require('../services/visit-groups');
     const row = await db('scheduled_services')
       .where('scheduled_services.id', serviceId)
-      .first('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date');
+      .first('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date', 'scheduled_services.status');
     if (!row) return res.status(404).json({ error: 'Service not found' });
-    // This router's documented answer for a visit that exists but is not the
-    // caller's (lockOwnedLiveVisit, the rain-out/reschedule ownership tests):
-    // 403 service_not_assigned.
-    const assigned = String(row.technician_id || '') === String(req.technicianId || '')
-      && dateOnly(row.scheduled_date) >= techAccessCutoff();
+    const statusRetry = req.method === 'PUT' && /^\/[^/]+\/status\/?$/.test(req.path);
+    const assigned = statusRetry
+      ? String(row.technician_id || '') === String(req.technicianId || '') && dateOnly(row.scheduled_date) >= techAccessCutoff()
+      : technicianVisitRowInScope(req, row);
     if (!assigned) return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     return next();
   } catch (err) { return next(err); }
