@@ -35,7 +35,9 @@ async function fetchConversationRelayEvents(callSid, {
   for (let page = 0; url && page < MAX_PAGES; page += 1) {
     // Bounded: a stalled page fails this call, never the whole report.
     const res = await fetchImpl(url, { headers: { Authorization: auth }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-    if (res.status === 404) return { events, available: false };
+    // 404 = not ready yet, but only before any page was accepted; a later
+    // 404 would silently truncate the call.
+    if (res.status === 404 && page === 0) return { events, available: false };
     if (!res.ok) throw new Error(`Voice Insights events HTTP ${res.status}`);
     const body = await res.json();
     if (Array.isArray(body.events)) events.push(...body.events);
@@ -77,10 +79,13 @@ const span = (from, to) => (from != null && to != null && to >= from ? to - from
  *   queued           — our reply arrived while earlier agent audio was still
  *                      playing, so Twilio logged no new start (the greeting
  *                      case); heard, but not a latency sample
- *   ambiguous        — the previous prompt was still waiting for its first
- *                      text when this one arrived. Twilio's events do not say which
- *                      prompt a reply answers, so this turn's reply and audio
- *                      are never attributed (not a latency sample)
+ *   ambiguous        — the previous prompt's reply had not both arrived and
+ *                      started playing when this one came in. Twilio's events
+ *                      do not say which prompt a reply or an audio start
+ *                      belongs to, so this turn's reply and audio are never
+ *                      attributed (not a latency sample). One rule covers
+ *                      every interleaving; doubt clears at the first turn
+ *                      whose reply both arrives and plays.
  *   no_audio_event   — we replied but no agent audio start followed before
  *                      the call ended
  *   silent           — we never replied before the call ended
@@ -117,11 +122,10 @@ const TIMELINE_HANDLERS = {
   stt_latency: (st, e) => { st.lastSttMs = e.latencyMs; },
   tts_latency: (st, e) => { st.pendingTtsMs = e.latencyMs; },
   prompt_sent: (st, e, turns) => {
-    // The previous prompt saw no reply text yet: the next reply events could
-    // be its late answer, so they are not attributed to this one. (Doubt
-    // reaches one turn only — a prompt whose reply was cut off for good
-    // must not leave every later turn unmeasured.)
-    const earlierPending = Boolean(st.current && !st.current.sawReply);
+    // Clean only when the previous prompt's reply both arrived and started
+    // playing (or queued behind audio already playing); otherwise a reply or
+    // audio start that follows may still be the previous one's.
+    const earlierPending = Boolean(st.current && !st.current.resolved);
     closeTurn(st.current, true);
     st.current = {
       index: turns.length + 1,
@@ -138,6 +142,7 @@ const TIMELINE_HANDLERS = {
       ttsMs: null,
       responses: 0,
       sawReply: false,
+      resolved: false, // reply text seen AND its audio started (or queued)
       agentPlayingAtFirstToken: false,
       agentOverCaller: false,
       callerBargeIns: 0,
@@ -153,6 +158,7 @@ const TIMELINE_HANDLERS = {
     if (!t) return;
     t.responses += 1;
     t.sawReply = true;
+    if (st.agentSpeaking) t.resolved = true; // queued behind audio already playing
     if (t.firstTokenAt == null && t.outcome == null) {
       t.firstTokenAt = e.at;
       t.agentPlayingAtFirstToken = st.agentSpeaking;
@@ -160,6 +166,7 @@ const TIMELINE_HANDLERS = {
   },
   start_of_agent_speech: (st, e) => {
     const t = st.current;
+    if (t && t.sawReply) t.resolved = true;
     // Only audio that starts AFTER this prompt's own first token can be its
     // reply; earlier audio is a previous reply still reaching the line.
     if (t && t.firstTokenAt != null && t.outcome == null) {
@@ -228,19 +235,29 @@ function joinTurnStats(timeline = [], turnStats = []) {
   const withClock = ours.filter((s) => Number.isFinite(s.promptWallAt));
   const pairs = new Map(); // timeline index → stat
   if (withClock.length) {
-    // Closest pairs first, globally, one-to-one — a chronological greedy pass
-    // would let an unmatched earlier prompt take a later prompt's exact match.
-    const candidates = [];
-    timeline.forEach((t, i) => withClock.forEach((s) => {
-      const d = Math.abs(s.promptWallAt - t.promptSentAt);
-      if (d <= JOIN_WINDOW_MS) candidates.push({ i, s, d });
-    }));
-    candidates.sort((a, b) => a.d - b.d);
-    const usedStats = new Set();
-    for (const c of candidates) {
-      if (pairs.has(c.i) || usedStats.has(c.s)) continue;
-      pairs.set(c.i, c.s);
-      usedStats.add(c.s);
+    // Both sides are chronological, so pairs never cross. An order-preserving
+    // alignment keeps the most pairs within the window, then the smallest
+    // total distance (greedy nearest-first could strand a valid pair).
+    const stats = [...withClock].sort((a, b) => a.promptWallAt - b.promptWallAt);
+    const n = timeline.length;
+    const m = stats.length;
+    const better = (a, b) => (a.count !== b.count ? a.count > b.count : a.dist < b.dist);
+    // best[i][j]: the best alignment of prompts i.. with stats j.. (the last
+    // row and column, nothing left on one side, stay empty alignments).
+    const best = Array.from({ length: n + 1 }, () => Array.from({ length: m + 1 }, () => ({ count: 0, dist: 0, move: null })));
+    for (let i = n - 1; i >= 0; i -= 1) {
+      for (let j = m - 1; j >= 0; j -= 1) {
+        let pick = { ...best[i + 1][j], move: 'skipPrompt' };
+        if (better(best[i][j + 1], pick)) pick = { ...best[i][j + 1], move: 'skipStat' };
+        const d = Math.abs(stats[j].promptWallAt - timeline[i].promptSentAt);
+        const take = d <= JOIN_WINDOW_MS ? { count: best[i + 1][j + 1].count + 1, dist: best[i + 1][j + 1].dist + d, move: 'pair' } : null;
+        if (take && better(take, pick)) pick = take;
+        best[i][j] = pick;
+      }
+    }
+    for (let i = 0, j = 0; i < n && j < m;) {
+      const { move } = best[i][j];
+      if (move === 'pair') { pairs.set(i, stats[j]); i += 1; j += 1; } else if (move === 'skipStat') j += 1; else i += 1;
     }
   } else if (ours.length === timeline.length) {
     ours.forEach((s, i) => pairs.set(i, s));

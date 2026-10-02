@@ -85,7 +85,7 @@ describe('buildTurnTimeline', () => {
   test('a back-to-back prompt with no end-of-speech marker uses the prompt time, flagged', () => {
     const turns = buildTurnTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1200, 'first_token_received'), // the first prompt's reply, never voiced
+      ev(1200, 'first_token_received'), ev(1250, 'start_of_agent_speech'), ev(1400, 'end_of_agent_speech'),
       ev(2500, 'prompt_sent'),
       ev(3000, 'first_token_received'), ev(3200, 'start_of_agent_speech'),
     ]);
@@ -116,7 +116,7 @@ describe('buildTurnTimeline', () => {
       ev(2800, 'first_token_received'), // B's reply, queued behind A
     ]);
     expect(turns[1].heardGapMs).toBeNull();
-    expect(turns[1].outcome).toBe('queued');
+    expect(turns[1].outcome).toBe('ambiguous'); // A's text arrived but its audio had not started
   });
 
   test('a prompt that arrives while an earlier one still awaits its first text is ambiguous: the late reply is never credited to it', () => {
@@ -141,6 +141,17 @@ describe('buildTurnTimeline', () => {
     ]);
     expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous', 'spoke']);
     expect(turns[2].heardGapMs).toBe(1000);
+  });
+
+  test('a prior reply whose text arrived but whose audio had not started makes the next prompt ambiguous', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1400, 'first_token_received'), // A's text, audio still synthesizing
+      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
+      ev(1600, 'first_token_received'), // B's text
+      ev(1650, 'start_of_agent_speech'), // A's audio
+    ]);
+    expect(turns[1]).toMatchObject({ outcome: 'ambiguous', heardGapMs: null, agentOverCaller: false });
   });
 
   test('a second agent audio start in the same turn that lands mid-utterance still counts as talking over the caller', () => {
@@ -213,6 +224,12 @@ describe('joinTurnStats', () => {
     expect(joined.map((t) => t.ours && t.ours.turn)).toEqual([null, 7]);
   });
 
+  test('nearby prompts keep every valid pair (order-preserving, most pairs first)', () => {
+    const tl = buildTurnTimeline([ev(0, 'prompt_sent'), ev(1000, 'prompt_sent')]);
+    const joined = joinTurnStats(tl, [{ turn: 1, promptWallAt: T0 + 900, toolCount: 0 }, { turn: 2, promptWallAt: T0 + 2500, toolCount: 1 }]);
+    expect(joined.map((t) => t.ours && t.ours.turn)).toEqual([1, 2]);
+  });
+
   test('rows stored before the wall clock existed pair by position only when the counts agree', () => {
     expect(joinTurnStats(timeline(), [{ turn: 1, toolCount: 0 }, { turn: 2, toolCount: 1 }]).map((t) => t.ours && t.ours.turn)).toEqual([1, 2]);
     expect(joinTurnStats(timeline(), [{ turn: 1, toolCount: 0 }]).every((t) => t.ours === null)).toBe(true);
@@ -251,6 +268,8 @@ describe('stored turn stats carry the join keys', () => {
       metadata: { relay_segments: segments },
     };
     expect(storedStatsFor(row).map((s) => s.segmentGeneration)).toEqual([1, 2, 2]);
+    const reversed = { ...row, metadata: { relay_segments: [{ generation: 2, turn_stats: [{ turn: 1, segmentGeneration: 2 }] }, { generation: 1, turn_stats: [{ turn: 1, segmentGeneration: 1 }] }] } };
+    expect(storedStatsFor(reversed).map((s) => s.segmentGeneration)).toEqual([1, 2]); // call order, not append order
   });
 });
 
@@ -267,6 +286,13 @@ describe('fetchConversationRelayEvents', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe(`https://insights.twilio.com/v1/Voice/${SID}/Events?Edge=carrier_edge&PageSize=200`);
     expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe(`Basic ${Buffer.from('ACtest:secret').toString('base64')}`);
     expect(fetchImpl.mock.calls[1][0]).toBe('https://insights.twilio.com/next');
+  });
+
+  test('a 404 after the first page fails the call instead of truncating it', async () => {
+    const fetchImpl = jest.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ events: [ev(0, 'prompt_sent')], meta: { next_page_url: 'https://insights.twilio.com/next' } }) })
+      .mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(fetchConversationRelayEvents(SID, { ...creds, fetchImpl })).rejects.toThrow('HTTP 404');
   });
 
   test('every request carries a deadline', async () => {

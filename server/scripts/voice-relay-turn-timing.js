@@ -24,6 +24,7 @@ const fs = require('fs');
 const {
   fetchConversationRelayEvents, buildTurnTimeline, joinTurnStats, summarizeTimeline,
 } = require('../services/voice-agent/relay-insights');
+const { compareSegments } = require('../services/voice-agent/relay-segments');
 
 const ARGS = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
@@ -53,7 +54,8 @@ function parseJson(value) {
  */
 function storedStatsFor(row) {
   const meta = parseJson(row.metadata) || {};
-  const segments = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
+  // Call order, not append order: sockets can close out of generation order.
+  const segments = (Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((x) => x && typeof x === 'object') : []).sort(compareSegments);
   const fromSegments = segments.flatMap((s) => (Array.isArray(s && s.turn_stats) ? s.turn_stats : []));
   if (fromSegments.length) return fromSegments;
   const tm = parseJson(row.transcription_metadata) || {};
