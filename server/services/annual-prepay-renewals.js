@@ -2910,6 +2910,23 @@ async function applyPrepaidCoverageForTerm(
 // Best-effort: a failure here must never block the payment sync itself.
 const PENDING_COMPLETION_CREDIT_BY = 'system:annual_prepay_pending_completion';
 
+// Was this term's year charged after the first visit (GATE_PAF_PREPAY)? Read
+// from the accepting estimate's durable job, bound to this term's invoice.
+async function termWasPafDeferred(term, prepayInvoiceId, conn) {
+  if (!term?.source_estimate_id || !prepayInvoiceId) return false;
+  const estimate = await conn('estimates').where({ id: term.source_estimate_id }).first('estimate_data');
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
+  return !!job && job.deferred_to_first_visit === true && String(job.invoice_id || '') === String(prepayInvoiceId);
+}
+
+function invoiceBillsBaseApplication(invoice) {
+  const InvoiceService = require('./invoice');
+  return InvoiceService._parseInvoiceLineItems(invoice?.line_items)
+    .some((li) => Number(li.amount) > 0 && InvoiceService.lineIsBaseApplication(li));
+}
+
 async function reconcilePendingWindowCompletions(term, conn = db) {
   const summary = { settled: 0, credited: 0 };
   try {
@@ -2943,6 +2960,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         .first('prepay_invoice_id');
       prepayInvoiceId = fullTerm ? fullTerm.prepay_invoice_id : null;
     }
+    const pafDeferredTerm = await termWasPafDeferred(term, prepayInvoiceId, conn);
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       if (String(row.status || '').toLowerCase() !== 'completed') continue;
@@ -2969,6 +2987,12 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       // annual_prepay_term_id — that column is null on some prepay invoices
       // (verified against prod), so the invoice-side check would miss them.
       if (prepayInvoiceId && String(invoice.id) === String(prepayInvoiceId)) continue;
+      // A year whose charge waited for the first visit (GATE_PAF_PREPAY) held
+      // its visits' base application unbilled; a completed visit's invoice
+      // with no base-application line is add-ons only (annual-prepay-addon-
+      // billing). The base was this term's, never separately collected: the
+      // slice was delivered, so nothing comes back as credit.
+      if (pafDeferredTerm && !invoiceBillsBaseApplication(invoice)) continue;
       // Payer-billed visit: the money (owed or collected) is the PAYER's AR,
       // not the homeowner's — settling it as homeowner coverage or crediting
       // the homeowner a slice for the payer's money are both wrong. The

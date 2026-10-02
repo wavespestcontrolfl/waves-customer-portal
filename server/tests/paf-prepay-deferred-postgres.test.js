@@ -534,6 +534,24 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await trx('invoices').where({ customer_id: f.customerId }).whereNot({ id: f.invoiceId })).toEqual([]);
     });
 
+    it('a held visit billed only for its add-ons earns no visit credit when the year is paid', async () => {
+      const f = await deferredAccept();
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ first_visit_date: day(0) });
+      await perform(f.parentId, f.customerId);
+      // Completion billed only the add-on (annual-prepay-addon-billing), paid.
+      await trx('invoices').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
+        invoice_number: `TEST-ADDON-${f.parentId.slice(0, 6)}`, token: randomUUID().replace(/-/g, ''), status: 'paid', paid_at: new Date(),
+        total: 20, subtotal: 20, line_items: JSON.stringify([{ client_id: `scheduled_${f.parentId}_addon_x`, description: 'Wasp nest removal', amount: 20, quantity: 1, unit_price: 20 }]) });
+      const credit = require('../services/customer-credit');
+      const creditSpy = jest.spyOn(credit, 'postCreditMovement');
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+      const paid = await trx('invoices').where({ id: f.invoiceId }).first();
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(paid);
+      expect((await trx('annual_prepay_terms').where({ id: f.termId }).first('status')).status).toBe('active');
+      expect(creditSpy).not.toHaveBeenCalled();
+      creditSpy.mockRestore();
+    });
+
     it('sends the pay link and rings the office on a decline, and keeps later visits held (R2)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
