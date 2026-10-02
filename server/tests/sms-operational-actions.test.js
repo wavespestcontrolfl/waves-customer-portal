@@ -1643,15 +1643,33 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
     // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
     await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
-    // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
-    expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
-      { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
+    // A promise Waves made: a text a PERSON wrote after it closes it without the
+    // model (owner 2026-10-01; a call back or an automated notice stays the
+    // model's to judge), and a text with no person's mark is the model's.
+    const promise = { ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } };
+    expect(await verifySmsFulfillment(promise, { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'thanks', basis: 'person_text_after_promise' });
+    expect(await verifySmsFulfillment(promise, { records: [call], failures: [] })).toMatchObject({ verdict: 'open' });
+    expect(await verifySmsFulfillment(promise, { records: [reply('bare2', '2040-03-11T15:00:00Z', 'Thanks!', { operator_sent: false })], failures: [] }))
+      .toMatchObject({ verdict: 'open' });
     // The check is told a promise is kept only by doing it, on the day it named.
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
     // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
     const { basis: _basis, ...noBasis } = ask.sms_context;
     await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(5);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(6);
+  });
+
+  test('owner 2026-10-01: an unscoped cancel ask that names a service is answered by that service\'s cancelled visit — never by another service, and never an ask that names none', () => {
+    const cancelledVisit = (service_type) => ({ id: 'v1', ref: 'visit:v1', type: 'visit', status: 'cancelled', service_type,
+      created_at: '2040-03-10T10:00:00Z', cancelled_at: '2040-03-12T13:05:00Z', progressed_at: null, text: `${service_type}; status cancelled; cancelled after the request` });
+    const ask = (quote) => ({ kind: 'other', description: quote, evidence: [{ quote }], sms_context: { ...ctx, basis: 'request', property_id: null } });
+    expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please cancel WDO'))).toBe(true);
+    expect(admissibleWitness(cancelledVisit('Quarterly Pest Control'), ask('Please cancel WDO'))).toBe(false);
+    expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please cancel my appointment'))).toBe(false);
+    expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please do not cancel WDO'))).toBe(false);
+    // A promise Waves made is never a cancel ask.
+    expect(admissibleWitness(cancelledVisit('WDO Inspection'), { ...ask('We will cancel WDO'), sms_context: { ...ctx, basis: 'promise', property_id: null } })).toBe(false);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {

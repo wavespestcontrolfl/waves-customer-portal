@@ -20,8 +20,9 @@
  * proof closes it (estimate sent, a returned call that reached the customer,
  * handoff, staff marked done), when staff dismissed or snoozed it, or when
  * the customer shows later activity the proof does not model: a visit
- * booked, a connected call about a quote or scheduling promise, or a text a
- * staff member sent by hand.
+ * booked, a connected call about a quote or scheduling promise, an estimate
+ * sent to the customer (callback and quote promises), or a text a staff
+ * member sent by hand.
  *
  * Alert: one rolling "missed in the last 24 hours" list (see runInner) —
  * posted fresh when a new miss joins it, rewritten in place when items drop
@@ -48,6 +49,10 @@ const {
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
+// Kinds an estimate sent to the customer after the promise keeps (a callback
+// about the quote, and the quote promise itself).
+const ESTIMATE_FOLLOWUP_KINDS = Object.freeze(['callback', 'send_estimate']);
+const ESTIMATE_SENT_SMS_TYPE = 'estimate_sent';
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
@@ -322,11 +327,16 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
     .where(function personSent() {
-      this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES);
+      // The estimate's own delivery text rides the same read (see the
+      // estimate evidence below): it keeps callback and quote promises only.
+      this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES)
+        .orWhere('message_type', ESTIMATE_SENT_SMS_TYPE);
     })
     .whereIn('status', ['sent', 'delivered'])
     .select('customer_id', 'to_phone', 'created_at', 'status', 'message_type', 'from_phone', ...smsContactSelects(conn)))
-    .filter((t) => operatorReply(t) && smsDelivered(t));
+    .filter((t) => smsDelivered(t));
+  const estimateTexts = texts.filter((t) => t.message_type === ESTIMATE_SENT_SMS_TYPE);
+  const personTexts = texts.filter(operatorReply);
   // A quote delivered to the customer rather than linked to this call: the
   // canonical proof records it as an association hint on the promise
   // (fulfillment kind estimate_sent, status still open) — its ownership rules
@@ -361,6 +371,42 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
       if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
     }
   }
+  // An estimate SENT to the customer after the promise keeps a callback or a
+  // quote promise: the callback ("call back to discuss the quote") is
+  // answered by the quote arriving, and a quote the office sent without
+  // linking it to this call (a re-sent or hand-built estimate) is still the
+  // quote. Same evidence boundary as everything above (`since`: the call's
+  // end, a floor time, or a renewal) and the canonical estimate-delivery
+  // witness (call-commitments handedOffWithin / witnessAt: a real handoff or
+  // an acceptance, never a suppressed send's bare sent_at). A linked caller
+  // matches the customer's own estimates (customer_id); an unlinked one only
+  // an UNOWNED estimate on the caller's phone, as estimateSentTo does, so a
+  // shared household number never clears another customer's promise. Two
+  // batched reads however many promises. An estimate the office parked on a
+  // lead the customer joined later (estimateSentTo's lead-mirror fence) is
+  // not matched here; its delivery text (sms_log 'estimate_sent', read with
+  // the texts above) is the second witness of the same send.
+  const quoteScoped = scoped.filter((x) => ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind));
+  const estimateDone = new Set();
+  const quoteCustomerIds = [...new Set(quoteScoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
+  if (quoteCustomerIds.length) {
+    const lowest = new Date(Math.min(...quoteScoped.filter((x) => x.r.customer_id).map((x) => x.since.getTime())));
+    const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereIn('customer_id', quoteCustomerIds)
+      .select(...commitments.HANDOFF_COLS(conn), 'customer_id');
+    for (const x of quoteScoped.filter((y) => y.r.customer_id)) {
+      if (sent.some((e) => String(e.customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
+    }
+  }
+  const quotePhones = [...new Set(quoteScoped.filter((x) => x.phone).map((x) => x.phone))];
+  if (quotePhones.length) {
+    const lowest = new Date(Math.min(...quoteScoped.filter((x) => x.phone).map((x) => x.since.getTime())));
+    const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereNull('customer_id')
+      .modify((b) => commitments.phoneWhereAny(b, 'customer_phone', quotePhones))
+      .select(...commitments.HANDOFF_COLS(conn), 'customer_phone');
+    for (const x of quoteScoped.filter((y) => y.phone)) {
+      if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
+    }
+  }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
     : phoneKey(rec.to_phone) === x.phone);
@@ -372,7 +418,9 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   for (const x of scoped) {
     if (visits.some((v) => visitFor(v, x) && booked(v, x))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
-      || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
+      || personTexts.some((t) => mine(t, x) && after(t, x.since))
+      || estimateDone.has(x.r.id)
+      || (ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && estimateTexts.some((t) => mine(t, x) && after(t, x.since)))) done.add(x.r.id);
   }
   return done;
 }

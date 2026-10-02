@@ -145,6 +145,18 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z', ...fields })),
           ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z', ...fields }))];
       }
+      if (table === 'estimates') {
+        const on = typeof activity.estimates === 'function' ? activity.estimates() : activity.estimates;
+        if (!on) return [];
+        // One estimate with a real handoff long after the promise; the
+        // unowned-phone read gets the number it asked about.
+        const phones = entry.calls.filter(([m, sql]) => m === 'whereRaw' && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
+        const fields = typeof on === 'object' ? on : {};
+        const custs = entry.calls.filter(([m, col]) => m === 'whereIn' && col === 'customer_id').flatMap(([, , v]) => v);
+        const base = { handed_off_at: '2100-01-01T00:00:00Z', ...fields };
+        if (custs.length) return custs.map((c) => ({ id: `est-${c}`, customer_id: c, customer_phone: null, ...base }));
+        return [{ id: 'est-1', customer_id: null, customer_phone: phones[0] || null, ...base }];
+      }
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
         const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
         return ids.filter((id) => hints[id]).map((id) => ({ id, fulfillment: hints[id] }));
@@ -713,4 +725,51 @@ test('an anonymous caller ID gives no contact to match on — unrelated activity
   listOpenCommitments.mockResolvedValue([row('anon', { customer_id: null, from_phone: 'anonymous' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   expect(queriesOn('sms_log')).toHaveLength(0);
+});
+
+describe('an estimate sent to the customer keeps a callback or quote promise', () => {
+  // Synthetic version of the prod case: a callback promised to discuss a quote,
+  // the quote then sent by the office (never linked to the call), viewed many
+  // times, and the promise still listed as missed all day.
+  test.each(['callback', 'send_estimate'])('a delivered estimate for the same customer after the promise drops a %s promise from the list', async (kind) => {
+    mockDb({ activity: { estimates: true } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    expect(argsOf('estimates', 'whereIn')).toContainEqual(['customer_id', ['cust-a']]);
+  });
+
+  test('an estimate whose only trace is a delivered estimate_sent text counts too', async () => {
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'delivered' } } });
+    listOpenCommitments.mockResolvedValue([row('a')]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    // A queued/failed text is no delivery, and the same text never clears a visit promise.
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'queued' } } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'delivered' } } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'schedule_visit' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
+  test('an estimate does not keep a schedule_visit promise', async () => {
+    mockDb({ activity: { estimates: true } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'schedule_visit' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    expect(queriesOn('estimates')).toHaveLength(0);
+  });
+
+  test('an unlinked caller is matched only by an UNOWNED estimate on the same number', async () => {
+    mockDb({ activity: { estimates: { customer_phone: '(941) 555-0123' } } });
+    listOpenCommitments.mockResolvedValue([row('a', { customer_id: null, direction: 'inbound', from_phone: '+19415550123' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    expect(argsOf('estimates', 'whereNull')).toContainEqual(['customer_id']);
+    // Another number's estimate never clears it.
+    mockDb({ activity: { estimates: { customer_phone: '(941) 555-0999' } } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
+  test('the evidence boundary is the call end: a handoff before the promise does not keep it', async () => {
+    mockDb({ activity: { estimates: { handed_off_at: et('13:00').toISOString() } } });
+    listOpenCommitments.mockResolvedValue([row('a', { call_started_at: et('14:00').toISOString() })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
 });

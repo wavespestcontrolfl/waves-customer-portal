@@ -138,6 +138,33 @@ describe('rowClearsSlot — call-linked booking evidence only', () => {
   });
 });
 
+describe('rowClearsSlot — cancelled/rescheduled rows the office created after the call', () => {
+  const slot = { dateET: '2026-08-01', minutes: 720 };
+  const afterCall = new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString();
+  const beforeCall = new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString();
+
+  test('booked right after the call, same date, later cancelled: handled (even at an unrelated time)', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    expect(rowClearsSlot(cancelled, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...cancelled, status: 'rescheduled' }, call(), slot)).toBe(true);
+  });
+
+  test('a cancelled row created BEFORE the call, or on another date, proves nothing', () => {
+    expect(rowClearsSlot(bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: beforeCall }), call(), slot)).toBe(false);
+    expect(rowClearsSlot(bookedRow({ status: 'cancelled', sched_date: '2026-08-05', window_start: '08:00:00', created_at: afterCall }), call(), slot)).toBe(false);
+  });
+
+  test('an ACTIVE post-call row at an unrelated time still does not clear', () => {
+    expect(rowClearsSlot(bookedRow({ status: 'scheduled', window_start: '08:00:00', created_at: afterCall }), call(), slot)).toBe(false);
+  });
+
+  test('computeBookingMisses: a booked-then-cancelled visit is no miss; a pre-call cancelled one is', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    expect(computeBookingMisses([call()], [cancelled], { now: NOW })).toEqual([]);
+    expect(computeBookingMisses([call()], [{ ...cancelled, created_at: beforeCall }], { now: NOW })).toHaveLength(1);
+  });
+});
+
 describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
   test('a confirmed slot with no booking evidence is a miss', () => {
     const misses = computeBookingMisses([call()], [], { now: NOW });

@@ -66,10 +66,9 @@ const MAX_ALERTS_PER_RUN = 8;
 // noon slot as a 12:00 or 13:00 window, not to the minute).
 const WINDOW_MATCH_TOLERANCE_MINUTES = 120;
 // Repeat paging (owner ruling 2026-09-30): once the first bell has rung, a
-// miss whose slot starts within a day (through the end of the slot's own ET
-// day) re-rings every REPEAT_INTERVAL_MINUTES
-// during ET daytime until it is booked or the office closes the call's
-// triage cards.
+// miss whose slot starts within a day (until the slot's own start time)
+// re-rings every REPEAT_INTERVAL_MINUTES during ET daytime until it is
+// booked or the office closes the call's triage cards.
 const REPEAT_WINDOW_HOURS = 24;
 const REPEAT_INTERVAL_MINUTES = 120;
 const REPEAT_DAY_START_HOUR_ET = 7;
@@ -77,6 +76,8 @@ const REPEAT_DAY_END_HOUR_ET = 21;
 // How far back a call can be and still repeat (slots are rarely booked more
 // than a few weeks out).
 const REPEAT_LOOKBACK_DAYS = 30;
+// Statuses of a scheduled_services row the office has acted on and closed out.
+const INACTIVE_STATUSES = new Set(['cancelled', 'rescheduled']);
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -161,6 +162,19 @@ function rowClearsSlot(row, call, slot) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
   if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
   if (row.sched_date !== slot.dateET) return false;
+  // A cancelled / rescheduled row is the office having ACTED on this call's
+  // slot (owner 2026-10-01: a visit booked right after the call and cancelled
+  // later is handled, not missed; the bell rang four times on one). With no
+  // call provenance, a row that is no longer active clears only when it was
+  // created at/after the call for the confirmed ET date. A pre-existing
+  // cancelled same-day row (created before the call) proves nothing. Active
+  // rows keep the stricter window-proximity rule below: an active
+  // post-call row at a far-off time could be an unrelated booking.
+  if (INACTIVE_STATUSES.has(row.status)) {
+    const rowCreated = row.created_at ? new Date(row.created_at).getTime() : NaN;
+    const callCreated = call.created_at ? new Date(call.created_at).getTime() : NaN;
+    if (!Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated) return true;
+  }
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;
   return false;
@@ -170,9 +184,10 @@ function rowClearsSlot(row, call, slot) {
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
 // ai_extraction_enriched }); `bookedRows` are scheduled_services rows
-// ({ customer_id, sched_date ('YYYY-MM-DD' via to_char — never a JS Date
-// round-trip), window_start, created_at, source_call_log_id, notes }),
-// already filtered to non-cancelled/rescheduled statuses.
+// ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
+// Date round-trip), window_start, created_at, source_call_log_id, notes }),
+// ANY status: cancelled/rescheduled rows clear only on the rules in
+// rowClearsSlot (a missing status counts as active).
 function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const misses = [];
@@ -277,14 +292,13 @@ async function runInner({ now = new Date() } = {}) {
     // still be fetched or the watchdog pages a booked visit as missed.
     bookedRows = await db('scheduled_services')
       .whereIn('customer_id', customerIds)
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
       .where(function bookedEvidence() {
         this.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates])
           .orWhereIn('source_call_log_id', callIds);
         if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
       })
       .select(
-        'customer_id', 'window_start', 'created_at', 'source_call_log_id', 'notes',
+        'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
         db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
       );
   }
@@ -406,8 +420,8 @@ async function ringMiss(m, { dedupeKey, repeat }) {
 }
 
 // The agreed slot starts within REPEAT_WINDOW_HOURS, or it is still the
-// slot's own ET day: a slot that passed unbooked is the promise actually
-// missed, so it keeps ringing through that day (a callback is still due).
+// slot's own ET day. This is the candidate-scan range only; repeatWindowOpen
+// additionally requires the slot not to have started.
 function slotInRepeatRange(slot, now = new Date()) {
   if (!slot) return false;
   const pad = (n) => String(n).padStart(2, '0');
@@ -418,9 +432,15 @@ function slotInRepeatRange(slot, now = new Date()) {
 }
 
 // Repeat window: the agreed slot starts within REPEAT_WINDOW_HOURS and has
-// not started yet, and it is daytime in ET (no overnight re-rings).
+// not started yet, and it is daytime in ET (no overnight re-rings). Once the
+// slot's start time passes the repeats stop (owner 2026-10-01: they used to
+// run to the end of the slot's day, ringing at 23:22Z for a 1 PM slot); the
+// first bell still rings for a slot that already passed unbooked.
 function repeatWindowOpen(slot, now = new Date()) {
   if (!slotInRepeatRange(slot, now)) return false;
+  const pad = (n) => String(n).padStart(2, '0');
+  const start = parseETDateTime(`${slot.dateET}T${pad(Math.floor(slot.minutes / 60))}:${pad(slot.minutes % 60)}`);
+  if (start.getTime() <= now.getTime()) return false;
   const hourET = etParts(now).hour;
   return hourET >= REPEAT_DAY_START_HOUR_ET && hourET < REPEAT_DAY_END_HOUR_ET;
 }

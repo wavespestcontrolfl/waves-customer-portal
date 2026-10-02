@@ -575,7 +575,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
         // The customer's only active property when the text arrived: an
-        // unscoped cancel ask is answered only by a cancellation there, never
+        // unscoped cancel ask is answered only by a cancellation of a service
+        // it names (sms-commitment-fulfillment cancelAskNamesService), never
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,

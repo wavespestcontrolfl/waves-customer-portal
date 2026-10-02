@@ -3004,7 +3004,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(0);
   });
 
-  test('owner ruling 2026-09-28: a promise staff texted is kept by doing it — a later reply never closes it; the model judges', async () => {
+  test('owner ruling 2026-09-28: a promise staff texted is kept by doing it — a later text carrying no person mark (a bare manual type) never closes it; the model judges', async () => {
     message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
       admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };
     await mockPg('sms_log').where({ id: message.id }).update(message);
@@ -3015,12 +3015,105 @@ postgres('SMS commitments on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ basis: 'promise' });
     const after = new Date(message.created_at.getTime() + 1000);
-    await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_body: 'Thanks!', created_at: after });
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), admin_user_id: null, message_body: 'Thanks!', created_at: after });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  // Owner 2026-10-01 (false overdue bells). A promise staff made ("let us
+  // shift this") that the office then resolved by a text of its own, which
+  // the customer thumbed-up, rang as still owed.
+  test('owner 2026-10-01: a promise staff texted is closed by a LATER staff-authored text in the thread, with no model call and no bell', async () => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "You're right, let us shift this" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise',
+      quote: message.message_body, description: 'let us shift this', due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [resolution] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_body: 'No change: your inspection is Thursday.', created_at: after }).returning('id');
+    // The customer's thumbs-up is no evidence either way.
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'inbound', from_phone: message.to_phone, to_phone: message.from_phone,
+      message_type: 'sms', admin_user_id: null, status: 'received', message_body: '👍', created_at: new Date(after.getTime() + 1000) });
+    const counts = await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 5000) });
+    expect(counts).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    const row = await mockPg('call_commitments').first();
+    expect(row.status).toBe('fulfilled');
+    expect(row.fulfillment).toMatchObject({ basis: 'person_text_after_promise', record_type: 'sms', record_id: resolution.id });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('owner 2026-10-01: an AUTOMATED text (not person-authored) after a staff promise does not close it', async () => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "You're right, let us shift this" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise',
+      quote: message.message_body, description: 'let us shift this', due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'appointment_reminder', admin_user_id: null,
+      message_body: 'Reminder: your visit is Thursday.', created_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+  });
+
+  // Owner 2026-10-01: "Please cancel WDO" (unscoped: the customer has several
+  // properties), the office cancelled the WDO visit the next morning and the
+  // system texted the cancellation, yet the overdue bell rang 'uncertain'.
+  describe('an unscoped cancel ask that names a service', () => {
+    const cancelAskFor = async (quote) => {
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, due_at: null, property_id: null, quote, description: quote };
+      await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
+        address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      await recordMessageOperations(mockPg, message, result, context);
+      const [commitment] = await mockPg('call_commitments').select('*');
+      expect(commitment.sms_context.property_id).toBeNull();
+      return commitment;
+    };
+    const cancelledVisit = async (serviceType, propertyId = context.properties[0].id) => {
+      const after = new Date(message.created_at.getTime() + 1000);
+      const [visit] = await mockPg('scheduled_services').insert({
+        customer_id: message.customer_id, property_id: propertyId, service_type: serviceType,
+        scheduled_date: etDateString(new Date(after.getTime() + 3 * 86400000)), window_start: '09:00:00', status: 'cancelled',
+        created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: after });
+      return new Date(after.getTime() + 1000);
+    };
+
+    test.each([
+      ['Please cancel WDO', 'WDO Inspection', true],
+      ['Please cancel the WDO inspection', 'WDO Inspection', true],
+      ['Please cancel WDO', 'Quarterly Pest Control', false],
+      ['Please cancel my appointment', 'WDO Inspection', false],
+      ["Please don't cancel WDO", 'WDO Inspection', false],
+    ])('%s vs a cancelled %s visit: admissible %s', async (quote, serviceType, admissible) => {
+      const commitment = await cancelAskFor(quote);
+      const now = await cancelledVisit(serviceType);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      const record = evidence.records.find((r) => r.type === 'visit');
+      expect(admissibleWitness(record, commitment, evidence.records)).toBe(admissible);
+    });
+
+    test('the cancelled WDO visit closes the ask end to end (model cites the cancelled visit), with no overdue bell', async () => {
+      await cancelAskFor('Please cancel WDO');
+      const now = await cancelledVisit('WDO Inspection');
+      const visit = (await loadSmsFulfillmentEvidence(mockPg, (await mockPg('call_commitments').first()), message, now)).records.find((r) => r.type === 'visit');
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: visit.ref, quote: 'cancelled after the request' } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 3600000) })).toMatchObject({ scanned: 1, fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
   });
 
   test('owner ruling 2026-09-28: intake stamps the ask\'s basis, no longer reply_answerable; money_answerable is unchanged', async () => {
