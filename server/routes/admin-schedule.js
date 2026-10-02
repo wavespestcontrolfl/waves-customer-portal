@@ -19272,7 +19272,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           // not a clash if this row joins it. Anyone else's visit, a hold, or
           // an own visit it cannot join (placeGrouped rolls back) stays a clash.
           const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(parent.customer_id));
-          const joined = ownOnly ? await placeGrouped(candidate, clashRows.map((r) => r.id)) : null;
+          // The new row takes the stop's own technician (as a ride takes the
+          // host's): no member is re-assigned, so a rolled-back attempt leaves
+          // no assignment broadcast or tech card behind. Own rows on two
+          // different techs are not one stop — a clash.
+          const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
+          const joined = ownOnly && stopTechs.length === 1
+            ? await placeGrouped(candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] })
+            : null;
           if (joined) return joined;
           attempt++; continue;
         }

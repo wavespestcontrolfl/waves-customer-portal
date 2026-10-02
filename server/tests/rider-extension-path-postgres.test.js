@@ -400,12 +400,43 @@ postgres('series extension keeps riding the lawn', () => {
       } finally { await trx.rollback(); }
     });
 
-    test('an own visit it cannot join (different technician) still pushes it and leaves no row behind', async () => {
+    test('an own visit on a different technician than the template: joins that stop on the STOP\'s technician (nobody re-assigned)', async () => {
       const trx = await mockPg.transaction();
       try {
         const pestTech = await technician(trx);
         const { w, date } = await alignedPest(trx, { pestTech });
-        await lawnVisit(trx, w, date); // lawn tech differs from the pest template's tech
+        const [lawn] = await lawnVisit(trx, w, date); // lawn tech differs from the pest template's tech
+        await extend(trx, w.pestParent.id);
+        const [row] = await extensionRows(trx, w.pestParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(date);
+        expect(String(row.technician_id)).toBe(String(lawn.technician_id));
+        const host = await trx('scheduled_services').where({ id: lawn.id }).first();
+        expect(row.visit_id).toBeTruthy();
+        expect(String(row.visit_id)).toBe(String(host.visit_id));
+        expect(String(host.technician_id)).toBe(String(lawn.technician_id)); // the lawn visit kept its tech
+      } finally { await trx.rollback(); }
+    });
+
+    test('own visits on two different technicians are not one stop: still a clash, no row left behind', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await alignedPest(trx);
+        await lawnVisit(trx, w, date);
+        const otherTech = await technician(trx);
+        await lawnVisit(trx, w, date, { technician_id: otherTech, window_start: '09:30', window_end: '10:30' });
+        await extend(trx, w.pestParent.id);
+        const rows = await extensionRows(trx, w.pestParent.id);
+        expect(rows).toHaveLength(1);
+        expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
+        expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: date, service_id: ids.pest_general_quarterly }).first()).toBeUndefined();
+      } finally { await trx.rollback(); }
+    });
+
+    test('an own visit it cannot join (grouping refused for an autopay customer) still pushes it and leaves no row behind', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await alignedPest(trx, { autopay: true });
+        await lawnVisit(trx, w, date);
         const before = await trx('scheduled_services').where({ customer_id: w.customerId }).count('* as n').first();
         await extend(trx, w.pestParent.id);
         const rows = await extensionRows(trx, w.pestParent.id);
@@ -524,8 +555,8 @@ postgres('series extension keeps riding the lawn', () => {
       const trx = await mockPg.transaction();
       const { apply, fired, file } = spies();
       try {
-        const pestTech = await technician(trx);
-        const w = await prepaidWorld(trx, { rides: false, pestTech });
+        // Visit groups refuse an autopay customer, so the own-lawn attempt is thrown away.
+        const w = await prepaidWorld(trx, { rides: false, autopay: true });
         process.env[GATE] = 'false';
         const date = await cadenceDate(trx, w.pestParent.id);
         await trx('scheduled_services').insert({
