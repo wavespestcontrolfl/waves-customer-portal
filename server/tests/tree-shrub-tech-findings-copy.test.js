@@ -9,7 +9,7 @@ const path = require('path');
 
 const {
   freezeTechFindings, normalizeTechFindings, stripCrownHealthClaims, applyTechFindingsToAssessment,
-  techFindingsPromptLines,
+  techFindingsPromptLines, hasTechFindingLines,
 } = require('../services/service-report/tree-shrub-tech-findings');
 const { buildTreeShrubReportV2 } = require('../services/service-report/tree-shrub-report-v2');
 const { buildTreeShrubVisualCategories } = require('../services/service-report/tree-shrub-visual-categories');
@@ -180,6 +180,26 @@ describe('palm-crown rule', () => {
     expect(stripCrownHealthClaims(null)).toBeNull();
   });
 
+  test('positive claims go even behind a ground-level phrase; adverse and can\'t-assess statements stay', () => {
+    // Prohibited reassurance, ground-level prefix or not.
+    expect(stripCrownHealthClaims('From the ground, the palm crown looks healthy.')).toBe('');
+    expect(stripCrownHealthClaims('Ground-level photos show the spear leaf is normal.')).toBe('');
+    expect(stripCrownHealthClaims("We couldn't see the crown well, but it looks healthy.")).toBe('');
+    expect(stripCrownHealthClaims('The crown is fine and the newest fronds are green.')).toBe('');
+    // Adverse findings are kept.
+    expect(stripCrownHealthClaims('The palm crown is not healthy.')).toBe('The palm crown is not healthy.');
+    expect(stripCrownHealthClaims("The spear leaf isn't normal.")).toBe("The spear leaf isn't normal.");
+    expect(stripCrownHealthClaims('The palm crown looks weak.')).toBe('The palm crown looks weak.');
+    expect(stripCrownHealthClaims('The crown is declining.')).toBe('The crown is declining.');
+    expect(stripCrownHealthClaims('The newest fronds show poor health.')).toBe('The newest fronds show poor health.');
+    // Pure can't-assess disclaimers are kept.
+    expect(stripCrownHealthClaims("We couldn't check the crown from the ground.")).toBe("We couldn't check the crown from the ground.");
+    expect(stripCrownHealthClaims('Crown health is not visible from the ground.')).toBe('Crown health is not visible from the ground.');
+    // Mixed paragraph: only the reassurance goes.
+    expect(stripCrownHealthClaims("From the ground, the palm crown looks healthy. The palm crown is not healthy near the base. We couldn't check the spear leaf."))
+      .toBe("The palm crown is not healthy near the base. We couldn't check the spear leaf.");
+  });
+
   test('gate on: the photo summary and captions never carry a crown-health sentence; gate off they are untouched', () => {
     const withCrown = assessment({
       observations: 'Light stippling on some shrubs. The palm crown looks healthy. Older fronds show yellowing.',
@@ -305,5 +325,106 @@ describe('report-writer prompt', () => {
     expect(src).toContain('const report = techFindingsCopyLive() ? stripCrownHealthClaims(generated.report) : generated.report;');
     expect(src.indexOf('stripCrownHealthClaims(generated.report)')).toBeLessThan(src.indexOf('reportCopyCacheSet(cacheKey, report);'));
     expect(src).toContain('const safeFallback = techFindingsCopyLive() ? stripCrownHealthClaims(report) : report;');
+  });
+});
+
+describe('access codes never reach customer copy through the technician\'s edit', () => {
+  const CODE_TEXT = 'Checked shrubs beside gate code 1234.';
+
+  test('the diagnosis row, insight card and writer prompt carry the edit without the code', () => {
+    gateOn();
+    const findings = [decide('pest_activity', 'edit', CODE_TEXT)];
+    const out = build(assessment(), findings);
+    expect(JSON.stringify(out)).not.toContain('1234');
+    expect(diagOf(out, 'pest_activity').customerExplanation).toBe('Checked shrubs beside gate code [redacted].');
+    expect(insightOf(out, 'pest_pressure').whatWeSaw).toBe('Checked shrubs beside gate code [redacted].');
+    expect(techFindingsPromptLines(findings)).not.toContain('1234');
+    expect(techFindingsPromptLines(findings)).toContain('[redacted]');
+  });
+
+  test('the code is not stored in the frozen decision either', () => {
+    gateOn();
+    const frozen = freezeTechFindings({ decisions: [{ key: 'pest_activity', action: 'edit', detail: CODE_TEXT }] });
+    expect(JSON.stringify(frozen)).not.toContain('1234');
+  });
+});
+
+describe('a hidden or replaced finding does not survive in photo captions', () => {
+  const withCaptions = (captions) => assessment({
+    photos: captions.map((caption, i) => ({
+      url: `https://example.test/p${i}.jpg`, zone: `Zone ${i}`, isBest: i === 0, qualityScore: 80, caption,
+    })),
+  });
+
+  test('hiding pest_activity drops pest and generic-assessment captions and keeps plain location labels', () => {
+    gateOn();
+    const out = build(withCaptions([
+      'Visible pest-pressure signals on foliage.',
+      'Scale on the hibiscus',
+      'Possible concern near the entry',
+      'Front bed, east side',
+    ]), [decide('pest_activity', 'hidden')]);
+    expect(out.photos.map((p) => p.caption)).toEqual([null, null, null, 'Front bed, east side']);
+    expect(JSON.stringify(out)).not.toMatch(/pest-pressure|scale on/i);
+  });
+
+  test('an edited finding\'s captions are replaced by the technician\'s text; the photos stay', () => {
+    gateOn();
+    const out = build(withCaptions(['Yellowing on the ixora', 'Back fence line']), [decide('leaf_color_vigor', 'edit', 'Iron chlorosis, treated today.')]);
+    expect(out.photos).toHaveLength(2);
+    expect(out.photos.map((p) => p.caption)).toEqual([null, 'Back fence line']);
+  });
+
+  test('monitor / confirmed leave captions alone; gate off leaves them alone', () => {
+    gateOn();
+    const caps = ['Visible pest-pressure signals on foliage.'];
+    expect(build(withCaptions(caps), [decide('pest_activity', 'monitor')]).photos[0].caption).toBe(caps[0]);
+    expect(build(withCaptions(caps), [decide('pest_activity', 'confirmed')]).photos[0].caption).toBe(caps[0]);
+    gateOff();
+    expect(build(withCaptions(caps)).photos[0].caption).toBe(caps[0]);
+  });
+});
+
+describe('every category edited or hidden: the writer grounding stays valid', () => {
+  const ALL = ['foliage_fullness', 'leaf_color_vigor', 'pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress'];
+  const reviewWith = (decisions) => {
+    const scores = { foliageFullness: 50, leafColorVigor: 70, pestActivity: 80, diseaseLeafSpot: 90, waterHeatStress: 80, overallScore: 74 };
+    const photosHash = treeShrubPhotosHash(['data:image/jpeg;base64,YQ==']);
+    const review = { scores, photosHash, observations: 'Sparse foliage.', photoCount: 1, scoredCount: 1, confirmed: true, decisions };
+    review.signature = treeShrubReviewSignature(scores, 1, 's1', photosHash, review.observations);
+    return review;
+  };
+  const ctx = (g) => buildReportCopyContext({
+    customerId: null, treeShrubReviewGrounding: g, serviceType: 'Tree and Shrub Care', serviceLine: 'tree_shrub',
+  });
+
+  test('all edited: no scores, an explicit no-photo-scores marker, and the technician\'s text still grounds the writer', async () => {
+    gateOn();
+    const v = validateTreeShrubReviewForReport(reviewWith(ALL.map((key) => ({ key, action: 'edit', detail: `Tech note for ${key}.` }))), { serviceId: 's1' });
+    expect(v.ok).toBe(true);
+    expect(v.grounding.scores).toEqual({});
+    expect(hasTechFindingLines(v.grounding.techFindings)).toBe(true);
+    const result = await ctx(v.grounding);
+    expect(result.contextText).toContain('TECHNICIAN-REVIEWED PHOTOS (source: reviewed_photo_signals; no photo scores)');
+    expect(result.contextText).toContain('Tech note for pest_activity.');
+    expect(result.contextText).not.toMatch(/\/100/);
+    expect(result.signals.hasTreeShrubReviewedPhotoSignals).toBe(true);
+  });
+
+  test('all hidden: nothing to say, so nothing is claimed grounded (the route keeps its existing not-enough-detail path)', async () => {
+    gateOn();
+    const v = validateTreeShrubReviewForReport(reviewWith(ALL.map((key) => ({ key, action: 'hidden' }))), { serviceId: 's1' });
+    expect(v.grounding.scores).toEqual({});
+    expect(hasTechFindingLines(v.grounding.techFindings)).toBe(false);
+    const result = await ctx(v.grounding);
+    expect(result.contextText).not.toContain('no photo scores');
+    expect(result.signals.hasTreeShrubReviewedPhotoSignals).toBe(false);
+  });
+
+  test('the route treats the technician\'s findings as report input and 503s if their grounding fails to load', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src).toContain('const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);');
+    expect(src).toContain('|| treeShrubTechFindingsGrounded\n      || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0');
+    expect(src).toContain('if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals)');
   });
 });

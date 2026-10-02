@@ -71,7 +71,7 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
-const { techFindingsCopyLive, stripCrownHealthClaims } = require('../services/service-report/tree-shrub-tech-findings');
+const { techFindingsCopyLive, stripCrownHealthClaims, hasTechFindingLines } = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -25210,6 +25210,10 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       return true;
     });
     const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
+    // leaves no scores, but the technician's own findings still ground the
+    // report (grounding.techFindings exists only while the gate is on).
+    const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -25220,6 +25224,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
+      || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       || cappedPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
@@ -25296,6 +25301,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
 
     if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
+    if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
       return res.status(503).json({
         error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
         code: 'tree_shrub_review_grounding_unavailable',

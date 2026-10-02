@@ -71,15 +71,31 @@ const CROWN_TERM = /\b(?:crown(?:shaft)?s?|spear(?:\s+(?:leaf|leaves|fronds?))?|
 // "new growth" alone is fine on a hedge; it is a palm-crown claim only in a palm sentence.
 const NEW_GROWTH_TERM = /\bnew(?:est)?\s+(?:growth|leaves|foliage|shoots)\b/i;
 const PALM_CONTEXT = /\b(?:palms?|fronds?|spear|crown)/i;
-const HEALTH_TERM = /\b(?:healthy|health|fine|normal|good|great|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|clear|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/i;
-// A disclaimer ("we couldn't see the crown from the ground") is exactly the
-// honest sentence; never strip it.
-const DISCLAIMER = /\b(?:can['’]t|cannot|could(?:\s+not|n['’]t)|unable to|not (?:visible|possible|able to)|out of (?:view|sight|reach)|too (?:high|tall)|ground[-\s]level|from the ground)\b/i;
+const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/gi;
+// A health word is NOT a positive claim when a negator, an adverse word or a
+// can't-assess marker sits in the few words before it ("not healthy", "poor
+// health", "couldn't check ... health") or a not-shown marker right after it.
+const NEGATED_BEFORE = /(?:\b(?:not|no longer|never|hardly|barely|far from|without|poor|poorly|declining|decline|declined|reduced|lack|lacking|loss|compromised|weak|weakened|failing|worsening|unable|cannot|unclear|unknown|uncertain|unsure|out of (?:view|sight|reach)|too (?:high|tall))\b|n['’]t\b|\bcould not\b)/i;
+const NOT_SHOWN_AFTER = /^\W*(?:\w+\W+){0,3}?(?:not\s+(?:shown|visible|possible|clear\w*|assess\w*|check\w*|inspect\w*|in view|able)|out of (?:view|sight)|unknown|unclear)\b/i;
+
+// True when the sentence makes a POSITIVE health / normal claim. A ground-level
+// phrase does not excuse it ("From the ground, the crown looks healthy" is the
+// prohibited reassurance); negated or adverse statements and pure can't-assess
+// disclaimers are not positive claims.
+function makesPositiveHealthClaim(sentence) {
+  const s = String(sentence || '');
+  for (const m of s.matchAll(HEALTH_TERM)) {
+    const before = s.slice(0, m.index).split(/\s+/).slice(-5).join(' ');
+    const after = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
+    if (!NEGATED_BEFORE.test(before) && !NOT_SHOWN_AFTER.test(after)) return true;
+  }
+  return false;
+}
 
 function isCrownHealthClaim(sentence) {
   const s = String(sentence || '');
   if (!(CROWN_TERM.test(s) || (NEW_GROWTH_TERM.test(s) && PALM_CONTEXT.test(s)))) return false;
-  return HEALTH_TERM.test(s) && !DISCLAIMER.test(s);
+  return makesPositiveHealthClaim(s);
 }
 
 // Remove every sentence that vouches for a palm's crown, spear leaf or newest
@@ -105,9 +121,17 @@ function stripCrownHealthClaims(text) {
 
 // ── Freeze ─────────────────────────────────────────────────────────────────────
 
+// The repo's canonical access-code redactor (report/track egress rule): gate,
+// garage, lockbox and alarm codes never reach customer copy. Lazy so this pure
+// module does not load the aggregator's dependencies until text needs it.
+function redactCodes(text) {
+  return require('../context-aggregator').redactAccessCodes(text);
+}
+
 function cleanDetail(value) {
   if (typeof value !== 'string') return null;
-  const t = value.replace(/\s+/g, ' ').trim().slice(0, MAX_DETAIL_CHARS);
+  // Redacted at the freeze too, so a code typed into an edit is never stored.
+  const t = redactCodes(value).replace(/\s+/g, ' ').trim().slice(0, MAX_DETAIL_CHARS);
   return t || null;
 }
 
@@ -153,7 +177,9 @@ function findingFor(findings, key) {
 // crown-health sentence (the palm rule outranks an edit).
 function editText(finding) {
   if (!finding || finding.action !== 'edit') return null;
-  const text = stripCrownHealthClaims(cleanDetail(finding.detail) || '');
+  // Redact before the char cap could split a code, and again nowhere else: every
+  // customer path reads the technician's text through here.
+  const text = stripCrownHealthClaims(redactCodes(cleanDetail(finding.detail) || ''));
   return text && text.trim() ? text.trim() : null;
 }
 
@@ -164,6 +190,26 @@ function editText(finding) {
  * from signals that included it is dropped. Edit: the prose is dropped too (it
  * would contradict the technician's text). The input is not mutated.
  */
+// Caption vocabulary per finding. A caption is tied to a finding when it uses
+// that finding's words; one with generic assessment wording ("visible signals")
+// cannot be placed reliably and is treated as tied to every replaced finding.
+const CAPTION_WORDS = {
+  pest_activity: /\b(?:pests?|insects?|scale|mites?|aphids?|whiteflies|whitefly|mealybugs?|thrips|caterpillars?|stippl\w*|webbing|sooty|chew\w*|honeydew|infest\w*)\b/i,
+  disease_leaf_spot: /\b(?:leaf[-\s]?spot\w*|fung\w*|disease\w*|mildew|blight|anthracnose|mold|rot|lesions?|spotting)\b/i,
+  water_heat_mechanical_stress: /\b(?:dry|wilt\w*|scorch\w*|stress\w*|water\w*|crispy|prun\w*|drought|heat|sunburn|mechanical|damage\w*)\b/i,
+  leaf_color_vigor: /\b(?:yellow\w*|chlorosis|pale|bronz\w*|colou?r\w*|discolou?r\w*|deficien\w*|vigor|off-color)\b/i,
+  foliage_fullness: /\b(?:thin\w*|sparse|bare|dieback|gaps?|dense|fullness|canopy|foliage)\b/i,
+};
+const GENERIC_ASSESSMENT_WORDS = /\b(?:signals?|visible|possible|appears?|apparent|issues?|concerns?|problems?|activity|symptoms?|conditions?|health\w*|signs?|observed|noted|detected)\b/i;
+
+// True when a photo caption speaks for a finding the technician replaced
+// (hidden, or edited with their own text) and must not reach customer copy.
+function captionTiedToReplacedFinding(caption, replacedKeys) {
+  if (typeof caption !== 'string' || !caption.trim() || !replacedKeys.length) return false;
+  if (GENERIC_ASSESSMENT_WORDS.test(caption)) return true;
+  return replacedKeys.some((key) => CAPTION_WORDS[key] && CAPTION_WORDS[key].test(caption));
+}
+
 function applyTechFindingsToAssessment(assessment, findings) {
   const list = Array.isArray(findings) ? findings : [];
   const hidden = list.filter((f) => f.action === 'hidden');
@@ -183,6 +229,13 @@ function applyTechFindingsToAssessment(assessment, findings) {
     }
   }
   if (hidden.length || edited.length) {
+    // A caption on a replaced finding's subject goes too; the photo itself stays.
+    const replaced = [...hidden, ...edited].map((f) => f.key);
+    if (Array.isArray(assessment.photos)) {
+      next.photos = assessment.photos.map((p) => (
+        p && captionTiedToReplacedFinding(p.caption, replaced) ? { ...p, caption: null } : p
+      ));
+    }
     next.observations = '';
     next.aiSummary = null;
     next.customerSummary = '';
@@ -244,7 +297,14 @@ function techFindingsPromptLines(findings) {
   return lines.join('\n');
 }
 
+// True when the technician's decisions give the writer something to say (a
+// confirmed finding or their own text), even with no photo scores left.
+function hasTechFindingLines(findings) {
+  return techFindingsPromptLines(findings) !== '';
+}
+
 module.exports = {
+  hasTechFindingLines,
   KEY_TO_SCORE,
   TECH_FINDING_LABELS,
   INSIGHT_FINDING_KEYS,
