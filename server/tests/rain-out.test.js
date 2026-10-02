@@ -1014,6 +1014,25 @@ describe('rain-out service', () => {
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true, notified_at: null });
     });
 
+    test('gate on: a series shift that reports a grouped stop start — the moved-SMS quotes that start', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [chain({ update: jest.fn().mockResolvedValue(1) }), chain({ update: jest.fn().mockResolvedValue(1) })],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00', visitId: 'v1', visitWindowStart: '11:00' }],
+      });
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const vars = renderSmsTemplate.mock.calls[renderSmsTemplate.mock.calls.length - 1][1];
+      expect(vars.new_option).toContain('11:00 AM - 1:00 PM');
+    });
+
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
