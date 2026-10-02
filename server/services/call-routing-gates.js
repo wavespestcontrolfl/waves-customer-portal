@@ -1107,6 +1107,9 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   'email_unverified',
   'email_invalid',
   'email_bounce_reverify',
+  // An owed first-name capture on a customer the call created: replacing the recording does
+  // not supply the name, and a superseded (terminal) card would block re-filing it.
+  'missing_first_name',
 ]);
 
 // Owner ruling 2026-09-30: a street-level address hold's review card (the
