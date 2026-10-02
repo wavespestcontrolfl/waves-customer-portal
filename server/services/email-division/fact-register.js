@@ -710,7 +710,7 @@ const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more
 const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?|inch(?:es)?|cm|centimet(?:er|re)s?|met(?:er|re)s?|mm))';
 // A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
 // 85 Fahrenheit.
-const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius))?\\b|\\s*(?:fahrenheit|celsius)\\b)';
+const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius|centigrade))?\\b|\\s*(?:fahrenheit|celsius|centigrade)\\b)';
 // A degree figure followed by a geometry noun is an angle, not a temperature:
 // "a 90-degree arc around a sprinkler head", "at a 90° angle" (codex #5414
 // round 3). Only the bare-unit trigger needs this; a folded range or bound
@@ -732,8 +732,8 @@ const isHotValue = (n) => n >= 80 && n <= 129;
 // The 80-degree line is Fahrenheit. A Celsius figure is converted before it
 // is judged, so "thrives at 30°C" (86°F) is the claim and "20°C" is not
 // (codex #5414 round 4).
-const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+celsius\\b|\\s*celsius\\b)';
-const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius/i;
+const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+(?:celsius|centigrade)\\b|\\s*(?:celsius|centigrade)\\b)';
+const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius|centigrade/i;
 const toFahrenheit = (celsius) => (celsius * 9) / 5 + 32;
 const tempValueF = (text, ...units) => (units.some((u) => u && IS_CELSIUS.test(u)) ? toFahrenheit(tempValue(text)) : tempValue(text));
 
@@ -763,9 +763,11 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
 // A ceiling named AFTER the figure, closing its clause: "80°F max", "80
-// degrees maximum", "80°F at most" — the same cap as "a maximum of 80°F".
+// degrees maximum", "80°F at most", "an 80°F maximum temperature" — the
+// same cap as "a maximum of 80°F".
 // It must end the clause: "90°F maximum damage" is not a ceiling.
-const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
+const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
+const TEMP_CONTEXT_BEFORE = /\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|it(?:\s+is|['’]s)|hits?|reach(?:es)?|degrees?)\b|°/i;
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -782,7 +784,11 @@ function foldTemperatures(sentence) {
     const low = Math.min(tempValueF(a, unitA || unitB), tempValueF(b, unitB || unitA));
     return token(isHotValue(low) ? 'hottemp' : 'cooltemp', match);
   });
-  text = text.replace(TEMP_TRAILING, (match, figure, unit, direction) => {
+  text = text.replace(TEMP_TRAILING, (match, figure, unit, direction, offset, whole) => {
+    // No unit: "85 or more" is a temperature only when temperature wording
+    // leads into it ("temperatures are 85 or higher"). "damaged 85 or more
+    // properties" is a count, whatever the noun (codex #5414 round 7).
+    if (!unit && !TEMP_CONTEXT_BEFORE.test(whole.slice(Math.max(0, offset - 60), offset))) return match;
     const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValueF(figure, unit));
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
@@ -791,7 +797,10 @@ function foldTemperatures(sentence) {
   // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
   // judged on its Fahrenheit value, so the raw-number triggers never see it.
   text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
-  const restore = (clause) => String(clause).replace(/\b(?:hot|cool)temp(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
+  // "anything but" holds a conjunction the clause splitter would cut on;
+  // it travels as one token so the idiom stays on its activity word.
+  text = text.replace(/\banything\s+but\b/gi, (match) => token('idiomneg', match));
+  const restore = (clause) => String(clause).replace(/\b(?:hottemp|cooltemp|idiomneg)(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
   return { text, restore };
 }
 
@@ -828,7 +837,10 @@ const PATCH_TRIGGER = new RegExp(
 const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:ever\\s+)?(?:(?:a|an|much\\s+of\\s+a)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
-const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+const NEGATED_RECEDE = new RegExp(`\\b(?:idiomneg\\d+|far\\s+from|not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+// "anything but active", "far from common": an idiom that negates the
+// activity word it sits directly before.
+const PATCH_IDIOM_NEGATION = new RegExp(`\\b(?:idiomneg\\d+|anything\\s+but|far\\s+from|nowhere\\s+near|the\\s+opposite\\s+of)\\s+(?:being\\s+)?${PATCH_ACTIVE.source.replace(/^\\b/, '')}`, 'i');
 const MYTH_WORD = /\b(?:myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
 
 // The clause is the fact that large patch recedes: a receding verb, not
@@ -922,7 +934,7 @@ function patchClaimInSentence(sentence, previousSentence = '') {
       if (MYTH_WORD.test(judged)) continue;
       return folded.restore(clause);
     }
-    if (patchRecedes(judged) || clauseDenies(judged) || PATCH_CONTRAST.test(span)) continue;
+    if (patchRecedes(judged) || clauseDenies(judged, PATCH_IDIOM_NEGATION) || PATCH_CONTRAST.test(span)) continue;
     return folded.restore(clause);
   }
   return null;

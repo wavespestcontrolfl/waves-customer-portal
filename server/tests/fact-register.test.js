@@ -661,6 +661,16 @@ describe('findUnverifiedClaims', () => {
       'Large patch rarely fails to thrive in summer.',
       'Large patch seldom fails to spread in summer.',
       'Large patch rarely stops short of spreading in summer.',
+      // centigrade is Celsius
+      'Large patch thrives at 30 degrees centigrade.',
+      'Large patch thrives when temperatures are 30 centigrade or higher.',
+      // the idiom on a receding word is the claim
+      'Large patch is anything but dormant when temperatures are 85°F.',
+      'Large patch is far from dormant in summer.',
+      // the idiom must sit on the activity word
+      'Large patch thrives when temperatures are 85°F, far from the coast.',
+      // unitless trailing bounds with temperature wording are still temperatures
+      'Large patch thrives when highs are 85 or more.',
       // decimal temperatures are read numerically
       'Large patch thrives at 85.5°F.',
       'Large patch thrives at 26.7°C.',
@@ -774,7 +784,17 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active when temperatures are lower than or equal to 80 degrees.',
       'Large patch is active when temperatures are at or below 80°F.',
       'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
-      // a ceiling named after the figure caps it
+      // a ceiling named after the figure caps it, with or without its noun
+      'Large patch is active at an 80°F maximum temperature.',
+      'Large patch is active at an 80°F maximum air temperature.',
+      // an idiom that negates the activity word
+      'Large patch is anything but active when temperatures are 85°F.',
+      'Large patch is far from common when temperatures are 90 degrees.',
+      // a unitless trailing bound with no temperature wording is a count
+      'Large patch damaged 85 or more properties last year.',
+      'Large patch showed up in 90 or more neighborhoods this fall.',
+      // cool centigrade
+      'Large patch is active when temperatures are 20 degrees centigrade.',
       'Large patch is active at 80°F max.',
       'Large patch is active at 80 degrees maximum.',
       'Large patch is active when temperatures are 80°F at most.',
