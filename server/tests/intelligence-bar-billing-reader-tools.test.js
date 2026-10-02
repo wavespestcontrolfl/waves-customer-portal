@@ -19,23 +19,28 @@ describe('billing reader definitions', () => {
   test('exactly the two read tools, with selector and pagination inputs', () => {
     expect(BILLING_READER_TOOLS.map((tool) => tool.name)).toEqual(NAMES);
     const list = BILLING_READER_TOOLS[0].input_schema.properties;
-    expect(Object.keys(list)).toEqual(expect.arrayContaining(['customer_id', 'customer_name', 'phone', 'limit', 'offset']));
+    expect(Object.keys(list)).toEqual(expect.arrayContaining(['customer_id', 'customer_name', 'limit', 'offset']));
+    // No phone selector: an unscoped phone cannot be bound to a billing read by the current-request grammar.
+    expect(Object.keys(list)).not.toContain('phone');
     expect(list.customer_id.format).toBe('uuid');
     const detail = BILLING_READER_TOOLS[1].input_schema;
     expect(detail.required).toEqual(['invoice_id']);
     expect(detail.properties.invoice_id.format).toBe('uuid');
   });
 
-  test('descriptions tell the model: read only, an attempt is not paid, what received means', () => {
+  test('descriptions tell the model: read only, balance only when collectible, otherwise the Invoices page with the reason', () => {
     for (const tool of BILLING_READER_TOOLS) {
       expect(tool.description).toMatch(/Read only/);
-      expect(tool.description).toMatch(/never call it paid/i);
-      expect(tool.description).toMatch(/ATTEMPT/);
-      expect(tool.description).toMatch(/RECEIVED only when the payments table records a successful payment or Stripe's state is succeeded/);
+      expect(tool.description).toMatch(/ONLY when the invoice passes the payment paths' own collectibility checks \(collectible: true\)/);
+      expect(tool.description).toMatch(/balance_due is null with the reason/);
+      expect(tool.description).toMatch(/send staff to the Invoices page/);
+      expect(tool.description).toMatch(/never suggest collecting or retrying a charge/);
+      expect(tool.description).toMatch(/informational rows, not a verdict on receipt/);
       expect(tool.description).toMatch(/Admin-only/);
       expect(tool.description).toMatch(/never changes anything/);
     }
-    expect(BILLING_READER_TOOLS[1].description).toMatch(/not stored in the portal/);
+    expect(BILLING_READER_TOOLS[0].description).toMatch(/total_due adds up ONLY the invoices that are collectible/);
+    expect(BILLING_READER_TOOLS[1].description).toMatch(/needs reconciliation — check the Invoices page/);
   });
 
   test('no underscore metadata, no model-facing confirmed field', () => {
