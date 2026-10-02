@@ -321,7 +321,7 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('scheduled_services').where({ id: childOf(/lawn/i).id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
       const [before] = await alertsOf(trx, est.estimateId);
-      expect(before.metadata.itemKeys).toEqual(['missing_time_tech:lawn_care']);
+      expect(before.metadata.itemKeys).toEqual(['lawn_care']);
       await trx('notifications').where({ id: before.id }).update({ read_at: new Date() });
       // A new service family goes untimed (a pest visit) with no budget left.
       await trx('scheduled_services').where({ id: childOf(/pest/i).id }).update({ technician_id: null });
@@ -336,7 +336,7 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: raiseAdminAlert })).toMatchObject({ problems: 1, held: 0 });
       const [after] = await alertsOf(trx, est.estimateId);
       expect(after.read_at).toBeNull();
-      expect(after.metadata.itemKeys).toEqual(['missing_time_tech:pest_control', 'missing_time_tech:lawn_care']);
+      expect(after.metadata.itemKeys).toEqual(['pest_control', 'lawn_care']);
     } finally {
       mockPg = pool;
       await trx.rollback();
@@ -456,7 +456,7 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 1 });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
       const [alert] = await alertsOf(trx, est.estimateId);
-      expect(alert.metadata.itemKeys).toEqual(['price_mismatch:lawn_care']);
+      expect(alert.metadata.itemKeys).toEqual(['lawn_care']);
       expect(alert.body).toMatch(/lawn visits priced \$1\.00, accepted \$100\.00/);
       // Fixed: the bell closes.
       await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 100 });

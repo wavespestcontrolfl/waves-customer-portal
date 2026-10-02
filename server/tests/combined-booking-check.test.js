@@ -205,7 +205,7 @@ describe('visit prices', () => {
   test('first visits, prepaid visits and unpriced visits are never price-checked', () => {
     const lawn = lawnRows({ parentOverrides: { estimated_price: 999 } }).map((row, i) => {
       if (i === 1) return { ...row, estimated_price: 90, prepaid_amount: 90 };
-      if (i === 2) return { ...row, estimated_price: 90, annual_prepay_term_id: 'term-1' };
+      if (i === 2) return { ...row, estimated_price: 90, prepaid_amount: 100, annual_prepay_term_id: 'term-1' };
       if (i === 3) return { ...row, estimated_price: null };
       return row.recurring_parent_id ? { ...row, estimated_price: 100 } : row;
     });
@@ -218,13 +218,32 @@ describe('visit prices', () => {
     expect(verdict.unpricedFamilies).toEqual(['pest_control', 'lawn_care']);
   });
 
-  test('a legacy monthly-dues rodent program has no per-visit price to check', () => {
-    const est = estimate([PEST], { monthly_total: 90, annual_total: 600 });
+  test('a legacy monthly-dues rodent program has no per-visit price, but its dues count, so pest is still checked', () => {
+    // Pest $600/yr + rodent dues $40/mo = $1,080 accepted.
+    const est = estimate([PEST], { monthly_total: 90, annual_total: 1080 });
     est.estimate_data.result.recurring.rodentBaitMo = 40;
     const rodent = priced(series({ key: 'rodent_bait_quarterly', type: 'Rodent Bait Stations', visits: 4, spacing: 91 }), 33);
-    const verdict = evaluateCombinedBooking({ estimate: est, rows: [...priced(pestRows(), 150), ...rodent] });
+    const ok = evaluateCombinedBooking({ estimate: est, rows: [...priced(pestRows(), 150), ...rodent] });
+    expect(ok.problems).toEqual([]);
+    expect(ok.unpricedFamilies).toEqual(['rodent_bait']);
+    const wrongPest = evaluateCombinedBooking({ estimate: est, rows: [...priced(pestRows(), 140), ...rodent] });
+    expect(texts(wrongPest)).toEqual(['3 pest visits priced $140.00, accepted $150.00']);
+  });
+
+  test('the accepted total must match the lines exactly: even a few cents off means a credit, so prices are not known', () => {
+    const verdict = verdictFor(priced(pestRows(), 150), priced(lawnRows(), 90), { estimate: estimate([PEST, LAWN], { annual_total: 1199.98 }) });
     expect(verdict.problems).toEqual([]);
-    expect(verdict.unpricedFamilies).toEqual(['rodent_bait']);
+    expect(verdict.unpricedFamilies).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('different wrong prices on one service are each named', () => {
+    const lawn = priced(lawnRows(), 90).map((row, i) => (i === 2 ? { ...row, estimated_price: 80 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['5 lawn visits priced $90.00 x4, $80.00 x1, accepted $100.00']);
+  });
+
+  test('a prepay term link with no live prepaid amount (a voided term keeps the link) is still price-checked', () => {
+    const lawn = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, annual_prepay_term_id: 'term-voided' } : row));
+    expect(codes(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['price_mismatch']);
   });
 
   test('a price finding whose accepted price can no longer be confirmed stays on the bell, marked', () => {
@@ -284,15 +303,18 @@ describe('postAlert', () => {
     });
     expect(spec.detail).toBeUndefined();
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true });
-    expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', itemKeys: ['missing_time_tech:lawn_care'] });
+    expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', itemKeys: ['lawn_care'] });
   });
 
   test('a standing bell re-rings only for a service family it did not carry', () => {
     const lawn = { code: 'missing_time_tech', families: ['lawn_care'] };
     const pest = { code: 'missing_time_tech', families: ['pest_control'] };
+    const lawnPrice = { code: 'price_mismatch', families: ['lawn_care'] };
     const meta = { itemKeys: problemKeys(lawn) };
     expect(ringOnNewProblem(problemKeys(lawn))({}, meta)).toBe(false);
     expect(ringOnNewProblem(problemKeys(pest))({}, meta)).toBe(true);
+    // A second kind of problem on a family the bell already carries does not ring again.
+    expect(ringOnNewProblem([...problemKeys(lawn), ...problemKeys(lawnPrice)])({}, meta)).toBe(false);
   });
 });
 

@@ -143,8 +143,9 @@ function acceptedPlan(estimate) {
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
   const family = (line) => converter.seedingFamilyKey(line);
+  const supplements = converter.supplementalCompanionLines(data);
   const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
-    acceptFrequency: acceptedFrequency, supplementalCompanions: converter.supplementalCompanionLines(data),
+    acceptFrequency: acceptedFrequency, supplementalCompanions: supplements,
   });
   const families = new Set([
     ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => [service, [service]]),
@@ -154,20 +155,24 @@ function acceptedPlan(estimate) {
     // by the office; they have no auto-seeded cadence to verify here.
     .filter(([service]) => converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency))
     .flatMap(([, sources]) => sources.map(family)));
-  return { families, prices: acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family }) };
+  // A supplement (the legacy rodent monthly dues) counts toward the accepted
+  // total only for a family no line already bills, as the combiner dedupes it.
+  const lineFamilies = new Set(lines.map(family));
+  const dues = supplements.filter((line) => !lineFamilies.has(family(line)));
+  return { families, prices: acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family, dues }) };
 }
 
 // The accepted per-visit price of each family: the same per-line rule the
 // converter's own price split uses (lineAnnualPerVisitAmount), summed over the
 // family's lines. Known only when the lines add up to the accepted annual
-// total to the cent (a manual discount, a plan credit or a cadence change
-// breaks that, and a guessed price would alert falsely), and only for a family
-// billed by its lines (a legacy rodent supplement is monthly dues: no line,
-// no per-visit price).
-function acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family }) {
-  const annualFromLines = Math.round(lines.reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0) * 100);
-  const reconciles = Number(estimate.annual_total) > 0
-    && Math.abs(annualFromLines - Math.round(Number(estimate.annual_total) * 100)) <= lines.length;
+// total EXACTLY to the cent, legacy rodent dues included (a manual discount,
+// a plan credit or a cadence change breaks that, even by a cent, and a
+// guessed price would alert falsely), and only for a family billed by its
+// lines (a legacy rodent supplement is monthly dues: no line, no per-visit
+// price, but its dues are part of the accepted total).
+function acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family, dues }) {
+  const annualCents = Math.round([...lines, ...dues].reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0) * 100);
+  const reconciles = Number(estimate.annual_total) > 0 && annualCents === Math.round(Number(estimate.annual_total) * 100);
   const prices = new Map();
   for (const key of families) {
     const perVisits = lines.filter((line) => family(line) === key)
@@ -236,7 +241,9 @@ function checkPrices(dated, families, prices) {
   for (const row of dated) {
     const price = Number(row.estimated_price);
     if (!row.recurring_parent_id || row.is_recurring === false || !(price > 0)) continue;
-    if (Number(row.prepaid_amount) > 0 || row.annual_prepay_term_id) continue;
+    // A live prepay stamp, not the term link alone: a voided / refunded term
+    // clears prepaid_amount but keeps the link for audit, and that visit bills.
+    if (Number(row.prepaid_amount) > 0) continue;
     const performs = rowFamilies(row).filter((family) => prices.has(family));
     const judged = performs.filter((family) => families.has(family));
     const shares = performs.map((family) => prices.get(family));
@@ -245,14 +252,17 @@ function checkPrices(dated, families, prices) {
     // In whole cents: float subtraction makes $150.02 - $150 read as just over two cents.
     if (Math.abs(Math.round(price * 100) - Math.round(expected * 100)) <= PRICE_TOLERANCE_CENTS) continue;
     for (const family of judged) {
-      const entry = off.get(family) || { count: 0, earliest: row.day, detail: `${money(price)}, accepted ${money(expected)}` };
+      const entry = off.get(family) || { count: 0, earliest: row.day, expected, prices: new Map() };
       entry.count += 1;
+      entry.prices.set(money(price), (entry.prices.get(money(price)) || 0) + 1);
       off.set(family, entry);
     }
   }
   return [...families].filter((family) => off.has(family)).map((family) => {
-    const { count, earliest, detail } = off.get(family);
-    return { code: 'price_mismatch', families: [family], earliest, text: `${count} ${lowerLabel(family)} visits priced ${detail}` };
+    const { count, earliest, expected, prices: seen } = off.get(family);
+    // Every distinct wrong price is named; one shared price reads plainly.
+    const priced = seen.size === 1 ? [...seen.keys()][0] : [...seen].map(([amount, n]) => `${amount} x${n}`).join(', ');
+    return { code: 'price_mismatch', families: [family], earliest, text: `${count} ${lowerLabel(family)} visits priced ${priced}, accepted ${money(expected)}` };
   });
 }
 
@@ -419,10 +429,11 @@ function dedupeKeyFor(estimateId) {
   return `${OPS_KEY}:${estimateId}`;
 }
 
-// A problem's stable identities: one per affected service family, so a fixed
-// lawn problem replaced by a new pest one rings.
+// A problem's ring identities: the service families it affects. A bell rings
+// again only when a NEW family joins it (a fixed lawn problem replaced by a
+// pest one), never for a second kind of problem on a family it already carries.
 function problemKeys(problem) {
-  return (problem.families || []).map((family) => `${problem.code}:${family}`);
+  return problem.families || [];
 }
 
 // A refresh rings only when a problem is new: an identity the standing row
@@ -571,8 +582,15 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
           .where(function untimedOrPriced() {
             this.whereNull('s.window_start').orWhereNull('s.technician_id');
             // The daily run also judges every upcoming PRICED series child
-            // (checkPrices); the urgent pass is about time and technician only.
-            if (!lastDay) this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id').where('s.estimated_price', '>', 0));
+            // (checkPrices), but only on a booking whose series come from two or
+            // more services (decided in SQL, so the large single-service
+            // population is never loaded); the urgent pass is about time and
+            // technician only.
+            if (!lastDay) {
+              this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id').where('s.estimated_price', '>', 0)
+                .whereRaw(`(SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
+                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2`));
+            }
           });
       });
     })
