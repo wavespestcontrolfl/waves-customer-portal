@@ -3723,146 +3723,195 @@ async function avAddressUniqueOwner(matches, opts) {
   }
 }
 
+// ── Household address suggestion: three small pieces + the composer ──────────
+// Street equivalence everywhere below is the shared sameHouseNumberStreet
+// (suffix aliases such as loop/lp, directionals, unit-first and trailing units).
+
+const addressZip5 = (value) => require('./customer-properties').normalizeZip(value);
+
+// The unit a street line / line-2 pair carries, in any supported position.
+function addressLineUnit(line, line2) {
+  const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+  const first = require('../utils/address-normalizer').splitUnitFirstLine(line);
+  return unitKey(line2) || (first ? unitKey(first.unit) : streetEmbeddedUnitKey(line));
+}
+
+// Do two renderings of ONE address agree? A missing street or ZIP on either side
+// is silent unless `strict`, which demands both be present on both sides.
+function addressRenderingsAgree(a = {}, b = {}, { strict = false } = {}) {
+  const lines = [String(a.address_line1 || '').trim(), String(b.address_line1 || '').trim()];
+  const zips = [addressZip5(a.zip), addressZip5(b.zip)];
+  if (strict && (lines.includes('') || zips.includes(''))) return false;
+  if (lines[0] && lines[1] && !sameHouseNumberStreet(lines[0], lines[1])) return false;
+  return !(zips[0] && zips[1] && zips[0] !== zips[1]);
+}
+
+// An accepted Address Validation verdict for an in-area address; `requirePremise`
+// demands an explicit PREMISE granularity (a missing one then fails).
+function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
+  if (!['validated_accept', 'corrected'].includes(av?.status) || av.inServiceArea !== true) return false;
+  return requirePremise ? av.granularity === 'PREMISE' : !av.granularity || av.granularity === 'PREMISE';
+}
+
+// GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be
+// the premise the verdict validated — explicit PREMISE granularity, and the stored
+// street + ZIP (and city, when both carry one) agree with the verdict's normalized
+// form. With V2 in shadow the verdict can describe a different address than the V1
+// one being inserted; that means no creation. Pure.
+function firstNameAdvisoryAddressOk(av, extracted = {}) {
+  if (!verdictAcceptsAddress(av, { requirePremise: true })) return false;
+  const n = av.normalized || {};
+  if (!addressRenderingsAgree(
+    { address_line1: extracted.address_line1, zip: extracted.zip },
+    { address_line1: n.street_line_1, zip: n.postal_code },
+    { strict: true },
+  )) return false;
+  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return !cityKey(extracted.city) || !cityKey(n.city) || cityKey(extracted.city) === cityKey(n.city);
+}
+
+// Piece 1 — validate the verdict and reconcile every rendering of the call's
+// address into ONE street / ZIP / unit. Returns { street, zip5, unit } or { reason }.
+function resolveHouseholdAddress({ address = {}, alternateAddresses = [], addressValidation = null } = {}) {
+  if (!verdictAcceptsAddress(addressValidation)) return { reason: 'address_not_validated' };
+  const street = String(address.address_line1 || '').trim();
+  const zip5 = addressZip5(address.zip);
+  if (!street || !zip5) return { reason: 'no_phone_or_address' };
+  // Each other rendering (the V2 service_address — whose unit is NOT copied into the
+  // legacy extraction when V2-primary adoption is off — and Address Validation's
+  // normalized street) must agree on street and ZIP, and every unit any of them
+  // carries must be the same one.
+  const renderings = alternateAddresses.filter(Boolean);
+  if (!renderings.every((alt) => addressRenderingsAgree(address, alt))) return { reason: 'address_disagrees' };
+  const units = new Set([addressLineUnit(street, address.address_line2),
+    ...renderings.map((alt) => addressLineUnit(alt.address_line1 || '', alt.address_line2))].filter(Boolean));
+  return units.size > 1 ? { reason: 'unit_conflict' } : { street, zip5, unit: [...units][0] || '' };
+}
+
+// Piece 2 — the COMPLETE candidate set: no LIMIT and no ZIP / deleted / active
+// pre-filter in SQL (the only narrowing is the NECESSARY condition that a digit
+// token of the call's line appears as a whole token). Every customer row and every
+// active customer_properties row on any account that could be this street is read;
+// dead rows are dropped later, by the classifier, so a second live household can
+// never be trimmed out of the count. A row with no ZIP stays a candidate.
+async function loadHouseholdCandidates(conn, { street, zip5 }) {
+  const tokens = [...new Set((street.match(/\b\d+[a-z]?\b/gi) || []).map((t) => t.toLowerCase()))];
+  const houseRe = `(^|[^0-9a-z])(${tokens.join('|')})([^0-9a-z]|$)`;
+  const sourcesById = new Map(); // customer id -> [{ line1, line2, zipExact }]
+  const take = (rows, idCol) => {
+    for (const r of rows) {
+      const rowZip = addressZip5(r.zip);
+      if (!sameHouseNumberStreet(r.address_line1, street) || (rowZip && rowZip !== zip5)) continue;
+      const list = sourcesById.get(r[idCol]) || [];
+      list.push({ line1: r.address_line1, line2: r.address_line2, zipExact: rowZip === zip5 });
+      sourcesById.set(r[idCol], list);
+    }
+  };
+  if (tokens.length) {
+    take(await conn('customers').whereRaw('address_line1 ~* ?', [houseRe])
+      .select('id', 'address_line1', 'address_line2', 'zip'), 'id');
+    if (await conn.schema.hasTable('customer_properties')) {
+      take(await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
+        .select('customer_id', 'address_line1', 'address_line2', 'zip'), 'customer_id');
+    }
+  }
+  const candidates = sourcesById.size
+    ? await conn('customers').whereIn('id', [...sourcesById.keys()])
+      .select('id', 'first_name', 'last_name', 'phone', 'address_line1', 'address_line2', 'zip',
+        'pipeline_stage', 'property_type', 'waveguard_tier', 'active', 'deleted_at')
+    : [];
+  return { sourcesById, candidates };
+}
+
+// Piece 3 — claim "exactly one" over the whole set, then judge that one account.
+// Live = not soft-deleted and not explicitly inactive (a NULL flag still counts, so
+// it can never hide a second household).
+function classifyHouseholdCandidates({ sourcesById, candidates }, wantUnit) {
+  const live = candidates.filter((c) => !c.deleted_at && c.active !== false);
+  if (live.length === 0) return { reason: 'no_address_match' };
+  if (live.length > 1) return { reason: 'multiple_customers_at_address' };
+  const [match] = live;
+  const sources = sourcesById.get(match.id);
+  const refusal = [
+    [match.active !== true, 'not_active'],
+    // An unknown / malformed stored ZIP is an ambiguity blocker, never positive evidence.
+    [!sources.some((src) => src.zipExact), 'zip_unconfirmed'],
+    // A unit on one side only is a different door.
+    [sources.some((src) => addressLineUnit(src.line1, src.line2) !== wantUnit), 'unit_differs'],
+    [['commercial', 'business'].includes(String(match.property_type || '').toLowerCase())
+      || String(match.waveguard_tier || '') === 'Commercial', 'commercial_account'],
+    [!FAIL_OPEN_CUSTOMER_STAGES.has(String(match.pipeline_stage || '').trim().toLowerCase()), 'not_established_customer'],
+  ].find(([refused]) => refused);
+  return refusal ? { reason: refusal[1] } : { customer: match, reason: 'address_match' };
+}
+
+// secondary_phone is outside ordinary matching but IS identity evidence: a number
+// stored there already belongs to an account.
+async function householdPhoneOnFile(conn, key) {
+  const hit = await conn('customers').whereNull('deleted_at')
+    .where(function orPhones() {
+      for (const col of [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone']) {
+        this.orWhereRaw(key.length === 10
+          ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+          : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`, [key]);
+      }
+    })
+    .first('id');
+  return !!hit;
+}
+
 // GATE_CALL_HOUSEHOLD_ADDRESS_MATCH (owner ruling 2026-10-02, "suggest, don't
 // auto-link"): a caller from a number NOT on file who is calling about the exact
-// address of ONE existing active residential customer may be a household member
-// of that account. This lookup is READ-ONLY; the caller files ONE office card
-// suggesting the account and links nothing.
-//
-// Deterministic only: the number matches NOBODY (any slot, any live customer),
-// the street (suffix-canonical, unit-stripped) + 5-digit ZIP matches exactly
-// ONE active, non-deleted customer, that customer is an established one
-// (FAIL_OPEN_CUSTOMER_STAGES), and neither side carries a unit that differs
-// from the other (a unit on one side only counts as differing: a condo door is
-// a different account). Commercial accounts are refused. Anything weaker
-// returns { customer: null, reason } and the caller falls back to today's
-// behaviour. Never throws.
+// address of ONE existing active residential customer may be a household member of
+// that account. READ-ONLY: the caller files ONE advisory office card suggesting the
+// account and links nothing. Returns { customer, reason }; anything weaker than a
+// single validated, residential, unit-consistent match is { customer: null, reason }
+// and the call proceeds as today. Never throws.
 async function findHouseholdCustomerByAddress({ phone, address = {}, alternateAddresses = [], commercialCall = false, addressValidation = null, conn = db } = {}) {
   const refuse = (reason) => ({ customer: null, reason });
   try {
     if (commercialCall) return refuse('commercial_call');
-    // A mis-transcribed street must never link a caller to someone else's
-    // account: the call's address must be Address-Validation accepted — the same
-    // predicate as the first-name advisory create (accepted or corrected, in
-    // the service area) and, when the verdict carries it, PREMISE granularity.
-    const av = addressValidation || {};
-    if (!['validated_accept', 'corrected'].includes(av.status)
-      || av.inServiceArea !== true
-      || (av.granularity && av.granularity !== 'PREMISE')) {
-      return refuse('address_not_validated');
-    }
+    const resolved = resolveHouseholdAddress({ address, alternateAddresses, addressValidation });
+    if (resolved.reason) return refuse(resolved.reason);
     const key = phoneKey(phone);
-    const street = String(address.address_line1 || '').trim();
-    const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
-    const zip5 = normalizeZip(address.zip);
-    if (!key || !street || !zip5) return refuse('no_phone_or_address');
-
-    // secondary_phone is deliberately outside ordinary matching but IS identity
-    // evidence: a number stored there already belongs to an account.
-    const phoneHit = await conn('customers').whereNull('deleted_at')
-      .where(function orPhones() {
-        for (const col of [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone']) {
-          this.orWhereRaw(key.length === 10
-            ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
-            : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`, [key]);
-        }
-      })
-      .first('id');
-    if (phoneHit) return refuse('phone_on_file');
-
-    // COMPLETE candidate set before claiming uniqueness (codex pre-push P1):
-    // no LIMIT, no ZIP / deleted / active pre-filter in SQL. The only SQL
-    // narrowing is a NECESSARY condition — the house number appears as a whole
-    // token in the street line — so every row that could key to this street is
-    // read. Soft-deleted and inactive rows are dropped only AFTER the set is
-    // built, and every other address source (an active customer_properties row
-    // on any account) adds its owner to the same set. A row with no ZIP could
-    // sit at this address, so it stays a candidate. "Exactly one" is claimed
-    // over that whole set or not at all.
-    // Every digit token of the call's line (a unit-first form such as
-    // "Apt 4 123 Main St" carries the unit number before the house number).
-    const numberTokens = [...new Set((street.match(/\b\d+[a-z]?\b/gi) || []).map((t) => t.toLowerCase()))];
-    if (numberTokens.length === 0) return refuse('no_house_number');
-    const houseRe = `(^|[^0-9a-z])(${numberTokens.join('|')})([^0-9a-z]|$)`;
-    // Both sides peel a unit-first form ("Apt 4 123 Main St") the same way before
-    // keying, so neither a stored nor a spoken unit-first line can hide a match.
-    const { splitUnitFirstLine } = require('../utils/address-normalizer');
-    const peel = (line, line2) => {
-      const first = splitUnitFirstLine(line);
-      return {
-        key: streetKey(first ? first.rest : line),
-        unit: unitKey(line2) || (first ? unitKey(first.unit) : streetEmbeddedUnitKey(line)),
-      };
-    };
-    const want = peel(street, address.address_line2);
-    const wantStreet = want.key;
-    if (!wantStreet) return refuse('no_phone_or_address');
-    // ONE coherent address (codex pre-push P1): every other rendering of the
-    // call's address — the V2 service_address (its unit is NOT copied into the
-    // legacy extraction when V2-primary adoption is off) and Address
-    // Validation's normalized street — must agree with it on street and ZIP,
-    // and every unit any of them carries must be the same one. Any
-    // disagreement refuses the match.
-    const units = new Set(want.unit ? [want.unit] : []);
-    for (const alt of alternateAddresses) {
-      if (!alt) continue;
-      if (String(alt.address_line1 || '').trim() && peel(alt.address_line1, null).key !== wantStreet) return refuse('address_disagrees');
-      if (normalizeZip(alt.zip) && normalizeZip(alt.zip) !== zip5) return refuse('address_disagrees');
-      const altUnit = peel(alt.address_line1 || '', alt.address_line2).unit;
-      if (altUnit) units.add(altUnit);
-    }
-    if (units.size > 1) return refuse('unit_conflict');
-    const wantUnit = units.size ? [...units][0] : '';
-    const zipFits = (z) => { const z5 = normalizeZip(z); return !z5 || z5 === zip5; };
-    const sourcesById = new Map(); // customer id -> [{ line1, line2, zipExact }]
-    // An unknown / malformed stored ZIP keeps its row a candidate (an ambiguity
-    // blocker) but is never positive evidence: the match needs a source whose
-    // ZIP is exactly the call's.
-    const addSource = (id, line1, line2, zip) => {
-      if (!sourcesById.has(id)) sourcesById.set(id, []);
-      sourcesById.get(id).push({ line1, line2, zipExact: normalizeZip(zip) === zip5 });
-    };
-    const addressRows = await conn('customers').whereRaw('address_line1 ~* ?', [houseRe])
-      .select('id', 'address_line1', 'address_line2', 'zip');
-    for (const r of addressRows) {
-      if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.id, r.address_line1, r.address_line2, r.zip);
-    }
-    if (await conn.schema.hasTable('customer_properties')) {
-      const propRows = await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
-        .select('customer_id', 'address_line1', 'address_line2', 'zip');
-      for (const r of propRows) {
-        if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.customer_id, r.address_line1, r.address_line2, r.zip);
-      }
-    }
-    if (sourcesById.size === 0) return refuse('no_address_match');
-    const candidates = await conn('customers').whereIn('id', [...sourcesById.keys()])
-      .select('id', 'first_name', 'last_name', 'phone', 'address_line1', 'address_line2', 'zip',
-        'pipeline_stage', 'property_type', 'waveguard_tier', 'active', 'deleted_at');
-    // Live = not soft-deleted and not explicitly inactive (a NULL active flag
-    // still counts as live so it can never hide a second household).
-    const live = candidates.filter((c) => !c.deleted_at && c.active !== false);
-    if (live.length === 0) return refuse('no_address_match');
-    if (live.length > 1) return refuse('multiple_customers_at_address');
-    const match = live[0];
-    if (match.active !== true) return refuse('not_active');
-    if (!sourcesById.get(match.id).some((src) => src.zipExact)) return refuse('zip_unconfirmed');
-    // Every address source of the match must carry the call's unit (a unit on
-    // one side only is a different door).
-    if (sourcesById.get(match.id).some((src) => peel(src.line1, src.line2).unit !== wantUnit)) {
-      return refuse('unit_differs');
-    }
-    const type = String(match.property_type || '').toLowerCase();
-    if (['commercial', 'business'].includes(type) || String(match.waveguard_tier || '') === 'Commercial') {
-      return refuse('commercial_account');
-    }
-    if (!FAIL_OPEN_CUSTOMER_STAGES.has(String(match.pipeline_stage || '').trim().toLowerCase())) {
-      return refuse('not_established_customer');
-    }
-    return { customer: match, reason: 'address_match' };
+    if (!key) return refuse('no_phone_or_address');
+    if (await householdPhoneOnFile(conn, key)) return refuse('phone_on_file');
+    const verdict = classifyHouseholdCandidates(await loadHouseholdCandidates(conn, resolved), resolved.unit);
+    return verdict.customer ? verdict : refuse(verdict.reason);
   } catch (e) {
     logger.warn(`[call-proc] household address match failed: ${e.code || e.name || 'error'}`);
     return refuse('lookup_error');
   }
+}
+
+// File the ONE suggestion card for a household match. The insert is conditional (a
+// card for this call is never duplicated, and a RESOLVED one is not re-opened);
+// returns true when a card is still open / in_progress for the call — the caller
+// re-adds the review reason to bridgeNeedsConfirmation every pass, so a retry keeps
+// it. Throws on a database failure (the caller logs code/name only).
+async function fileHouseholdSuggestionCard({ conn = db, callLogId, account, extracted = {}, phone, onFileAddress, extraction }) {
+  const existing = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'household_address_match' }).first('id', 'status');
+  if (existing) return ['open', 'in_progress'].includes(existing.status);
+  const accountName = [account.first_name, account.last_name].filter(Boolean).join(' ') || 'an existing customer';
+  const card = buildTriageItem({
+    callLogId,
+    flag: 'household_address_match',
+    onFileAddress,
+    extraction,
+    severity: 'advisory',
+    extraPayload: {
+      suggested_customer_id: String(account.id),
+      suggested_customer_name: accountName,
+      address: [extracted.address_line1, extracted.address_line2, extracted.city, extracted.zip].filter(Boolean).join(', ') || null,
+      caller_phone: phone,
+    },
+  });
+  card.summary = `Caller at ${accountName}'s address — book on that account?`;
+  await conn('triage_items').insert(card)
+    .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .ignore();
+  return true;
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -12102,9 +12151,7 @@ const CallRecordingProcessor = {
     const firstNameAdvisoryCreate = !extracted.first_name
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
       && !!String(extracted.last_name || '').trim()
-      && !!String(extracted.address_line1 || '').trim()
-      && ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
-      && effectiveAddressValidation?.inServiceArea === true;
+      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
@@ -12156,31 +12203,16 @@ const CallRecordingProcessor = {
         });
         if (householdMatch.customer) {
           try {
-            const alreadyFiled = await db('triage_items')
-              .where({ call_log_id: call.id, reason_code: 'household_address_match' }).first('id');
-            if (!alreadyFiled) {
-              const account = householdMatch.customer;
-              const accountName = [account.first_name, account.last_name].filter(Boolean).join(' ') || 'an existing customer';
-              const addressText = [extracted.address_line1, extracted.address_line2, extracted.city, extracted.zip].filter(Boolean).join(', ');
-              const card = buildTriageItem({
-                callLogId: call.id,
-                flag: 'household_address_match',
-                onFileAddress,
-                extraction: v2CanonicalExtraction || undefined,
-                severity: 'advisory',
-                extraPayload: {
-                  suggested_customer_id: String(account.id),
-                  suggested_customer_name: accountName,
-                  address: addressText || null,
-                  caller_phone: phone,
-                },
-              });
-              card.summary = `Caller at ${accountName}'s address — book on that account?`;
-              await db('triage_items').insert(card)
-                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                .ignore();
-              if (!bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');
-            }
+            const cardOpen = await fileHouseholdSuggestionCard({
+              callLogId: call.id,
+              account: householdMatch.customer,
+              extracted,
+              phone,
+              onFileAddress,
+              extraction: v2CanonicalExtraction || undefined,
+            });
+            // Every pass (a retry included) re-adds the review reason while the card stands.
+            if (cardOpen && !bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');
           } catch (suggestErr) {
             logger.warn(`[call-proc] household-address suggestion card failed for ${maskSid(callSid)}: ${suggestErr.code || suggestErr.name || 'db_error'}`);
           }
@@ -22486,6 +22518,8 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   findHouseholdCustomerByAddress,
+  fileHouseholdSuggestionCard,
+  firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

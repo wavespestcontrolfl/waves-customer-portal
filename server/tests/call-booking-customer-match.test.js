@@ -23,7 +23,8 @@ const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
-const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, advisoryBookingAddressHoldFields } = _test;
+const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, advisoryBookingAddressHoldFields,
+  fileHouseholdSuggestionCard, firstNameAdvisoryAddressOk } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -109,14 +110,38 @@ describe('FIX 1: a first-name-less booking needs the BOOKED address validated (s
   });
 });
 
+describe('FIX 1: the address a first-name-less customer is created at must be the validated premise', () => {
+  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE',
+    normalized: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' } };
+  const stored = { address_line1: '100 Example Lp', city: 'Sarasota', zip: '34240-1111' };
+  test('explicit PREMISE granularity is required; a missing one no longer passes', () => {
+    expect(firstNameAdvisoryAddressOk(AV, stored)).toBe(true);
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: undefined }, stored)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'ROUTE' }, stored)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'ambiguous' }, stored)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored)).toBe(false);
+    expect(firstNameAdvisoryAddressOk(null, stored)).toBe(false);
+  });
+  test('shadow mode: a verdict for a DIFFERENT street, ZIP or city than the V1 address being inserted means no creation', () => {
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '102 Example Loop' })).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, zip: '34241' })).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Parrish' })).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '' })).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, zip: '' })).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, normalized: {} }, stored)).toBe(false);
+    // a missing city on either side is silent; suffix aliases are equivalent
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: '' })).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' })).toBe(true);
+  });
+});
+
 describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
   test('the customer-create branch opens only behind the first-name gate and the validated-premise predicate', () => {
     expect(source).toMatch(/\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature/);
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
     expect(predicate).toContain('callFirstNameAdvisoryLive()');
     expect(predicate).toContain("String(extracted.last_name || '').trim()");
-    expect(predicate).toContain("['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)");
-    expect(predicate).toContain('effectiveAddressValidation?.inServiceArea === true');
+    expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted)');
   });
 
   test('customer_creation_failed expectation follows the same predicate', () => {
@@ -132,9 +157,8 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(step).toContain('addressValidation: effectiveAddressValidation');
     expect(step).toContain('service_address?.street_line_2');
     expect(step).toContain('effectiveAddressValidation?.normalized?.street_line_1');
-    expect(step).toContain("flag: 'household_address_match'");
-    expect(step).toContain('suggested_customer_id: String(account.id)');
-    expect(step).toContain("book on that account?`");
+    expect(step).toContain('fileHouseholdSuggestionCard({');
+    expect(step).toContain("if (cardOpen && !bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');");
     // read-only: no link, no contact write, no stamp, no backfill, no consent change
     for (const forbidden of ['customerId =', 'persistCallSecondaryContact', 'household_link', 'backfill', 'update(', "db('call_log')"]) {
       expect(step).not.toContain(forbidden);
@@ -318,6 +342,39 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').del();
     await trx('customers').insert(member({ pipeline_stage: 'new_lead' }));
     expect((await lookup()).reason).toBe('not_established_customer');
+  });
+
+  test('street equivalence is the shared helper: loop vs lp, directionals, on the call side and the stored rows', async () => {
+    const row = member({ address_line1: '1083 N Example Shell Lp' });
+    await trx('customers').insert(row);
+    expect((await lookup({ address_line1: '1083 North Example Shell Loop' })).customer?.id).toBe(row.id);
+    expect((await lookup({ address_line1: '1083 N Example Shell Lp' })).customer?.id).toBe(row.id);
+    // a different street type is a different street
+    expect((await lookup({ address_line1: '1083 N Example Shell Ave' })).reason).toBe('no_address_match');
+    // a stored twin spelled the other way still counts toward uniqueness
+    await trx('customers').insert(member({ id: randomUUID(), phone: '+19415550111', address_line1: '1083 North Example Shell Loop' }));
+    expect((await lookup({ address_line1: '1083 N Example Shell Loop' })).reason).toBe('multiple_customers_at_address');
+  });
+
+  test('the suggestion card: filed once, reported open on every retry, never re-opened once resolved', async () => {
+    await trx.raw('CREATE TEMP TABLE triage_items (LIKE public.triage_items INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP');
+    const callLogId = randomUUID();
+    const account = member();
+    const args = { conn: trx, callLogId, account, extracted: { address_line1: '1083 Example Shell Loop', city: 'Sarasota', zip: '34240' }, phone: NOT_ON_FILE };
+    expect(await fileHouseholdSuggestionCard(args)).toBe(true);
+    const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(card.reason_code).toBe('household_address_match');
+    expect(card.summary).toBe("Caller at Pat Example's address — book on that account?");
+    expect(card.payload).toMatchObject({ suggested_customer_id: account.id, suggested_customer_name: 'Pat Example' });
+    // RETRY with the card still open: no second card, but the caller is told it is open (re-adds the bridge reason)
+    expect(await fileHouseholdSuggestionCard(args)).toBe(true);
+    expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
+    await trx('triage_items').update({ status: 'in_progress' });
+    expect(await fileHouseholdSuggestionCard(args)).toBe(true);
+    // resolved: not re-opened, not re-added
+    await trx('triage_items').update({ status: 'resolved' });
+    expect(await fileHouseholdSuggestionCard(args)).toBe(false);
+    expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
   });
 
   test('a number stored only in secondary_phone is identity evidence, never "unknown"', async () => {
