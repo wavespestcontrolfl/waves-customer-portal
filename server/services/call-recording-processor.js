@@ -3723,6 +3723,22 @@ async function avAddressUniqueOwner(matches, opts) {
   }
 }
 
+// The durable fact "this call was linked to its customer as a HOUSEHOLD contact
+// (service-address match; the caller is NOT the account holder)". Stamped on
+// call_log.metadata.household_link in the same fenced write as the link itself
+// and read by every customer-field backfill, so a reprocess, a retry or a
+// later pass that only sees call_log.customer_id can never write the caller's
+// phone, email or name onto the account holder (codex pre-push P1). Pure.
+function householdLinkFromCall(call, customerId) {
+  if (!call || !customerId) return false;
+  let meta = call.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const link = meta && typeof meta === 'object' ? meta.household_link : null;
+  return !!link && String(link.customer_id || '') === String(customerId);
+}
+
 // GATE_CALL_HOUSEHOLD_ADDRESS_MATCH (owner ruling 2026-10-02): a caller from a
 // number NOT on file who is calling about the exact address of ONE existing
 // active residential customer is a household contact of that account (a
@@ -3768,21 +3784,68 @@ async function findHouseholdCustomerByAddress({ phone, address = {}, commercialC
       .first('id');
     if (phoneHit) return refuse('phone_on_file');
 
-    const rows = await conn('customers')
-      .whereNull('deleted_at')
-      .where({ active: true })
-      .whereRaw("LEFT(regexp_replace(COALESCE(zip, ''), '[^0-9]', '', 'g'), 5) = ?", [zip5])
+    // COMPLETE candidate set before claiming uniqueness (codex pre-push P1):
+    // no LIMIT, no ZIP / deleted / active pre-filter in SQL. The only SQL
+    // narrowing is a NECESSARY condition — the house number appears as a whole
+    // token in the street line — so every row that could key to this street is
+    // read. Soft-deleted and inactive rows are dropped only AFTER the set is
+    // built, and every other address source (an active customer_properties row
+    // on any account) adds its owner to the same set. A row with no ZIP could
+    // sit at this address, so it stays a candidate. "Exactly one" is claimed
+    // over that whole set or not at all.
+    // Every digit token of the call's line (a unit-first form such as
+    // "Apt 4 123 Main St" carries the unit number before the house number).
+    const numberTokens = [...new Set((street.match(/\b\d+[a-z]?\b/gi) || []).map((t) => t.toLowerCase()))];
+    if (numberTokens.length === 0) return refuse('no_house_number');
+    const houseRe = `(^|[^0-9a-z])(${numberTokens.join('|')})([^0-9a-z]|$)`;
+    // Both sides peel a unit-first form ("Apt 4 123 Main St") the same way before
+    // keying, so neither a stored nor a spoken unit-first line can hide a match.
+    const { splitUnitFirstLine } = require('../utils/address-normalizer');
+    const peel = (line, line2) => {
+      const first = splitUnitFirstLine(line);
+      return {
+        key: streetKey(first ? first.rest : line),
+        unit: unitKey(line2) || (first ? unitKey(first.unit) : streetEmbeddedUnitKey(line)),
+      };
+    };
+    const want = peel(street, address.address_line2);
+    const wantStreet = want.key;
+    if (!wantStreet) return refuse('no_phone_or_address');
+    const wantUnit = want.unit;
+    const zipFits = (z) => { const z5 = normalizeZip(z); return !z5 || z5 === zip5; };
+    const sourcesById = new Map(); // customer id -> [{ line1, line2 }]
+    const addSource = (id, line1, line2) => {
+      if (!sourcesById.has(id)) sourcesById.set(id, []);
+      sourcesById.get(id).push({ line1, line2 });
+    };
+    const addressRows = await conn('customers').whereRaw('address_line1 ~* ?', [houseRe])
+      .select('id', 'address_line1', 'address_line2', 'zip');
+    for (const r of addressRows) {
+      if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.id, r.address_line1, r.address_line2);
+    }
+    if (await conn.schema.hasTable('customer_properties')) {
+      const propRows = await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
+        .select('customer_id', 'address_line1', 'address_line2', 'zip');
+      for (const r of propRows) {
+        if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.customer_id, r.address_line1, r.address_line2);
+      }
+    }
+    if (sourcesById.size === 0) return refuse('no_address_match');
+    const candidates = await conn('customers').whereIn('id', [...sourcesById.keys()])
       .select('id', 'first_name', 'last_name', 'phone', 'address_line1', 'address_line2', 'zip',
-        'pipeline_stage', 'property_type', 'waveguard_tier')
-      .limit(50);
-    const wantStreet = streetKey(street);
-    const wantUnit = unitKey(address.address_line2) || streetEmbeddedUnitKey(street);
-    const sameStreet = rows.filter((r) => streetKey(r.address_line1) === wantStreet && wantStreet);
-    if (sameStreet.length === 0) return refuse('no_address_match');
-    if (sameStreet.length > 1) return refuse('multiple_customers_at_address');
-    const match = sameStreet[0];
-    const haveUnit = unitKey(match.address_line2) || streetEmbeddedUnitKey(match.address_line1);
-    if (wantUnit !== haveUnit) return refuse('unit_differs');
+        'pipeline_stage', 'property_type', 'waveguard_tier', 'active', 'deleted_at');
+    // Live = not soft-deleted and not explicitly inactive (a NULL active flag
+    // still counts as live so it can never hide a second household).
+    const live = candidates.filter((c) => !c.deleted_at && c.active !== false);
+    if (live.length === 0) return refuse('no_address_match');
+    if (live.length > 1) return refuse('multiple_customers_at_address');
+    const match = live[0];
+    if (match.active !== true) return refuse('not_active');
+    // Every address source of the match must carry the call's unit (a unit on
+    // one side only is a different door).
+    if (sourcesById.get(match.id).some((src) => peel(src.line1, src.line2).unit !== wantUnit)) {
+      return refuse('unit_differs');
+    }
     const type = String(match.property_type || '').toLowerCase();
     if (['commercial', 'business'].includes(type) || String(match.waveguard_tier || '') === 'Commercial') {
       return refuse('commercial_account');
@@ -6871,11 +6934,15 @@ async function backfillLinkedCustomerFromExtraction({ customerId, existing, extr
   return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
 }
 
-async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false, suppressEmail = false } = {}) {
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false, householdContact = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
-  if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
-  if (!customer.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
+  // householdContact: the caller is NOT the account holder (service-address
+  // link) — their name, phone and email are never written onto the account.
+  const suppressEmail = householdContact;
+  suppressPhone = suppressPhone || householdContact;
+  if (!customer.first_name && extracted.first_name && !householdContact) updates.first_name = capitalizeName(extracted.first_name);
+  if (!customer.last_name && extracted.last_name && !householdContact) updates.last_name = capitalizeName(extracted.last_name);
   // suppressPhone: the caller-phone identity check flagged that this call's
   // ANI isn't on any of the linked customer's phone slots — writing the
   // number here would permanently save an UNVERIFIED phone to a possibly
@@ -12033,7 +12100,9 @@ const CallRecordingProcessor = {
     let phoneMatchedThisPass = false;
     // GATE_CALL_HOUSEHOLD_ADDRESS_MATCH: this pass linked the call by service
     // address (the caller's number is NOT on the account).
-    let householdLinkedThisPass = false;
+    // Seeded from the persisted household_link stamp so a reprocess / retry that
+    // arrives with call.customer_id already set stays household-protected.
+    let householdLinkedThisPass = householdLinkFromCall(call, customerId);
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -12077,7 +12146,15 @@ const CallRecordingProcessor = {
       if (householdMatch && !householdMatch.customer) {
         logger.info(`[call-proc] household address match refused for ${maskSid(callSid)}: ${householdMatch.reason}`);
       }
-      if (existing) {
+      if (existing && householdLinkFromCall(call, existing.id)) {
+        // A retry of a call the first pass linked as a HOUSEHOLD contact whose
+        // checkpoint never landed: the caller's number now sits in the
+        // account's service-contact slot, so the phone match finds the account
+        // again. Same protection as the first pass — link, never backfill.
+        customerId = existing.id;
+        householdLinkedThisPass = true;
+        logger.info(`[call-proc] ${maskSid(callSid)} re-linked to household account ${customerId}; no contact backfill`);
+      } else if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
         // Update with any new info (email + address; shared with the
@@ -12089,6 +12166,23 @@ const CallRecordingProcessor = {
         // Link only: NO email/address/phone backfill onto the account holder
         // from a different person's call. The caller's name + number go to a
         // service-contact slot through the shared secondary-contact writer.
+        // The link and its household stamp are ONE token-fenced write: a lost
+        // claim links nothing, and a crash after this point still leaves the
+        // stamp for the retry (see householdLinkFromCall).
+        const stamped = await db('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            customer_id: householdMatch.customer.id,
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{household_link}', ?::jsonb, true)",
+              [JSON.stringify({ customer_id: String(householdMatch.customer.id), matched_by: 'service_address', linked_at: new Date().toISOString() })],
+            ),
+            updated_at: new Date(),
+          });
+        if (!stamped) {
+          logger.warn(`[call-proc] household link skipped for ${maskSid(callSid)} — processing claim lost`);
+        } else {
         customerId = householdMatch.customer.id;
         householdLinkedThisPass = true;
         const householdContact = {
@@ -12131,6 +12225,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] household-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
+        }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
@@ -16774,7 +16869,7 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, suppressEmail: householdLinkedThisPass });
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, householdContact: householdLinkedThisPass });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the
@@ -20334,7 +20429,11 @@ const CallRecordingProcessor = {
     // the only thing the release paths read.
     let dripHoldRecorded = null;
     let newsletterHoldRecorded = null;
-    if (customerId && extracted.email && v2EmailBlocked) {
+    if (customerId && householdLinkedThisPass) {
+      // The caller's email is a household contact's, not the account holder's:
+      // never enroll it against the account's customer id.
+      beehiivResult = { skipped: 'household_contact' };
+    } else if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
     } else if (customerId && extracted.email
@@ -22372,6 +22471,7 @@ CallRecordingProcessor._test = {
   sanitizeLastNameAdvisoryInsertError,
   legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
+  backfillCustomerFromAppointmentContact,
   prelinkedBackfillGate,
   thirdPartyCallNatureFromV2,
   linkedCustomerAcceptsBackfill,
@@ -22422,6 +22522,7 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   findHouseholdCustomerByAddress,
+  householdLinkFromCall,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

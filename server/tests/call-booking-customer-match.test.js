@@ -17,6 +17,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: () => false, isOwnedNumber: () => false }));
+let mockCaptured = null;
+const mockApplyUpdates = jest.fn(async (args) => { mockCaptured = JSON.parse(JSON.stringify(args.updates)); return { emailApplied: true }; });
+jest.mock('../services/customer-email-fanout', () => ({
+  applyCustomerUpdatesWithEmailClaimGuard: (...args) => mockApplyUpdates(...args),
+  propagateCustomerEmailChange: jest.fn(async () => ({})),
+}));
 
 const fs = require('fs');
 const knex = require('knex');
@@ -24,7 +30,10 @@ const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
-const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress } = _test;
+const {
+  validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall,
+  backfillCustomerFromAppointmentContact, prelinkedBackfillGate,
+} = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -114,11 +123,66 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(branch).toContain("flag: 'household_contact_linked'");
     expect(branch).not.toContain('backfillLinkedCustomerFromExtraction');
     expect(source).toContain('phoneMatchedThisPass: phoneMatchedThisPass || householdLinkedThisPass');
-    expect(source).toContain('suppressEmail: householdLinkedThisPass');
+    expect(source).toContain('householdContact: householdLinkedThisPass');
   });
 
   test('the confirmation greeting falls back to "there"', () => {
     expect(source).toContain("const firstName = customerValidation.details.firstName || 'there';");
+  });
+});
+
+describe('FIX 2: household identity survives reprocess, retry and later backfills', () => {
+  const ACCOUNT = '11111111-1111-4111-8111-111111111111';
+  const OTHER = '22222222-2222-4222-8222-222222222222';
+  const stamped = (customerId = ACCOUNT, asString = false) => {
+    const metadata = { household_link: { customer_id: customerId, matched_by: 'service_address' } };
+    return { metadata: asString ? JSON.stringify(metadata) : metadata };
+  };
+
+  test('householdLinkFromCall reads the persisted stamp for the linked customer only', () => {
+    expect(householdLinkFromCall(stamped(), ACCOUNT)).toBe(true);
+    expect(householdLinkFromCall(stamped(ACCOUNT, true), ACCOUNT)).toBe(true);
+    expect(householdLinkFromCall(stamped(), OTHER)).toBe(false); // an operator relink to someone else is not a household link
+    expect(householdLinkFromCall({ metadata: {} }, ACCOUNT)).toBe(false);
+    expect(householdLinkFromCall({ metadata: 'not json' }, ACCOUNT)).toBe(false);
+    expect(householdLinkFromCall(null, ACCOUNT)).toBe(false);
+    expect(householdLinkFromCall(stamped(), null)).toBe(false);
+  });
+
+  const extracted = { first_name: 'Sally', last_name: 'Example', email: 'sally@example.com', phone: '+19415550177', address_line1: '1083 Example Shell Loop' };
+  const account = { id: ACCOUNT, first_name: '', last_name: null, phone: null, email: null, address_line1: '1083 Example Shell Loop', city: 'Sarasota', state: 'FL', zip: '34240' };
+
+  test('REPROCESS: the pre-linked backfill gate is closed once the stamp is seeded, open without it', () => {
+    const base = { customerId: ACCOUNT, createdCustomerFromCall: false, extracted, thirdPartyCallNature: false };
+    const reprocessed = { customer_id: ACCOUNT, from_phone: '+19415550177', direction: 'inbound', ...stamped() };
+    // processRecording seeds householdLinkedThisPass from the stamp and ORs it into phoneMatchedThisPass.
+    expect(prelinkedBackfillGate({ ...base, call: reprocessed, phoneMatchedThisPass: householdLinkFromCall(reprocessed, ACCOUNT) }).eligible).toBe(false);
+    const ordinary = { customer_id: ACCOUNT, from_phone: '+19415550177', direction: 'inbound', metadata: {} };
+    expect(prelinkedBackfillGate({ ...base, call: ordinary, phoneMatchedThisPass: householdLinkFromCall(ordinary, ACCOUNT) }).eligible).toBe(true);
+  });
+
+  test('REPROCESS: the appointment backfill never writes the caller name, phone or email onto the account', async () => {
+    mockApplyUpdates.mockClear();
+    const out = await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', { householdContact: true });
+    expect(out).toBe(account);
+    expect(mockApplyUpdates).not.toHaveBeenCalled();
+  });
+
+  test('control: without the household flag the same backfill does write them', async () => {
+    mockApplyUpdates.mockClear();
+    await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', {}).catch(() => {});
+    expect(mockApplyUpdates).toHaveBeenCalled();
+    expect(mockCaptured).toMatchObject({ first_name: 'Sally', phone: '+19415550177', email: 'sally@example.com' });
+  });
+
+  test('wiring: stamp + customer link are one token-fenced write, a retry that re-finds the account by the saved slot phone is still protected, and the drip enroll is skipped', () => {
+    const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
+    expect(branch).toContain("where('processing_token', procToken)");
+    expect(branch).toContain("'{household_link}'");
+    expect(branch).toContain('customer_id: householdMatch.customer.id');
+    expect(source).toContain('if (existing && householdLinkFromCall(call, existing.id)) {');
+    expect(source).toContain('let householdLinkedThisPass = householdLinkFromCall(call, customerId);');
+    expect(source).toContain("beehiivResult = { skipped: 'household_contact' }");
   });
 });
 
@@ -131,6 +195,7 @@ const SKIP = !process.env.DATABASE_URL;
   beforeEach(async () => {
     trx = await database.transaction();
     await trx.raw('CREATE TEMP TABLE customers (LIKE public.customers INCLUDING DEFAULTS) ON COMMIT DROP');
+    await trx.raw('CREATE TEMP TABLE customer_properties (LIKE public.customer_properties INCLUDING DEFAULTS) ON COMMIT DROP');
   });
   afterEach(async () => { await trx.rollback(); });
   afterAll(async () => { await database.destroy(); });
@@ -171,6 +236,58 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await lookup({}, { addressValidation: av })).toEqual({ customer: null, reason: 'address_not_validated' });
     }
     expect((await lookup({}, { addressValidation: { status: 'corrected', inServiceArea: true } })).customer).not.toBeNull();
+  });
+
+  test('uniqueness is claimed over the COMPLETE candidate set: nothing can trim a second live household out of the count', async () => {
+    const row = member();
+    await trx('customers').insert(row);
+    // (a) a second household with no ZIP on file
+    const noZip = member({ id: randomUUID(), first_name: 'Lee', phone: '+19415550103', zip: null });
+    await trx('customers').insert(noZip);
+    expect((await lookup()).reason).toBe('multiple_customers_at_address');
+    await trx('customers').where({ id: noZip.id }).del();
+    // (b) a second household whose active flag is NULL (still live)
+    await trx('customers').insert(member({ id: randomUUID(), phone: '+19415550104', active: null }));
+    expect((await lookup()).reason).toBe('multiple_customers_at_address');
+    await trx('customers').where({ phone: '+19415550104' }).del();
+    // (c) a second household known only through an active customer_properties row
+    const other = member({ id: randomUUID(), phone: '+19415550105', address_line1: '9 Elsewhere Way', zip: '34241' });
+    await trx('customers').insert(other);
+    await trx('customer_properties').insert({ customer_id: other.id, address_line1: '1083 Example Shell Loop', zip: '34240', active: true, address_key: 'k1' });
+    expect((await lookup()).reason).toBe('multiple_customers_at_address');
+    // an INACTIVE property row is a former address, not a household
+    await trx('customer_properties').update({ active: false });
+    expect((await lookup()).customer?.id).toBe(row.id);
+  });
+
+  test('many unrelated customers in the ZIP never push the real second household out of view (no LIMIT)', async () => {
+    const row = member();
+    const filler = Array.from({ length: 75 }, (_, i) => member({
+      id: randomUUID(), phone: `+1941555${String(2000 + i)}`, address_line1: `${2000 + i} Filler Street`,
+    }));
+    const twin = member({ id: randomUUID(), phone: '+19415550106', first_name: 'Lee' });
+    await trx('customers').insert([...filler, row, twin]);
+    expect((await lookup()).reason).toBe('multiple_customers_at_address');
+  });
+
+  test('soft-deleted and inactive twins are dropped only after counting and never block the live match', async () => {
+    const row = member();
+    await trx('customers').insert([
+      row,
+      member({ id: randomUUID(), phone: '+19415550107', deleted_at: new Date() }),
+      member({ id: randomUUID(), phone: '+19415550108', active: false }),
+    ]);
+    expect((await lookup()).customer?.id).toBe(row.id);
+  });
+
+  test('a unit-first call line still finds the candidates', async () => {
+    const row = member({ address_line2: 'Unit 4' });
+    await trx('customers').insert(row);
+    expect((await lookup({ address_line1: 'Unit 4 1083 Example Shell Loop' })).customer?.id).toBe(row.id);
+    expect((await lookup({ address_line1: 'Unit 5 1083 Example Shell Loop' })).reason).toBe('unit_differs');
+    // a stored unit-first twin cannot hide from a clean call line
+    await trx('customers').insert(member({ id: randomUUID(), phone: '+19415550109', address_line1: 'Apt 4 1083 Example Shell Loop', address_line2: null }));
+    expect((await lookup({ address_line1: '1083 Example Shell Loop', address_line2: 'Unit 4' })).reason).toBe('multiple_customers_at_address');
   });
 
   test('more than one customer at the address -> refused', async () => {
