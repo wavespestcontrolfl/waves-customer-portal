@@ -11,8 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "98606d7fda90e0504c3e761ef52ac07269b88a68047ecc72839660ec9c7ecbf9"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "5a47d890a88ee805625c537bb48f540c4fb6c2569dc75c490647c6dcbd9a2d8c"
     },
     "slug": "aphid",
     "common_name": "Aphid",
@@ -78,9 +78,7 @@
     "peak_months": [
       2,
       3,
-      4,
-      10,
-      11
+      4
     ],
     "service": {
       "line": "tree_shrub",
@@ -97,7 +95,8 @@
     },
     "tech_notes": "ID color morph and host plant. Horticultural oil/insecticidal soap for light cases; systemic for persistent, heavy infestations.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/in330"
+      "https://ask.ifas.ufl.edu/publication/in330",
+      "https://gardeningsolutions.ifas.ufl.edu/care/pests-and-diseases/pests/thrips/"
     ],
     "links": {
       "site_page": "/pest-identifier/aphid/",
@@ -735,7 +734,9 @@
       6,
       7,
       8,
-      9
+      9,
+      10,
+      11
     ],
     "service": {
       "line": "tree_shrub",
@@ -756,12 +757,13 @@
     },
     "legacy_slugs": [],
     "sources": [
-      "https://journals.flvc.org/edis/article/view/119491"
+      "https://journals.flvc.org/edis/article/view/119491",
+      "https://ask.ifas.ufl.edu/publication/IN913"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "0ba4178c25034ad2eb1c97c8395204f35d128c6898178997f0cbd41746daa11f"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "fc9da79dccdd58005ff05fffc1f84dea0bc812c28fe18e71b67326a8c293deb3"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1186,6 +1188,7 @@
       12
     ],
     "peak_months": [
+      4,
       5,
       6,
       7,
@@ -1212,12 +1215,13 @@
     },
     "legacy_slugs": [],
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/in307"
+      "https://ask.ifas.ufl.edu/publication/in307",
+      "https://ask.ifas.ufl.edu/publication/IN307"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Peak months follow the cited 'hot, dry summer and fall' pattern for twospotted spider mite; Florida's summer is also rainy season, which can knock populations down, so actual SWFL peak timing may vary by year.",
-      "approval_hash": "9578e60a1d0da4ede4d06763a76fd681f421b3643d844341419c465fec7f6119"
+      "notes": "Peak months follow the cited 'hot, dry summer and fall' pattern for twospotted spider mite; Florida's summer is also rainy season, which can knock populations down, so actual SWFL peak timing may vary by year. Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "f2a00c3b057266bb2695658932a449043cc670a4acf9628b57875eb397ecb69e"
     },
     "role": "plant_pest",
     "risk": "low",

@@ -31,7 +31,7 @@ describe('level rule (derived from catalog months)', () => {
 
   test('every item levels array matches the catalog rule for every month', () => {
     const cal = buildYardCalendar({ month: 1 });
-    const slugsOf = { nutsedge: ['yellow-nutsedge', 'purple-nutsedge'], 'winter-weeds': ['cudweed', 'asiatic-hawksbeard'] };
+    const slugsOf = { nutsedge: ['yellow-nutsedge', 'purple-nutsedge'], 'winter-weeds': ['cudweed'] };
     for (const item of cal.items) {
       const entries = (slugsOf[item.id] || [item.id]).map((s) => catalog.getEntry(s));
       item.levels.forEach((lv, i) => {
@@ -61,8 +61,9 @@ describe('combined rows take the max of their members', () => {
     const nut = byId(buildYardCalendar({ month: 6 }), 'nutsedge');
     expect(nut.level).toBe(3);
     expect(yn.peak_months.includes(6) || pn.peak_months.includes(6)).toBe(true);
-    // Mar-Apr and Oct-Nov in season, Dec-Feb off.
-    expect(nut.levels).toEqual([0, 0, 2, 2, 3, 3, 3, 3, 3, 2, 2, 0]);
+    // UF/IFAS EP569: both nutsedges grow in all seasons in Florida, most in
+    // summer (owner 2026-10-02): low year-round, May-Sep peak.
+    expect(nut.levels).toEqual([1, 1, 1, 1, 3, 3, 3, 3, 3, 1, 1, 1]);
     expect(byId(buildYardCalendar({ month: 1 }), 'winter-weeds').levels).toEqual([3, 3, 3, 2, 0, 0, 0, 0, 0, 2, 2, 3]);
   });
 });
@@ -144,7 +145,7 @@ describe('trend', () => {
 
   test('easing_next_month when peak drops', () => {
     expect(t(11, 'sod-webworm')).toBe('easing_next_month'); // Nov peak -> Dec low
-    expect(t(8, 'take-all-root-rot')).toBe('easing_next_month'); // Aug peak -> Sep in season
+    expect(t(9, 'take-all-root-rot')).toBe('easing_next_month'); // Sep peak -> Oct in season
   });
 
   test('null when steady or falling from below peak', () => {
