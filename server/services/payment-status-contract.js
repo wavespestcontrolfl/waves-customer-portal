@@ -513,6 +513,15 @@ function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scope
 // must carry one of those amounts. A true sentence about a DIFFERENT record is off target (held), never an answer.
 const INBOUND_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
 const amountCentsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
+const INBOUND_TENDER_RES = [
+  ['card', /\b(?:card|credit|debit|visa|mastercard|amex|discover|apple\s*pay|google\s*pay)\b/i],
+  ['ach', /\b(?:ach|bank(?:\s+(?:account|transfer|draft))?|e-?check|checking)\b/i],
+  ['zelle', /\bzelle\b/i],
+  ['cash', /\bcash\b/i],
+  ['check', /\b(?:paper\s+)?che(?:ck|que)s?\b(?!\s+(?:on|in|with|if|whether|that|to\s+see))/i],
+];
+// the tender a rendered payment sentence names ('card' / 'ach'), or null when it names none
+const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH payment\b/.test(t) ? 'ach' : null);
 function copiesOffTarget(copied, inboundText) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
@@ -521,8 +530,13 @@ function copiesOffTarget(copied, inboundText) {
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
   const namedTails = new Set([...named.tail.map(stripZeros), ...named.full.map((f) => stripZeros(f.split('-').pop()))]);
   const amounts = new Set((inbound.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf));
+  // Codex round-60 P2: a payment method the customer named. A rendered payment sentence names a tender only when the row proves it (card
+  // / ACH from Stripe columns; a manual tender - Zelle, cash, check - is never named), so a copied payment sentence answers a tender
+  // question only when it names THAT tender: a Zelle / cash / check question is never answered by a copied receipt.
+  const namedTenders = INBOUND_TENDER_RES.filter(([, re]) => re.test(inbound)).map(([tender]) => tender);
   return copied.some((sentence) => {
     const t = String(sentence);
+    if (namedTenders.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
     if (inv && (named.full.length || named.tail.length)) {
       const num = inv[1].toUpperCase();

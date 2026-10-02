@@ -814,3 +814,17 @@ describe('the snapshot records the Zelle invoice a copied Zelle sentence named',
     expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: NO }], reply: NO })).toEqual({ customer_id: 'c1', sentences: [NO] });
   });
 });
+
+// Codex round-60 P2: a copied receipt answers a tender question only when it names THAT tender
+describe('a copied payment sentence and the payment method the customer named', () => {
+  const CARD = 'We received your $100.00 card payment on Sep 12, 2026.';
+  const GEN = 'We received your $100.00 payment on Sep 12, 2026.';
+  test.each([
+    [GEN, 'Did my Zelle payment arrive?', true], [GEN, 'Did you get the cash I left?', true], [GEN, 'Did my check clear?', true],
+    [CARD, 'Did my bank transfer go through?', true], [CARD, 'Did my card payment go through?', false],
+    [GEN, 'Did my payment go through?', false], [GEN, 'Can you check on my payment?', false],
+    ['Your account balance is $95.00.', 'Did my Zelle arrive?', false],
+  ])('%s / %s => off target: %s', (copied, inbound, off) => {
+    expect(c.copiesOffTarget([copied], inbound)).toBe(off);
+  });
+});

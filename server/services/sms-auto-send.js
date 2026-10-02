@@ -843,6 +843,11 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
           ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
           : undefined,
         laneFields.providerPreSendCheck,
+        // Codex round-60 P1: the lane predicate above reads the DB too (the booked re-service reference), so the billing fingerprint is
+        // read ONCE MORE after it - the last read before the provider request is a billing one (a single query on the handoff connection)
+        billingFingerprint !== undefined
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint })
+          : undefined,
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an

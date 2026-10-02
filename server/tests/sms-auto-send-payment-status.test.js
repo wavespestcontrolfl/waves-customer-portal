@@ -205,3 +205,12 @@ describe('auto-send billing fingerprint at the provider boundary', () => {
     await expect(check.afterMarker({ dbi: dbiWith('fp-b') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY' });
   });
 });
+
+// Codex round-60 P1: the lane predicate reads the DB too, so the billing fingerprint is read once more after it (the last read)
+test('autoSendMessage composes the billing fingerprint again AFTER the lane predicate', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/sms-auto-send'), 'utf8');
+  const lane = src.indexOf('        laneFields.providerPreSendCheck,\n');
+  const again = src.indexOf("billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint })", lane);
+  expect(lane).toBeGreaterThan(-1);
+  expect(again).toBeGreaterThan(lane);
+});
