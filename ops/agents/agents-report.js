@@ -102,11 +102,14 @@ async function main() {
   const laneRows = lanes.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL).map((l) => [
     l.status === 'attention' ? '!' : l.status === 'active' ? '' : '·',
     l.id, l.area, l.calls, pct(l.okRate), pct(l.fallbackRate), ms(l.p50LatencyMs), ms(l.p95LatencyMs),
-    `${k(l.tokens.input + l.tokens.cachedInput)}/${k(l.tokens.output)}`,
+    // Shown as the ledger's own counters, never summed: cached input is inside
+    // the input count for OpenAI / Gemini and beside it for Anthropic
+    // (services/llm-cost.js).
+    `${k(l.tokens.input)}/${k(l.tokens.cachedInput)}/${k(l.tokens.output)}`,
     usd(l.estCostUsd), l.unpricedCalls == null ? '—' : l.unpricedCalls,
     l.attentionReasons.map((r) => r.detail || r.kind).join('; '),
   ]);
-  console.log(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/out', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
+  console.log(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/cached/out', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
 
   const unpriced = lanes.lanes.filter((l) => (l.unpricedCalls || 0) > 0);
   if (unpriced.length) console.log(`\nunpriced calls (model-name matching to check): ${unpriced.map((l) => `${l.id} ${l.unpricedCalls}`).join(', ')}`);
