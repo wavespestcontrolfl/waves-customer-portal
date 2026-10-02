@@ -92,7 +92,7 @@ function productionAnswers(call) {
 async function askAndRecord(call, prod, verdict) {
   try {
     const { askPackage } = require('./typed-decisions/jev');
-    const { packageFor } = require('./typed-decisions/packages');
+    const { packageFor, DEFAULT_DECISION_PROVIDER } = require('./typed-decisions/packages');
     const { recordDecisions } = require('./typed-decisions/shadow-recorder');
     const { callSubjectHash, callTranscriptSpan } = require('./typed-decisions/subject-hash');
     const result = await askPackage('call_judge.v2', {
@@ -105,7 +105,7 @@ async function askAndRecord(call, prod, verdict) {
     const baselines = { complaint: { deep_judge: bool(verdict.complaint) } };
     for (const f of JEV_SHARED_FIELDS) baselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
     const recorded = await recordDecisions({
-      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines,
+      capability: 'call_judge', pkg: packageFor('call_judge.v2'), provider: DEFAULT_DECISION_PROVIDER, subjectType: 'call_log', subjectId: call.id, result, baselines,
       subjectHash: callSubjectHash(call.transcription),
     });
     return recorded.recorded > 0 ? 'recorded' : 'failed';

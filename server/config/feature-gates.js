@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file rings ONE Customers bell; read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. Series EXTENSION riding the lawn ships in a follow-up PR — do not flip this gate until it lands, or riders drift off the lawn after their first seeded year. Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_SHORTLINK_LEGACY_EXPIRE=true (retire the legacy 1-7 char short-link code space: /l/<legacy code> answers 410 and resolveShortCode returns null for it, so ~2k guessable codes that front never-expiring bearer-token URLs stop working; read at call time via shortlinkLegacyExpireLive(), dark by default; ungated either way, a re-send never reuses a legacy code)
@@ -18,6 +19,7 @@
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
+ *   GATE_HOME_LINE=true (each customer's outbound texts use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -144,6 +146,7 @@
  *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the program focuses on this month, built from server/config/protocols.json months (lawn-program-line.js), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
+ *   GATE_LAWN_DIAGNOSTIC_EVIDENCE=true (prospect lawn report "why we think so": GET /api/public/lawn-diagnostic/:token adds a `basis` line ("Based on 4 photos.", plus a fixed note when photo quality limited the read) and, per finding, `evidence` { why, certainty, confirm }: what the condition looks like, how sure the read is, and the on-site check that would settle it. Every string is fixed copy in lawn-diagnostic-evidence.js selected by the finding's allowlisted condition label and clamped confidence; the stored observed_evidence / inferred_context / confirmation_step free text is still never published. One extra read (a photo count) per report view while live. The lawn-assessment teaser is unchanged. Ships DARK, read at call time via lawnDiagnosticEvidenceLive(); off = byte-identical payload and page)
  *   GATE_LAWN_SINCE_LAST=true (lawn report "Since your last visit" block: the lead (GATE_LAWN_REPORT_LEAD) gains reportV2.lead.sinceLast { priorDate, lines } and the web report prints it above "What we applied today": what the last visit applied, the overall direction and at most two per-treatment states from the progress engine, and which watched topics are still on today's list. Every sentence is a fixed string selected by key in lawn-since-last-copy.js (no model, no number, no timing word), and a state is spoken only for an owner-approved expectation row; photos that cannot support a comparison say nothing. Needs GATE_LAWN_VISIT_MEMORY (the memory it reads) and GATE_LAWN_REPORT_LEAD (the block it renders in); with either off it does nothing. Live web view only (mode 'live'): PDF and static builds never carry the key, so the PDF and its cache key are unchanged. Ships DARK, read at call time via lawnSinceLastLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
@@ -1153,6 +1156,15 @@ const gates = {
   // block and snapshot shape byte-identical. Read at call time by
   // server/services/sms-shadow-drafter.js — this entry is for logGateStatus only.
   smsOffersScheduler: gateEnvValue('GATE_SMS_OFFERS_SCHEDULER'),
+  // SMS offer ledger (SMS booking completion, slice 1 of
+  // sms-booking-complete-scope 2026-10-02): after the provider accepts a reply
+  // that quoted appointment times, record in sms_offers which slots the SENT
+  // text carried, for which job, and until when (services/sms-offers.js, called
+  // from messaging/send-customer-message.js). Records only: nothing reads the
+  // table to act, and no text changes. Dark in every environment: gate off, the
+  // send path does not load the ledger module. Read at call time by
+  // sms-offers.js offerLedgerLive() — this entry is for logGateStatus only.
+  smsOfferLedger: gateEnvValue('GATE_SMS_OFFER_LEDGER'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -2636,6 +2648,10 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Daily city-level forecast snapshots + read-only historical comparisons.
+  // Opt-in everywhere after migration; live consumers use gateEnvValue at call time.
+  pestForecastHistory: gateEnvValue('GATE_PEST_FORECAST_HISTORY'),
+
   // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
   // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
   // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
@@ -3397,6 +3413,14 @@ const gates = {
   // same either way. Read at CALL time; this entry is for logGateStatus.
   smsLineAddressFallback: gateEnvValue('GATE_SMS_LINE_ADDRESS_FALLBACK'),
 
+  // Customer home line (owner ruling 2026-10-02, "local line everywhere").
+  // ON: deriveOutboundNumber picks a known customer's stored home line
+  // (homeLineLocationId) ahead of any per-call office, and the daily sweep
+  // (services/home-line.js) stamps it. OFF (unset is the kill switch):
+  // byte-identical to before. Read at CALL time via homeLineLive(); this
+  // entry is for logGateStatus.
+  homeLine: process.env.GATE_HOME_LINE === 'true',
+
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
   // nothing reminds the tech to tap Complete). ON: one 7 PM ET text
@@ -3817,6 +3841,11 @@ const gates = {
   // lawnVisitMemoryLive().
   lawnVisitMemory: gateEnvValue('GATE_LAWN_VISIT_MEMORY'),
 
+  // Prospect lawn report "why we think so" (fixed evidence copy per finding and
+  // a photo-basis line on the public lawn-diagnostic payload). Ships DARK. This
+  // entry is for logGateStatus only: the route reads
+  // GATE_LAWN_DIAGNOSTIC_EVIDENCE at call time via lawnDiagnosticEvidenceLive().
+  lawnDiagnosticEvidence: gateEnvValue('GATE_LAWN_DIAGNOSTIC_EVIDENCE'),
   // Lawn report "Since your last visit" block: the customer render of the
   // treatment memory and the progress engine, as reportV2.lead.sinceLast.
   // Ships DARK. This entry is for logGateStatus only: report-data.js reads
@@ -3992,6 +4021,13 @@ function pestRidesLawnAtAcceptLive() {
 // `fastCompleteReportEnabled` and the voice-facts route.
 function fastCompleteReportLive() {
   return process.env.GATE_FAST_COMPLETE_REPORT === 'true';
+}
+
+// GATE_NEIGHBORHOOD_ACCESS read at CALL time — strict `=== 'true'`; unset = kill.
+// Files a saved neighborhood gate code under the property's neighborhood
+// (services/neighborhood-access.js fileGateCodeAfterSave).
+function neighborhoodAccessLive() {
+  return process.env.GATE_NEIGHBORHOOD_ACCESS === 'true';
 }
 
 function pestInsiderProofLive() {
@@ -4376,6 +4412,11 @@ function lawnVisitMemoryLive() {
   return gateEnvValue('GATE_LAWN_VISIT_MEMORY');
 }
 
+// GATE_LAWN_DIAGNOSTIC_EVIDENCE read at CALL time (same 1/true/on convention).
+function lawnDiagnosticEvidenceLive() {
+  return gateEnvValue('GATE_LAWN_DIAGNOSTIC_EVIDENCE');
+}
+
 // GATE_LAWN_SINCE_LAST read at CALL time (same 1/true/on convention). The
 // block needs the memory it reads and the lead it renders in, so this is
 // false unless all three gates are live.
@@ -4463,6 +4504,14 @@ function leadEmailLinksLive() {
 // — see its own header for why.
 function visitPrepTechAlertsLive() {
   return process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true';
+}
+
+// GATE_HOME_LINE read at CALL time — strict `=== 'true'`. The canonical
+// reader for the customer home line (twilio.js deriveOutboundNumber and the
+// home-line sweep); the `homeLine` gates-map entry above is for
+// logGateStatus only.
+function homeLineLive() {
+  return process.env.GATE_HOME_LINE === 'true';
 }
 
 // GATE_SMS_LINK_WRAP read at CALL time — strict `=== 'true'`, same convention
@@ -4859,6 +4908,7 @@ module.exports.knownGateCatalog = knownGateCatalog;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
+module.exports.homeLineLive = homeLineLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
@@ -4873,6 +4923,7 @@ module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;
+module.exports.lawnDiagnosticEvidenceLive = lawnDiagnosticEvidenceLive;
 module.exports.lawnSinceLastLive = lawnSinceLastLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
@@ -4924,5 +4975,7 @@ module.exports.llmCostTrackingLive = llmCostTrackingLive;
 module.exports.fastCompleteReportLive = fastCompleteReportLive;
 // GATE_KB_CUSTOMER_AUDIENCE reader, on its own line.
 module.exports.kbCustomerAudienceLive = kbCustomerAudienceLive;
+// GATE_NEIGHBORHOOD_ACCESS reader, on its own line.
+module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;

@@ -20,11 +20,13 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/stripe', () => ({}));
 const mockControl = jest.fn();
 const mockSummary = jest.fn();
+const mockSummaryForInvoice = jest.fn();
 const mockRecord = jest.fn(async () => {});
 jest.mock('../services/customer-dunning/wiring', () => ({
   ...jest.requireActual('../services/customer-dunning/wiring'),
   controlCustomerSchedule: (...a) => mockControl(...a),
   customerScheduleSummary: (...a) => mockSummary(...a),
+  customerScheduleSummaryForInvoice: (...a) => mockSummaryForInvoice(...a),
   recordStaffControl: (...a) => mockRecord(...a),
 }));
 const mockSendNextTouchNow = jest.fn();
@@ -57,7 +59,7 @@ const post = (base, path, body, role = 'admin') => fetch(`${base}${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json', 'x-test-role': role }, body: JSON.stringify(body || {}),
 });
 
-beforeEach(() => { mockControl.mockReset(); mockSendNextTouchNow.mockReset(); mockSummary.mockReset(); mockRecord.mockClear(); });
+beforeEach(() => { mockControl.mockReset(); mockSendNextTouchNow.mockReset(); mockSummary.mockReset(); mockSummaryForInvoice.mockReset(); mockRecord.mockClear(); });
 
 describe('POST /api/admin/customers/:id/dunning-schedule/:control', () => {
   test.each(['send-now', 'pause', 'resume', 'release'])('%s: admin only; passes the control, the admin and a trimmed reason; answers what the control returned', async (control) => {
@@ -239,9 +241,10 @@ describe('GET /api/admin/invoices/:id/followup', () => {
     expect(mockSummary).toHaveBeenCalledWith(CUST);
   });
 
-  test('not on combined reminders: customerSchedule is null; no sequence: null without a lookup', async () => {
+  test('not on combined reminders: customerSchedule is null, with or without a sequence', async () => {
     sequenceRead({ id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, status: 'active', step_index: 2 });
     mockSummary.mockResolvedValue(null);
+    mockSummaryForInvoice.mockResolvedValue(null);
     await withServer(async (base) => {
       expect((await (await get(base, '/api/admin/invoices/inv-1/followup')).json()).customerSchedule).toBeNull();
       sequenceRead(undefined);
@@ -249,6 +252,20 @@ describe('GET /api/admin/invoices/:id/followup', () => {
       expect(none).toMatchObject({ sequence: null, customerSchedule: null });
     });
     expect(mockSummary).toHaveBeenCalledTimes(1);
+    expect(mockSummaryForInvoice).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex #5593 r1 P2: an invoice with no reminder row of its own that the combined balance covers.
+  test('no sequence, but the combined balance covers the invoice: customerSchedule comes from the invoice lookup', async () => {
+    sequenceRead(undefined);
+    const summary = { id: 'sched-1', customerId: CUST, status: 'active', stepIndex: 4, stepLabel: '60-day reminder', invoiceCount: 3, nextTouchAt: null, controllable: true };
+    mockSummaryForInvoice.mockResolvedValue(summary);
+    await withServer(async (base) => {
+      const body = await (await get(base, '/api/admin/invoices/inv-9/followup')).json();
+      expect(body).toMatchObject({ sequence: null, customerSchedule: summary });
+    });
+    expect(mockSummaryForInvoice).toHaveBeenCalledWith('inv-9');
+    expect(mockSummary).not.toHaveBeenCalled();
   });
 });
 

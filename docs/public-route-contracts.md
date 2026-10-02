@@ -1448,6 +1448,14 @@ creates a placeholder first name. The explicitly linked profile
 (`estimates.customer_id`) with a blank first name takes the collected first
 name through `propagateCustomerNameChange`; phone-matched or sibling profiles
 never do.
+
+Greeting name (2026-10-02, precursor to #5559). GET `/api/estimates/:token/data`
+`estimate.customerFirstName` is the greeting token, not blindly the first word of
+`customer_name`: when the linked customer (`estimates.customer_id`) has a blank first
+name and the estimate name begins with that customer's surname (or is a single word
+and the surname is unknown), it is `null`, and the page greets "there". Unlinked
+estimates, a linked customer with a first name, or a failed lookup keep the first word
+of `customer_name` as before. The linked customer's name fields are never returned.
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
@@ -2757,7 +2765,24 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
-internals, or tech notes — generic 404 for missing/draft/expired/malformed),
+internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
+for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
+"Based on N photos." from a count of the diagnostic's stored photos (capped at
+12; the number is left out when none are stored or the count fails) plus a
+fixed note when `input_assessment.photo_quality` is limited or poor; null when
+neither applies. Per finding, `evidence` `{ why, certainty, confirm }`: what
+the condition looks like, how sure the read is, and the on-site check that
+would settle it (`confirm` is null for a high-confidence finding and for
+conditions that need no check; `certainty` is null for a clean lawn). Every
+string is fixed copy in `server/services/lawn-diagnostic-evidence.js` selected
+ONLY by the finding's already-allowlisted condition label and clamped
+confidence, so the naming gate still decides what is named and the stored
+`observed_evidence`, `inferred_context`, `negative_evidence`,
+`confirmation_step` and photo limitations (model or client free text) are
+still never published. A label the table does not know gets no `evidence`
+key. The `/api/public/lawn-assessment` teaser's `first_finding` never carries
+`evidence`),
 `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
 + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
 validation before coercion — name plus a valid email or phone — links one
@@ -2860,6 +2885,18 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
+Forecast evidence: `baseline_comparison` is `above|below|near` the monthly
+seasonal model. The legacy `pests[].trend` stays `up|down|flat` with
+`trend_basis: seasonal_baseline` for existing embeds; it is not a temporal
+trend. `week_over_week` is null unless the same city's same model has a
+comparable-weather snapshot exactly seven ET calendar days earlier. When
+available it carries direction, score delta, and both dates, describing
+modeled change only. `model_version` identifies the scoring model and
+`evidence.observation_validation` remains `not_validated`. Public requests
+may READ `pest_forecast_snapshots` under `GATE_PEST_FORECAST_HISTORY`, but
+never write history or read customer observations. The gated 08:15/14:15 ET
+cron captures the first successful city forecast per day. History failure
+preserves the weather outlook with unavailable comparisons.
 Note: unlike the token-gated read routes, the forecast and `/locations`
 responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy

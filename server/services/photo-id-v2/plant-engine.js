@@ -422,9 +422,21 @@ function hasPhotoVetoLookAlike(entry) {
   return (entry.look_alikes || []).some((la) => la.photo_can_confirm === false);
 }
 
+// Owner ruling 2026-10-02 ("cap it"): a lawn grass or grassy weed reads at
+// most `likely` unless the Sol second opinion was asked and named the same
+// plant (`secondOpinionAgreed`, set only by `combineIdentity`). The eval-2
+// set (134 labeled photos) had turf right 47% of the time, and every
+// confident miss was a grass or a young palm. At `likely` the entry's own
+// look-alike ask (seed head, blade tip, dug-up runner) is what
+// `plantNextPhotoFor` shows.
+const GRASS_CAP_GROUPS = new Set(['turfgrasses', 'grassy-weeds']);
+function isGrassCapped(top) {
+  return GRASS_CAP_GROUPS.has(top.entry.group) && !top.secondOpinionAgreed;
+}
+
 function identityEntryLevelAnswer(top, { blockPrettySure = false, disagreed = false } = {}) {
   if (disagreed || !top?.entry || top.uncovered || !isApproved(top.entry)) return null;
-  const blocked = !top.verified || blockPrettySure || hasPhotoVetoLookAlike(top.entry);
+  const blocked = !top.verified || blockPrettySure || hasPhotoVetoLookAlike(top.entry) || isGrassCapped(top);
   if (top.confidence >= PRETTY_SURE_MIN && !blocked) return { wording: 'pretty_sure', entry: top.entry };
   if (top.confidence >= LIKELY_MIN) return { wording: 'likely', entry: top.entry };
   return null;
@@ -1403,7 +1415,7 @@ function combineIdentity(geminiCandidates, escalationRaw, indexEntries, contextS
   if (sameCandidateKey(geminiTop, openaiTop)) {
     // Both providers' own top is the answer's top; a runner-up with a
     // higher raw number must not displace it.
-    const agreed = { ...geminiTop, ...scoreProvenanceOf(checkedScoreWinner(geminiTop, openaiTop)) };
+    const agreed = { ...geminiTop, ...scoreProvenanceOf(checkedScoreWinner(geminiTop, openaiTop)), secondOpinionAgreed: true };
     const rest = dedupeCandidates([...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]).filter((c) => !sameCandidateKey(c, agreed));
     return { ...base, candidates: [agreed, ...rest].slice(0, 3) };
   }
@@ -2285,6 +2297,7 @@ module.exports = {
   OBSERVED_TERMS,
   escalateBelow,
   _test: {
+    isGrassCapped,
     plantEvidenceFor,
     plantCandidatesBlockFor,
     plantNextPhotoFor,
