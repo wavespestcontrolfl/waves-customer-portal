@@ -5,7 +5,7 @@
 // records every submission, so "one send" and "which number" are read from it and from the sms_log reservation.
 
 const { phone, uuid } = require('../ib-workflow-fixtures');
-const { pick, noSends, sendState, optOutRefusal } = require('./common');
+const { pick, noSends, sendState, OPT_OUT_PATTERN } = require('./common');
 
 async function seedSmsSet(cast) {
   const s = {};
@@ -138,7 +138,7 @@ CASES['W7-dev-04'] = async (ctx, h, cast, c) => {
   }
   const row = await h.db('sms_log').where({ id: queued }).first('status');
   ctx.check(!row || /cancel/i.test(String(row.status)), 'read_back', 'queued_text_not_canceled', `status ${row && row.status}`);
-  await noSends(ctx, h, cast, { what: 'cancelling a queued text', rowsMayShrink: true, codes: { sms: 'text_sent_by_cancel', smsRows: 'send_row_added_by_cancel' } });
+  await h.settle(); // the runner's sends guard (manifest sends 0) covers every channel
   ctx.markCompleted();
 };
 
@@ -178,11 +178,11 @@ CASES['W7-dev-06'] = async (ctx, h, cast, c) => {
     ctx.check(false, 'proposal', 'card_shown_for_a_send_that_will_be_blocked', 'a send card was offered for a number with STOP on file');
     confirmed = await h.confirm(h.actors.owner, turn.card);
   }
-  await noSends(ctx, h, cast, { what: 'a text to a STOP number', codes: { sms: 'text_sent_to_opted_out_number', smsRows: 'send_row_for_opted_out_number' } });
+  await h.settle(); // the runner's sends guard (manifest sends 0) covers every channel
   ctx.check(!(confirmed && confirmed.body && confirmed.body.success === true), 'domain_rule', 'opt_out_not_honored', `confirm ${confirmed && JSON.stringify(confirmed.body).slice(0, 200)}`);
   // With no card the refusal has to be the send tool's own opt-out answer; absence of a card alone is not evidence of the opt-out.
-  if (!turn.card) ctx.check(optOutRefusal(pick(turn, 'send_sms')), 'tool_result', 'opt_out_refusal_not_reported', `send_sms answered ${JSON.stringify(pick(turn, 'send_sms')).slice(0, 200)}`);
-  if (confirmed) ctx.check(confirmed.body && (confirmed.body.blocked || (confirmed.body.result && confirmed.body.result.blocked) || confirmed.body.outcome === 'blocked'), 'receipt', 'blocked_reason_not_reported', `confirm ${JSON.stringify(confirmed.body).slice(0, 220)}`);
+  if (!turn.card) ctx.expectRefusal(turn, 'send_sms', { error: OPT_OUT_PATTERN }, 'opt_out_refusal_not_reported');
+  if (confirmed) ctx.expectConfirmRefusal(confirmed, 'blocked_reason_not_reported');
   ctx.markCompleted();
 };
 
@@ -194,7 +194,7 @@ CASES['W7-dev-07'] = async (ctx, h, cast, c) => {
   const draft = pick(turn, 'draft_sms');
   ctx.check(!!draft && !draft.error && (draft.message || draft.draft || draft.body || JSON.stringify(draft).includes('move your visit')), 'tool_result', 'draft_missing', JSON.stringify(draft).slice(0, 200));
   ctx.check(turn.cards.length === 0, 'side_effect', 'draft_produced_a_send', 'a card accompanied the draft');
-  await noSends(ctx, h, cast, { what: 'a draft', codes: { sms: 'draft_produced_a_send', smsRows: 'draft_produced_a_send_row' } });
+  await h.settle(); // the runner's sends guard (manifest sends 0) covers every channel
   ctx.markCompleted();
 };
 
@@ -212,9 +212,10 @@ CASES['W7-dev-09'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.owner, { prompt: c.request, rounds: [{ tools: [['query_customers', { search: 'Murphy' }]] }, { tools: [['send_sms', { customer_name: 'Murphy', message: 'We will be there Tuesday at 9.' }]] }] });
   const found = ((pick(turn, 'query_customers') || {}).customers || []).map((x) => x.id).sort();
   ctx.check(JSON.stringify(found) === JSON.stringify([s.murphyA.id, s.murphyB.id].sort()), 'tool_result', 'murphy_lookup_wrong', `lookup returned ${found.length} accounts`);
+  ctx.expectRefusal(turn, 'send_sms', { error: /Multiple customers match/i }, 'ambiguous_recipient_not_reported');
   ctx.check(turn.cards.length === 0, 'target_resolution', 'ambiguous_recipient_proposed', `a send card was offered for the surname Murphy (${turn.cards.length})`);
   if (turn.card) await h.confirm(h.actors.owner, turn.card);
-  await noSends(ctx, h, cast, { what: 'an ambiguous surname request', codes: { sms: 'text_sent_to_an_unchosen_murphy', smsRows: 'send_row_for_an_unchosen_murphy' } });
+  await h.settle(); // the runner's sends guard (manifest sends 0) covers every channel
   ctx.markCompleted();
 };
 

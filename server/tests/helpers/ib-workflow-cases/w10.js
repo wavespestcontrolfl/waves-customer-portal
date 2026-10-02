@@ -15,6 +15,7 @@ async function addProduct(h, cast, over) {
   const id = uuid();
   const row = { id, name: 'Synthetic Product', category: 'insecticide', sku: `${STOCK_SKU_PREFIX}${id.slice(0, 8)}`, formulation: 'SC', inventory_unit: 'fl_oz', inventory_on_hand: 0, best_vendor: 'Synthetic supplier', active: true, ...over };
   await h.db('products_catalog').insert(row);
+  cast.productIds.push(id);
   cast.onRetire((db, failed) => removeStockRows(db, [id], failed));
   return row;
 }
@@ -166,6 +167,7 @@ CASES['W10-dev-04'] = async (ctx, h, cast, c) => {
   const found = ((pick(turn, 'query_stock') || {}).products || []).filter((p) => /granule/i.test(p.name));
   ctx.check(found.length === 2, 'tool_result', 'both_granule_rows_not_listed', `${found.length} granule rows listed`);
   const result = pick(turn, 'adjust_stock');
+  ctx.expectRefusal(turn, 'adjust_stock', { error: /Multiple products match/i }, 'ambiguous_product_refusal_not_specific');
   ctx.check(turn.cards.length === 0, 'proposal', 'ambiguous_product_guessed', `a card was offered for "sample granule" with two matching rows`);
   ctx.check(!!result && Array.isArray(result.candidates) && result.candidates.length === 2, 'tool_result', 'ambiguity_not_reported_with_both_rows', `adjust result ${JSON.stringify(result).slice(0, 220)}`);
   ctx.check(before === await allState(h, s), 'side_effect', 'stock_changed_for_an_ambiguous_product', 'a product, ledger or request changed');
@@ -196,7 +198,10 @@ CASES['W10-dev-06'] = async (ctx, h, cast, c) => {
   const s = await seedStockSet(cast, h);
   const before = await allState(h, s);
   // A naive model passes the amount without a unit; the product's inventory unit is fluid ounces, so "2" would mean 2 fl oz.
-  const turn = await stockTurn(ctx, h, { prompt: c.request, rounds: adjust({ product_name: 'Talak', movement_type: 'restock', quantity: 2 }) });
+  const turn = await stockTurn(ctx, h, { prompt: c.request, control: 'We received 2 of Talak.', rounds: adjust({ product_name: 'Talak', movement_type: 'restock', quantity: 2 }) });
+  // The refusal that matters is the writer's own: it must say the unit is missing, not merely decline (an unestablished product,
+  // an unavailable tool and a real unit check all leave no card and no stock change).
+  ctx.expectRefusal(turn, 'adjust_stock', { error: /unit/i }, 'missing_unit_not_clarified');
   ctx.check(turn.cards.length === 0, 'proposal', 'card_with_an_assumed_unit', `a card was offered for "2" of Talak with no unit: ${JSON.stringify(turn.card && turn.card.contract && turn.card.contract.effects || turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 240)}`);
   ctx.check(before === await allState(h, s), 'side_effect', 'stock_changed_without_a_unit', 'stock or ledger changed');
   ctx.markCompleted();
@@ -224,6 +229,7 @@ CASES['W10-dev-08'] = async (ctx, h, cast, c) => {
   // Another movement lands (+30 fl oz) after the card is shown and before it is confirmed.
   await h.db('products_catalog').where({ id: s.taurus.id }).update({ inventory_on_hand: TAURUS_BASE + 30, updated_at: new Date() });
   await h.db('product_inventory_movements').insert({ product_id: s.taurus.id, movement_type: 'restock', quantity: 30, unit: 'fl_oz', stock_before: TAURUS_BASE, stock_after: TAURUS_BASE + 30, metadata: JSON.stringify({ source: 'fixture_concurrent_movement' }) });
+  await ctx.fixtureChanged();
   let stale;
   if (turn.card) stale = await h.confirm(h.actors.owner, turn.card);
   let final = (await stockOf(h, s.taurus)).onHand;
@@ -249,6 +255,7 @@ CASES['W10-dev-09'] = async (ctx, h, cast, c) => {
   const s = await seedStockSet(cast, h);
   const before = await allState(h, s);
   const turn = await stockTurn(ctx, h, { prompt: c.request, actor: h.actors.tech, rounds: adjust({ product_name: 'Taurus SC', movement_type: 'restock', quantity: 2, unit: 'gal' }) });
+  ctx.expectRefusal(turn, 'adjust_stock', { error: /not available to your role/i }, 'technician_stock_tool_not_refused');
   ctx.check(turn.cards.length === 0, 'domain_rule', 'technician_offered_a_stock_write', `cards ${turn.cards.length}; status ${turn.status}`);
   ctx.check(before === await allState(h, s), 'side_effect', 'technician_changed_stock', 'stock, ledger or request changed');
   ctx.markCompleted();

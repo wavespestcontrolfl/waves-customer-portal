@@ -18,8 +18,8 @@ async function scoped(h, table, column, values, orderBy = 'id') {
   }
 }
 
-/** Every row a read could touch for the case's customers, leads, promises and notifications, as one comparable string. */
-async function rowState(h, cast, { notifications = false } = {}) {
+/** Every row a read could touch for the case's customers, leads, promises, notifications and stock products, table by table. */
+async function rowTables(h, cast, { notifications = false } = {}) {
   const customers = cast.customers || [];
   const byCustomer = ['customer_properties', 'scheduled_services', 'service_records', 'sms_log', 'call_log', 'invoices', 'payments', 'customer_credit_ledger', 'collections_flags', 'estimates', 'messaging_audit_log', 'emails', 'email_automation_sends'];
   const state = { customers: await scoped(h, 'customers', 'id', customers) };
@@ -30,14 +30,50 @@ async function rowState(h, cast, { notifications = false } = {}) {
     state.notifications = await scoped(h, 'notifications', 'id', cast.notificationIds || []);
     state.notification_total = Number((await h.db('notifications').count('* as n').first()).n);
   }
-  return JSON.stringify(state);
+  const products = cast.productIds || [];
+  if (products.length) {
+    state.products_catalog = await scoped(h, 'products_catalog', 'id', products);
+    state.product_inventory_movements = await scoped(h, 'product_inventory_movements', 'product_id', products, 'created_at');
+    state.product_restock_requests = await scoped(h, 'product_restock_requests', 'product_id', products);
+    const requests = (state.product_restock_requests || []).filter((r) => r && r.id).map((r) => r.id);
+    state.vendor_orders = await scoped(h, 'vendor_orders', 'restock_request_id', requests);
+  }
+  return state;
 }
+
+/** The same, as one comparable string. */
+async function rowState(h, cast, options) { return JSON.stringify(await rowTables(h, cast, options)); }
 
 /** Which tables differ between two rowState strings, for the failure detail. */
 function changedTables(before, after) {
   const a = JSON.parse(before);
   const b = JSON.parse(after);
   return Object.keys({ ...a, ...b }).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+}
+
+/**
+ * The manifest's "unchanged" rows, enforced by the runner. `spec` maps a table to { mode, columns }:
+ *   mode 'all'      no step of the case changes that table: every row now equals every row at the baseline
+ *   mode 'baseline' the case only adds rows (`table[new]`): every row that existed at the baseline equals its baseline value
+ *   columns         null: the complete row is compared; a Set: only the columns the manifest names (`table[*].column`)
+ * Returns the tables that differ. A case that changes a seeded row of the same table is not judged here (its own checks are).
+ */
+async function unchangedViolations(h, cast, baseline, spec) {
+  const now = await rowTables(h, cast, { notifications: !!baseline.notifications });
+  const bad = [];
+  for (const [table, { mode, columns }] of spec) {
+    if (!(table in baseline)) continue;
+    const project = (row) => (!columns || !row || typeof row !== 'object' ? row : Object.fromEntries([...columns].map((k) => [k, row[k]])));
+    const before = (baseline[table] || []).map(project);
+    const after = (now[table] || []).map(project);
+    if (mode === 'all') {
+      if (JSON.stringify(before) !== JSON.stringify(after)) bad.push(table);
+    } else {
+      const byId = new Map((now[table] || []).filter((r) => r && r.id).map((r) => [r.id, JSON.stringify(project(r))]));
+      if ((baseline[table] || []).some((r) => r && r.id && byId.get(r.id) !== JSON.stringify(project(r)))) bad.push(table);
+    }
+  }
+  return bad;
 }
 
 /** Compare a row snapshot taken earlier with the rows now. Returns ok. */
@@ -78,7 +114,7 @@ async function sendState(h, cast) {
  * compared with the baseline the harness took at the case's first turn (rows the seed itself holds are not sends).
  * `codes` names the failure per channel so a workflow keeps its own wording: { sms, email }.
  */
-async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null, settle = true, rowsMayShrink = false } = {}) {
+async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null, settle = true } = {}) {
   if (settle) await h.settle();
   const base = since || ctx.sendBaseline || {};
   const now = await sendState(h, cast);
@@ -88,10 +124,11 @@ async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null
   const emailCode = codes.email || 'read_sent_an_email';
   ctx.check(now.sms_provider === was('sms_provider'), 'side_effect', smsCode, `${now.sms_provider - was('sms_provider')} SMS provider submissions for ${what}`);
   const outboundBase = base.outbound_sms_rows ?? now.outbound_sms_rows;
-  ctx.check((rowsMayShrink ? now.outbound_sms_rows <= outboundBase : now.outbound_sms_rows === outboundBase) && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
+  // A queued text cancelled (its row removed) is not a send: the count may fall, never rise.
+  ctx.check(now.outbound_sms_rows <= outboundBase && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
   ctx.check(now.sendgrid_provider === was('sendgrid_provider') && now.gmail_provider === was('gmail_provider') && now.blocked_sender_hosts === (base.blocked_sender_hosts ?? now.blocked_sender_hosts), 'side_effect', emailCode, () => `${what}: SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider}, unstubbed sender calls ${base.blocked_sender_hosts} -> ${now.blocked_sender_hosts}`);
   const rows = ['email_rows', 'email_message_rows', 'email_automation_rows'].filter((k) => now[k] !== (base[k] ?? now[k]));
   ctx.check(rows.length === 0, 'side_effect', codes.emailRows || `${emailCode}_row`, () => `${what}: ${rows.map((k) => `${k} ${base[k]} -> ${now[k]}`).join('; ')}`);
 }
 
-module.exports = { rowState, noWrites, sendState, noSends, changedTables };
+module.exports = { rowTables, unchangedViolations, rowState, noWrites, sendState, noSends, changedTables };

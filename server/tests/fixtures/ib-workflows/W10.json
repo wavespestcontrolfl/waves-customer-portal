@@ -106,6 +106,7 @@
         "changes": [
           "product_inventory_movements[new].product_id = Taurus SC",
           "product_restock_requests[taurus-open].status = received",
+          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz",
           "product_restock_requests[taurus-open].closed_at = set (receiving closes the request)"
         ],
         "unchanged": [

@@ -39,6 +39,7 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
 const { bootHarness } = require('./helpers/ib-workflow-harness');
 const { Cast, sweepStale } = require('./helpers/ib-workflow-fixtures');
 const { capabilityGaps } = require('./helpers/ib-workflow-capability');
+const { noSends, sendState, unchangedViolations } = require('./helpers/ib-workflow-state');
 const { CASES } = require('./helpers/ib-workflow-cases');
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'ib-workflows');
@@ -48,6 +49,9 @@ const SNAPSHOT = path.join(RESULT_DIR, 'baseline-dev.json');
 const DETAIL = path.join(RESULT_DIR, 'baseline-dev-detail.json');
 const WORKFLOWS = Array.from({ length: 10 }, (_, i) => `W${i + 1}`);
 const only = process.env.IB_BASELINE_ONLY ? process.env.IB_BASELINE_ONLY.split(',') : null;
+// A workflow ("W1") selects its own cases ("W1-dev-01") and never another workflow's ("W10-dev-01"): match the id exactly, or as a
+// prefix that ends at a dash. A longer prefix ("W1-dev-0", "W10-dev") still works, an exact case id too.
+const selected = (id) => !only || only.some((p) => id === p || id.startsWith(p.includes('-') ? p : `${p}-`));
 
 const manifests = WORKFLOWS.map((id) => JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, `${id}.json`), 'utf8')));
 // DEV partition only. A held-out case is filtered out before anything reads it.
@@ -86,6 +90,53 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     if (h) await h.close();
   });
 
+  /**
+   * Structural guards, applied by the runner to every scored dev case so no case has to remember them (three review rounds in a
+   * row found a case whose own check was too weak). A case may opt out of one guard with a reason: `CASES[id].optOut = { sends,
+   * unchanged, refusal }`; the reason is recorded in the case's notes.
+   *   sends      every step of the manifest says sends 0: nothing may go out on ANY channel over the whole case (provider stubs,
+   *              accepted audit rows, outbound rows, email). Otherwise provider submissions may not exceed the declared total and
+   *              no email may go out.
+   *   unchanged  a table named in an "unchanged" line: no step changes it, so every seeded row keeps its complete value; or every
+   *              change to it is `table[new]`, so every row that existed at the first turn keeps its complete value.
+   *   refusal    a negative outcome (blocked_by_rule, unsupported, or a clarification with no card on a negative case) must have
+   *              asserted HOW the bar refused through ctx.expectRefusal (the tool's code or message) or ctx.expectNoAttempt.
+   */
+  async function runGuards(c, ctx, cast) {
+    const optOut = (CASES[c.id] && CASES[c.id].optOut) || {};
+    const steps = [c, ...c.corrections].map((step) => step.expected);
+    const skip = (name) => { if (optOut[name]) ctx.note(`${name} guard skipped: ${optOut[name]}`); return !!optOut[name]; };
+    const declared = steps.reduce((total, e) => total + Number(e.sends || 0), 0);
+    if (!skip('sends')) {
+      if (declared === 0) {
+        await noSends(ctx, h, cast, { what: 'a case whose manifest says sends 0', codes: { sms: 'guard_sent_a_text', smsRows: 'guard_outbound_row_added', email: 'guard_sent_an_email', emailRows: 'guard_email_row_added' } });
+      } else {
+        const now = await sendState(h, cast);
+        ctx.check(now.sms_provider <= declared, 'side_effect', 'guard_sent_more_than_declared', `${now.sms_provider} provider submissions, the manifest declares ${declared}`);
+        ctx.check(now.sendgrid_provider === 0 && now.gmail_provider === 0, 'side_effect', 'guard_sent_an_email', `SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider} in a text-only case`);
+      }
+    }
+    if (!skip('unchanged') && ctx.rowBaseline) {
+      const tableOf = (line) => (/^(\w+)\[/.exec(line) || [])[1];
+      const unchangedLines = steps.flatMap((e) => e.unchanged || []).filter((line) => tableOf(line));
+      const changes = steps.flatMap((e) => e.changes || []);
+      const columnOf = (line) => (/^\w+\[[^\]]*\]\.(\w+)/.exec(line) || [])[1] || null;
+      const spec = new Map();
+      for (const table of new Set(unchangedLines.map(tableOf))) {
+        const lines = unchangedLines.filter((line) => tableOf(line) === table);
+        // `table[*].column` holds only that column; any line naming no column holds the complete row.
+        const columns = lines.every(columnOf) ? new Set(lines.map(columnOf)) : null;
+        const mine = changes.filter((line) => tableOf(line) === table);
+        if (!mine.length) spec.set(table, { mode: 'all', columns });
+        else if (mine.every((line) => new RegExp(`^${table}\\[new`).test(line))) spec.set(table, { mode: 'baseline', columns });
+      }
+      const bad = await unchangedViolations(h, cast, ctx.rowBaseline, spec);
+      ctx.check(bad.length === 0, 'side_effect', 'guard_unchanged_rows_changed', `the manifest says these stay unchanged but a seeded row differs in: ${bad.join(', ')}`);
+    }
+    const negative = steps.some((e) => e.outcome === 'blocked_by_rule' || e.outcome === 'unsupported' || (c.negative === true && e.outcome === 'awaiting_operator' && e.card === false));
+    if (negative && !skip('refusal')) ctx.check(ctx.refusalAsserted, 'harness', 'refusal_unspecified', 'a negative outcome finished without asserting the specific refusal (ctx.expectRefusal or ctx.expectNoAttempt)');
+  }
+
   async function execute(c, probe) {
     const cast = new Cast(h.db);
     const ctx = h.newContext(c, cast);
@@ -101,6 +152,7 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     }
     try {
       ctx.verifyContract();
+      if (!probe) await runGuards(c, ctx, cast);
     } catch (err) {
       ctx.fail('harness', 'contract_check_threw', `${err.message}`.split('\n')[0]);
     } finally {
@@ -132,7 +184,7 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     expect([...new Set(bad)]).toEqual([]);
   });
 
-  test.each(devCases.filter((c) => !only || only.some((p) => c.id.startsWith(p))).map((c) => [c.id, c]))('%s', async (id, c) => {
+  test.each(devCases.filter((c) => selected(c.id)).map((c) => [c.id, c]))('%s', async (id, c) => {
     const gaps = capabilityGaps(c);
     let record;
     if (gaps.length) {

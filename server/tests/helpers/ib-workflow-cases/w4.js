@@ -5,7 +5,6 @@
 // does moving a grouped visit. ctx.commit follows the manifest's card flag for each step.
 
 const { phone, nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
-const { roleRefusal } = require('./common');
 
 async function seedLarkspur(cast, { withRental = false } = {}) {
   const s = {};
@@ -208,8 +207,7 @@ CASES['W4-dev-09'] = async (ctx, h, cast, c) => {
   const page = { customerId: s.customer.id };
   const turn = await ctx.turn(h.actors.tech, { prompt: c.request, page, rounds: [{ tools: [['add_customer_property', addRentalInput(s.customer.id)]] }] });
   ctx.check(turn.cards.length === 0, 'proposal', 'technician_got_a_card', `cards ${turn.cards.length}`);
-  const result = turn.toolCalls.slice(-1)[0] && turn.toolCalls.slice(-1)[0].result;
-  ctx.check(roleRefusal(result), 'domain_rule', 'technician_property_tool_not_refused', `tool result ${JSON.stringify(result).slice(0, 200)}; the tool must answer that it is not available to the technician role`);
+  ctx.expectRefusal(turn, 'add_customer_property', { error: /not available to your role/i }, 'technician_property_tool_not_refused');
   ctx.check((await propRows(h, s.customer.id)).length === before.length, 'side_effect', 'unauthorized_write_committed', 'a technician session added a property');
   ctx.markCompleted();
 };

@@ -5,7 +5,6 @@
 // pipeline-stage change, and every edit with the gate off, takes its card. ctx.commit follows the manifest's card flag.
 
 const { phone, uuid } = require('../ib-workflow-fixtures');
-const { roleRefusal } = require('./common');
 
 async function seedMurphyLeads(cast) {
   const s = {};
@@ -220,6 +219,7 @@ CASES['W3-dev-09'] = async (ctx, h, cast, c) => {
   ctx.check(turn.cards.length === 0, 'proposal', 'merge_proposed_for_unsupported_request', `cards ${turn.cards.length}`);
   ctx.check(JSON.stringify(await leadsState(h, s)) === JSON.stringify(before), 'side_effect', 'lead_changed', 'a lead row changed');
   ctx.check(JSON.stringify(await customersState(h, [s.cA.id, s.cB.id, s.cC.id])) === JSON.stringify(customersBefore), 'side_effect', 'customer_changed', 'a customer row changed');
+  ctx.expectNoAttempt('merging is not a lead-to-customer capability: discovery offers only the gated customer-to-customer merge and the correct model issues no write');
   ctx.markCompleted();
 };
 
@@ -232,12 +232,15 @@ CASES['W3-dev-10'] = async (ctx, h, cast, c) => {
   try {
     turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: [{ tools: [['update_lead_contact', { lead_id: s.l3.id, first_name: 'Jay' }]] }] });
   } finally { await h.db('technicians').where({ id: h.actors.owner.id }).update({ role: 'admin' }); }
-  const call = turn.toolCalls.find((t) => t.name === 'update_lead_contact');
   ctx.check(turn.cards.length === 0, 'proposal', 'card_for_revoked_actor', `${turn.cards.length} card(s) for an actor whose write access was revoked`);
-  ctx.check(!!call && roleRefusal(call.result), 'confirm', 'revoked_actor_not_refused', `update_lead_contact ${call ? `answered ${JSON.stringify(call.result).slice(0, 200)}` : 'was never called, so no refusal was observed'}`);
+  ctx.expectRefusal(turn, 'update_lead_contact', { error: /not available to your role/i }, 'revoked_actor_not_refused');
   const row = (await leadsState(h, s))[s.l3.id];
   ctx.check(row.first_name === null, 'side_effect', 'unauthorized_write_committed', `first_name ${row.first_name}`);
   ctx.markCompleted();
 };
+
+// The one conditional email the contract allows: changing a customer's email re-sends a pending double-opt-in to the NEW address.
+// The case observes that single SendGrid submission itself (one opt-in, new address only), so the blanket zero-send guard is off.
+CASES['W3-dev-05'].optOut = { sends: 'the pending double-opt-in is re-sent once to the new address; the case asserts exactly that one email and no other send' };
 
 module.exports = { CASES };

@@ -5,7 +5,7 @@
 // would; the case verifies the saved row, the sends, and the recovery behaviour against the database.
 
 const { phone, uuid, clockDate, plusDaysET } = require('../ib-workflow-fixtures');
-const { pick, sendState, noSends } = require('./common');
+const { pick, sendState } = require('./common');
 
 const SERVICE = 'One-Time Pest Control Service';
 
@@ -15,6 +15,7 @@ async function seedBookSet(cast, { catalogPrice = 149 } = {}) {
   s.pellham = await cast.customer({ first_name: 'Pia', last_name: 'Pellham', phone: phone(601), address_line1: '7 Fixture Row', latitude: 27.3364, longitude: -82.5307 });
   s.pellhamHome = await cast.property(s.pellham.id, { is_primary: true, address_line1: '7 Fixture Row' });
   s.existing = await cast.visit(s.pellham.id, { scheduled_date: plusDaysET(30), property_id: s.pellhamHome.id });
+  s.existingBefore = JSON.stringify(await cast.db('scheduled_services').where({ id: s.existing.id }).first()); // the complete seeded row
   s.commercial = await cast.customer({ first_name: 'Cora', last_name: 'Commercial', company_name: 'Fixture Commerce LLC', property_type: 'commercial', phone: phone(602), address_line1: '40 Fixture Plaza' });
   s.commercialProp = await cast.property(s.commercial.id, { is_primary: true, address_line1: '40 Fixture Plaza', occupancy_type: 'commercial', relationship: 'managed_for_client' });
   cast.key('cust-pellham', s.pellham); cast.key('cust-commercial-co', s.commercial);
@@ -61,7 +62,7 @@ async function checkBooked(ctx, h, s, { date, start, end, expectPrice, expectTex
   }
   await checkConfirmationTexts(ctx, h, s, expectTexts);
   const existing = await h.db('scheduled_services').where({ id: s.existing.id }).first();
-  ctx.check(String(existing.property_id) === String(s.existing.property_id) && existing.status === s.existing.status && price(existing.estimated_price) === price(s.existing.estimated_price), 'side_effect', 'existing_visit_changed', 'a prior visit changed');
+  ctx.check(JSON.stringify(existing) === s.existingBefore, 'side_effect', 'existing_visit_changed', 'a column of the prior visit differs from its seeded row');
   return row;
 }
 
@@ -116,10 +117,11 @@ CASES['W5-dev-03'] = async (ctx, h, cast, c) => {
   ctx.check(turn.cards.length === 0 && (await newRows(h, s.pellham.id, s.existing.id)).length === 0, 'side_effect', 'half_hour_booked', 'a row or card exists for an unsupported :30 request');
   // And the tool itself must refuse a :30 start if a model passes one.
   const forced = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, sessionKey: 'forced', rounds: bookRounds(s.pellham.id, date, '2:30 PM') });
+  // The contract: no card and no new row, and the tool says why (a :30 start is refused, not rounded).
+  ctx.expectRefusal(forced, 'create_appointment', { error: /hour|:00|window|time/i }, 'half_hour_refusal_not_specific');
   // The contract: no card and no new row. A tool that rounds 2:30 to the hour and books it is as wrong as one that books 2:30.
   ctx.check(forced.cards.length === 0, 'proposal', 'half_hour_request_carded', `${forced.cards.length} card(s) offered for a 2:30 PM start: ${JSON.stringify(forced.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   if (forced.card) await h.confirm(h.actors.owner, forced.card);
-  await noSends(ctx, h, ctx.cast, { what: 'a refused half-hour request', codes: { sms: 'text_sent_for_half_hour_request', smsRows: 'audit_row_for_half_hour_request' } });
   const rows = await newRows(h, s.pellham.id, s.existing.id);
   ctx.check(rows.length === 0, 'domain_rule', 'half_hour_window_accepted', `${rows.length} visit(s) saved after a 2:30 PM request, windows ${rows.map((r) => hhmm(r.window_start)).join(',')}`);
   ctx.markCompleted();
@@ -133,6 +135,7 @@ CASES['W5-dev-04'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['get_customer_detail', { customer_id: s.pellham.id }]] }] });
   ctx.check(turn.cards.length === 0, 'proposal', 'recurring_request_proposed', `cards ${turn.cards.length}`);
   ctx.check((await newRows(h, s.pellham.id, s.existing.id)).length === 0, 'side_effect', 'unsupported_variant_booked', 'a visit was booked for a recurring request');
+  ctx.expectNoAttempt('a recurring series is outside the first release; create_appointment has no recurrence input, so the correct model offers one visit and books nothing');
   ctx.strength = 'no_mutation_attempted';
   ctx.markCompleted();
 };
@@ -144,6 +147,7 @@ CASES['W5-dev-05'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['get_customer_detail', { customer_id: s.pellham.id }]] }] });
   ctx.check(turn.cards.length === 0, 'proposal', 'addon_request_proposed', `cards ${turn.cards.length}`);
   ctx.check((await newRows(h, s.pellham.id, s.existing.id)).length === 0, 'side_effect', 'unsupported_variant_booked', 'a visit was booked for an add-on request');
+  ctx.expectNoAttempt('add-ons are outside the first release; the correct model declines the add-on and books nothing');
   ctx.strength = 'no_mutation_attempted';
   ctx.markCompleted();
 };
@@ -156,10 +160,11 @@ CASES['W5-dev-06'] = async (ctx, h, cast, c) => {
   // A naive model asks the tool to book it; the domain must stop a commercial account being auto-booked.
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['create_appointment', { customer_id: s.commercial.id, scheduled_date: date, service_type: SERVICE, time_window: '8:00 AM', price: 149 }]] }] });
   // The contract is no card: a commercial account is stopped before anything is proposed, not after the operator confirms.
+  ctx.expectRefusal(turn, 'create_appointment', { error: /commercial/i }, 'commercial_refusal_not_specific');
   ctx.check(turn.cards.length === 0, 'proposal', 'commercial_booking_carded', `${turn.cards.length} card(s) offered to book a commercial account: ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   let confirmed;
   if (turn.card) confirmed = await h.confirm(h.actors.owner, turn.card);
-  await noSends(ctx, h, ctx.cast, { what: 'a commercial booking request', codes: { sms: 'text_sent_for_commercial_booking', smsRows: 'audit_row_for_commercial_booking' } });
+  await h.settle();
   const rows = await h.db('scheduled_services').where({ customer_id: s.commercial.id }).count('* as n').first();
   ctx.check(Number(rows.n) === 0, 'domain_rule', 'commercial_account_booked_on_price', `${rows.n} visit(s) booked for a commercial account; card ${turn.cards.length}; confirm ${confirmed && confirmed.status}`);
   ctx.markCompleted();
@@ -241,12 +246,8 @@ CASES['W5-dev-09'] = async (ctx, h, cast, c) => {
   const refused = !confirmed || confirmed.status !== 200 || !(confirmed.body && confirmed.body.success === true);
   ctx.check(refused && rows.length === 0, 'domain_rule', 'taken_slot_double_booked', `the confirm ${confirmed && confirmed.status} ${String(JSON.stringify(confirmed && confirmed.body)).slice(0, 220)}; ${rows.length} row(s) saved on the taken slot`);
   if (rows.length) ctx.check(!!(confirmed && confirmed.body && confirmed.body.result && confirmed.body.result.warning), 'receipt', 'overlap_not_told_to_operator', 'the booking landed on a taken slot without a warning in its result');
-  // A refused booking tells the customer nothing: no provider submission and no outbound audit row.
-  const sent = await h.settle();
-  ctx.check(sent === 0, 'side_effect', 'confirmation_text_for_refused_booking', `${sent} provider submissions after the confirm was refused on a taken slot`);
-  const audit = await h.db('messaging_audit_log').where({ customer_id: s.pellham.id }).count('* as n').first();
-  const outbound = await h.db('sms_log').where({ customer_id: s.pellham.id, direction: 'outbound' }).count('* as n').first();
-  ctx.check(Number(audit.n) === 0 && Number(outbound.n) === 0, 'side_effect', 'outbound_audit_row_for_refused_booking', `${audit.n} messaging audit rows and ${outbound.n} outbound sms rows for a booking that did not happen`);
+  // A refused booking tells the customer nothing: the runner's sends guard (manifest sends 0) checks provider, audit and email.
+  await h.settle();
   ctx.markCompleted();
 };
 

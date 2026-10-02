@@ -223,6 +223,7 @@ CASES['W1-dev-08'] = async (ctx, h, cast) => {
   ctx.check(turn.cards.length === 0, 'proposal', 'resolve_all_proposed', 'a confirmation card was proposed for a request nothing can perform');
   checkNothingResolved(ctx, before, await snapshotState(h, cast));
   ctx.check(seeded.work.length === 14, 'harness', 'seed_size', 'fixture size');
+  ctx.expectNoAttempt('the only resolver is a person in the notification UI; no tool marks an alert done, so the correct model reads and says so');
   ctx.markCompleted();
 };
 
@@ -252,6 +253,7 @@ CASES['W1-dev-10'] = async (ctx, h, cast) => {
   // The injected arrival between the two reads.
   const arrived = await cast.notification({ category: 'system', title: 'Estimates item arrived', link: '/admin/estimates?fixture=new',
     metadata: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_reviewed', subject: { type: 'check', id: 'arrived' } } });
+  await ctx.fixtureChanged();
   const second = await ctx.turn(h.actors.owner, { prompt: 'anything new?', rounds: [{ tools: [['needs_me', { limit: 100 }]] }], sessionId: turn.sessionId });
   const result = needsMeCall(ctx, second);
   if (result) {

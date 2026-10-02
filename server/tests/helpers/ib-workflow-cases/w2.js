@@ -170,6 +170,7 @@ CASES['W2-dev-07'] = async (ctx, h, cast, c) => {
   ctx.check(JSON.stringify(found) === JSON.stringify([set.murphyA.id, set.murphyB.id].sort()), 'tool_result', 'murphy_lookup_wrong', `lookup returned ${found.length} accounts`);
   ctx.check(!turn.body.taskTarget || turn.body.taskTarget.customer_id !== set.fennimore.id, 'target_resolution', 'viewed_customer_selected_over_named', 'the viewed Fennimore account became the target of a request naming Murphy');
   ctx.check(!has(turn.toolCalls.map((t) => t.result), set.fennimore.id), 'target_resolution', 'wrong_account_facts_delivered', 'Fennimore facts reached the model for a Murphy request');
+  ctx.expectNoAttempt('the correct model asks which Murphy; the lookup above returns both accounts and no write is issued');
   await noWrites(ctx, h, cast, before);
   ctx.markCompleted();
 };
@@ -212,6 +213,7 @@ CASES['W2-dev-10'] = async (ctx, h, cast, c) => {
   // A new inbound text arrives, then the operator asks again.
   await noWrites(ctx, h, cast, before);
   const arrived = await cast.sms(set.fennimore.id, { direction: 'inbound', from_phone: set.fennimore.phone, to_phone: '+19413335555', message_body: 'Also the gate is open now.', created_at: new Date() });
+  await ctx.fixtureChanged();
   const afterArrival = await snapshot(h, cast); // the arrival is the one legitimate new row; the second ask may not change anything
   const again = await ctx.turn(h.actors.owner, { prompt, rounds: lookupThen('Fennimore', briefTools), sessionKey: 'second' });
   const thread = pick(again, 'get_conversation_thread');

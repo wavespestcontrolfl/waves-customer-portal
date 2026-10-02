@@ -76,6 +76,68 @@ class CaseContext {
     this.contract = null;
     this.confirms = []; // every card the case confirmed through the route
     this.sendBaseline = null; // outbound/email row counts at the first turn (see ib-workflow-state)
+    this.rowBaseline = null;  // every seeded row, table by table, at the first turn: the runner's "unchanged" guard compares with it
+    this.refusalAsserted = false; // set by expectRefusal / expectNoAttempt; the runner requires it of a negative case
+  }
+
+  /** Seed rows exist and nothing has been asked yet: remember what "unchanged" and "nothing sent" are measured against. */
+  async takeBaselines() {
+    const state = require('./ib-workflow-state');
+    this.sendBaseline = await state.sendState(this.h, this.cast);
+    this.rowBaseline = await state.rowTables(this.h, this.cast);
+  }
+
+  /**
+   * A scripted fixture event (a text that arrives, a measurement that is edited, another booking taking a slot) is not a write by
+   * the tool under test: call this right after it so the runner's guards measure from the new state.
+   */
+  async fixtureChanged() {
+    if (this.cast && this.rowBaseline) {
+      const state = require('./ib-workflow-state');
+      this.rowBaseline = await state.rowTables(this.h, this.cast, { notifications: !!this.rowBaseline.notifications });
+    }
+  }
+
+  /**
+   * A negative case (blocked_by_rule, unsupported, or a clarification with no card) must name HOW the bar refused: the tool's own
+   * answer, by code and/or message, from a call the script actually issued. A turn with no card and no row change is not evidence of
+   * the rule (an unavailable tool, an unrelated error and the real refusal all look the same). `code` is compared exactly, `error` is
+   * a RegExp on the tool's error or message text; at least one is required. Records `failCode` (point tool_result) otherwise.
+   */
+  expectRefusal(turn, tool, { code, error } = {}, failCode = 'refusal_not_specific') {
+    this.refusalAsserted = true;
+    if (!code && !error) throw new Error('expectRefusal needs a code or an error pattern');
+    const call = turn.toolCalls.filter((t) => t.name === tool).pop();
+    const result = call && call.result;
+    const text = result && typeof result === 'object' ? String(result.error || result.message || '') : '';
+    const ok = !!result && typeof result === 'object' && !result.executed && !result.proposal && (!code || result.code === code) && (!error || error.test(text));
+    return this.check(ok, 'tool_result', failCode, () => `${tool} ${call ? `answered ${JSON.stringify(result).slice(0, 220)}` : 'was never called, so no refusal was observed'}; expected ${code ? `code ${code}` : ''}${code && error ? ' and ' : ''}${error ? `message ${error}` : ''}`);
+  }
+
+  /**
+   * The refusal here is the model's, not a tool's: the correct model asks or declines and issues no write, so the scripted case
+   * never attempts one. Declares that, with the reason, and asserts none of `tools` was issued. A case that can drive the
+   * layer with the naive call should use expectRefusal instead.
+   */
+  expectNoAttempt(reason, { tools = null } = {}) {
+    this.refusalAsserted = true;
+    const registry = require('../../services/intelligence-bar/action-registry');
+    // No tools named: any issued tool the registry does not classify as a read counts as an attempt.
+    const isWrite = (name) => (tools ? tools.includes(name) : !!registry.actions.get(name) && registry.actions.get(name).kind !== 'read');
+    const attempted = this.issued.filter((c) => isWrite(c.name)).map((c) => c.name);
+    this.note(`no attempt by design: ${reason}`);
+    return this.check(attempted.length === 0, 'side_effect', 'write_attempted_for_an_unsupported_request', `the script issued ${attempted.join(', ')} for a request the contract refuses (${reason})`);
+  }
+
+  /**
+   * The refusal comes after the operator confirms (a send to a STOP number is blocked at the send, not at the card): the confirm
+   * answer must say it was blocked and must not report success. `failCode` names the failure.
+   */
+  expectConfirmRefusal(confirmed, failCode = 'blocked_reason_not_reported') {
+    this.refusalAsserted = true;
+    const body = confirmed && confirmed.body;
+    const blocked = !!body && body.success !== true && !!(body.blocked || (body.result && body.result.blocked) || body.outcome === 'blocked');
+    return this.check(blocked, 'receipt', failCode, () => `confirm ${confirmed ? `${confirmed.status} ${JSON.stringify(body).slice(0, 220)}` : 'was never made'}`);
   }
 
   /** Record a divergence. `code` is stable and machine-comparable; `detail` is human evidence. */
@@ -307,7 +369,7 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
     async turn(actor, options, ctx) {
       const { prompt, rounds = [], page = {}, sessionKey = 'default', requestKey, context = 'estimates', discover = true, conversationHistory } = options;
       // The row baseline noSends compares against: taken at the case's first turn, after its seed rows exist.
-      if (ctx && ctx.cast && !ctx.sendBaseline) ctx.sendBaseline = await require('./ib-workflow-state').sendState(harness, ctx.cast);
+      if (ctx && ctx.cast && !ctx.sendBaseline) await ctx.takeBaselines();
       const key = `${actor.id}:${sessionKey}`;
       if (!harness.sessions.has(key)) harness.sessions.set(key, crypto.randomUUID());
       const sessionId = options.sessionId || harness.sessions.get(key);

@@ -7,7 +7,7 @@
 // draft without a card are reported not_runnable and only probed.
 
 const { phone } = require('../ib-workflow-fixtures');
-const { pick, noSends: sharedNoSends } = require('./common');
+const { pick } = require('./common');
 
 async function ensurePricing(db) {
   // Canonical code defaults seed the isolated database; the same seeding the platform estimate suite uses.
@@ -102,9 +102,6 @@ async function checkDraft(ctx, h, f, { apps, count = 1, sqft = 5000 }) {
   return row;
 }
 
-/** An estimate save sends nothing: no text, no email (SendGrid, Gmail or an unstubbed sender), no outbound or email row. */
-const noSends = (ctx, h, cast) => sharedNoSends(ctx, h, cast, { what: 'an estimate save', codes: { sms: 'estimate_save_sent_a_text', smsRows: 'estimate_save_logged_an_outbound_text', email: 'estimate_save_sent_an_email', emailRows: 'estimate_save_logged_an_email' } });
-
 const CASES = {};
 
 async function plainSave(ctx, h, cast, c, apps, { prompt } = {}) {
@@ -112,7 +109,6 @@ async function plainSave(ctx, h, cast, c, apps, { prompt } = {}) {
   const proposed = await proposeSave(ctx, h, s.thistle, { apps, prompt: prompt || c.request });
   await confirmSave(ctx, h, proposed);
   await checkDraft(ctx, h, s.thistle, { apps: apps || 9 });
-  await noSends(ctx, h, cast);
   return { s, proposed };
 }
 
@@ -132,7 +128,6 @@ CASES['W8-dev-03'] = async (ctx, h, cast, c) => {
   const row = await checkDraft(ctx, h, s.thistle, { apps: 12 });
   ctx.check(!!draft && !!row && row.id === draft.id, 'read_back', 'revision_made_a_second_draft', `draft ${draft && draft.id.slice(0, 8)} became ${row && row.id.slice(0, 8)}`);
   ctx.check(!!row && Number(row.annual_total) !== nineAnnual, 'read_back', 'revised_price_not_recomputed', `annual stayed ${nineAnnual}`);
-  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -146,6 +141,7 @@ CASES['W8-dev-04'] = async (ctx, h, cast, c) => {
   const second = await ctx.turn(h.actors.owner, { prompt: c.corrections[0].request, page: { customerId: s.thistle.customer.id }, sessionId: first.turn.sessionId, sessionKey: 'six',
     rounds: [{ tools: [['save_customer_estimate', { customer_id: s.thistle.customer.id, property_id: s.thistle.property.id, estimate_id: draft && draft.id, lawn_applications: 6 }]] }] });
   const rows = await draftsOf(h, s.thistle);
+  ctx.expectRefusal(second, 'save_customer_estimate', { code: 'invalid_input' }, 'six_times_refusal_not_specific');
   ctx.check(second.cards.length === 0, 'proposal', 'six_times_a_year_proposed', `cards ${second.cards.length}; ${JSON.stringify(second.toolCalls.slice(-1).map((t) => t.result)).slice(0, 220)}`);
   if (second.card) await h.confirm(h.actors.owner, second.card);
   const after = await draftsOf(h, s.thistle);
@@ -179,6 +175,7 @@ CASES['W8-dev-06'] = async (ctx, h, cast, c) => {
   // The saved lawn measurement changes after the price was computed and before the card is confirmed.
   await h.db('customer_properties').where({ id: s.thistle.property.id }).update({ property_sqft: 12000, updated_at: new Date() });
   await h.db('customers').where({ id: s.thistle.customer.id }).update({ property_sqft: 12000 });
+  await ctx.fixtureChanged();
   let stale;
   if (first.turn.card) {
     stale = await h.confirm(h.actors.owner, first.turn.card);
@@ -205,6 +202,7 @@ CASES['W8-dev-07'] = async (ctx, h, cast, c) => {
     rounds: [{ tools: [['get_customer_estimate_context', { customer_id: s.wex.customer.id }]] }, { tools: [['save_customer_estimate', { customer_id: s.wex.customer.id, property_id: s.wex.property.id, estimate_id: sent && sent.id, lawn_applications: 9 }]] }] });
   const context = pick(turn, 'get_customer_estimate_context');
   ctx.check(!!context && (context.estimates || []).some((e) => sent && e.id === sent.id && e.status === 'sent'), 'tool_result', 'sent_status_not_visible', 'the context does not show the quote as sent');
+  ctx.expectRefusal(turn, 'save_customer_estimate', { error: /sent|honou?red/i }, 'sent_quote_refusal_not_specific');
   ctx.check(turn.cards.length === 0, 'domain_rule', 'sent_quote_revision_offered', `a card to revise the sent quote in place was offered; ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   if (turn.card) await h.confirm(h.actors.owner, turn.card);
   const after = await draftsOf(h, s.wex);
@@ -219,7 +217,6 @@ CASES['W8-dev-08'] = async (ctx, h, cast, c) => {
   await confirmSave(ctx, h, proposed);
   const row = await checkDraft(ctx, h, s.thistle, { apps: 9 });
   ctx.check(!!row && !JSON.stringify(parse(row.estimate_data).engineResult || {}).includes('"perApplication":50'), 'side_effect', 'operator_typed_price_on_estimate', 'a 50 dollar line is on the estimate');
-  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -228,9 +225,8 @@ CASES['W8-dev-09'] = async (ctx, h, cast, c) => {
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.lark.customer.id }, customer: s.lark.customer });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page,
     rounds: [{ tools: [['get_customer_estimate_context', { customer_id: s.lark.customer.id }]] }, { tools: [['save_customer_estimate', { customer_id: s.lark.customer.id, property_id: s.lark.property.id, lawn_applications: 12 }]] }] });
-  const save = pick(turn, 'save_customer_estimate');
   ctx.check(turn.cards.length === 0, 'proposal', 'estimate_card_without_a_measurement', `cards ${turn.cards.length}`);
-  ctx.check(!!save && (save.success === false || !!save.error) && /measure|lawn|area|facts|property/i.test(JSON.stringify(save)), 'tool_result', 'missing_measurement_not_reported', `save result ${JSON.stringify(save).slice(0, 220)}`);
+  ctx.expectRefusal(turn, 'save_customer_estimate', { code: 'missing_information' }, 'missing_measurement_not_reported');
   ctx.check((await draftsOf(h, s.lark)).length === 0, 'side_effect', 'estimate_saved_without_a_measurement', 'a draft exists for a property with no lawn measurement');
   ctx.markCompleted();
 };
@@ -240,7 +236,6 @@ CASES['W8-dev-10'] = async (ctx, h, cast, c) => {
   const proposed = await proposeSave(ctx, h, s.thistle, { apps: 12, prompt: c.request });
   await confirmSave(ctx, h, proposed);
   await checkDraft(ctx, h, s.thistle, { apps: 12 });
-  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
