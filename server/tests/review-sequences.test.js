@@ -4960,6 +4960,32 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
     });
 
+    test('#5524 r7: if the long-link fallback cannot be stamped, nothing is sent and the step retries', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-7', first_name: 'Lena', last_name: 'K', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+        service_records: [{ id: 'sr-tv-7', customer_id: 'tv-7', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      });
+      // Only the fallback stamp (template_key + custom_body cleared) fails.
+      db.mockImplementation((table) => {
+        const q = mock(table);
+        if (table === 'review_requests') {
+          const update = q.update.bind(q);
+          q.update = (patch) => (patch && 'custom_body' in patch && patch.custom_body === null && patch.template_key
+            ? Promise.reject(new Error('db blip')) : update(patch));
+        }
+        return q;
+      });
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv7', sequenceStep: 1, serviceRecordId: 'sr-tv-7',
+      });
+      expect(out).toMatchObject({ ok: false, retryable: true, reason: 'fallback_stamp_failed' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
     test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

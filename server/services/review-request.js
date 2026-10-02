@@ -5048,9 +5048,18 @@ const ReviewService = {
         const fallbackTpl = tpl || OUTREACH.getOutreachTemplate(fallbackId);
         body = OUTREACH.renderOutreachBody(fallbackTpl.body, renderVars, { requireLink: true });
         logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${fallbackId})`);
+        // The row must say what is actually sent: if the stamp can't be
+        // written, send nothing now and retry the step (nothing reserved or
+        // sent yet), rather than send the template under a tech-voice row.
+        try {
+          await db("review_requests").where({ id: request.id }).update({ template_key: fallbackId, custom_body: null });
+        } catch (err) {
+          logger.warn(`[review] tech-voice long-link fallback stamp failed — retrying the step (requestId=${request.id}): ${err.message}`);
+          await db("review_requests").where({ id: request.id }).whereNot({ status: "sending" })
+            .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) }).catch(() => {});
+          return { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "fallback_stamp_failed" };
+        }
         request.template_key = fallbackId;
-        await db("review_requests").where({ id: request.id }).update({ template_key: fallbackId, custom_body: null })
-          .catch((err) => logger.warn(`[review] tech-voice long-link fallback stamp failed (requestId=${request.id}): ${err.message}`));
       }
     }
 

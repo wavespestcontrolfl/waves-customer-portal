@@ -456,6 +456,21 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(Drafter.verifyDraftBody('Aaron, if you were happy with the visit. Would you leave a Google review? {review_url}', { firstName: 'Aaron' })).toBe('satisfaction_condition');
   });
 
+  test('#5524 r7: the sender filter runs in the email query, before the row limit', async () => {
+    const raws = [];
+    db.mockImplementation((table) => {
+      const q = builder(table);
+      if (table === 'emails') {
+        const orig = q.whereRaw;
+        q.whereRaw = (sql, b) => { raws.push([sql, b]); return orig ? orig(sql, b) : q; };
+      }
+      return q;
+    });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    expect(raws).toContainEqual(['lower(from_address) LIKE ?', ['%marta@example.com%']]);
+  });
+
   test('#5524 r2 P1: an email attached by display name from another address is not the customer\'s words', async () => {
     const auth = (d) => `mx.google.com; dkim=pass header.i=@${d}`;
     mockTables.emails = [

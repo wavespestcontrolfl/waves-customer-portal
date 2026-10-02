@@ -469,8 +469,17 @@ async function customerOwnEmails(customerId, before = null, customerEmail = null
       .whereRaw("from_address NOT ILIKE ?", ["%wavespestcontrol%"])
       .where("received_at", ">", new Date(Date.now() - GROUNDING_WINDOW_DAYS * 86400000))
       .modify((q) => { if (before) q.where("received_at", "<", before); })
+      // Narrow to the account holder's address in the query (exact match is
+      // re-checked below), and over-fetch, so other senders' rows or failed
+      // authentication can't crowd the customer's own mail out of the limit.
+      .modify((q) => {
+        if (customerEmail) {
+          const esc = String(customerEmail).toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`);
+          q.whereRaw("lower(from_address) LIKE ?", [`%${esc}%`]);
+        }
+      })
       .orderBy("received_at", "desc")
-      .limit(TECH_VOICE_MAX_EMAILS)
+      .limit(TECH_VOICE_MAX_EMAILS * 5)
       .select("id", "subject", "gmail_thread_id", "received_at", "body_text", "body_html", "from_address", "authentication_results");
     // A From header is attacker-typed: only mail that authenticated as its
     // own domain (DKIM / SPF aligned) is the customer's words, same as every
@@ -484,7 +493,7 @@ async function customerOwnEmails(customerId, before = null, customerEmail = null
     const authentic = own ? rows.filter((r) => normalizeAddress(r.from_address) === own
       && hasAlignedAuth(r.authentication_results, domainFromAddress(r.from_address))) : [];
     const ownSubjects = await ownSubjectsInThreads(db, authentic);
-    return authentic.map((r) => ({
+    return authentic.slice(0, TECH_VOICE_MAX_EMAILS).map((r) => ({
       date: r.received_at,
       subject: redactAccessCodes(String(ownSubjects.get(r.id) || "")).slice(0, 160),
       text: redactAccessCodes(stripQuotedAndSignature(emailPlainText(r))).slice(0, TECH_VOICE_EMAIL_CHARS),
