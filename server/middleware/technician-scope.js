@@ -50,6 +50,8 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/projects(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/treatment-plans(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/lawn-assessment(\/.*)?$/ },
+  // Consultation outcome on a visit (the router pins it to the assigned tech).
+  { bucket: 'own-visits', methods: ['GET', 'HEAD', 'POST'], pattern: /^\/api\/admin\/consultations\/[^/]+\/outcome$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/customers(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/intelligence-bar(\/.*)?$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/(services|technicians|discounts)$/ },

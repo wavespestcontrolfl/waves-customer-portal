@@ -83,6 +83,8 @@ describe('matcher', () => {
     ['GET', '/api/admin/auth/me', true],
     ['GET', '/api/admin/feature-flags', true],
     ['POST', '/api/stripe/terminal/handoff', true],
+    ['POST', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/outcome', true],
+    ['GET', '/api/admin/consultations/stats', false],
     ['POST', '/api/stripe/terminal/capture', true],
     ['GET', '/api/admin/wiki', true],
     ['GET', '/api/admin/wiki/termite/baiting', true],
