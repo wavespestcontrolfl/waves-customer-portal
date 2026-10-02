@@ -82,11 +82,17 @@ function excludeActivityOnlyFromBell(query) {
 // unified messages on any of their conversations, and recent legacy sms_log rows
 // that never got a unified twin (older ones were initialised unread and never
 // mirrored, so they do not count).
+// Hidden recruiting replies (message_type job_*, utils/recruiting-thread-scope.js)
+// are not the customer's texts and never ring this bell, so they never hold it open.
+const { RECRUITING_MESSAGE_TYPE_PREFIX_LIKE } = require('../utils/recruiting-thread-scope');
+const NOT_RECRUITING_SQL = (col) => `(${col} IS NULL OR ${col} NOT LIKE '${RECRUITING_MESSAGE_TYPE_PREFIX_LIKE}%')`;
 const CUSTOMER_UNREAD_INBOUND_SQL = `(
   EXISTS (SELECT 1 FROM messages um JOIN conversations uc ON uc.id = um.conversation_id
     WHERE uc.customer_id = ? AND um.channel = 'sms' AND um.direction = 'inbound'
+      AND ${NOT_RECRUITING_SQL('um.message_type')}
       AND (um.is_read = false OR um.is_read IS NULL))
   OR EXISTS (SELECT 1 FROM sms_log ul WHERE ul.customer_id = ? AND ul.direction = 'inbound'
+      AND ${NOT_RECRUITING_SQL('ul.message_type')}
       AND ul.created_at > NOW() - interval '30 days' AND (ul.is_read = false OR ul.is_read IS NULL)
       AND NOT EXISTS (SELECT 1 FROM messages tw WHERE tw.twilio_sid = ul.twilio_sid AND tw.channel = 'sms'))
 )`;

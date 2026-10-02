@@ -191,23 +191,32 @@ async function ringGapBell(trx, event) {
       const dedupeKey = `agent-gap:${event.id}:${event.at.toISOString()}`;
       const metadata = { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) };
       // A gap a Claude window on the Mac picks up by itself is Claude's work, not
-      // the owner's (owner 2026-10-01): it is an engineering row in the Agents
-      // Activity feed and never the bell. The email path is a no-op: a gap is
-      // not worth an email when the in-app feed is off. A gap that waits for the
-      // owner's "build gap N" (texting AI, phone agent) stays a bell.
-      const result = AUTO_PICKUP_SOURCES.has(event.source)
-        ? await require('./ops-digest').deliverOpsDigest({
-          key: 'agent-gap', subject: title, headline: title, summary: body, text: body,
+      // the owner's (owner 2026-10-01): an engineering row in the Agents Activity
+      // feed, never the bell. The `FIX:` subject gives it the actionable kind
+      // (an unprefixed subject reads as FYI: completed in Activity, dropped by
+      // needs-me); the headline keeps the bell-style title. Only a row really
+      // written in-app counts: with the feed off (GATE_OPS_DIGESTS_IN_APP /
+      // GATE_AGENT_ACTIVITY) deliverOpsDigest takes its email path, writes
+      // nothing, and the gap falls back to the bell below. A gap that waits for
+      // the owner's "build gap N" (texting AI, phone agent) is always a bell.
+      let result = null;
+      if (AUTO_PICKUP_SOURCES.has(event.source)) {
+        const digest = await require('./ops-digest').deliverOpsDigest({
+          key: 'agent-gap', subject: `FIX: ${title}`, headline: title, summary: body, text: body,
           audience: 'engineering', link: BELL_LINK, dedupeKey, metadata, trx: sp,
           sendEmail: async () => ({ ok: true }),
-        })
-        : await require('./notification-service').notifyAdmin('agents', title, body, {
+        });
+        if (digest?.channel === 'in_app' && !digest.fallback) result = digest;
+      }
+      if (!result) {
+        result = await require('./notification-service').notifyAdmin('agents', title, body, {
           link: BELL_LINK,
           bell: true,
           trx: sp,
           dedupeKey,
           metadata,
         });
+      }
       if (!result || result.ok === false || result.fallback) throw Object.assign(new Error('bell not written'), { code: 'NOT_WRITTEN' });
       await sp('agent_gap_reports').where('id', event.id).update({ belled_at: event.at });
     });

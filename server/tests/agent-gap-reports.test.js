@@ -247,6 +247,7 @@ describe('agent-gap-reports', () => {
       const arg = digestMock.mock.calls[0][0];
       expect(arg).toMatchObject({
         key: 'agent-gap', audience: 'engineering', link: '/admin/agents',
+        subject: expect.stringMatching(/^FIX: Gap #7/),
         headline: expect.stringMatching(/^Gap #7: (bar|tech bar) \(scheduling\)$/),
         summary: 'A Claude window on the Mac starts building it within 10 min.',
         metadata: { gapId: 7, source, reopened: false },
@@ -254,6 +255,50 @@ describe('agent-gap-reports', () => {
       expect(arg.dedupeKey).toMatch(/^agent-gap:7:\d{4}-\d{2}-\d{2}T/);
       expect(arg.trx).toBeDefined();
       expect(belledUpdates).toHaveLength(1);
+    });
+
+    // The seam derives the row's kind from the subject: an unprefixed one reads as
+    // FYI (completed in Activity, dropped by needs-me). The FIX: prefix keeps the
+    // open gap actionable.
+    test('the digest subject classifies as an actionable engineering finding, not FYI', () => {
+      jest.dontMock('../services/ops-digest');
+      const real = jest.requireActual('../services/ops-digest');
+      const { gapBellText } = load()._private;
+      const { title, body } = gapBellText({ id: 7, source: 'intelligence-bar', domain: 'scheduling' });
+      const fields = real.digestRowFields({ subject: `FIX: ${title}`, headline: title, summary: body, audience: 'engineering' });
+      expect(fields).toMatchObject({ kind: 'FIX', audience: 'engineering', feed: 'activity', title: 'Gap #7: bar (scheduling)' });
+      expect(real.digestRowFields({ subject: title, headline: title, audience: 'engineering' }).kind).toBe('FYI');
+    });
+
+    // GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY off (the default): deliverOpsDigest
+    // takes its email path and writes no row. The gap must not be stamped as rung
+    // for nothing: it falls back to the bell.
+    test.each([
+      ['feed off (email path)', { ok: true, channel: 'email' }],
+      ['digest row not written (fallback)', { ok: true, channel: 'email', fallback: true }],
+    ])('a Claude-built gap falls back to the bell when the Activity feed is unavailable: %s', async (_n, outcome) => {
+      const { writeGapRows } = load();
+      digestMock.mockResolvedValue(outcome);
+      returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: 'scheduling', xmax: '0' }];
+      const [saved] = await writeGapRows([signal({ source: 'intelligence-bar' })]);
+      await flush();
+      expect(saved).toMatchObject({ rang: true });
+      expect(notifyMock).toHaveBeenCalledTimes(1);
+      const [category, title, body, opts] = notifyMock.mock.calls[0];
+      expect(category).toBe('agents');
+      expect(title).toBe('Gap #7: bar (scheduling)');
+      expect(body).toBe('A Claude window on the Mac starts building it within 10 min.');
+      expect(opts.bell).toBe(true);
+      expect(belledUpdates).toHaveLength(1);
+    });
+
+    test('a Claude-built gap stamps belled_at only once a row really landed: neither path writing leaves it unset', async () => {
+      const { writeGapRows } = load();
+      digestMock.mockResolvedValue({ ok: true, channel: 'email' });
+      notifyMock.mockResolvedValue(null);
+      const [saved] = await writeGapRows([signal({ source: 'tech-bar' })]);
+      expect(saved.rang).toBe(false);
+      expect(belledUpdates).toHaveLength(0);
     });
 
     test('a Claude-built gap that is back rings the Activity feed as "is back", and a digest row that was not written leaves belled_at unset', async () => {
@@ -264,11 +309,11 @@ describe('agent-gap-reports', () => {
       expect(digestMock.mock.calls[0][0].headline).toBe('Gap #7 is back: bar (scheduling)');
       expect(belledUpdates).toHaveLength(1);
       belledUpdates = [];
-      digestMock.mockResolvedValue({ ok: true, channel: 'email', fallback: true });
+      digestMock.mockResolvedValue({ ok: false, channel: 'in_app', id: null });
+      notifyMock.mockResolvedValue(null);
       const [retry] = await writeGapRows([signal({ source: 'intelligence-bar' })]);
       expect(retry.rang).toBe(false);
       expect(belledUpdates).toHaveLength(0);
-      expect(notifyMock).not.toHaveBeenCalled();
     });
 
     test('an open gap recorded before the per-gap bell (belled_at NULL) rings on its next sighting and is stamped', async () => {

@@ -59,4 +59,13 @@ describe('shared thread row (sms-thread:<customerId>) read state', () => {
     expect(sql).toContain('JOIN conversations uc ON uc.id = um.conversation_id');
     expect(sql).not.toMatch(/conversation_id = /);
   });
+
+  // Hidden recruiting replies (message_type job_*) are not the customer's texts
+  // and never ring this bell, so one unread must not hold the thread row open.
+  test('the unread check leaves out recruiting rows, on unified and legacy sources', async () => {
+    await NotificationService.markInboundSmsReadAdmin({ customerId: 'cust-1', role: 'admin' });
+    const { sql } = updateSql();
+    expect(sql).toContain("(um.message_type IS NULL OR um.message_type NOT LIKE 'job\\_%')");
+    expect(sql).toContain("(ul.message_type IS NULL OR ul.message_type NOT LIKE 'job\\_%')");
+  });
 });
