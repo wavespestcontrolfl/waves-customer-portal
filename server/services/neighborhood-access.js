@@ -336,6 +336,9 @@ async function unfiledGateCodeCustomers(conn) {
     .whereNull('c.deleted_at')
     .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''")
     .where((w) => w.whereNull('f.customer_id')
+      // The filed neighborhood was deleted (FK SET NULL, e.g. the backfill
+      // rollback): nothing is filed any more.
+      .orWhereNull('f.neighborhood_id')
       .orWhereRaw(`f.value_hash <> ${VALUE_HASH_SQL}`)
       .orWhereRaw(`f.neighborhood_id IS DISTINCT FROM (
         SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
@@ -435,19 +438,31 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   const who = firstName ? `${String(firstName).slice(0, 20)}'s update` : 'the latest update';
   const { composeAdminAlert } = require('./admin-alert-compose');
   const { raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
-  const base = `${name} now has ${Number(live?.n) || 2} different gate codes on file`;
+  const count = Number(live?.n) || 2;
+  const base = `${name} now has ${count} different gate codes on file`;
   // The composer's why limit is 110; a long name drops the "after …" clause.
-  const why = `${base} after ${who}.`.length <= 110 ? `${base} after ${who}.` : `${base}.`;
-  const composed = composeAdminAlert({
-    area: 'Customers',
-    action: 'confirm a neighborhood gate code',
-    why,
-    severity: 'needs-you',
-    link: `/admin/customers?customerId=${customerId}`,
-    subject: { type: 'customer', id: String(customerId) },
-    doneWhen: 'gate_code_confirmed',
-    who: 'person',
-  });
+  // A name the composer rejects (initials read as a second sentence, a
+  // bracket, an exclamation point) never costs the bell: drop the customer's
+  // name, then the community's.
+  const whys = [`${base} after ${who}.`, `${base}.`, `A neighborhood now has ${count} different gate codes on file.`];
+  let composed;
+  for (const why of whys) {
+    try {
+      composed = composeAdminAlert({
+        area: 'Customers',
+        action: 'confirm a neighborhood gate code',
+        why,
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${customerId}`,
+        subject: { type: 'customer', id: String(customerId) },
+        doneWhen: 'gate_code_confirmed',
+        who: 'person',
+      });
+      break;
+    } catch (err) {
+      if (err.code !== 'ADMIN_ALERT_RULE' || why === whys[whys.length - 1]) throw err;
+    }
+  }
   return raiseAdminAlertWithReopen('customer', composed.headline, composed.why, {
     dedupeKey: `${CONFLICT_KEY_PREFIX}${neighborhoodId}`,
     dedupeVersion: 'v1',
@@ -458,7 +473,8 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
     ringOnRefresh: () => false,
     bellDefault: true,
     link: composed.link,
-    metadata: { ...composed.metadata, neighborhoodId },
+    // customerId top-level: the central internal-test-customer suppression reads it.
+    metadata: { ...composed.metadata, customerId: String(customerId), neighborhoodId },
   });
 }
 

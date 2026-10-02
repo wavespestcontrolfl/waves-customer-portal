@@ -145,6 +145,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(headline).toBe('Customers — confirm a neighborhood gate code');
     expect(why).toBe("Willow Grande now has 2 different gate codes on file after Sample's update.");
     expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers?customerId=${customerId}` });
+    // Top-level customerId: the internal-test-customer bell suppression reads it.
+    expect(opts.metadata).toMatchObject({ customerId: String(customerId), neighborhoodId: n });
     expect(why).not.toMatch(/3333|4444/);
   });
 
@@ -238,6 +240,34 @@ postgres('neighborhood gate-code filing sweep', () => {
     const why = mockRaise.mock.calls[0][2];
     expect(why.length).toBeLessThanOrEqual(110);
     expect(why).toBe('Laurelwood Preserve at Cypress Banks now has 2 different gate codes on file.');
+  });
+
+  test.each([
+    ['initials', 'A. J.', 'Oak Hollow', 'Oak Hollow now has 2 different gate codes on file.'],
+    ['a bracketed community name', 'Sample', 'Oak Hollow [North]', 'A neighborhood now has 2 different gate codes on file.'],
+  ])('a name the composer rejects (%s) still rings the bell', async (_label, firstName, name, expected) => {
+    const n = await neighborhood(name);
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '2727', status: 'active', source: 'backfill' });
+    const customerId = await customerWithCode('2828', { neighborhoodId: n });
+    await trx('customers').where({ id: customerId }).update({ first_name: firstName });
+    await sweepSavedGateCodes();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(mockRaise.mock.calls[0][2]).toBe(expected);
+  });
+
+  test('a filing whose neighborhood was deleted is filed again', async () => {
+    const n = await neighborhood('Gone Grove');
+    const customerId = await customerWithCode('2929', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    // The backfill rollback deletes the neighborhood: the ledger FK goes NULL with the property's link.
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: null, neighborhood_source: null, neighborhood_checked_at: null });
+    await trx('neighborhood_access').where({ neighborhood_id: n }).del();
+    await trx('neighborhoods').where({ id: n }).del();
+    expect((await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).neighborhood_id).toBeNull();
+    const n2 = await neighborhood('New Grove');
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2, neighborhood_source: 'office' });
+    expect((await sweepSavedGateCodes()).customers).toBe(1);
+    expect((await accessRows(n2)).map((r) => r.code)).toEqual(['2929']);
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
