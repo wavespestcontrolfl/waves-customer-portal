@@ -1515,32 +1515,29 @@ router.post('/:id/treatment-zone', upload.fields([
 // DELETE /api/tech/services/:id/treatment-zone — "Remove the trace" on the
 // Fast Complete report flow: a trace that no longer matches the note (it now
 // says spots only, or not inside) comes off before the visit is completed.
-// Same gate and assignment check as the save. `expectedPropertyId` binds it
-// to the property the sheet loaded, as the save does; a completed visit
-// keeps its trace (409).
+// Same gate as the save; the actor's current assignment is judged on the
+// locked visit row (a technician reassigned meanwhile is refused).
+// `expectedPropertyId` binds it to the property the sheet loaded, as the
+// save does; a completed visit keeps its trace (409).
+const TRACE_REMOVE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, service_not_assigned: 403, not_found: 404 };
 router.delete('/:id/treatment-zone', async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('treatmentZoneMap')) {
       return res.status(404).json({ error: 'Not enabled' });
     }
-    const svc = await db('scheduled_services')
-      .where({ id: req.params.id })
-      .first('id', 'technician_id');
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
-      return res.status(403).json({ error: 'Not assigned to this service' });
-    }
     const removed = await deleteTreatmentZoneMap({
-      scheduledServiceId: svc.id,
+      scheduledServiceId: req.params.id,
+      actor: req,
       ...(Object.prototype.hasOwnProperty.call(req.query, 'expectedPropertyId') ? { expectedPropertyId: req.query.expectedPropertyId || null } : {}),
     }).catch((err) => {
-      if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
+      if (TRACE_REMOVE_REFUSALS[err?.code]) return { refused: err };
       throw err;
     });
     if (removed?.refused) {
-      return res.status(409).json({ error: removed.refused.message, code: removed.refused.code });
+      const { code, message } = removed.refused;
+      return res.status(TRACE_REMOVE_REFUSALS[code]).json({ error: message, code });
     }
-    logger.info(`[tech-track] treatment zone removed service=${svc.id} tech=${req.technicianId} removed=${!!removed}`);
+    logger.info(`[tech-track] treatment zone removed service=${req.params.id} tech=${req.technicianId} removed=${!!removed}`);
     return res.json({ removed: !!removed });
   } catch (err) {
     logger.error(`[tech-track] treatment zone remove failed: ${err.message}`);

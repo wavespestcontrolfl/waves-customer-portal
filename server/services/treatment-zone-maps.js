@@ -249,17 +249,17 @@ async function saveTreatmentZoneMap({
 
 // "Remove the trace" (the Fast Complete report flow): a trace that no longer
 // matches the note comes off before the visit is completed. Under the visit
-// row's lock, which the completion takes before it reads the trace: a visit
-// moved to another property, or already completed (its report shows the
-// trace), is refused. The images come off S3 after the commit, best effort.
-async function deleteTreatmentZoneMap({ scheduledServiceId, expectedPropertyId, knex = db }) {
+// row's lock, which the completion takes before it reads the trace, with the
+// actor's current assignment judged on the locked row (lockOwnedLiveVisit; a
+// technician reassigned meanwhile is refused): a visit moved to another
+// property, or already completed (its report shows the trace), is refused.
+// The images come off S3 after the commit, best effort.
+async function deleteTreatmentZoneMap({ scheduledServiceId, actor, expectedPropertyId, knex = db }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
+  if (!actor) throw operationalError('actor is required');
+  const { lockOwnedLiveVisit } = require('./technician-visit-scope');
   const removed = await knex.transaction(async (trx) => {
-    const visit = await trx('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .forUpdate()
-      .first('property_id', 'status');
-    if (!visit) throw operationalError('Service not found', 404);
+    const visit = await lockOwnedLiveVisit(trx, actor, scheduledServiceId, ['property_id', 'status'], { allowCompleted: true });
     if (expectedPropertyId !== undefined && String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
       throw propertyChangedError();
     }

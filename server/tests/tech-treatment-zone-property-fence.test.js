@@ -126,37 +126,36 @@ describe('Remove the trace (DELETE, the report flow)', () => {
     method: 'DELETE', headers: { Authorization: 'Bearer tech' },
   });
   beforeEach(() => {
-    mockFirst.mockReset();
     mockDelete.mockReset();
-    mockFirst.mockImplementation(async () => ({ id: 'svc-1', technician_id: 'tech-1' }));
     mockDelete.mockResolvedValue({ snapshot_s3_key: 'snap.png' });
   });
 
-  test('the assigned tech removes it, bound to the property the sheet loaded', async () => {
+  test('the tech removes it as themselves, bound to the property the sheet loaded', async () => {
     await withServer(async (baseUrl) => {
       const res = await remove(baseUrl);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ removed: true });
     });
-    expect(mockDelete).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', expectedPropertyId: 'prop-2' });
+    expect(mockDelete).toHaveBeenCalledWith(expect.objectContaining({
+      scheduledServiceId: 'svc-1',
+      expectedPropertyId: 'prop-2',
+      actor: expect.objectContaining({ techRole: 'technician', technicianId: 'tech-1' }),
+    }));
   });
 
-  test('a visit with no property sends an empty binding, and another tech\'s visit is refused', async () => {
+  test('a visit with no property sends an empty binding', async () => {
     await withServer(async (baseUrl) => {
       expect((await remove(baseUrl, '?expectedPropertyId=')).status).toBe(200);
-      mockFirst.mockImplementation(async () => ({ id: 'svc-1', technician_id: 'tech-9' }));
-      expect((await remove(baseUrl)).status).toBe(403);
     });
-    expect(mockDelete).toHaveBeenCalledTimes(1);
-    expect(mockDelete).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', expectedPropertyId: null });
+    expect(mockDelete).toHaveBeenCalledWith(expect.objectContaining({ expectedPropertyId: null }));
   });
 
-  test('a completed or moved visit answers 409 with its reason', async () => {
-    for (const code of ['visit_completed', 'visit_property_changed']) {
-      mockDelete.mockRejectedValueOnce(Object.assign(new Error(`refused: ${code}`), { code, statusCode: 409 }));
+  test('each refusal on the locked row answers with its status and reason', async () => {
+    for (const [code, status] of [['visit_completed', 409], ['visit_property_changed', 409], ['service_not_assigned', 403], ['not_found', 404]]) {
+      mockDelete.mockRejectedValueOnce(Object.assign(new Error(`refused: ${code}`), { code }));
       await withServer(async (baseUrl) => {
         const res = await remove(baseUrl);
-        expect(res.status).toBe(409);
+        expect(res.status).toBe(status);
         expect(await res.json()).toEqual({ error: `refused: ${code}`, code });
       });
     }
