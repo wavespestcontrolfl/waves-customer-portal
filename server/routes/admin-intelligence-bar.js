@@ -2809,6 +2809,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
+    let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
@@ -2991,6 +2992,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               result = direct.result;
               if (direct.actionId) directActionIds.push(direct.actionId);
               if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
+              if (direct.partial) directOutcomePartial = true;
               if (direct.failed) {
                 failed = true;
                 errorMessage = result.error;
@@ -3276,7 +3278,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // the task open as outcome_unknown — never 'responded', which the task
       // store treats as closed and drops from the open list (pre-push P1 on
       // #5563); its saved receipt stays the authority on recovery.
-      ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
+      // A partial direct outcome is checkpointed as awaiting_approval, the raw
+      // state a carded partial keeps too: the snapshot derives the exposed
+      // partially_completed state from the receipts and the task stays open
+      // and actionable (Codex r4 P2).
+      ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length || directOutcomePartial ? 'awaiting_approval'
         : directOutcomeUncertain ? 'outcome_unknown'
           : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),

@@ -45,6 +45,9 @@ const { ibFullAccess } = require('./ib-access');
 //   - the estimate writers and approve_price (money)
 //   - switch_appointment_property: on a grouped visit it relocates every
 //     service line sharing the visit (bulk; Codex r1 on #5563)
+//   - set_estimate_presentation: writes model-authored customer-facing copy
+//     (a display name) onto an estimate; that stays reviewed on the card
+//     (Codex r4)
 //   - every external_action: send_sms, reply_via_sms, send_email_reply,
 //     review requests and replies, block_sender, outside-service writes
 const OWNER_DIRECT_TOOL_NAMES = new Set([
@@ -63,7 +66,6 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
   'update_restock_request',
   'toggle_estimate_v2_view',
   'toggle_show_one_time_option',
-  'set_estimate_presentation',
   'cancel_queued_message',
 ]);
 
@@ -102,6 +104,13 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
     const stops = preview?.stops;
     return Array.isArray(stops) && stops.length === 1 && !stops[0]?.grouped_visit_id;
   }
+  // reschedule_appointment on a grouped visit detaches the service or
+  // recomputes the parent visit window (the card discloses it; Codex r4), so
+  // the pinned appointment the proposal verified must carry no visit_id.
+  if (toolName === 'reschedule_appointment') {
+    const pin = preview?.pinned_appointment;
+    return Boolean(pin && typeof pin === 'object' && !pin.visit_id);
+  }
   if (toolName === 'update_customer') {
     const updates = input?.updates;
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
@@ -130,6 +139,9 @@ async function runDirectCommit(clientPayload, { commit, cancel }) {
     result,
     actionId: committed?.claimed ? clientPayload.id : null,
     uncertain: result.executed === null || result.receiptPersisted === false,
+    // A known partial outcome (the write landed, a follow-on repair did not)
+    // keeps the task actionable exactly as a carded partial does (Codex r4).
+    partial: result.outcome === 'partially_completed',
     failed: !result.executed,
   };
 }
@@ -161,7 +173,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. assign_technician executes directly for one stop; several stops show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. assign_technician and reschedule_appointment execute directly for one ungrouped stop; grouped visits and several stops show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.

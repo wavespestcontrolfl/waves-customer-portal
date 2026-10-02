@@ -71,7 +71,7 @@ describe('which writes skip the card', () => {
   test('customer messages, money, bulk and destructive writes keep their card', () => {
     for (const name of ['send_sms', 'reply_via_sms', 'send_email_reply', 'trigger_review_request', 'submit_review_reply',
       'bulk_update_customers', 'bulk_update_leads', 'optimize_all_routes', 'swap_tech_assignments', 'move_stops_to_day',
-      'create_appointment', 'cancel_appointment', 'cancel_plan', 'merge_customers', 'save_customer_estimate', 'switch_appointment_property',
+      'create_appointment', 'cancel_appointment', 'cancel_plan', 'merge_customers', 'save_customer_estimate', 'switch_appointment_property', 'set_estimate_presentation',
       'create_pending_estimate', 'approve_price', 'set_railway_gate', 'request_instant_payout']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, false]);
     }
@@ -82,9 +82,18 @@ describe('which writes skip the card', () => {
   });
 
   test('the lead and schedule edits the owner asked for execute directly', () => {
-    for (const name of ['update_lead_contact', 'update_lead_status', 'reschedule_appointment', 'update_property_access']) {
+    for (const name of ['update_lead_contact', 'update_lead_status', 'update_property_access']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, true]);
     }
+  });
+
+  test('reschedule_appointment is direct only for a pinned ungrouped appointment', () => {
+    const input = { appointment_id: A, new_date: '2026-10-03' };
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A, visit_id: null } })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A } })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A, visit_id: 'visit-1' } })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, {})).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input)).toBe(false);
   });
 
   test('assign_technician is direct for one ungrouped stop; several stops, a grouped stop, or no preview keep the card', () => {
@@ -122,7 +131,9 @@ describe('which writes skip the card', () => {
 
     calls.length = 0;
     const unsaved = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'completed', result: {}, receiptPersisted: false, warning: 'w' } }), cancel });
-    expect(unsaved).toMatchObject({ actionId: 'pa-1', uncertain: true, failed: false });
+    expect(unsaved).toMatchObject({ actionId: 'pa-1', uncertain: true, partial: false, failed: false });
+    const partial = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'partially_completed', result: { success: true, warning: 'group repair failed' } } }), cancel });
+    expect(partial).toMatchObject({ actionId: 'pa-1', uncertain: false, partial: true, failed: false, result: { executed: true, outcome: 'partially_completed' } });
 
     // A commit that throws before claiming releases the approval and rethrows.
     calls.length = 0;
@@ -295,6 +306,10 @@ describe('reads for the owner login', () => {
     expect(await Context.prepareReadInput(phoneConflict, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     const phoneAgrees = await Context.prepareReadInput({ customer_name: 'Synthetic Person', phone: '941-555-0001' }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
     expect(phoneAgrees.input.customer_id).toBe(A);
+    // A valid id or phone beside a name that matched nobody is a conflict too.
+    expect(await Context.prepareReadInput({ customer_name: 'Nobody Here', customer_id: B }, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput({ customer_name: 'Nobody Here', phone: '9415550002' }, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput({ customer_name: 'Nobody Here', customer_id: B }, strict({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     // Two customers share the name: A's id with B's phone fits neither row.
     rows.customers[1].first_name = 'Synthetic'; rows.customers[1].last_name = 'Person';
     const split = { customer_name: 'Synthetic Person', customer_id: A, phone: '9415550002' };
