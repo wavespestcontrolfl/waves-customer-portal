@@ -505,7 +505,7 @@ describe('review sequences — cadence engine', () => {
       email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
       customers: [{ id: 'pe-tv', first_name: 'Deb', last_name: 'D', phone: '+19410000015', email: 'x@y.com', nearest_location_id: 'sarasota' }],
       // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
-      service_records: [{ id: 'sr-pe-tv', customer_id: 'pe-tv', technician_id: null, service_type: 'pest control', service_date: new Date() }],
+      service_records: [{ id: 'sr-pe-tv', customer_id: 'pe-tv', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       notification_prefs: [{ customer_id: 'pe-tv', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
     });
     db.mockImplementation(mock);
@@ -4844,7 +4844,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'tv-1', first_name: 'Lena', last_name: 'K', phone: '+19410000093', nearest_location_id: 'bradenton' }],
         // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
-        service_records: [{ id: 'sr-tv-1', customer_id: 'tv-1', technician_id: 'tech-c', service_type: 'pest control', service_date: new Date() }],
+        service_records: [{ id: 'sr-tv-1', customer_id: 'tv-1', technician_id: 'tech-c', service_type: 'pest control', status: 'completed', service_date: new Date() }],
         technicians: [{ id: 'tech-c', name: 'Christopher Adams' }],
       });
       db.mockImplementation(mock);
@@ -4871,7 +4871,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'tv-3', first_name: 'Ravi', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' }],
         // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
-        service_records: [{ id: 'sr-tv-3', customer_id: 'tv-3', technician_id: null, service_type: 'pest control', service_date: new Date() }],
+        service_records: [{ id: 'sr-tv-3', customer_id: 'tv-3', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       });
       db.mockImplementation(mock);
       const out = await ReviewService.sendOutreachTouch({
@@ -4910,7 +4910,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'tv-5', first_name: 'Lena', last_name: 'K', phone: '+19410000097', nearest_location_id: 'bradenton' }],
         // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
-        service_records: [{ id: 'sr-tv-5', customer_id: 'tv-5', technician_id: null, service_type: 'pest control', service_date: new Date() }],
+        service_records: [{ id: 'sr-tv-5', customer_id: 'tv-5', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       });
       db.mockImplementation(mock);
       const out = await ReviewService.sendOutreachTouch({
@@ -4940,7 +4940,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({
         customers: [{ id: 'tv-6', first_name: 'Ravi', last_name: 'P', phone: '+19410000091', nearest_location_id: 'venice' }],
-        service_records: [{ id: 'sr-old', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', service_date: new Date(Date.now() - 90 * 86400000) }],
+        service_records: [
+          { id: 'sr-old', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date(Date.now() - 90 * 86400000) },
+          // Recent, but not a completed visit: never the subject.
+          { id: 'sr-incomplete', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), service_date: new Date() },
+          { id: 'sr-sched', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'scheduled', service_date: new Date() },
+        ],
       });
       db.mockImplementation(mock);
       const out = await ReviewService.sendOutreachTouch({
@@ -4957,7 +4962,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'tv-2', first_name: 'Ravi', last_name: 'P', phone: '+19410000094', nearest_location_id: 'venice' }],
         // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
-        service_records: [{ id: 'sr-tv-2', customer_id: 'tv-2', technician_id: null, service_type: 'pest control', service_date: new Date() }],
+        service_records: [{ id: 'sr-tv-2', customer_id: 'tv-2', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       });
       db.mockImplementation(mock);
 
@@ -5379,7 +5384,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     mockDraftTechVoice.mockResolvedValue(fresh);
     const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey }],
-      service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', service_date: new Date() }],
+      service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
     }));
 
     let mock = fixture('tvd-1', new Date(Date.now() - 2 * 86400000));

@@ -4661,13 +4661,23 @@ const ReviewService = {
           .then((sr) => sr?.service_type || null).catch(() => null)) || serviceType,
       }
         : await db("service_records")
-          .where({ customer_id: customer.id })
+          .where({ customer_id: customer.id, status: "completed" })
           .where("service_date", ">=", new Date(Date.now() - 30 * 86400000))
           .orderBy("service_date", "desc")
-          .first("id", "service_date", "technician_id", "service_type")
+          .limit(5)
+          .select("id", "service_date", "technician_id", "service_type", "structured_notes")
+          // A completed visit only, with the paid-invoice path's own outcome
+          // rule (an incomplete / declined visit is never the subject).
           // Everything about the visit comes from that visit, its service
           // type included (it decides the termite rule), never the sequence.
-          .then((sr) => (sr ? { serviceRecordId: sr.id, serviceDate: sr.service_date, technicianId: sr.technician_id, serviceType: sr.service_type } : null))
+          .then((rows) => {
+            const sr = rows.find((r) => {
+              let notes = r.structured_notes || {};
+              if (typeof notes === "string") { try { notes = JSON.parse(notes); } catch { notes = {}; } }
+              return !notes.visitOutcome || notes.visitOutcome === "completed";
+            });
+            return sr ? { serviceRecordId: sr.id, serviceDate: sr.service_date, technicianId: sr.technician_id, serviceType: sr.service_type } : null;
+          })
           .catch(() => null);
     // Anchor a recovered visit to the cadence the first time, so later
     // touches draft about the SAME visit even if a newer one completes.
