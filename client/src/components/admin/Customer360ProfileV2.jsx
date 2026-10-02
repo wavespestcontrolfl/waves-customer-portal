@@ -5396,7 +5396,7 @@ function CustomerWorkspaceHeader({
             <Button
               variant="secondary"
               className="c360-contact-action"
-              onClick={() => callViaBridge(c.phone, name)}
+              onClick={() => callViaBridge(c.phone, name, undefined, c.id)}
             >
               <Phone size={16} />
               Call
@@ -5443,6 +5443,7 @@ function CustomerWorkspaceHeader({
                 <CallBridgeLink
                   phone={contact.phone}
                   customerName={contact.name || name}
+                  customerId={c.id}
                 >
                   {contact.phone}
                 </CallBridgeLink>
@@ -5468,6 +5469,7 @@ function CustomerContactLinks({
   phone,
   email,
   customerName,
+  customerId,
   phoneClassName,
   emailClassName,
 }) {
@@ -5477,6 +5479,7 @@ function CustomerContactLinks({
         <CallBridgeLink
           phone={phone}
           customerName={customerName}
+          customerId={customerId}
           className={phoneClassName}
         >
           {phone}
@@ -5664,6 +5667,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
+                customerId={c.id}
                 phoneClassName="u-nums text-zinc-900 hover:underline"
                 emailClassName="text-zinc-900 hover:underline"
               />
@@ -5704,6 +5708,7 @@ function CustomerOverlayHeader({
                   phone={slot.phone}
                   email={slot.email}
                   customerName={slot.name || customerName}
+                  customerId={c.id}
                   phoneClassName="u-nums text-zinc-900 hover:underline mr-3"
                   emailClassName="text-zinc-900 hover:underline"
                 />
@@ -5736,6 +5741,8 @@ function CustomerOverlayHeader({
                     callViaBridge(
                       c.phone,
                       `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+                      undefined,
+                      c.id,
                     )
                   }
                   className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
@@ -5805,6 +5812,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
+                customerId={c.id}
                 phoneClassName="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
                 emailClassName="text-ink-secondary hover:text-zinc-900 no-underline truncate"
               />
@@ -7826,6 +7834,7 @@ function CustomerProfileMobileActions({
             <CallBridgeLink
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+              customerId={c.id}
               styledButton
               className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >

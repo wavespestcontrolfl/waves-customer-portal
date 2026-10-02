@@ -49,17 +49,28 @@ describe('stampHomeLines', () => {
   test('stamps unstamped and moved customers, leaves a current stamp alone', async () => {
     process.env.GATE_HOME_LINE = 'true';
     const { database, updates } = fakeDb([parrish, current, moved]);
-    expect(await stampHomeLines({ now, database })).toEqual({ stamped: 2, unchanged: 1, lostRace: 0 });
+    expect(await stampHomeLines({ now, database })).toEqual({ stamped: 2, unchanged: 1, noOffice: 0, lostRace: 0 });
     expect(updates).toEqual([
       { id: 'a', home_line_location_id: 'parrish', home_line_address_key: addressKey(parrish), home_line_source: 'derived', home_line_set_at: now },
       { id: 'c', home_line_location_id: 'sarasota', home_line_address_key: addressKey(moved), home_line_source: 'derived', home_line_set_at: now },
     ]);
   });
 
+  test('an address that names no office is left unstamped (readers keep their fallbacks)', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    const blank = { id: 'd', address_line1: '', city: '', zip: '' };
+    const outOfArea = { id: 'e', address_line1: '5 Far Rd', city: 'Orlando', zip: '32801' };
+    const { database, updates } = fakeDb([blank, outOfArea, parrish]);
+    expect(await stampHomeLines({ now, database })).toEqual({ stamped: 1, unchanged: 0, noOffice: 2, lostRace: 0 });
+    expect(updates.map((u) => [u.id, u.home_line_location_id])).toEqual([['a', 'parrish']]);
+    // …so the call path still presents the main line for them after a sweep.
+    expect(homeLineCallerId(blank)).toBe('+19412975749');
+  });
+
   test('a row changed since the read is counted, not overwritten', async () => {
     process.env.GATE_HOME_LINE = 'true';
     const { database } = fakeDb([parrish], { updateResult: 0 });
-    expect(await stampHomeLines({ now, database })).toEqual({ stamped: 0, unchanged: 0, lostRace: 1 });
+    expect(await stampHomeLines({ now, database })).toEqual({ stamped: 0, unchanged: 0, noOffice: 0, lostRace: 1 });
   });
 
   test('the compare-and-set covers every input the line is derived from', async () => {

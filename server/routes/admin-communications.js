@@ -1845,7 +1845,11 @@ router.post('/call', async (req, res, next) => {
         .first();
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
-      const contactColumns = relatedCommitmentId ? require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS : ['phone'];
+      // Any number the selected customer is known by (primary, secondary or a
+      // service contact): Customer 360 sends customerId for its service-contact
+      // call links so the call links to — and takes the caller ID of — the
+      // customer whose page it is, not a phone-only lookup.
+      const contactColumns = require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS;
       if (!normalizedTo || !contactColumns.some((column) => normalizedTo === normalizePhone(customer[column]))) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }

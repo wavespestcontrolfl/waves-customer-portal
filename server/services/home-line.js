@@ -2,7 +2,7 @@
  * Customer home line sweep (owner ruling 2026-10-02, "local line everywhere").
  *
  * Stamps customers.home_line_location_id with the office line their service
- * address resolves to (config/locations.js resolveServiceLocation), together
+ * address names (config/locations.js matchServiceLocation), together
  * with the address key it was derived from. homeLineLocationId() trusts the
  * stamp only while that key still matches the row's address, so:
  *   - a stamped customer keeps their line when the city map or a geocode
@@ -19,7 +19,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { resolveServiceLocation } = require('../config/locations');
+const { matchServiceLocation } = require('../config/locations');
 const { addressKey } = require('./customer-property-address-keys');
 const { homeLineLive } = require('../config/feature-gates');
 
@@ -34,10 +34,19 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
   let stamped = 0;
   let unchanged = 0;
   let lostRace = 0;
+  let noOffice = 0;
   for (const row of rows) {
     const key = addressKey(row);
     if (row.home_line_location_id && row.home_line_address_key === key) {
       unchanged += 1;
+      continue;
+    }
+    // Only an address that names an office is stamped. A blank or out-of-area
+    // address stays unstamped, so the readers keep their own fallbacks (texts:
+    // the default office; calls: the main line) instead of a stored default.
+    const office = matchServiceLocation(row);
+    if (!office) {
+      noOffice += 1;
       continue;
     }
     // Compare-and-set on every column the line was derived from: an address
@@ -48,7 +57,7 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
       update = update.whereRaw(`${column} IS NOT DISTINCT FROM ?`, [row[column] ?? null]);
     }
     const updated = await update.update({
-        home_line_location_id: resolveServiceLocation(row).id,
+        home_line_location_id: office.id,
         home_line_address_key: key,
         home_line_source: 'derived',
         home_line_set_at: now,
@@ -56,8 +65,8 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
     if (updated) stamped += 1;
     else lostRace += 1;
   }
-  logger.info(`[home-line] sweep: ${stamped} stamped, ${unchanged} unchanged, ${lostRace} changed meanwhile`);
-  return { stamped, unchanged, lostRace };
+  logger.info(`[home-line] sweep: ${stamped} stamped, ${unchanged} unchanged, ${noOffice} no office, ${lostRace} changed meanwhile`);
+  return { stamped, unchanged, noOffice, lostRace };
 }
 
 /**

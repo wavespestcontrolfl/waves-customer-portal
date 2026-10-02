@@ -7,7 +7,10 @@
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const DEFAULT_FROM = "+19412975749";
 
-export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM) {
+// customerId: the customer whose number this is (primary, secondary or a
+// service contact) — the server validates it and picks the caller ID from it
+// (their home line under GATE_HOME_LINE), so pass it whenever it is known.
+export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM, customerId = null) {
   if (!phone) return;
   const who = (customerName || "").trim() || "this number";
   const confirmMsg = `Call ${who} at ${phone}?\n\nWaves will call your phone first — press 1 to connect.`;
@@ -19,7 +22,7 @@ export async function callViaBridge(phone, customerName = "", fromNumber = DEFAU
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM }),
+      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM, ...(customerId ? { customerId } : {}) }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.success) {
@@ -48,6 +51,7 @@ export default function CallBridgeLink({
   phone,
   customerName = "",
   fromNumber = DEFAULT_FROM,
+  customerId = null,
   className,
   style,
   // Opt-in for callers that fully style the button via className (e.g. a
@@ -65,7 +69,7 @@ export default function CallBridgeLink({
       type="button"
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation();
-        callViaBridge(phone, customerName, fromNumber);
+        callViaBridge(phone, customerName, fromNumber, customerId);
       }}
       className={className}
       // Default: apply BASE_STYLE so link-style callers keep the inline-tel:
