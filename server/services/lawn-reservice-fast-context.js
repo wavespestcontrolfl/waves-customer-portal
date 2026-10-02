@@ -176,6 +176,24 @@ async function loadLawnSqft(svc, knex) {
   }
 }
 
+// Whether /complete treats a 0 stock count on this visit as an advisory, not a
+// hold: a WaveGuard member's lawn completion allows negative inventory and
+// records the shortfall (complete-scheduled-service.js isWaveGuardLawnCompletion,
+// the same classifier, so the sheet never refuses what the server accepts). A
+// failed read answers false: the sheet then keeps its stock hold.
+async function loadStockAdvisory(svc, knex) {
+  try {
+    const customer = await knex('customers').where({ id: svc.customer_id }).first('waveguard_tier');
+    return require('./complete-scheduled-service').isWaveGuardLawnCompletion({
+      cust_waveguard_tier: customer?.waveguard_tier || null,
+      service_type: svc.service_type,
+    });
+  } catch (err) {
+    logger.warn(`[lawn-reservice-fast-context] WaveGuard tier unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
+}
+
 // The customer's own words from booking, for the sheet's "They said" line.
 function customerRequestOf(svc) {
   const text = String(svc.customer_request || '').trim();
@@ -225,6 +243,7 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     products: catalog,
     methods,
     lawnSqft: await loadLawnSqft(svc, knex),
+    stockAdvisory: await loadStockAdvisory(svc, knex),
     lastVisit,
   };
 }
@@ -238,4 +257,5 @@ module.exports = {
   lawnReserviceIneligibleReason,
   findLastLawnRecord,
   loadLastVisit,
+  loadStockAdvisory,
 };

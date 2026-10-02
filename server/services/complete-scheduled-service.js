@@ -14377,3 +14377,4 @@ module.exports = {
 module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportApplicationMethod;
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
+module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;

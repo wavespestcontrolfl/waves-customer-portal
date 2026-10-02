@@ -205,6 +205,19 @@ describe('products', () => {
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 
+  test('a WaveGuard lawn callback (stockAdvisory) shows the 0-stock flag but never holds Complete', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, stockAdvisory: true } });
+    await readyVisit(request);
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
+    enterAmount('Empty Jug Surfactant', 2);
+    fireEvent.click(within(within(editorFor('Empty Jug Surfactant')).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }));
+    expect(screen.getByText('0 in stock')).toBeTruthy();
+    expect(screen.queryByText(/shows 0 in stock/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+  });
+
   test('a property with no earlier lawn visit starts with no tiles and asks the tech to add what they applied', async () => {
     const request = makeRequest({ context: { ...CONTEXT, lastVisit: null } });
     render(<FastCompleteLawnReserviceSheet service={SERVICE} request={request} onClose={() => {}} />);

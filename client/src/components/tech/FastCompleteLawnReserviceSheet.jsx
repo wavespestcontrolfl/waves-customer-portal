@@ -151,7 +151,7 @@ function lastVisitRows(products, lastVisit, ctx) {
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, lastVisit: null, customerRequest: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, lastVisit: null, customerRequest: null,
   visitIdentity: null, visit: null,
 };
 
@@ -161,6 +161,9 @@ function methodContext(data) {
   return {
     methods: (Array.isArray(data?.methods) ? data.methods : []).filter((choice) => choice?.value),
     lawnSqft: Number(data?.lawnSqft) > 0 ? Number(data.lawnSqft) : null,
+    // WaveGuard lawn callbacks: the server records a 0-stock shortfall as an
+    // advisory and completes, so the sheet shows the flag but never holds.
+    stockAdvisory: data?.stockAdvisory === true,
   };
 }
 
@@ -256,7 +259,7 @@ const inOptionOrder = (options, set) => options.filter((option) => set.has(optio
 
 function missingRequirement({ form, rows, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
-  const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const outOfStock = !ctx.stockAdvisory && active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   // Every active row needs the method the tech used, and square feet when that
   // method needs them. Nothing is defaulted.
@@ -384,7 +387,7 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
   const missingReason = missingRequirement({ form, rows, ctx, dictationPending });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the note and taps.
-  const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const stockRow = !ctx.stockAdvisory && rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const [checkingStock, setCheckingStock] = useState(false);
   const checkStock = async () => {
     setCheckingStock(true);

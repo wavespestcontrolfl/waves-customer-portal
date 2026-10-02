@@ -16,6 +16,7 @@ const {
   lawnReserviceIneligibleReason,
   lawnMethodChoices,
   LAWN_METHODS,
+  loadStockAdvisory,
 } = require('../services/lawn-reservice-fast-context');
 
 const LAWN_PROFILE = {
@@ -342,5 +343,17 @@ describe('methods, areas and lawn size', () => {
   test('a customer with more than one property: the per-customer lawn size prefills nothing', async () => {
     expect((await build({ customer_turf_profiles: { lawn_sqft: 6400 }, customer_properties: { n: '2' } })).lawnSqft).toBeNull();
     expect((await build({ customer_turf_profiles: { lawn_sqft: 6400 }, customer_properties: { n: '1' } })).lawnSqft).toBe(6400);
+  });
+});
+
+describe('loadStockAdvisory (WaveGuard lawn completions record 0 stock as an advisory)', () => {
+  const svc = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Care Re-Service' };
+  test('a WaveGuard member tier on a lawn visit is advisory', async () => {
+    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: 'Gold' } }))).toBe(true);
+  });
+  test('no tier, the Commercial tier, or a failed read keeps the hold', async () => {
+    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: null } }))).toBe(false);
+    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: 'Commercial' } }))).toBe(false);
+    expect(await loadStockAdvisory(svc, fakeKnex({ customers: new Error('boom') }))).toBe(false);
   });
 });
