@@ -1485,7 +1485,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
     }
     const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
 
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
     const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
     // codex #5196 P1: durable pre-provider evidence for THIS send, written
     // only when it carries a validated consultation link (same condition
@@ -1494,7 +1494,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // block (round-3 P2) so onDispatchAbort, the post-send definite-failure
     // cleanup below, AND the catch cleanup all delete exactly this attempt,
     // never a sibling one.
-    const sendResult = await sendCustomerMessage({
+    // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
+    const sendResult = await sendManualCustomerSms({
       to: lead.phone,
       body: message,
       channel: 'sms',

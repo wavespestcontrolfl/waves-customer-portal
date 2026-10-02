@@ -52,9 +52,12 @@ function gratitudeReservationOwner(input, callbacks = {}) {
 
 // Coordination follows claim possibility, not the live gate: an older
 // instance can still claim during a rolling disable, and a retained uncertain
-// claim outlives the gate, until the activation stamp is cleared.
+// claim outlives the gate, until the activation stamp is cleared. The
+// unanswered-text lane claims on the same thread lock, so it needs the same
+// durable provider-boundary evidence while its variable is present.
 function gratitudeCoordinationActive() {
-  return require('../sms-gratitude-context').gratitudeClaimsPossible();
+  return require('../sms-gratitude-context').gratitudeClaimsPossible()
+    || require('../sms-unanswered-reply').unansweredClaimsPossible();
 }
 
 // The reservation holds a phone-keyed SMS thread. An explicit App notice
