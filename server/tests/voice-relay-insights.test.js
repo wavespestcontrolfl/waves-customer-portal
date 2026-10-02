@@ -103,6 +103,18 @@ describe('buildTurnTimeline', () => {
     expect(s.caller_barge_ins).toBe(1);
   });
 
+  test('audio that starts before a prompt has its own first token belongs to an earlier reply, never the newer prompt', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1800, 'first_token_received'), // reply A, not playing yet
+      ev(1900, 'end_of_customer_speech'), ev(1900, 'prompt_sent'), // prompt B
+      ev(1950, 'start_of_agent_speech'), // A's audio
+      ev(2800, 'first_token_received'), // B's reply, queued behind A
+    ]);
+    expect(turns[1].heardGapMs).toBeNull();
+    expect(turns[1].outcome).toBe('queued');
+  });
+
   test('a reply with no agent audio before the call ends is no_audio_event; no reply is silent', () => {
     expect(buildTurnTimeline([ev(0, 'prompt_sent'), ev(900, 'first_token_received')])[0].outcome).toBe('no_audio_event');
     expect(buildTurnTimeline([ev(0, 'prompt_sent')])[0].outcome).toBe('silent');
@@ -142,6 +154,12 @@ describe('joinTurnStats', () => {
     const joined = joinTurnStats(timeline(), [{ turn: 1, promptWallAt: T0 + 60000, toolCount: 0 }]);
     expect(joined.every((t) => t.ours === null)).toBe(true);
     expect(summarizeTimeline(joined).unclassified).toBe(2);
+  });
+
+  test('an earlier unmatched prompt never takes a later prompt\'s closer match', () => {
+    const tl = buildTurnTimeline([ev(1000, 'prompt_sent'), ev(1500, 'prompt_sent')]);
+    const joined = joinTurnStats(tl, [{ turn: 7, promptWallAt: T0 + 1510, toolCount: 0 }]);
+    expect(joined.map((t) => t.ours && t.ours.turn)).toEqual([null, 7]);
   });
 
   test('rows stored before the wall clock existed pair by position only when the counts agree', () => {

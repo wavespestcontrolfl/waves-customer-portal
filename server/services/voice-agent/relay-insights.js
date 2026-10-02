@@ -150,7 +150,10 @@ function buildTurnTimeline(events = []) {
         pendingTtsMs = e.latencyMs;
         break;
       case 'start_of_agent_speech':
-        if (current && current.agentSpeechStartAt == null && current.outcome == null) {
+        // Only audio that starts AFTER this prompt's own first token can be
+        // its reply; earlier audio is a previous reply still reaching the
+        // line and is never credited to the newer prompt.
+        if (current && current.firstTokenAt != null && current.agentSpeechStartAt == null && current.outcome == null) {
           current.agentSpeechStartAt = e.at;
           current.ttsMs = pendingTtsMs;
           current.agentOverCaller = customerSpeaking;
@@ -195,23 +198,28 @@ function buildTurnTimeline(events = []) {
 function joinTurnStats(timeline = [], turnStats = []) {
   const ours = (Array.isArray(turnStats) ? turnStats : []).filter((s) => s && typeof s === 'object');
   const withClock = ours.filter((s) => Number.isFinite(s.promptWallAt));
-  const used = new Set();
-  const pick = (t, i) => {
-    if (withClock.length) {
-      let best = null;
-      for (const s of withClock) {
-        if (used.has(s)) continue;
-        const d = Math.abs(s.promptWallAt - t.promptSentAt);
-        if (d <= JOIN_WINDOW_MS && (!best || d < best.d)) best = { s, d };
-      }
-      return best ? best.s : null;
+  const pairs = new Map(); // timeline index → stat
+  if (withClock.length) {
+    // Closest pairs first, globally, one-to-one — a chronological greedy pass
+    // would let an unmatched earlier prompt take a later prompt's exact match.
+    const candidates = [];
+    timeline.forEach((t, i) => withClock.forEach((s) => {
+      const d = Math.abs(s.promptWallAt - t.promptSentAt);
+      if (d <= JOIN_WINDOW_MS) candidates.push({ i, s, d });
+    }));
+    candidates.sort((a, b) => a.d - b.d);
+    const usedStats = new Set();
+    for (const c of candidates) {
+      if (pairs.has(c.i) || usedStats.has(c.s)) continue;
+      pairs.set(c.i, c.s);
+      usedStats.add(c.s);
     }
-    return ours.length === timeline.length ? ours[i] : null;
-  };
+  } else if (ours.length === timeline.length) {
+    ours.forEach((s, i) => pairs.set(i, s));
+  }
   return timeline.map((t, i) => {
-    const s = pick(t, i);
+    const s = pairs.get(i);
     if (!s) return { ...t, ours: null };
-    used.add(s);
     return {
       ...t,
       ours: {
