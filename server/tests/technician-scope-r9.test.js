@@ -66,3 +66,13 @@ describe('arrival after a CAS miss', () => {
     expect(src).toMatch(/maybeSendArrivalSms\(arrivalRow, serviceId, opts\.actingTechId, claimArrivedAt, opts\.expectTechnicianId \|\| null\)/);
   });
 });
+
+describe('staged photo changes (main #5590-era routes, #5568 sweep)', () => {
+  test('the locked visit read judges the canonical current-assignment rule', () => {
+    const src = read('services/service-photos.js');
+    const fn = src.slice(src.indexOf('async function lockStagedPhotoForChange('));
+    expect(fn).toMatch(/\.first\('id', 'technician_id', 'status', 'scheduled_date'\)/);
+    expect(fn).toMatch(/!technicianVisitRowInScope\(\{ techRole: 'technician', technicianId: actor\?\.technicianId \}, visit\)/);
+    expect(fn.slice(0, 1200)).not.toMatch(/visit\.technician_id !== actor/);
+  });
+});
