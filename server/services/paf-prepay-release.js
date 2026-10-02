@@ -462,8 +462,25 @@ async function firstChargeCompletionFacts(svc, conn = db) {
       ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('method_type')
       : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('method_type');
     const bank = ['us_bank_account', 'ach'].includes(String(method?.method_type || ''));
-    const amount = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    return { amount, methodLine: bank ? 'saved bank account' : 'card on file' };
+    // The acknowledged total is a CEILING (owner R1): account credit the
+    // charge will draw lowers it. Credit that covers the year means nothing
+    // is charged, so the regular "nothing due today" text is the true one;
+    // credit that only lowers it makes the amount "up to" the ceiling.
+    const invoice = job.invoice_id
+      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'total', 'credit_applied')
+      : null;
+    if (!invoice) return null;
+    const credit = require('./customer-credit');
+    let creditLowers = false;
+    if (await credit.autoApplyWouldApply(invoice, conn)) {
+      const balance = await credit.getBalance(invoice.customer_id, conn);
+      if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
+      creditLowers = true;
+    } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
+      return null;
+    }
+    const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
   } catch (err) {
     logger.warn(`[paf-prepay] first-charge completion facts unavailable for visit ${svc?.id}: ${err.message}`);
     return null;

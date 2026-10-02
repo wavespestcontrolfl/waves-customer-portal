@@ -301,6 +301,21 @@ postgres('annual prepay charged after the first visit', () => {
       expect(text).not.toMatch(/nothing due today/);
     });
 
+    it('account credit that lowers the charge makes the amount a ceiling (R1)', async () => {
+      const f = await deferredAccept();
+      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 100 });
+      const text = await completeWithText(f, f.parentId);
+      expect(text).toMatch(/payment of up to \$480\.00 is being charged/);
+    });
+
+    it('account credit that covers the year keeps the "nothing due" text', async () => {
+      const f = await deferredAccept();
+      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 1000 });
+      const text = await completeWithText(f, f.parentId);
+      expect(text).not.toMatch(/being charged/);
+      expect(text).toMatch(/nothing (is )?due today/);
+    });
+
     it('a later visit of a year already released keeps the regular text', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'pending' } });
       const text = await completeWithText(f, f.childId);
