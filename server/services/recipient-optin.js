@@ -732,8 +732,14 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // appointment recipient for this property — release to ask_failed
       // (re-adding them re-claims and asks) instead of texting a stranger.
       if (idx < 0) {
+        // Bound to the snapshot (same visit, still undispatched, no live
+        // lease): a concurrent call that re-added the phone and rebound or
+        // leased the row is never released.
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .where((q) => { if (row.visit_id) q.where({ visit_id: row.visit_id }); else q.whereNull('visit_id'); })
+          .whereNull('dispatched_at')
+          .where(leaseFree)
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         continue;
       }
@@ -840,12 +846,16 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
           this.where({ message_type: 'recipient_optin_request' })
             .orWhereRaw("metadata::text like '%recipient_optin_request%'");
         })
+        // Only THIS attempt's logs (since its claim): an older failed ask is
+        // not evidence against a later retry (e.g. one marked attempted on an
+        // uncertain handoff with no log of its own).
+        .where('created_at', '>=', row.requested_at)
         .orderBy('created_at', 'desc')
         .first('status')
         .catch(() => null);
       if (lastAsk && isFailureStatus(lastAsk.status)) {
         await db('recipient_optin')
-          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending', requested_at: row.requested_at })
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
       }
     }
