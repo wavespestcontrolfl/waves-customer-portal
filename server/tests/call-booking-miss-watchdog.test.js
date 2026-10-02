@@ -138,43 +138,36 @@ describe('rowClearsSlot — call-linked booking evidence only', () => {
   });
 });
 
-describe('rowClearsSlot — cancelled/rescheduled rows the office created after the call', () => {
+describe('rowClearsSlot — cancelled/rescheduled rows clear only on call provenance', () => {
   const slot = { dateET: '2026-08-01', minutes: 720 };
   const afterCall = new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString();
-  const beforeCall = new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString();
 
-  test('booked right after the call, near the slot, same date, later cancelled: handled', () => {
-    const cancelled = bookedRow({ status: 'cancelled', window_start: '13:00:00', created_at: afterCall });
-    expect(rowClearsSlot(cancelled, call(), slot)).toBe(true);
-    expect(rowClearsSlot({ ...cancelled, status: 'rescheduled' }, call(), slot)).toBe(true);
+  test('a cancelled/rescheduled row carrying the call (source_call_log_id or the Call SID note) clears, on any date or time', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    expect(rowClearsSlot({ ...cancelled, source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...cancelled, status: 'rescheduled', source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...cancelled, sched_date: '2026-08-05', notes: 'Call SID: CAsynthetic001.' }, call(), slot)).toBe(true);
   });
 
-  test('a cancelled post-call row at an UNRELATED time (8 AM vs the noon slot) does not clear; with call provenance it does', () => {
-    const unrelated = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
-    expect(rowClearsSlot(unrelated, call(), slot)).toBe(false);
-    expect(rowClearsSlot({ ...unrelated, window_start: null }, call(), slot)).toBe(false);
-    expect(rowClearsSlot({ ...unrelated, source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
-    expect(rowClearsSlot({ ...unrelated, sched_date: '2026-08-05', notes: 'Call SID: CAsynthetic001.' }, call(), slot)).toBe(true);
+  test('a cancelled row WITHOUT provenance never clears: not near the slot, not at the slot time, not created after the call', () => {
+    for (const window_start of ['08:00:00', '12:00:00', '13:00:00', null]) {
+      for (const status of ['cancelled', 'rescheduled']) {
+        expect(rowClearsSlot(bookedRow({ status, window_start, created_at: afterCall }), call(), slot)).toBe(false);
+      }
+    }
+    // Another call's provenance is not this call's.
+    expect(rowClearsSlot(bookedRow({ status: 'cancelled', source_call_log_id: 'call-other' }), call(), slot)).toBe(false);
   });
 
-  test('a cancelled row created BEFORE the call, or on another date, proves nothing', () => {
-    expect(rowClearsSlot(bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: beforeCall }), call(), slot)).toBe(false);
-    expect(rowClearsSlot(bookedRow({ status: 'cancelled', sched_date: '2026-08-05', window_start: '08:00:00', created_at: afterCall }), call(), slot)).toBe(false);
-  });
-
-  test('an ACTIVE post-call row at an unrelated time still does not clear', () => {
+  test('an ACTIVE row keeps the window-proximity rule', () => {
+    expect(rowClearsSlot(bookedRow({ status: 'confirmed', window_start: '13:00:00', created_at: afterCall }), call(), slot)).toBe(true);
     expect(rowClearsSlot(bookedRow({ status: 'scheduled', window_start: '08:00:00', created_at: afterCall }), call(), slot)).toBe(false);
   });
 
-  test('computeBookingMisses: a booked-then-cancelled visit is no miss; a pre-call cancelled one is', () => {
-    const cancelled = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: afterCall });
+  test('computeBookingMisses: a provenance-linked cancelled visit is no miss; the same row without provenance is', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: afterCall, source_call_log_id: 'call-1' });
     expect(computeBookingMisses([call()], [cancelled], { now: NOW })).toEqual([]);
-    expect(computeBookingMisses([call()], [{ ...cancelled, created_at: beforeCall }], { now: NOW })).toHaveLength(1);
-  });
-
-  test('computeBookingMisses: a pre-call cancelled row AT the slot time still does not clear (no window-match fallthrough)', () => {
-    const stale = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: beforeCall });
-    expect(computeBookingMisses([call()], [stale], { now: NOW })).toHaveLength(1);
+    expect(computeBookingMisses([call()], [{ ...cancelled, source_call_log_id: null }], { now: NOW })).toHaveLength(1);
   });
 });
 

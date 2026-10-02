@@ -162,23 +162,14 @@ function rowClearsSlot(row, call, slot) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
   if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
   if (row.sched_date !== slot.dateET) return false;
-  // A cancelled / rescheduled row is the office having ACTED on this call's
-  // slot (owner 2026-10-01: a visit booked right after the call and cancelled
-  // later is handled, not missed; the bell rang four times on one). With no
-  // call provenance (handled above), a row that is no longer active clears
-  // only when BOTH hold: it was created at/after the call, and its window is
-  // within WINDOW_MATCH_TOLERANCE_MINUTES of the confirmed slot (the same
-  // proximity an active row needs), so an unrelated 8 AM visit cancelled
-  // later never hides a noon commitment. A row created before the call
-  // proves nothing and never reaches the proximity test.
+  // A cancelled / rescheduled row clears the miss ONLY through the provenance
+  // branches above (owner 2026-10-01: a visit booked from the call and later
+  // cancelled is handled, not missed; Codex #5543 r1-r4: any timing or
+  // proximity rule on an inactive row without provenance kept admitting an
+  // unrelated visit). Active rows keep the window-proximity fallback.
+  if (INACTIVE_STATUSES.has(row.status)) return false;
   const startMinutes = windowStartMinutes(row.window_start);
-  const near = startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES;
-  if (INACTIVE_STATUSES.has(row.status)) {
-    const rowCreated = row.created_at ? new Date(row.created_at).getTime() : NaN;
-    const callCreated = call.created_at ? new Date(call.created_at).getTime() : NaN;
-    return near && !Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated;
-  }
-  return near;
+  return startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES;
 }
 
 // Pure diff, exported for tests: which calls confirmed a slot that has no
@@ -187,8 +178,8 @@ function rowClearsSlot(row, call, slot) {
 // ai_extraction_enriched }); `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
-// ANY status: cancelled/rescheduled rows clear only on the rules in
-// rowClearsSlot (a missing status counts as active).
+// ANY status: cancelled/rescheduled rows clear only on call provenance
+// (rowClearsSlot; a missing status counts as active).
 function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const misses = [];
