@@ -1010,3 +1010,28 @@ describe('Codex #5580 round 3 pre-push audit', () => {
     expect(out.officeNote).toBe('Customer is disputing the invoice.');
   });
 });
+
+describe('customer note = the tech\'s own clauses, word for word', () => {
+  test.each([
+    ['Used four ounces of Taurus.', 'Used forty gallons of Taurus.'],
+    ['Did not treat inside. Treated outside.', 'Treated inside and outside.'],
+    ['Did not treat inside.', 'Treat inside.'],
+  ])('transcript "%s" refuses the note "%s"', (transcript, note) => {
+    const out = validateFill(answer({ customerNote: note }), ctx, transcript);
+    expect(out.customerNote).toBe('');
+    expect(out.unclear).toContainEqual({ heard: note, reason: 'note_not_heard' });
+  });
+
+  test('a whole clause the tech said is kept as said', () => {
+    const out = validateFill(answer({ customerNote: 'Treated the kitchen for roaches.' }), ctx, 'Treated the kitchen for roaches, light activity.');
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+  });
+
+  test.each([
+    'Office, can you check why the invoice went out twice?',
+    'This one is for the office only, the invoice went out twice.',
+  ])('"%s" is office-only even when the model drops the label', (transcript) => {
+    const out = validateFill(answer({ customerNote: 'The invoice went out twice.' }), ctx, `Treated the garage. ${transcript}`);
+    expect(out.customerNote).toBe('');
+  });
+});

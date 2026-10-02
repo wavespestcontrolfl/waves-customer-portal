@@ -158,6 +158,12 @@ describe('pest_reservice golden fixtures', () => {
       }
     });
 
+    test('the notes split on the transcript, not the model\'s labels: every sentence offered as customer note', () => {
+      const out = validateFill({ ...idealAnswer(expected, c.transcript), customerNote: c.transcript, officeNote: '' }, ctx, c.transcript);
+      for (const word of expected.customerNote.mustExclude || []) expect(out.customerNote.toLowerCase()).not.toContain(word.toLowerCase());
+      for (const word of expected.officeNote.mustInclude || []) expect(out.officeNote.toLowerCase()).toContain(word.toLowerCase());
+    });
+
     test('the validator turns an ideal model answer into exactly this fill', () => {
       const out = validateFill(idealAnswer(expected, c.transcript), ctx, c.transcript);
       expect(out.products).toEqual(expected.products);
