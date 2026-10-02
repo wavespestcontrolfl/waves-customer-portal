@@ -403,6 +403,25 @@ describe('missedVisit', () => {
     expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-10-02', window_start: '09:00:00' }])).missedVisit).toBeNull();
   });
 
+  test('more than one page of resolved no-shows never hides an older open one (paged scan)', async () => {
+    const resolved = (i) => ({ scheduled_service_id: `r${i}`, original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: '2026-10-03', service_type: 'Pest Control', status: 'confirmed', ss_scheduled_date: '2026-10-03', window_start: '09:00:00' });
+    const open = { scheduled_service_id: 'v-open', original_date: '2026-09-26', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Mosquito Control', status: 'no_show' };
+    const pages = [Array.from({ length: 10 }, (_, i) => resolved(i)), [open]];
+    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: (ops) => pages[(ops.find((o) => o.op === 'offset')?.args[0] || 0) / 10] || [] });
+    const out = await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    expect(out.missedVisit).toMatchObject({ type: 'Mosquito Control', date: '2026-09-26', reason: 'customer_noshow' });
+  });
+
+  test('more than one page of skipped unfinished rows never hides an older miss (paged scan)', async () => {
+    const yesterdayLate = (i) => ({ id: `y${i}`, technician_id: null, service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '23:00:00', status: 'confirmed' });
+    const older = { id: 'v-old', technician_id: null, service_type: 'Lawn Care', scheduled_date: '2026-09-27', window_start: '09:00:00', status: 'confirmed' };
+    const pages = [Array.from({ length: 10 }, (_, i) => yesterdayLate(i)), [older]];
+    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? (pages[(ops.find((o) => o.op === 'offset')?.args[0] || 0) / 10] || []) : []), reschedule_log: () => [] });
+    // 00:30 ET: yesterday's 23:00 rows are still open, so the scan pages past them
+    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T04:30:00Z'), deriveWindow, conn });
+    expect(out.missedVisit).toMatchObject({ type: 'Lawn Care', date: '2026-09-27', reason: 'not_completed' });
+  });
+
   test('a rebooked newest no-show does not hide an older open one', async () => {
     const rebooked = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: '2026-10-03', service_type: 'Pest Control', status: 'confirmed' };
     const open = { scheduled_service_id: 'v8', original_date: '2026-09-27', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Mosquito Control', status: 'no_show' };

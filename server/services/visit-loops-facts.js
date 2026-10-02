@@ -263,7 +263,20 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }
 }
 
 // ── missed visit ────────────────────────────────────────────────────────────
+// Missed-visit reads page through the lookback (stable order) until an unresolved
+// occurrence is found: the resolution rules run in JS, so a page of resolved rows
+// must never hide an older open one. The 7-day window bounds it; the page cap is a
+// backstop.
 const MISSED_SCAN_MAX = 10;
+const MISSED_SCAN_PAGES = 20;
+// Yields each page of fetchPage(offset) until a short or empty page (or the cap).
+async function* scanPages(fetchPage) {
+  for (let p = 0; p < MISSED_SCAN_PAGES; p += 1) {
+    const rows = (await fetchPage(p * MISSED_SCAN_MAX)) || [];
+    if (rows.length) yield rows;
+    if (rows.length < MISSED_SCAN_MAX) return;
+  }
+}
 // The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
 // internal job block as the end, so only the start is the promised window.
 function missedWindowStart(originalWindow) {
@@ -277,7 +290,7 @@ function missedWindowLabel(originalWindow, deriveWindow) {
 }
 // A pending/confirmed visit from the lookback that nobody performed.
 async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { today, since }) {
-  const unfinishedRows = await conn('scheduled_services')
+  const page = (offset) => conn('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
     .whereIn('status', NOT_STARTED_STATUSES)
@@ -289,19 +302,23 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
     .whereNotExists(function serviceRecorded() {
       this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
     })
-    .orderBy('scheduled_date', 'desc')
-    .limit(MISSED_SCAN_MAX)
+    .orderBy('scheduled_date', 'desc').orderBy('id', 'asc')
+    .offset(offset).limit(MISSED_SCAN_MAX)
     .select('id', 'visit_id', 'technician_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
-  // A lagging row whose sibling at the same stop (tech, day, window) is underway
-  // or done is not a miss — the same rule the passed-window read applies.
-  const startedStops = await startedStopKeys(conn, customerId, unfinishedRows || []);
   // Yesterday's late visit whose window runs past midnight (23:00-01:00) is
   // still open, not missed, until that window ends.
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
   const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday && crossesIntoNow(row, nowMin);
-  const siblingStarted = (row) => { const key = stopKey(row); return Boolean(key) && startedStops.has(key); };
-  const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row) && !siblingStarted(row));
+  let unfinished = null;
+  for await (const rows of scanPages(page)) {
+    // A lagging row whose sibling at the same stop (tech, day, window) is underway
+    // or done is not a miss — the same rule the passed-window read applies.
+    const startedStops = await startedStopKeys(conn, customerId, rows);
+    const siblingStarted = (row) => { const key = stopKey(row); return Boolean(key) && startedStops.has(key); };
+    unfinished = rows.find((row) => !stillOpen(row) && !siblingStarted(row)) || null;
+    if (unfinished) break;
+  }
   if (!unfinished) return null;
   return {
     type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,
@@ -311,68 +328,70 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
 
 // The newest customer no-show in the lookback that was not followed up.
 async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since }) {
-  const noshows = await conn('reschedule_log as rl')
+  const page = (offset) => conn('reschedule_log as rl')
     .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
     .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
     .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
-    .orderBy('rl.original_date', 'desc')
-    .limit(MISSED_SCAN_MAX)
+    .orderBy('rl.original_date', 'desc').orderBy('rl.id', 'asc')
+    .offset(offset).limit(MISSED_SCAN_MAX)
     .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status', 'ss.track_state',
       // the same completion evidence loadUnfinishedVisit honors
       conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'));
   // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
-  for (const noshow of noshows || []) {
-    const date = calendarDay(noshow.original_date);
-    const family = familyKey(noshow.service_type);
-    const liveOrDone = [...UPCOMING_SERVICE_STATUSES, 'completed'];
-    // The logged row itself is the follow-up when it is live or done AND no longer
-    // the missed occurrence: the soft path stamps new_date; a no-show logged
-    // without one (missed-appointment onSkip) can still be rebooked on the same
-    // row later (another day or a later window) or completed.
-    const missedStartHms = missedWindowStart(noshow.original_window);
-    const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
-      || (missedStartHms != null && hhmmToMinutes(noshow.window_start) !== hhmmToMinutes(missedStartHms));
-    // ...or it was performed after all: a tracker 'complete' ahead of a lagging
-    // status, or a written service record (the same evidence loadUnfinishedVisit uses)
-    const performed = noshow.track_state === 'complete' || noshow.recorded === true;
-    const movedSelf = performed || (liveOrDone.includes(noshow.status)
-      && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
-    // Otherwise another visit of the same service on or after the missed day
-    // (a same-day replacement counts), never the logged row itself.
-    // No property on the missed row (legacy, or the property was deleted): another
-    // visit cannot be shown to be at the same address, so only the row itself can
-    // resolve it.
-    const later = !movedSelf && date && family && noshow.property_id
-      ? await conn('scheduled_services')
-        .where({ customer_id: customerId }).where('scheduled_date', '>=', date)
-        .whereIn('status', liveOrDone)
-        .modify((b) => {
-          if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
-          // the same property: another address's visit does not resolve this miss
-          b.where('property_id', noshow.property_id);
-          // booked in response: a recurring series pre-creates its future children,
-          // so a visit that already existed before the no-show was logged is not one
-          if (noshow.logged_at) b.where('created_at', '>', noshow.logged_at);
-        })
-        .select('service_type', 'scheduled_date', 'window_start')
-      : [];
-    // A same-day visit counts only when its window starts AFTER the missed slot (an
-    // earlier visit that day preceded the no-show); unknown starts do not count.
-    const missedStart = hhmmToMinutes(missedStartHms);
-    const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
-      || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
-    const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family && afterMiss(r));
-    if (!followedUp) {
-      return {
-        type: noshow.service_type || null, date, windowStart: missedStartHms,
-        // The window that was MISSED, as the customer was promised it: the logged
-        // original START through the arrival-window formatter (writers store
-        // "start-end" with the internal job block as the end), never the joined
-        // row's current (possibly moved) window.
-        windowDisplay: missedWindowLabel(noshow.original_window, deriveWindow),
-        status: noshow.status || 'no_show', reason: 'customer_noshow',
-      };
+  for await (const noshows of scanPages(page)) {
+    for (const noshow of noshows) {
+      const date = calendarDay(noshow.original_date);
+      const family = familyKey(noshow.service_type);
+      const liveOrDone = [...UPCOMING_SERVICE_STATUSES, 'completed'];
+      // The logged row itself is the follow-up when it is live or done AND no longer
+      // the missed occurrence: the soft path stamps new_date; a no-show logged
+      // without one (missed-appointment onSkip) can still be rebooked on the same
+      // row later (another day or a later window) or completed.
+      const missedStartHms = missedWindowStart(noshow.original_window);
+      const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
+        || (missedStartHms != null && hhmmToMinutes(noshow.window_start) !== hhmmToMinutes(missedStartHms));
+      // ...or it was performed after all: a tracker 'complete' ahead of a lagging
+      // status, or a written service record (the same evidence loadUnfinishedVisit uses)
+      const performed = noshow.track_state === 'complete' || noshow.recorded === true;
+      const movedSelf = performed || (liveOrDone.includes(noshow.status)
+        && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
+      // Otherwise another visit of the same service on or after the missed day
+      // (a same-day replacement counts), never the logged row itself.
+      // No property on the missed row (legacy, or the property was deleted): another
+      // visit cannot be shown to be at the same address, so only the row itself can
+      // resolve it.
+      const later = !movedSelf && date && family && noshow.property_id
+        ? await conn('scheduled_services')
+          .where({ customer_id: customerId }).where('scheduled_date', '>=', date)
+          .whereIn('status', liveOrDone)
+          .modify((b) => {
+            if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
+            // the same property: another address's visit does not resolve this miss
+            b.where('property_id', noshow.property_id);
+            // booked in response: a recurring series pre-creates its future children,
+            // so a visit that already existed before the no-show was logged is not one
+            if (noshow.logged_at) b.where('created_at', '>', noshow.logged_at);
+          })
+          .select('service_type', 'scheduled_date', 'window_start')
+        : [];
+      // A same-day visit counts only when its window starts AFTER the missed slot (an
+      // earlier visit that day preceded the no-show); unknown starts do not count.
+      const missedStart = hhmmToMinutes(missedStartHms);
+      const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
+        || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
+      const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family && afterMiss(r));
+      if (!followedUp) {
+        return {
+          type: noshow.service_type || null, date, windowStart: missedStartHms,
+          // The window that was MISSED, as the customer was promised it: the logged
+          // original START through the arrival-window formatter (writers store
+          // "start-end" with the internal job block as the end), never the joined
+          // row's current (possibly moved) window.
+          windowDisplay: missedWindowLabel(noshow.original_window, deriveWindow),
+          status: noshow.status || 'no_show', reason: 'customer_noshow',
+        };
+      }
     }
   }
   return null;

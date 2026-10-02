@@ -342,6 +342,15 @@ describe('auto-send: a retryable ETA refusal at the provider boundary releases t
     expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
   });
 
+  test('the released claim names the open-loop recheck, not the live ETA, in the log and the reopened card', async () => {
+    const logger = require('../services/logger');
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true }));
+    await attempt({ reply: 'Sounds good, thanks!' });
+    const lines = logger.warn.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /open-loop recheck unreadable at the provider boundary/.test(l))).toBe(true);
+    expect(lines.some((l) => /live ETA recheck unreadable at the provider boundary/.test(l))).toBe(false);
+  });
+
   test('a closed commitment at the boundary is terminal: the claim fails', async () => {
     sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)', retryable: false }));
     const r = await attempt({ reply: 'Sounds good, thanks!' });

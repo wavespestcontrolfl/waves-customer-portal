@@ -503,6 +503,11 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2),
 // and so does the open-loop recheck (PR #5499).
 const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY']);
+const BOUNDARY_RECHECK_SUBSYSTEMS = Object.freeze({
+  LIVE_ETA_CHECK_FAILED_AT_BOUNDARY: { what: 'the live ETA', logName: 'live ETA' },
+  LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY: { what: 'the label timing', logName: 'label facts' },
+  OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY: { what: 'the open promises and visit status', logName: 'open-loop' },
+});
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
     && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
@@ -1027,8 +1032,9 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
-    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    // the subsystem whose read failed, named in the log and the reopened card
+    const { what, logName } = BOUNDARY_RECHECK_SUBSYSTEMS[result.code] || BOUNDARY_RECHECK_SUBSYSTEMS.LIVE_ETA_CHECK_FAILED_AT_BOUNDARY;
+    logger.warn(`[sms-auto-send] ${logName} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
     await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
     await releaseClaim(claim.decisionId);
     await reopenParked(`Auto-send paused: ${what} could not be rechecked — suggestion reopened.`);
