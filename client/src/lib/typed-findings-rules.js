@@ -112,3 +112,73 @@ export const TYPED_TYPES_WITHOUT_PLACES = [
   "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
   "rodent_inspection", "rodent_bait_station", "bed_bug",
 ];
+
+// Whether a typed form's visit records treated places on the full form's own
+// picker: never one whose places are its own work fields (above), and a
+// termite bait station visit only when something went down other than bait
+// (the full form's spray evidence).
+export function typedFormTakesPlaces(type, { sprayed = false } = {}) {
+  if (TYPED_TYPES_WITHOUT_PLACES.includes(type)) return false;
+  return type !== "termite_bait_station" || sprayed;
+}
+
+// Follow-up-only trap actions a declared Initial setup cannot carry —
+// mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
+// server/services/service-report/activity-indicators.js.
+export const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
+  "Traps reset",
+  "Traps moved",
+  "Traps replaced",
+  "Bait/lure refreshed",
+  "Damaged or missing traps found",
+];
+
+// Initial-setup constraints on rodent trapping, mirrored before submit so a
+// person gets the prompt instead of the server's 422 (codex P2 round 14 on
+// #3159): the messages mirror validateTypedFindings in
+// activity-indicators.js. [] for any other form or visit.
+export function trapSetupConflicts(schemaType, values) {
+  if (schemaType !== "rodent_trapping" || String(values?.trap_visit_type ?? "").trim() !== "Initial setup") return [];
+  const conflicts = [];
+  const followUpOnly = String(values?.trap_actions ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
+  if (followUpOnly.length) {
+    conflicts.push(
+      `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
+    );
+  }
+  // Shape FIRST, exactly as validateTypedFindings checks a count field:
+  // Number("1.0") and Number("1e1") are positive integers here but the
+  // server rejects both, so a coercion-only mirror still let the 422 it
+  // exists to prevent through (codex P2 round 15).
+  const rawCount = values?.traps_checked;
+  const countStr = typeof rawCount === "number"
+    ? String(rawCount)
+    : (typeof rawCount === "string" ? rawCount.trim() : null);
+  if (countStr == null || !/^\d{1,4}$/.test(countStr)) {
+    conflicts.push(
+      'An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"',
+    );
+  } else if (Number(countStr) < 1) {
+    conflicts.push(
+      'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
+    );
+  }
+  return conflicts;
+}
+
+// A field's label as the form shows it: an initial setup's trap count is the
+// traps set.
+export function typedFieldLabel(schemaType, field, values = {}) {
+  if (
+    schemaType === "rodent_trapping"
+    && field.key === "traps_checked"
+    && String(values.trap_visit_type || "").trim() === "Initial setup"
+  ) {
+    return "Traps set";
+  }
+  return field.label;
+}

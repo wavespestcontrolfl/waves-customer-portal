@@ -41,13 +41,14 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import {
-  TREATMENT_AREA_FIELD_KEYS, TYPED_TYPES_WITHOUT_PLACES, completionAreasForTypedFindings, parseApplicationAreas,
-  typedActivityScoreConflict, typedFieldRequiredNow, typedTreatmentAreaField, typedZeroStateRefusesBody,
+  TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas, trapSetupConflicts,
+  typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedFormTakesPlaces, typedTreatmentAreaField,
+  typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
 // here for existing importers.
-export { completionAreasForTypedFindings, typedActivityScoreConflict, typedFieldRequiredNow, typedTreatmentAreaField };
+export { completionAreasForTypedFindings, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedTreatmentAreaField };
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
@@ -9337,17 +9338,6 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
-// Follow-up-only trap actions a declared Initial setup cannot carry —
-// mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
-// server/services/service-report/activity-indicators.js.
-const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
-  "Traps reset",
-  "Traps moved",
-  "Traps replaced",
-  "Bait/lure refreshed",
-  "Damaged or missing traps found",
-];
-
 // Termite Phase-3 attestation contradictions, mirrored pre-submit so the
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
@@ -9388,44 +9378,10 @@ export function typedFieldValueConflicts(schemaType, values, fields = null) {
       'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
     );
   }
-  // Initial-setup constraints on rodent trapping, mirrored pre-submit so
-  // the tech gets the inline prompt instead of the server 422 (codex P2
-  // round 14 on #3159) — same rationale as the termite mirrors above, and
-  // the caller already runs this for both the primary and every companion
-  // section. The action list mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS and
-  // the messages mirror validateTypedFindings in activity-indicators.js.
-  if (
-    schemaType === "rodent_trapping" &&
-    String(values?.trap_visit_type ?? "").trim() === "Initial setup"
-  ) {
-    const followUpOnly = String(values?.trap_actions ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
-    if (followUpOnly.length) {
-      conflicts.push(
-        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
-      );
-    }
-    // Shape FIRST, exactly as validateTypedFindings checks a count field:
-    // Number("1.0") and Number("1e1") are positive integers here but the
-    // server rejects both, so a coercion-only mirror still let the 422 it
-    // exists to prevent through (codex P2 round 15).
-    const rawCount = values?.traps_checked;
-    const countStr = typeof rawCount === "number"
-      ? String(rawCount)
-      : (typeof rawCount === "string" ? rawCount.trim() : null);
-    if (countStr == null || !/^\d{1,4}$/.test(countStr)) {
-      conflicts.push(
-        'An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"',
-      );
-    } else if (Number(countStr) < 1) {
-      conflicts.push(
-        'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
-      );
-    }
-  }
+  // Initial-setup constraints on rodent trapping (shared with the tech
+  // sheet); the caller already runs this for both the primary and every
+  // companion section.
+  conflicts.push(...trapSetupConflicts(schemaType, values));
   return conflicts;
 }
 
@@ -9513,17 +9469,6 @@ const EMPTY_COMPANION_ENTRY = {
 // "Initial setup" would contradict the report, which labels the very same
 // number "Traps set" (owner 2026-08-02). Kept to this one pair rather than a
 // general mechanism: it is the only field whose noun flips.
-export function typedFieldLabel(schemaType, field, values = {}) {
-  if (
-    schemaType === "rodent_trapping"
-    && field.key === "traps_checked"
-    && String(values.trap_visit_type || "").trim() === "Initial setup"
-  ) {
-    return "Traps set";
-  }
-  return field.label;
-}
-
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -9562,6 +9507,10 @@ export function TypedFindingsSection({
   // unclear (keys). Null off.
   heard = null,
   unclear = null,
+  // The technician's own rating heard from the notes ({ value, quote }) and
+  // whether the notes left it unclear (step 4). Null off.
+  heardScore = null,
+  scoreUnclear = false,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9663,7 +9612,7 @@ export function TypedFindingsSection({
         quotes={heardQuotes(field)}
         unclear={leftUnclear(field)}
         color={mutedColor}
-        ask={field.type === "chips" ? "Pick what applies." : "Pick one."}
+        ask={({ chips: "Pick what applies.", count: "Enter the number." })[field.type] || "Pick one."}
       />
     </div>
   );
@@ -9746,6 +9695,11 @@ export function TypedFindingsSection({
                 ? `Prefills from findings: ${scoreLabels[activityScore] || activityScore} — choose to confirm or change`
                 : "Prefills from findings until you choose"}
           </div>
+          <LaneHeardLine
+            quotes={heardScore && activityScore === heardScore.value ? [heardScore.quote] : []}
+            unclear={scoreUnclear && activityScore == null}
+            color={mutedColor}
+          />
         </div>
       )}
       {/* The "Next steps (up to 4)" chip picker was retired (owner ruling
@@ -13953,12 +13907,12 @@ export function CompletionPanel({
   );
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
-    || TYPED_TYPES_WITHOUT_PLACES.includes(service.completionProfile?.findingsType)
     // Station visits have no meaningful "areas treated" — the station
     // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
     // termite lanes keep the termite area list, and a station visit that
-    // records spray evidence gets the picker back.
-    || (service.completionProfile?.findingsType === "termite_bait_station" && !sprayEvidenceInForm);
+    // records spray evidence gets the picker back (typedFormTakesPlaces,
+    // shared with the tech sheet).
+    || !typedFormTakesPlaces(service.completionProfile?.findingsType, { sprayed: sprayEvidenceInForm });
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -16759,7 +16713,9 @@ export function CompletionPanel({
     const heard = note
       ? await adminFetch(`/admin/dispatch/${service.id}/typed-facts`, {
         method: "POST",
-        body: JSON.stringify({ note, current: findingsValues }),
+        // A rating already set leaves nothing to read for once every field
+        // is set too (the server's nothing_to_fill).
+        body: JSON.stringify({ note, current: findingsValues, scoreSet: typedActivityScore != null }),
       }).catch(() => null)
       : null;
     if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) {
@@ -16767,21 +16723,29 @@ export function CompletionPanel({
       // or found nothing left to fill) leaves no field unclear: the asks
       // always reflect the latest Generate (pre-push P1). Words beside
       // values still standing stay.
-      setTypedHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      setTypedHeard((prev) => (prev?.unclear?.length || prev?.scoreUnclear ? { ...prev, unclear: [], scoreUnclear: false } : prev));
       return;
     }
     const fills = Object.entries(heard.values || {}).filter(([key, value]) => (
       typeof value === "string" && value && String(findingsValues[key] ?? "").trim() === ""
     ));
-    if (fills.length) applyTypedFill(fills);
+    // The technician's own rating, heard on a form whose score they set
+    // (step 4), fills the gauge only while nobody has set it.
+    const activity = typedFindingsSchema?.activity;
+    const heardScore = activity && !activity.deriveField && !typedActivityTouched && typedActivityScore == null
+      && Number.isInteger(heard.score?.value) ? heard.score : null;
+    if (fills.length || heardScore) applyTypedFill(fills, heardScore?.value ?? null);
     // Words heard earlier stay beside values still standing; a field filled
     // again takes its new words.
     setTypedHeard((prev) => ({
       values: {
         ...(prev?.values || {}),
-        ...Object.fromEntries(fills.map(([key, value]) => [key, { value, quotes: (heard.heard?.[key] || []).map((entry) => entry.quote) }])),
+        // One quote per words heard: two values said in the same words show them once.
+        ...Object.fromEntries(fills.map(([key, value]) => [key, { value, quotes: [...new Set((heard.heard?.[key] || []).map((entry) => entry.quote))] }])),
       },
       unclear: Array.isArray(heard.unclearFields) ? heard.unclearFields : [],
+      score: heardScore ? { value: heardScore.value, quote: heardScore.quote } : prev?.score || null,
+      scoreUnclear: heard.scoreUnclear === true,
     }));
   }
   // A fill changes what an installed report was written from, as a typed
@@ -16789,13 +16753,18 @@ export function CompletionPanel({
   // values itself: handleTypedFindingChange refuses writes while generating,
   // and the fill runs inside Generate. An untouched gauge follows its derive
   // field, as a pick does.
-  function applyTypedFill(fills) {
+  function applyTypedFill(fills, score = null) {
     invalidateGeneratedReportOnTypedEdit();
     setFindingsValues((prev) => {
       const next = { ...prev };
       for (const [key, value] of fills) if (String(prev[key] ?? "").trim() === "") next[key] = value;
       return next;
     });
+    if (score != null) {
+      // The technician said the rating, so it is theirs, as a tap is.
+      setTypedActivityTouched(true);
+      setTypedActivityScore(score);
+    }
     const activity = typedFindingsSchema?.activity;
     const derive = activity?.deriveField && !typedActivityTouched
       ? fills.find(([key]) => key === activity.deriveField)
@@ -19311,6 +19280,8 @@ export function CompletionPanel({
     // First tap pins technician-set, even when the value doesn't change.
     setTypedActivityTouched(true);
     setTypedActivityScore(n);
+    // A person's pick is theirs: the words a heard rating stood on go.
+    setTypedHeard((prev) => (prev?.score ? { ...prev, score: null } : prev));
   }
   function handleTypedRecommendationsChange(value) {
     // While a Generate request is in flight the snapshot must stay what the
@@ -20904,6 +20875,8 @@ export function CompletionPanel({
                 onRecommendationsChange={handleTypedRecommendationsChange}
                 heard={typedVoiceFill ? typedHeard?.values : null}
                 unclear={typedVoiceFill ? typedHeard?.unclear : null}
+                heardScore={typedVoiceFill ? typedHeard?.score : null}
+                scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -23358,6 +23331,8 @@ export function CompletionPanel({
               onRecommendationsChange={handleTypedRecommendationsChange}
               heard={typedVoiceFill ? typedHeard?.values : null}
               unclear={typedVoiceFill ? typedHeard?.unclear : null}
+              heardScore={typedVoiceFill ? typedHeard?.score : null}
+              scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
             />
           )}
           {/* Companion sections — one typed form per companion schema,

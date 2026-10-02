@@ -853,7 +853,12 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     // The form's present values judge the fill (never stored): a field
     // already set is never filled, and a fill that clashes with one is left
     // for a person.
-    const facts = await readTypedFacts({ note, findingsType, current: req.body?.current });
+    // The form as served for the visit's own service key; a score the
+    // client already holds (scoreSet) leaves nothing to read for when every
+    // field is set too.
+    const facts = await readTypedFacts({
+      note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+    });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });
