@@ -44,6 +44,9 @@ const WAIT_OPEN_MINUTES = 120;
 // Query floor only: the same-ET-day rule below is the real age bound.
 const LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 100;
+// Pages one sweep may read: refused rows stay pending, so the sweep walks past
+// them (keyset on inbound time + id) instead of re-reading the same oldest page.
+const SWEEP_MAX_PAGES = 10;
 const STAMP_VERSION = 'unanswered_reply_v1';
 // Bookkeeping retries only reach back this far; older rows are history.
 const SETTLE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -85,8 +88,11 @@ function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled } =
   };
 }
 
-/** Pending suggestions old enough to look at, oldest inbound first. */
-function candidatePage({ now, limit = SWEEP_LIMIT }) {
+/**
+ * Pending suggestions old enough to look at, oldest inbound first. `after` is
+ * the last row of the previous page ({ createdAt, smsLogId }).
+ */
+function candidatePage({ now, limit = SWEEP_LIMIT, after = null }) {
   const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
   const { AUTOSEND_WORKFLOW } = require('./sms-auto-send');
   return db('agent_decisions as ad')
@@ -109,6 +115,9 @@ function candidatePage({ now, limit = SWEEP_LIMIT }) {
       this.select(db.raw('1'))
         .from('agent_decisions as prior')
         .whereRaw('prior.idempotency_key = ? || s.id::text', [`${AUTOSEND_WORKFLOW}:inbound:`]);
+    })
+    .modify((q) => {
+      if (after) q.whereRaw('(s.created_at, s.id) > (?, ?)', [after.createdAt, after.smsLogId]);
     })
     .orderBy('s.created_at', 'asc')
     .orderBy('s.id', 'asc')
@@ -238,6 +247,9 @@ async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, 
 function handoffCheck(claim) {
   const check = async ({ dbi = db } = {}) => {
     if (!unansweredReplyLive()) return { ok: false, code: 'gate_off', reason: 'gate_off' };
+    // The executor's sends are conversational, so the shared validator never
+    // defers them: a sweep that started at 7:58 PM must not deliver at 8:01.
+    if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
     const { threadLast10, customerId, smsLogId } = claim.unanswered;
     const newerInbound = await dbi('sms_log')
       .where({ direction: 'inbound' })
@@ -376,21 +388,34 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
     logger.warn(`[sms-unanswered] answered-card repair failed: ${err.message}`);
   }
 
-  const rows = await candidatePage({ now });
-  totals.scanned = rows.length;
-  if (!rows.length) return totals;
-
   const sla = require('./followup-sla-watcher');
-  let calendar;
-  try {
-    calendar = await sla.loadSlaCalendar(db, new Date(rows[0].inbound_created_at), now);
-  } catch (err) {
-    logger.warn(`[sms-unanswered] office calendar unreadable (${err.message}); nothing sent this run`);
-    return { ...totals, reason: 'calendar_unavailable' };
-  }
-
   const refuse = (reason) => { totals.refused[reason] = (totals.refused[reason] || 0) + 1; };
   const seenInbounds = new Set();
+  let calendar = null;
+  let after = null;
+  for (let page = 0; page < SWEEP_MAX_PAGES; page += 1) {
+    const rows = await candidatePage({ now, after });
+    if (!rows.length) break;
+    totals.scanned += rows.length;
+    const last = rows[rows.length - 1];
+    after = { createdAt: last.inbound_created_at, smsLogId: last.sms_log_id };
+    if (!calendar) {
+      try {
+        calendar = await sla.loadSlaCalendar(db, new Date(rows[0].inbound_created_at), now);
+      } catch (err) {
+        logger.warn(`[sms-unanswered] office calendar unreadable (${err.message}); nothing sent this run`);
+        return { ...totals, reason: 'calendar_unavailable' };
+      }
+    }
+    // Real clock, not `now`: a long sweep stops at closing time.
+    if (!isWithinSendWindowET(new Date())) return { ...totals, reason: 'outside_send_window' };
+    await sweepPage({ rows, now, calendar, sla, refuse, seenInbounds, totals });
+    if (rows.length < SWEEP_LIMIT) break;
+  }
+  return totals;
+}
+
+async function sweepPage({ rows, now, calendar, sla, refuse, seenInbounds, totals }) {
   for (const row of rows) {
     if (seenInbounds.has(row.sms_log_id)) continue;
     seenInbounds.add(row.sms_log_id);
@@ -421,11 +446,11 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
       logger.warn(`[sms-unanswered] candidate failed (suggestion ${row.decision_id}): ${err.message}`);
     }
   }
-  return totals;
 }
 
 module.exports = {
   WAIT_OPEN_MINUTES,
+  SWEEP_LIMIT,
   ORDINARY_INTENTS,
   STAMP_VERSION,
   ANSWERED_STATUS,

@@ -55,6 +55,9 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
 
   beforeEach(async () => {
     process.env.GATE_SMS_UNANSWERED_REPLY = 'true';
+    // The send-window rechecks read the real clock; pin only Date to the fixture's
+    // Tuesday 2 PM ET so timers, I/O and the pg driver run normally.
+    jest.useFakeTimers({ now: NOW, doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'hrtime', 'performance'] });
     trx = await database.transaction();
     const schema = `sms_unanswered_${randomUUID().replaceAll('-', '')}`;
     await trx.raw('CREATE SCHEMA ??', [schema]);
@@ -71,6 +74,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
 
   afterEach(async () => {
     delete process.env.GATE_SMS_UNANSWERED_REPLY;
+    jest.useRealTimers();
     jest.restoreAllMocks();
     await trx?.rollback();
   });
@@ -295,6 +299,44 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     sendCustomerMessage.mockClear();
     expect((await sweep()).scanned).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('closing time between the claim and the provider call holds the send and the card returns', async () => {
+    const s = await waitingSuggestion();
+    sendCustomerMessage.mockImplementation(async (input) => {
+      jest.setSystemTime(at('2026-10-07T00:01:00Z')); // 8:01 PM ET
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.outside_send_window).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+    expect((await draft(s.draftId)).status).toBe('suggested');
+  });
+
+  test('a sweep that reaches closing time stops before the next page', async () => {
+    await waitingSuggestion();
+    jest.setSystemTime(at('2026-10-07T00:01:00Z'));
+    // `now` says 2 PM (the tick's start); the real clock says 8:01 PM.
+    expect(await sweep()).toMatchObject({ sent: 0, attempted: 0, reason: 'outside_send_window' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a full page of refused candidates does not starve a newer eligible one', async () => {
+    for (let i = 0; i < unanswered.SWEEP_LIMIT; i += 1) {
+      // 8:00–9:39 AM ET, all held for a person's review.
+      await waitingSuggestion({
+        inboundAt: new Date(at('2026-10-06T12:00:00Z').getTime() + i * 60 * 1000),
+        phone: `+1202555${String(1000 + i).padStart(4, '0')}`,
+        stamp: { require_review: true },
+      });
+    }
+    const s = await waitingSuggestion();
+    const totals = await sweep();
+    expect(totals).toMatchObject({ scanned: unanswered.SWEEP_LIMIT + 1, attempted: 1, sent: 1 });
+    expect(totals.refused.review_required).toBe(unanswered.SWEEP_LIMIT);
+    expect((await card(s.decisionId)).status).toBe(unanswered.ANSWERED_STATUS);
   });
 
   test('the thread\'s other waiting cards resolve as passed over, the answered one as answered', async () => {
