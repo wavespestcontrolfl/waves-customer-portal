@@ -679,3 +679,17 @@ describe('codex r2 on #5566', () => {
   });
 });
 
+describe('frozen named issues (codex r4)', () => {
+  const full = { turf_density: 70, weed_suppression: 70, color_health: 70, stress_damage: 70, overall: 70 };
+  const run = (issues) => buildLawnProgress({
+    current: { date: '2026-09-30', scores: full, confidence: 'high' },
+    prior: { date: '2026-08-31', scores: full },
+    sinceLast: { priorDate: '2026-08-31', applied: [{ name: 'Artavia 2 SC', targets: [] }], checks: [], ...(issues ? { issues } : {}) },
+  });
+  it('a target-less fungicide is curative when the prior visit froze large_patch, preventive otherwise', () => {
+    expect(run(['large_patch']).items.map((i) => i.rowId)).toContain('fungicide_curative');
+    expect(run(null).items.map((i) => i.rowId)).toContain('fungicide_preventive');
+    expect(run(['not_a_key']).items.map((i) => i.rowId)).toContain('fungicide_preventive');
+  });
+});
+

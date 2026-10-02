@@ -140,7 +140,21 @@ function buildVisitMemory({ reportV2, assessmentId, serviceDate } = {}) {
     if (checks.length >= MAX_CHECKS) break;
   }
 
-  return { v: VISIT_MEMORY_VERSION, assessmentId: String(assessmentId), serviceDate: date, applied, checks };
+  // Named issues confirmed at this visit (keys the expectations engine knows,
+  // e.g. large_patch, chinch): a fungicide or insecticide with no tagged target
+  // is judged curative when the visit named its cause, so that evidence is
+  // frozen with the application. reportV2.namedIssues is the slot the photo
+  // read / tech confirmation PRs (P19, P27) fill; absent today, so the key is
+  // omitted and existing frozen entries keep their exact shape.
+  // Keys only (no expectations vocabulary here: that engine ships dark and
+  // drops any key it does not know when it reads them).
+  const issues = [...new Set((Array.isArray(reportV2.namedIssues) ? reportV2.namedIssues : [])
+    .map((key) => text(String(key || '').toLowerCase()))
+    .filter((key) => key && /^[a-z0-9_]+$/.test(key)))].sort().slice(0, MAX_CHECKS);
+  return {
+    v: VISIT_MEMORY_VERSION, assessmentId: String(assessmentId), serviceDate: date, applied, checks,
+    ...(issues.length ? { issues } : {}),
+  };
 }
 
 /**
@@ -202,6 +216,7 @@ function buildSinceLast({ priorVisit, priorMemory } = {}) {
     priorDate: ymd(priorMemory.serviceDate) || ymd(priorVisit.date) || null,
     applied,
     checks,
+    ...(Array.isArray(priorMemory.issues) && priorMemory.issues.length ? { issues: priorMemory.issues } : {}),
   };
 }
 

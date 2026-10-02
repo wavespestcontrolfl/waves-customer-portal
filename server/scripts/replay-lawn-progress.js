@@ -134,7 +134,7 @@ function progressFor({ current, prior }, { band, overallBand }) {
     // the prior row.
     sinceLast: Object.prototype.hasOwnProperty.call(current, 'frozenSinceLast')
       ? current.frozenSinceLast
-      : (prior ? { priorDate: prior.date, applied: prior.applied || [], checks: [] } : null),
+      : (prior ? { priorDate: prior.date, applied: prior.applied || [], issues: prior.issues || [], checks: [] } : null),
     band,
     overallBand,
   });
@@ -422,7 +422,7 @@ async function loadReplayRows(db) {
           applied: stored
             ? (Array.isArray(stored.applied) ? stored.applied : [])
             : (a.service_record_id ? appliedFromProducts(productsBy.get(a.service_record_id) || []) : []),
-          ...(stored ? { frozenSinceLast: stored.sinceLast || null } : {}),
+          ...(stored ? { frozenSinceLast: stored.sinceLast || null, issues: Array.isArray(stored.issues) ? stored.issues : [] } : {}),
           order: a.confirmed_order || '',
         };
       });

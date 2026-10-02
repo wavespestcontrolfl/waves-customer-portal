@@ -542,3 +542,19 @@ describe('appliedFromProducts (shared with the P13 replay)', () => {
   });
 });
 
+describe('named issues ride the frozen memory (codex r4 on #5566)', () => {
+  const { buildVisitMemory, buildSinceLast } = require('../services/service-report/lawn-visit-memory');
+  const reportV2 = (extra = {}) => ({ treatment: { products: [{ name: 'Artavia 2 SC', kind: 'fungicide' }] }, insights: [], ...extra });
+  it('freezes normalized issue keys (the engine drops unknown ones), and omits the key when there are none', () => {
+    const m = buildVisitMemory({ reportV2: reportV2({ namedIssues: ['Large_Patch', 'chinch', 'bad key!', 'chinch', null] }), assessmentId: 'a1', serviceDate: '2026-08-31' });
+    expect(m.issues).toEqual(['chinch', 'large_patch']);
+    const none = buildVisitMemory({ reportV2: reportV2(), assessmentId: 'a1', serviceDate: '2026-08-31' });
+    expect(none).not.toHaveProperty('issues');
+  });
+  it('sinceLast carries the prior entry\'s frozen issues', () => {
+    const priorMemory = buildVisitMemory({ reportV2: reportV2({ namedIssues: ['large_patch'] }), assessmentId: 'p1', serviceDate: '2026-08-31' });
+    const since = buildSinceLast({ priorVisit: { assessmentId: 'p1', date: '2026-08-31' }, priorMemory });
+    expect(since.issues).toEqual(['large_patch']);
+  });
+});
+

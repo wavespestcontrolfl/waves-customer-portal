@@ -253,14 +253,16 @@ const VERDICT_STATE = {
   unclear: 'unclear',
 };
 
-function appliedRows(applied, priorDate) {
+function appliedRows(applied, priorDate, issues = []) {
   const applications = (Array.isArray(applied) ? applied : [])
     .filter((app) => app && typeof app.name === 'string' && app.name.trim())
     .map((app) => ({ name: app.name, targets: Array.isArray(app.targets) ? app.targets : [] }));
   if (!applications.length) return { rows: [], unmapped: [] };
   // includeUnapproved: the progress is DATA; each item carries `approved` so
   // the writer (P14) can still withhold what the owner has not signed.
-  const built = buildLawnExpectations({ applications, visitDate: priorDate }, { includeUnapproved: true });
+  // The prior visit's FROZEN named issues: a target-less fungicide or
+  // insecticide is curative when that visit named its cause.
+  const built = buildLawnExpectations({ applications, issues, visitDate: priorDate }, { includeUnapproved: true });
   return { rows: built.rows, unmapped: built.unmapped };
 }
 
@@ -378,7 +380,7 @@ function comparisonGates(current, prior) {
 
 /** One item per judged metric of each prior applied row, then one per prior check. */
 function progressItems({ sinceLast, priorDate, days, current, prior, gates, band }) {
-  const { rows, unmapped } = appliedRows(sinceLast?.applied, priorDate);
+  const { rows, unmapped } = appliedRows(sinceLast?.applied, priorDate, Array.isArray(sinceLast?.issues) ? sinceLast.issues : []);
   const items = rows.flatMap((row) => {
     // Judged metrics when the row has windows; otherwise its one metric, which
     // judgeProgress answers 'holding_steady'.
