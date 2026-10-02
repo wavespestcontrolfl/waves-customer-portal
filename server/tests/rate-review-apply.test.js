@@ -939,6 +939,20 @@ describe('applyDueRateChanges — monthly_membership', () => {
     expect(mockDb.store.customer_plan_rates.map((r) => Number(r.monthly_rate))).toEqual([20, 13.33]);
     expect(customer1().monthly_rate).toBe('33.33');
   });
+  test('priced off the scalar, then the account stopped running exactly that one line (replaced by lawn, or a lawn line joined, ledger empty) → held, nothing written', async () => {
+    const replaced = monthlyBook({ source: 'monthly_rate', ledger: [] });
+    for (const v of replaced.scheduled_services) v._line = 'lawn_care';
+    let out = await runApply(replaced, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(out.holds.map((h) => h.reason)).toEqual(['rate_moved_since_notice']);
+    expect(customer1().monthly_rate).toBe('33.33');
+    const joined = monthlyBook({ source: 'monthly_rate', ledger: [] });
+    joined.scheduled_services.push({ ...joined.scheduled_services[joined.scheduled_services.length - 1], id: VISIT(900), recurring_parent_id: null, _line: 'lawn_care' });
+    out = await runApply(joined, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(customer1().monthly_rate).toBe('33.33');
+    expect(mockDb.store.customer_plan_rates).toEqual([]);
+  });
   test('priced off the scalar and the family slice still carries the whole scalar → applied', async () => {
     const out = await runApply(monthlyBook({ source: 'monthly_rate' }), JAN);
     expect(out).toMatchObject({ applied: 1, held: 0 });

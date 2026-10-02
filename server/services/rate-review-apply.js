@@ -751,7 +751,7 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
 }
 
 async function applyMonthly(trx, ctx) {
-  const { notice, customer } = ctx;
+  const { notice, customer, today } = ctx;
   const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
   const source = ctx.metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
@@ -763,6 +763,15 @@ async function applyMonthly(trx, ctx) {
   // is no longer the noticed rate — moving it would raise a different
   // amount than the letter quoted. Hold unless this family's slice (or a
   // lone unattributed slice) still carries the whole scalar.
+  // The ranking prices off the scalar only for an account with ONE plan
+  // line; the account must still run exactly that line (a pest plan
+  // replaced by lawn at the same total, or a second line joining with no
+  // ledger attribution, is not the plan the letter named).
+  if (source !== 'ledger_slice') {
+    const lines = await loadAccountPlanLineCount(trx, { customerId: customer.id, fromDate: today });
+    const own = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
+    if (lines !== 1 || own.length === 0) throw hold('rate_moved_since_notice', { currentCents, source, accountLines: lines });
+  }
   if (source !== 'ledger_slice' && all.length > 0) {
     const familyKeys = new Set(family.map((r) => r.family_key));
     const outside = all.filter((r) => !familyKeys.has(r.family_key) && r.family_key !== PlanRateLedger.UNATTRIBUTED);
