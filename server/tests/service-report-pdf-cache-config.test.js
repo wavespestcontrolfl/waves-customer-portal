@@ -240,6 +240,36 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(result.key).toContain('-tsreview2');
   });
 
+  describe('GATE_TS_TECH_FINDINGS_COPY joins the tree PDF identity', () => {
+    const tree = { service_line: 'tree_shrub', service_type: 'Tree & Shrub Care' };
+    const prior = process.env.GATE_TS_TECH_FINDINGS_COPY;
+    afterEach(() => {
+      if (prior === undefined) delete process.env.GATE_TS_TECH_FINDINGS_COPY; else process.env.GATE_TS_TECH_FINDINGS_COPY = prior;
+    });
+
+    test('gate off keeps today\'s exact signature (no mass invalidation while dark); gate on adds the gate and a content revision', () => {
+      const { treeShrubReviewPdfSignature } = jest.requireActual('../services/service-report/pdf-storage');
+      delete process.env.GATE_TS_TECH_FINDINGS_COPY;
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2');
+      process.env.GATE_TS_TECH_FINDINGS_COPY = 'false';
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2');
+      process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2-tsfind1');
+    });
+
+    test('flipping the gate changes the stored-PDF key; other service lines never change', () => {
+      const { treeShrubReviewPdfSignature, reportPdfStorageKey } = jest.requireActual('../services/service-report/pdf-storage');
+      delete process.env.GATE_TS_TECH_FINDINGS_COPY;
+      const off = reportPdfStorageKey('service-1', { visibilitySignature: treeShrubReviewPdfSignature(tree) });
+      process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
+      const on = reportPdfStorageKey('service-1', { visibilitySignature: treeShrubReviewPdfSignature(tree) });
+      expect(on).not.toBe(off);
+      expect(off).toContain('-tsreview2');
+      expect(on).toContain('-tsreview2-tsfind1');
+      expect(treeShrubReviewPdfSignature({ service_line: 'lawn' })).toBe('');
+    });
+  });
+
   test.each(['lawn', 'pest', 'termite', 'mosquito'])('the tree PDF version does not invalidate %s reports', (serviceLine) => {
     const { treeShrubReviewPdfSignature } = jest.requireActual('../services/service-report/pdf-storage');
     expect(treeShrubReviewPdfSignature({ service_line: serviceLine, service_type: 'Tree & Shrub Care' })).toBe('');

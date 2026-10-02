@@ -71,6 +71,9 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
+const {
+  techFindingsCopyLive, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer, PALM_CROWN_PROMPT_RULE,
+} = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -25135,11 +25138,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // summary alone never opens this block (mirrors the generation-gate rule
     // above: real, tech-vetted photo text is substantive, a bare count or an
     // unreviewed summary is not).
-    const photoObservationsBlock = cappedPhotoCaptions.length
+    // Built at use time (below) for a tree & shrub visit with GATE_TS_TECH_FINDINGS_COPY
+    // on: a hidden / edited finding withholds the photo-read captions and summary,
+    // so the block never repeats what the technician replaced.
+    const buildPhotoObservationsBlock = (captions, summary) => (captions.length
       ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
-        + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
-        + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
-      : '';
+        + (summary ? `Summary: ${summary}\n` : '')
+        + captions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
+      : '');
     // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
     // watcher needs to know whether THIS generation actually included the
     // photo block — with the gate off (the default), cappedPhotoCaptions is
@@ -25148,7 +25154,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // mirrors when photoObservationsBlock is non-empty; reused across every
     // response branch below (a cache hit reuses a prior generation built
     // from this SAME identity, so it carries the same grounding truth).
-    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
+    // Re-derived from the technician-filtered captions once grounding is known.
+    let photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -25448,6 +25455,23 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       return true;
     });
     const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
+    // leaves no scores, but the technician's own findings still ground the
+    // report (grounding.techFindings exists only while the gate is on).
+    // GATE_TS_TECH_FINDINGS_COPY: the photo text the writer may use, filtered
+    // BEFORE the input gate below so captions withheld by the technician's
+    // decisions can never hold that gate open on their own.
+    let promptPhotoCaptions = cappedPhotoCaptions;
+    let promptPhotoSummary = photoSummaryText;
+    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
+      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
+      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
+      // The summary was written about the photos as a whole: a replaced finding
+      // withdraws it.
+      promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
+    }
+    photoGroundingUsed = promptPhotoCaptions.length > 0;
+    const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -25458,8 +25482,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
+      || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
-      || cappedPhotoCaptions.length > 0;
+      || promptPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
     // promises (owner "ok yes add these" 2026-10-01): with the writer rules
     // on a grounded visit only. Fail-soft: no record, no mention. Resolved
@@ -25541,6 +25566,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       });
     }
 
+    if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
     // Scores-only requests live or die by the assessment grounding: when the
     // validated assessment was the ONLY substantive input and the grounding
     // load then failed (or resolved to retake-pending), there is nothing real
@@ -25564,7 +25597,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // proceed on the photo block even when the assessment load itself
       // fails; only a TRUE assessment-only request (no captions either)
       // still 503s retryable.
-      && !cappedPhotoCaptions.length;
+      && !promptPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -25596,11 +25629,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const effectiveSystemPrompt = selectReportCopyPrompt(
+    const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
       writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
     );
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
+    // instruction is THE guard, no word filter). In the system prompt so it
+    // reaches every tree & shrub generation even when the grounding context
+    // fails, and joins the draft cache key with it.
+    const effectiveSystemPrompt = selectedSystemPrompt
+      && techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub'
+      ? `${selectedSystemPrompt}\n\n${PALM_CROWN_PROMPT_RULE}`
+      : selectedSystemPrompt;
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25652,6 +25693,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
     }
+    const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);
     const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system

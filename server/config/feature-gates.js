@@ -153,6 +153,7 @@
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
  *   GATE_FAST_COMPLETE_REPORT=true (Fast Complete report flow, owner "ok go" 2026-10-01: the tech portal opens the one-screen sheet for pest re-services AND regular untyped pest visits; the tech talks into a text box, taps customer home / pest activity 1-5 / one tip / the promise check, generates the AI report, reads it, traces the spray and completes through the full /complete path, billing and customer text as the full form. The schedule payload carries `fastCompleteReportEnabled`; POST /admin/dispatch/:id/voice-facts reads where the tech treated, the pests they named and how the sprays went down from the note, each quoted word for word. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteReportLive(). Ships DARK; off = the flag is false, the route answers 404 {enabled:false} and the tech portal routes pest visits exactly as before.)
+ *   GATE_TS_TECH_FINDINGS_COPY=true (Tree & Shrub tech findings in customer copy, parity with the lawn rulings, owner 2026-10-02: the technician's keep/confirm/hide/edit decisions on the photo-read findings are FROZEN on the service record (structured_notes.treeShrubTechFindings) whether or not the signed preview is accepted, and the customer report + AI report prompt obey them (a hidden finding never appears, a confirmed one reads as the technician's finding, an edit uses the technician's text; the photo read stays stored for the office). Also the palm-crown rule (owner 2026-10-01: photos are ground level, so no customer copy may call a palm's crown, spear leaf or newest fronds healthy). Customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechFindingsCopyLive(). Ships DARK; off = nothing is stored and every report/prompt is byte-identical to before.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   GATE_NOTE_BOX_PHOTOS=true (Photos in the notes box, owner "ok go" 2026-10-02 on the Fast Complete mockup v8: the office Complete Service form puts the visit's photos inside the notes box, each with a short description typed or dictated that rides as the photo's caption to the report writer and the customer's report, and the separate photo section goes away. The schedule payload carries `noteBoxPhotosEnabled` per service, never for lawn or tree, shrub & palm. Strict opt-in: exactly 'true', read at call time via noteBoxPhotosLive(). Ships DARK; off = the form's photo section exactly as before.)
  *   GATE_LANE_VOICE_FILL=true (Fast Complete step 2, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/lane-facts reads a specialty visit's own record (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) from the technician's note: the places from the lane's own list and at most one value per finding group, each with the note's own words, kept only when the lane's closeout offers it and the note holds the words, never a pair the completion refuses (services/visit-lane-facts.js, TEXT_POLICIES.fastStructured, lane visit_lane_facts). Writes nothing: the office form and the tech's sheet show each field with its words for a person to confirm. With GATE_FAST_COMPLETE_REPORT also on, the tech portal opens such a visit (one that completes without a project) in the Fast Complete sheet's report flow instead of the project editor: the sheet's record card fills from the note, and the report and the /complete body (areasServiced, structuredObservations) are written from it; the pest-recap context answers the visit's `lane`. Strict opt-in: exactly 'true', read at call time via laneVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, and the tech portal routes lane visits to the project editor as before.)
@@ -3793,6 +3794,12 @@ const gates = {
   // entry is for logGateStatus only: admin-schedule.js and admin-dispatch.js
   // read GATE_FAST_COMPLETE_REPORT at call time via fastCompleteReportLive().
   fastCompleteReport: process.env.GATE_FAST_COMPLETE_REPORT === 'true',
+
+  // Tree & Shrub tech findings in customer copy (owner 2026-10-02). Ships DARK
+  // in every environment. This entry is for logGateStatus only: the completion
+  // freeze, the T&S report builders and the report-writer prompt read
+  // GATE_TS_TECH_FINDINGS_COPY at call time via tsTechFindingsCopyLive().
+  tsTechFindingsCopy: process.env.GATE_TS_TECH_FINDINGS_COPY === 'true',
   // Lawn re-service Fast Complete (owner 2026-10-01): the one-screen completion
   // sheet for the free between-visit lawn callback (lawn_re_service). Ships DARK
   // in every environment. This entry is for logGateStatus only: admin-dispatch.js
@@ -4015,6 +4022,13 @@ function kbCustomerAudienceLive() {
 // schedule payload's `treeShrubFastCompleteEnabled`.
 function tsFastCompleteLive() {
   return process.env.GATE_TS_FAST_COMPLETE === 'true';
+}
+
+// GATE_TS_TECH_FINDINGS_COPY read at CALL time — strict `=== 'true'`, dark in
+// every environment. The canonical reader for the T&S tech-findings freeze, the
+// report builders' tech-decision overlay and the palm-crown copy rule.
+function tsTechFindingsCopyLive() {
+  return process.env.GATE_TS_TECH_FINDINGS_COPY === 'true';
 }
 
 // GATE_LAWN_RESERVICE_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark
@@ -5028,6 +5042,7 @@ module.exports.portalChatVisitFactsLive = portalChatVisitFactsLive;
 module.exports.typedDecisionsLive = typedDecisionsLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
+module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
 module.exports.noteBoxPhotosLive = noteBoxPhotosLive;
 module.exports.laneVoiceFillLive = laneVoiceFillLive;
