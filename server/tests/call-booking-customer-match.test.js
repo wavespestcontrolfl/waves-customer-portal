@@ -23,7 +23,7 @@ const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
-const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress } = _test;
+const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, advisoryBookingAddressHoldFields } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -85,6 +85,27 @@ describe('FIX 1: validatePhoneCallAppointmentCustomer with a last name only', ()
     process.env[FIRST_NAME_GATE] = 'true';
     const v = validatePhoneCallAppointmentCustomer({ ...customerRow, first_name: 'Sam' }, extracted, '+19415550142');
     expect(v.advisory).not.toContain('first_name');
+  });
+});
+
+describe('FIX 1: a first-name-less booking needs the BOOKED address validated (shadow mode)', () => {
+  const ok = (advisory) => ({ ok: true, missing: [], advisory });
+  test('outside enforce mode, a first_name advisory holds unless the verdict validates the address being booked (V1/V2 disagreement keeps avPositiveForBooking false)', () => {
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: false })).toEqual(['first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['email', 'first_name', 'last_name']), avPositiveForBooking: false })).toEqual(['email', 'first_name']);
+    // an email on file does NOT lift the hold for a first-name-less booking
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name', 'last_name']), avPositiveForBooking: false })).toEqual(['first_name']);
+  });
+  test('no hold when the verdict validates the booked address, in enforce mode (canAutoRoute owns it), for a named caller, or when the customer is already not ok', () => {
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: true })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['first_name']), avPositiveForBooking: false })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['last_name']), avPositiveForBooking: false })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: { ok: false, missing: ['phone'], advisory: ['first_name'] }, avPositiveForBooking: false })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({})).toEqual([]);
+  });
+  test('wiring: the hold decision uses the helper and reports the advisory fields', () => {
+    expect(source).toContain('advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking })');
+    expect(source).toContain('customerValidation.ok ? advisoryHoldFields : customerValidation.missing');
   });
 });
 

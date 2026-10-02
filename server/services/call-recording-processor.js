@@ -6740,6 +6740,16 @@ function hasUsablePhone(value) {
   return String(value || '').replace(/\D/g, '').length >= 10;
 }
 
+// Outside enforce mode canAutoRoute's address-trust gate never runs, so a booking
+// that lacks the email — or, under GATE_CALL_FIRST_NAME_ADVISORY, the first name —
+// must still have its ACTUAL destination positively validated (the verdict must
+// validate the street/unit being booked, not just some address V2 heard).
+// Returns the advisory fields that put the booking on hold; [] = no hold. Pure.
+function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking } = {}) {
+  if (enforceModeActive || !customerValidation?.ok || avPositiveForBooking) return [];
+  return ['email', 'first_name'].filter((field) => customerValidation.advisory?.includes(field));
+}
+
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
   // A service-contact slot email satisfies the email requirement: it is a
   // deliverable account email (appointment-email's resolveRecipients includes
@@ -16985,12 +16995,10 @@ const CallRecordingProcessor = {
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true
             && avValidatesBookedAddress;
-          const emailAdvisoryHold = !enforceModeActive
-            && customerValidation.ok
-            && !!customerValidation.advisory?.includes('email')
-            && !avPositiveForBooking;
+          const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking });
+          const emailAdvisoryHold = advisoryHoldFields.length > 0;
           if (!customerValidation.ok || emailAdvisoryHold) {
-            const missingFields = customerValidation.ok ? ['email'] : customerValidation.missing;
+            const missingFields = customerValidation.ok ? advisoryHoldFields : customerValidation.missing;
             appointmentResult = {
               service: serviceResolution.service,
               dateTime: extracted.preferred_date_time,
@@ -17001,7 +17009,7 @@ const CallRecordingProcessor = {
             };
             logger.warn(
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
-              missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
+              missingFields.join(', ') + (emailAdvisoryHold ? ' (a booking with no email or no first name outside enforce mode requires a validated address)' : '')
             );
           } else {
             // 'there' when no first name is on file (advisory-create path):
@@ -22473,6 +22481,7 @@ CallRecordingProcessor._test = {
   unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  advisoryBookingAddressHoldFields,
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
