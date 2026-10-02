@@ -842,7 +842,10 @@ router.get('/', async (req, res, next) => {
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
         'customers.nearest_location_id', 'customers.city',
         'customers.zip as customer_zip', 'customers.latitude as customer_latitude',
-        'customers.longitude as customer_longitude')
+        'customers.longitude as customer_longitude',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2',
+        'customers.home_line_location_id as customer_home_line_location_id',
+        'customers.home_line_address_key as customer_home_line_address_key')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -876,6 +879,9 @@ router.get('/', async (req, res, next) => {
       const customer = d.customer_id ? {
         id: d.customer_id, phone: d.phone, city: d.city,
         zip: d.customer_zip, latitude: d.customer_latitude, longitude: d.customer_longitude,
+        address_line1: d.customer_address_line1, address_line2: d.customer_address_line2,
+        home_line_location_id: d.customer_home_line_location_id,
+        home_line_address_key: d.customer_home_line_address_key,
       } : null;
       const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
       const r = await resolveDraftRecipient(d, preloaded).catch(() => null);

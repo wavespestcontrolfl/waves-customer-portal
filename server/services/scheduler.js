@@ -1092,6 +1092,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:05AM — Customer home line stamp (GATE_HOME_LINE, read inside)
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    try {
+      await runExclusive('home-line-sweep', () => require('./home-line').stampHomeLines());
+    } catch (err) {
+      logger.error(`[home-line] daily sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {
