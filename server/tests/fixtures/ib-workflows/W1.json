@@ -42,7 +42,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -83,7 +83,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -111,7 +111,7 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].state"
+              "admin_alerts[*].status"
             ],
             "sends": 0,
             "card": false,
@@ -140,7 +140,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -180,7 +180,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -220,7 +220,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -248,7 +248,7 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].state"
+              "admin_alerts[*].status"
             ],
             "sends": 0,
             "card": false,
@@ -277,7 +277,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -305,7 +305,7 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].state"
+              "admin_alerts[*].status"
             ],
             "sends": 0,
             "card": false,
@@ -334,7 +334,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -376,7 +376,7 @@
         "outcome": "unsupported",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -416,7 +416,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -457,7 +457,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -485,7 +485,7 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].state"
+              "admin_alerts[*].status"
             ],
             "sends": 0,
             "card": false,
@@ -516,7 +516,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -556,7 +556,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -597,7 +597,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -625,7 +625,7 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].state"
+              "admin_alerts[*].status"
             ],
             "sends": 0,
             "card": false,
@@ -657,7 +657,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -699,7 +699,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -741,7 +741,7 @@
         "outcome": "unsupported",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -781,7 +781,7 @@
         "outcome": "blocked_by_rule",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -823,7 +823,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -863,7 +863,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,
@@ -904,7 +904,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].state"
+          "admin_alerts[*].status"
         ],
         "sends": 0,
         "card": false,

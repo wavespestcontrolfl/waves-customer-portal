@@ -75,10 +75,10 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "sms_log[new].customer = cust-pellham",
+              "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
               "sms_log[new].status = submitted",
-              "sms_log[new].body = last approved draft, no signature"
+              "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [
               "sms_log[other customers]"
@@ -154,10 +154,10 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "sms_log[new].customer = cust-pellham",
+              "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
               "sms_log[new].status = submitted",
-              "sms_log[new].body = last approved draft, no signature"
+              "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [
               "sms_log[other customers]"
@@ -192,10 +192,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-pellham",
+          "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = secondary ending 0102",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
           "sms_log[to primary 0101]"
@@ -293,10 +293,10 @@
       "expected": {
         "outcome": "unknown",
         "changes": [
-          "sms_log[new].customer = cust-pellham",
+          "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
           "sms_log[new].status = unknown",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
           "sms_log duplicate rows"
@@ -435,10 +435,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-pellham",
+          "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],
         "sends": 1,
@@ -528,10 +528,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-pellham",
+          "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
           "sms_log duplicate rows"
@@ -627,10 +627,10 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "sms_log[new].customer = cust-fennimore",
+              "sms_log[new].customer_id = cust-fennimore",
               "sms_log[new].to_phone = primary ending 0301",
               "sms_log[new].status = submitted",
-              "sms_log[new].body = last approved draft, no signature"
+              "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [],
             "sends": 1,
@@ -661,10 +661,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-fennimore",
+          "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],
         "sends": 1,
@@ -801,10 +801,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-fennimore",
+          "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
           "sms_log[to cust-pellham]"
@@ -932,10 +932,10 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "sms_log[new].customer = cust-pellham",
+              "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
               "sms_log[new].status = submitted",
-              "sms_log[new].body = last approved draft, no signature"
+              "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [],
             "sends": 1,
@@ -966,10 +966,10 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "sms_log[new].customer = cust-fennimore",
+          "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
           "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+          "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],
         "sends": 1,

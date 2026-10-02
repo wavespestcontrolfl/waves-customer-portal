@@ -40,9 +40,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -88,9 +88,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -135,9 +135,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -202,9 +202,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -396,9 +396,9 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -484,9 +484,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
+          "customer_properties[new].customer_id = cust-larkspur",
           "customer_properties[new].label = rental",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address_line1 = 27 Sample Court",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
@@ -532,8 +532,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-wexcombe",
-          "customer_properties[new].address = 52 Sample Court",
+          "customer_properties[new].customer_id = cust-wexcombe",
+          "customer_properties[new].address_line1 = 52 Sample Court",
           "customer_properties[new].label = rental",
           "customer_properties[new].is_primary = false"
         ],
@@ -839,8 +839,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-wexcombe",
-          "customer_properties[new].address = 33 Sample Court",
+          "customer_properties[new].customer_id = cust-wexcombe",
+          "customer_properties[new].address_line1 = 33 Sample Court",
           "customer_properties[new].label = rental"
         ],
         "unchanged": [

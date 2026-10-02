@@ -46,7 +46,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output",
@@ -95,7 +95,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output"
@@ -143,7 +143,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output"
@@ -193,7 +193,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 9",
           "estimates[new].price = engine output"
@@ -258,7 +258,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output",
@@ -328,7 +328,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output"
@@ -422,7 +422,7 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 9",
           "estimates[new].price = engine output"
@@ -512,7 +512,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 12",
           "estimates[new].price = engine output"
@@ -693,7 +693,7 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "estimates[new].customer = cust-thistledown",
+          "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
           "estimates[new].lawn_applications = 9",
           "estimates[new].price = engine output"
@@ -871,7 +871,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-pellham",
+          "estimates[new].customer_id = cust-pellham",
           "estimates[new].lawn_applications = 12"
         ],
         "unchanged": [],
@@ -959,7 +959,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-pellham",
+          "estimates[new].customer_id = cust-pellham",
           "estimates[new].lawn_applications = 12"
         ],
         "unchanged": [

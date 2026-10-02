@@ -203,7 +203,7 @@
         "unchanged": [
           "customers[cust-murphy-b]",
           "customers[cust-murphy-a].email",
-          "customers[cust-murphy-a].address"
+          "customers[cust-murphy-a].address_line1"
         ],
         "sends": 0,
         "card": false,
@@ -834,7 +834,7 @@
         "outcome": "completed",
         "changes": [
           "customers[cust-murphy-a].notes = (empty)",
-          "customers[cust-murphy-a].source = referral"
+          "customers[cust-murphy-a].lead_source = referral"
         ],
         "unchanged": [
           "customers[cust-murphy-a].phone",

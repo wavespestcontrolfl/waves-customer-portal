@@ -263,20 +263,31 @@ describe.each(manifests)('$id coverage', ({ id, doc }) => {
 });
 
 // Row references in changes/unchanged name real tables and columns, so a
-// harness can query them. These four are deliberate logical names for values
+// harness can query them. These five are deliberate logical names for values
 // that are not one column; the doc lists the same mapping.
 const LOGICAL_FIELDS = {
   'estimates.lawn_applications': 'estimate_data inputs: services.lawn.lawnFreq',
   'estimates.measurement': 'estimate_data inputs: the property lawn measurement used',
+  'estimates.price': 'the engine total saved with the estimate (monthly_total / annual_total per cadence)',
   'scheduled_services.date_window': 'scheduled_date + window_start / window_end',
   'sms_log.template': 'sms_log.message_type (the template key the sender used)',
 };
 
 describe('row references', () => {
   const MIGRATIONS = path.join(__dirname, '..', 'models', 'migrations');
-  const src = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(MIGRATIONS, f), 'utf8')).join('\n');
-  const tables = new Set([...src.matchAll(/createTable\(\s*'([a-z_]+)'/g)].map((m) => m[1]));
-  const columns = new Set([...src.matchAll(/['"]([a-z_]+)['"]/g)].map((m) => m[1]));
+  const files = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(MIGRATIONS, f), 'utf8'));
+  const tables = new Set(files.flatMap((src) => [...src.matchAll(/createTable\(\s*'([a-z_]+)'/g)].map((m) => m[1])));
+  // A column counts for a table only if it is named in a migration that
+  // creates or alters THAT table (knex or raw SQL), not anywhere in the tree.
+  const columnsOf = (table) => {
+    const touches = new RegExp(`(?:createTable|alterTable|table)\\(\\s*'${table}'|ALTER TABLE\\s+(?:IF EXISTS\\s+)?"?${table}"?\\b|CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?"?${table}"?\\b`, 'i');
+    return new Set(files.filter((src) => touches.test(src)).flatMap((src) => [...src.matchAll(/['"\s]([a-z0-9_]+)['"\s]/g)].map((m) => m[1])));
+  };
+  const columnCache = new Map();
+  const hasColumn = (table, field) => {
+    if (!columnCache.has(table)) columnCache.set(table, columnsOf(table));
+    return columnCache.get(table).has(field);
+  };
 
   test('every table[...] and table[...].field in a case is a migrated table and column, or a listed logical name', () => {
     const bad = new Set();
@@ -284,16 +295,22 @@ describe('row references', () => {
       for (const c of doc.cases) {
         for (const step of [c.expected, ...c.corrections.map((x) => x.expected)]) {
           for (const line of [...step.changes, ...step.unchanged]) {
-            for (const m of line.matchAll(/\b([a-z_]+)\[[^\]]*\](?:\.([a-z_]+))?/g)) {
+            for (const m of line.matchAll(/\b([a-z0-9_]+)\[[^\]]*\](?:\.([a-z0-9_]+))?/g)) {
               const [, table, field] = m;
               if (!tables.has(table)) bad.add(`${c.id}: table ${table}`);
-              else if (field && !columns.has(field) && !LOGICAL_FIELDS[`${table}.${field}`]) bad.add(`${c.id}: ${table}.${field}`);
+              else if (field && !hasColumn(table, field) && !LOGICAL_FIELDS[`${table}.${field}`]) bad.add(`${c.id}: ${table}.${field}`);
             }
           }
         }
       }
     }
     expect([...bad]).toEqual([]);
+  });
+
+  test('the column check is per table: a real column of another table is refused', () => {
+    expect(hasColumn('sms_log', 'message_body')).toBe(true);
+    expect(hasColumn('sms_log', 'window_start')).toBe(false);
+    expect(hasColumn('scheduled_services', 'message_body')).toBe(false);
   });
 
   test('the doc lists every logical field name', () => {
