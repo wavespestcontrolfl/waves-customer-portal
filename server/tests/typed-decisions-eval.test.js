@@ -189,6 +189,25 @@ describe('scoreRows — tiers from the representative set only', () => {
     expect(cap.questions[0].representative.counts.labeled).toBe(1);
   });
 
+  test('tiers are judged on the full-precision bound: 597/597 (0.99499) does not round up past 0.995, 598/598 does clear it', () => {
+    const [almost] = scoreRows(rows(597, { p: 0.95 }), []);
+    expect(almost.questions[0].tier).toBe(2);
+    expect(almost.questions[0].representative.metrics.acceptedCorrect.lowerBound).toBe(0.995); // display rounding only
+    expect(almost.questions[0].blocker).toMatch(/about 1 more/);
+    const [clears] = scoreRows(rows(598, { p: 0.95 }), []);
+    expect(clears.questions[0].tier).toBe(3);
+    expect(clears.questions[0].nextTier).toBeNull();
+    expect(clears.questions[0].blocker).toBeNull();
+  });
+
+  test('a group opened by a coverage row for an unregistered package still learns its type from the labeled answers', () => {
+    const coverage = [{ capability: 'gone', package_id: 'gone.v1', question_id: 'q', served_model: 'jev-1.13.0', answered: 40, confident: 30 }];
+    const [cap] = scoreRows(rows(10, { capability: 'gone', pkg: 'gone.v1', question: 'q' }), coverage);
+    expect(cap.questions[0].type).toBe('noul');
+    expect(cap.questions[0].representative.counts).toMatchObject({ labeled: 10, unclear: 0 });
+    expect(cap.questions[0].coverage.answered).toBe(40);
+  });
+
   test('the tiers are the owner\'s floors, in order', () => {
     expect(TIERS.map((t) => t.tier)).toEqual([1, 2, 3]);
     expect(TIERS[0].floors).toEqual({ precision: 0.9, recall: 0.9 });

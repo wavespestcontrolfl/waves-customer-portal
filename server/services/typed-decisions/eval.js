@@ -9,8 +9,11 @@
  * stays a human decision taken from it.
  *
  * Two label sets, kept apart (§9 rule 4):
- *   representative = rows sampled for random_audit or held out. Release
- *                    performance is measured here, and only here.
+ *   representative = rows sampled for random_audit or held out. The random
+ *                    audit is drawn population-wide, before and independent
+ *                    of the disagreement check (shadow-recorder.sampleFor), so
+ *                    it is a true sample of every answer, hard cases included.
+ *                    Release performance is measured here, and only here.
  *   development    = rows sampled because the model disagreed with a baseline.
  *                    Biased toward hard cases; reported for the reviewer, never
  *                    used to clear a tier.
@@ -163,13 +166,21 @@ function tally(stats, type, row) {
   }
 }
 
+// Full precision: tiers are judged on these numbers. Display rounding happens
+// once, in displayMetrics, so 597/597 (bound 0.99499) can never round up past
+// a 0.995 floor.
 function rate(num, den) {
   return {
-    value: den > 0 ? Number((num / den).toFixed(4)) : null,
-    lowerBound: Number(binomialLowerBound(num, den).toFixed(4)),
+    value: den > 0 ? num / den : null,
+    lowerBound: binomialLowerBound(num, den),
     numerator: num,
     denominator: den,
   };
+}
+
+const round4 = (x) => (x == null ? null : Number(x.toFixed(4)));
+function displayMetrics(metrics) {
+  return Object.fromEntries(Object.entries(metrics).map(([name, m]) => [name, { ...m, value: round4(m.value), lowerBound: round4(m.lowerBound) }]));
 }
 
 // The rates a tier reads. A choice or score question has no yes class, so its
@@ -215,7 +226,7 @@ function tierOf(metrics, representativeLabeled) {
       blocker = `Tier ${t.tier} (${t.name}): no labeled rows count toward ${METRIC_LABELS[name]} yet.`;
     } else {
       const more = labelsToFloor(m, floor);
-      blocker = `Tier ${t.tier} (${t.name}): ${METRIC_LABELS[name]} ${m.value} (lower bound ${m.lowerBound}, ${m.numerator}/${m.denominator}) is below ${floor}`
+      blocker = `Tier ${t.tier} (${t.name}): ${METRIC_LABELS[name]} ${round4(m.value)} (lower bound ${round4(m.lowerBound)}, ${m.numerator}/${m.denominator}) is below ${floor}`
         + (more === null ? '.' : `; about ${more} more all-correct representative labels would clear it.`);
     }
     break;
@@ -256,6 +267,9 @@ function scoreRows(labeledRows = [], coverageRows = []) {
   for (const row of labeledRows) {
     if (!LABELED.includes(row.label_status)) continue;
     const g = ensure(row);
+    // A group opened by a coverage row (no answer to read) learns its type
+    // from the first labeled answer when the package is unregistered.
+    if (!g.type) g.type = questionType(row);
     if (REPRESENTATIVE.includes(row.sampled_for)) tally(g.representative, g.type, row);
     else if (DEVELOPMENT.includes(row.sampled_for)) tally(g.development, g.type, row);
     else g.other += 1; // labeled outside any sample: shown, never scored
@@ -273,8 +287,8 @@ function scoreRows(labeledRows = [], coverageRows = []) {
       questionId: g.questionId,
       servedModel: g.servedModel,
       type: g.type,
-      representative: { counts: g.representative, metrics: representative },
-      development: { counts: g.development, metrics: development },
+      representative: { counts: g.representative, metrics: displayMetrics(representative) },
+      development: { counts: g.development, metrics: displayMetrics(development) },
       otherLabeled: g.other,
       coverage: {
         answered: g.coverage.answered,
