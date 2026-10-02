@@ -1660,37 +1660,22 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     expect(dispatchWithFallback).toHaveBeenCalledTimes(6);
   });
 
-  test('owner 2026-10-01 (Codex #5543 r2): a cancel ask resolves to catalog services only on their FULL distinctive term set; a cancellation answers an unscoped ask only when it resolves to exactly the visit\'s service', () => {
-    const { resolveAskServices } = require('../services/sms-commitment-fulfillment');
-    const catalog = [
-      { service_key: 'wdo_inspection', name: 'WDO Inspection Service' },
-      { service_key: 'termite_inspection', name: 'Termite Inspection Service' },
-      { service_key: 'foam_drill', name: 'Termite Foam Service' },
-      { service_key: 'termite_liquid', name: 'Termite Liquid Treatment Service' },
-      { service_key: 'lawn_care', name: 'Lawn Care Service' },
-      { service_key: 'pest_quarterly', name: 'Quarterly Pest Control Service' },
-      { service_key: 'rodent_inspection', name: 'Rodent Inspection Service' },
-      { service_key: 'rodent_general', name: 'Rodent Pest Control Service' },
-    ];
-    // Shared "termite" with the foam service is not enough: foam is not in the ask.
-    expect(resolveAskServices('Please cancel termite inspection', catalog)).toEqual(['termite_inspection']);
-    expect(resolveAskServices('Please cancel WDO', catalog)).toEqual(['wdo_inspection']);
-    expect(resolveAskServices('Please cancel the termite foam service', catalog)).toEqual(['foam_drill']);
-    expect(resolveAskServices('Please cancel lawn care', catalog)).toEqual(['lawn_care']);
-    // Equal distinctive sets stay ambiguous (two lawn care services -> neither).
-    expect(resolveAskServices('Please cancel lawn care', [...catalog, { service_key: 'lawn_re', name: 'Lawn Care Re-Service' }])).toEqual(['lawn_care', 'lawn_re']);
-    // A name with no distinctive term is never named by words; "rodent" is two services.
-    expect(resolveAskServices('cancel my quarterly pest control', catalog)).toEqual([]);
-    expect(resolveAskServices('cancel my appointment', catalog)).toEqual([]);
-    expect(resolveAskServices('cancel rodent', catalog)).toEqual(['rodent_inspection', 'rodent_general']);
-    const visit = (extra) => ({ id: 'v1', ref: 'visit:v1', type: 'visit', status: 'cancelled', service_type: 'Termite Foam Service',
-      created_at: '2040-03-10T10:00:00Z', cancelled_at: '2040-03-12T13:05:00Z', progressed_at: null, text: 'cancelled after the request', ...extra });
-    const ask = (quote) => ({ kind: 'other', description: quote, evidence: [{ quote }], sms_context: { ...ctx, basis: 'request', property_id: null } });
-    expect(admissibleWitness(visit({ ask_names_visit_service: true }), ask('Please cancel WDO'))).toBe(true);
-    expect(admissibleWitness(visit({ ask_names_visit_service: false }), ask('Please cancel WDO'))).toBe(false);
-    expect(admissibleWitness(visit({}), ask('Please cancel WDO'))).toBe(false);
-    // Only a customer's cancel ask: a promise, or a negated mention, never.
-    expect(admissibleWitness(visit({ ask_names_visit_service: true }), { ...ask('We will cancel WDO'), sms_context: { ...ctx, basis: 'promise', property_id: null } })).toBe(false);
+  test('owner 2026-10-01 (Codex #5543 r4): an unscoped cancel ask is answered by a cancellation only for the ONE visit live at ask time; negated asks and promises never qualify', () => {
+    const visit = (id) => ({ id, ref: `visit:${id}`, type: 'visit', status: 'cancelled', service_type: 'WDO Inspection',
+      created_at: '2040-03-10T10:00:00Z', cancelled_at: '2040-03-12T13:05:00Z', progressed_at: null, text: 'cancelled after the request' });
+    const ask = (quote, ids, extra = {}) => ({ kind: 'other', description: quote, evidence: [{ quote }],
+      sms_context: { ...ctx, basis: 'request', property_id: null, ask_live_visit_ids: ids, ...extra } });
+    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', ['v1']))).toBe(true);
+    // Two live visits at ask time, none, or a different visit: never.
+    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', ['v1', 'v2']))).toBe(false);
+    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', []))).toBe(false);
+    expect(admissibleWitness(visit('v2'), ask('Please cancel WDO', ['v1']))).toBe(false);
+    // An ask recorded before the stamp existed is never answered this way.
+    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', undefined))).toBe(false);
+    expect(admissibleWitness(visit('v1'), ask('Please do not cancel WDO', ['v1']))).toBe(false);
+    expect(admissibleWitness(visit('v1'), ask('We will cancel WDO', ['v1'], { basis: 'promise' }))).toBe(false);
+    // A property-scoped ask is unchanged: a cancellation at that property answers it.
+    expect(admissibleWitness({ ...visit('v9'), property_id: 'home' }, ask('Please cancel my appointment', undefined, { property_id: 'home' }))).toBe(true);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
