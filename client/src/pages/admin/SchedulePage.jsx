@@ -16790,13 +16790,21 @@ export function CompletionPanel({
     const areas = areasServiced.length
       ? []
       : (Array.isArray(heard.areas) ? heard.areas : []).filter((entry) => areaOptions.includes(entry?.area));
-    if (areas.length) {
-      lawnAreasInitializedRef.current = true;
-      setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
-    }
-    for (const { value } of findings) {
-      addChipNote("Found", value);
-      appendUniqueLabel(setSelectedObservationLabels, value);
+    if (findings.length || areas.length) {
+      // A fill changes the record an installed report was written from, as
+      // a tap does: the report goes and the tech's own notes, with their
+      // marker lines, come back before the fill's markers are written, so a
+      // later edit never restores notes the fill's picks are missing from
+      // (pre-push P1). Mirrors handleSpecialtyFindingChange.
+      const detached = invalidateGeneratedReportOnTypedEdit();
+      if (areas.length) {
+        lawnAreasInitializedRef.current = true;
+        setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
+      }
+      for (const { value } of findings) {
+        if (!detached) setNotes((current) => (current.trim() ? `${current.trimEnd()}\n[Found] ${value}` : `[Found] ${value}`));
+        appendUniqueLabel(setSelectedObservationLabels, value);
+      }
     }
     setLaneHeard({ areas, findings, unclear: [...unclear] });
   }
