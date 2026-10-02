@@ -12101,18 +12101,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Guarded reads only, no inner try/catch: a failed statement
             // would abort the whole accept transaction regardless (waves-db
             // §5b), so the column guard above is the real protection.
+            // Locked: the call pipeline writes server-owned keys into this
+            // blob; an unlocked read could drop one written in between.
+            const curRow = await trx('customers')
+              .select('service_preferences').where({ id: customerId }).forUpdate().first();
+            const curRaw = typeof curRow?.service_preferences === 'string'
+              ? JSON.parse(curRow.service_preferences || '{}')
+              : (curRow?.service_preferences || {});
             if (!('commercial_interior_scope' in prefs)) {
-              const curRow = await trx('customers')
-                .select('service_preferences').where({ id: customerId }).first();
-              const curRaw = typeof curRow?.service_preferences === 'string'
-                ? JSON.parse(curRow.service_preferences || '{}')
-                : (curRow?.service_preferences || {});
               if (curRaw && typeof curRaw === 'object' && curRaw.commercial_interior_scope) {
                 prefs.commercial_interior_scope = curRaw.commercial_interior_scope;
               }
             }
+            // Server-owned keys (booking-confirmation replays, caller
+            // demotion, consent boundary — #5467) survive the accept's rebuild.
             await trx('customers').where({ id: customerId }).update({
-              service_preferences: JSON.stringify(prefs),
+              service_preferences: JSON.stringify(require('../utils/service-preferences-server-keys').withServerOwnedPrefs(curRaw, prefs)),
             });
           }
         } catch (e) { logger.warn(`[estimate-accept] service_preferences copy skipped: ${e.message}`); }

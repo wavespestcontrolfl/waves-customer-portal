@@ -119,6 +119,11 @@ function normalizeSecondaryContact(contact) {
     phone_raw_spoken: cleanText(contact.phone_raw_spoken),
     email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
     notes: cleanText(contact.notes),
+    // Schema 1.22.0: the extractor's read on whether this person should get the
+    // appointment texts / will be on site. They only trigger the recipient
+    // opt-in ASK; strict booleans, absent/garbled = false.
+    wants_appointment_texts: contact.wants_appointment_texts === true,
+    on_site: contact.on_site === true,
   };
   if (!normalized.name_full && !normalized.first_name && !normalized.last_name
       && !normalized.phone_e164 && !normalized.email) return null;
