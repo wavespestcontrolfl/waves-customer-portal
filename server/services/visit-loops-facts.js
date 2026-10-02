@@ -184,9 +184,9 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   const liveNow = (occ) => occ.date === today || (occ.date === yesterday && crossesIntoNow({ window_start: occ.startHms }, nowMin));
   // Every applicable alert, newest first; a confirmed delay outranks a tracking
   // gap (a gap is not a must-answer loop, so it must never hide a real delay).
-  // a lagging member of a stop whose sibling is already underway or done carries no
-  // delay either (the same stop rule as the passed-window read)
-  const startedStops = await startedStopKeys(conn, customerId, alerts || []);
+  // a lagging member of a stop whose sibling has already ARRIVED or finished carries
+  // no delay (the passed-window stop rule, arrival-only: en route can still be late)
+  const startedStops = await startedStopKeys(conn, customerId, alerts || [], { arrivedOnly: true });
   const applicable = [];
   for (const row of alerts || []) {
     const key = stopKey(row);
@@ -235,12 +235,16 @@ const stopKey = (r) => {
 };
 // The stops (stopKey) on these days where some row is underway or done, by status
 // or tracker — used by the passed-window read.
-async function startedStopKeys(conn, customerId, rows) {
+// arrivedOnly (the delay read): only arrival or completion counts — a stop the tech
+// is still driving to can be late, and its own en-route row must not hide its delay.
+async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } = {}) {
   const dates = [...new Set(rows.map((r) => calendarDay(r.scheduled_date)).filter(Boolean))];
   if (!dates.length) return new Set();
+  const statuses = arrivedOnly ? ['on_site', 'completed'] : ['en_route', 'on_site', 'completed'];
+  const trackStates = arrivedOnly ? ['on_property', 'complete'] : ['en_route', 'on_property', 'complete'];
   const advanced = await conn('scheduled_services').where({ customer_id: customerId })
     .whereIn('scheduled_date', dates)
-    .where((b) => b.whereIn('status', ['en_route', 'on_site', 'completed']).orWhereIn('track_state', ['en_route', 'on_property', 'complete']))
+    .where((b) => b.whereIn('status', statuses).orWhereIn('track_state', trackStates))
     .select('visit_id', 'technician_id', 'scheduled_date', 'window_start');
   return new Set((advanced || []).map(stopKey).filter(Boolean));
 }

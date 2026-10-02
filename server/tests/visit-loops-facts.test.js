@@ -155,6 +155,14 @@ describe('lateAlert', () => {
     const conn = (advanced) => fakeConn({ scheduled_services: (ops) => (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date') ? advanced : []), dispatch_alerts: () => [delay] });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).lateAlert).toBeNull();
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([]) })).lateAlert).toMatchObject({ visitId: 'visit-1' });
+    // the delay read asks only for ARRIVED or finished rows: an en-route row (the alerted visit itself) never suppresses it
+    const seen = fakeConn({ scheduled_services: () => [], dispatch_alerts: () => [delay] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: seen });
+    const q = seen.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'whereIn', (a) => a[0] === 'scheduled_date'));
+    const got = [];
+    const stub = { whereIn: (...a) => { got.push(a); return stub; }, orWhereIn: (...a) => { got.push(a); return stub; } };
+    q.ops.filter((o) => o.op === 'where' && typeof o.args[0] === 'function').forEach((o) => o.args[0](stub));
+    expect(got).toEqual([['status', ['on_site', 'completed']], ['track_state', ['on_property', 'complete']]]);
   });
 
   test('a confirmed delay outranks a newer tracking gap on another visit', async () => {
