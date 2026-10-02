@@ -163,7 +163,7 @@ const chipStyle = {
   color: '#18181B', fontSize: 14, fontWeight: 500, lineHeight: 1.2, fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
 };
 const chipCurrent = { background: '#18181B', color: '#fff', border: '0.5px solid #18181B', cursor: 'default' };
-const subStyle = { fontSize: 12, fontWeight: 400, color: '#52525B' };
+const subStyle = { fontSize: 14, fontWeight: 400, color: '#52525B' };
 const pillStyle = {
   flex: '0 0 auto', width: 56, minHeight: 54, padding: '6px 2px', borderRadius: 6, border: '0.5px solid #D4D4D8',
   background: '#fff', color: '#18181B', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
@@ -242,11 +242,11 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
                 ...(selected ? { background: '#18181B', color: '#fff', border: '1px solid #18181B' } : null),
               }}
             >
-              <span style={{ fontSize: 12, opacity: selected ? 0.8 : 1, color: selected ? '#fff' : '#52525B' }}>
+              <span style={{ fontSize: 14, opacity: selected ? 0.8 : 1, color: selected ? '#fff' : '#52525B' }}>
                 {day.date === today ? 'Today' : (d ? DOW[d.getUTCDay()] : '')}
               </span>
               <span style={{ fontSize: 16, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{d ? d.getUTCDate() : ''}</span>
-              <span style={{ fontSize: 12, color: selected ? '#fff' : (day.hours.length || day.status === 'unverified' ? '#52525B' : '#C8312F') }}>
+              <span style={{ fontSize: 14, color: selected ? '#fff' : (day.hours.length || day.status === 'unverified' ? '#52525B' : '#C8312F') }}>
                 {pillCount(day)}
               </span>
             </button>

@@ -4826,7 +4826,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save & take payment"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save & take payment anyway" : "Save & take payment")}
             </button>{" "}
             <button
               onClick={() => handleSave()}
