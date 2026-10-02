@@ -110,7 +110,9 @@ async function staffTextSender({ phone, customerId = null, database = db, now = 
   const digits = String(phone || '').replace(/\D/g, '').slice(-10);
   if (digits.length === 10) {
     const since = new Date(now.getTime() - CONVERSATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
     const last = await database('sms_log')
+      .modify(excludeUnresolvedSendReservations)
       .where('direction', 'inbound')
       .whereIn('to_phone', customerLines)
       .where('created_at', '>=', since)

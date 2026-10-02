@@ -64,6 +64,7 @@ function query({ result = [], returning } = {}) {
     'whereNull',
     'whereRaw',
     'whereIn',
+    'modify',
     'orderBy',
     'limit',
     'insert',

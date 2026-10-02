@@ -136,6 +136,7 @@ describe('staffTextSender (staff texts, PR 3)', () => {
         where: (...args) => { (seen[table] ||= []).push(['where', ...args]); return q; },
         whereIn: (...args) => { (seen[table] ||= []).push(['whereIn', ...args]); return q; },
         whereNull: () => q,
+        modify: (fn) => { fn(q); return q; },
         whereRaw: (...args) => { (seen[table] ||= []).push(['whereRaw', ...args]); return q; },
         orderBy: () => q,
         first: async () => (table === 'sms_log' ? lastInbound : customer),
