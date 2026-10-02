@@ -145,6 +145,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10615,24 +10616,7 @@ export function defaultApplicationMethod(product = {}, serviceType = "", { inter
 // products DO (owner request 2026-07-23): their targets are the nutrition
 // goals of the application (green-up, iron chlorosis, potassium deficiency),
 // prefilled from the catalog like pest targets. Unknown catalog rows keep it.
-export function productControlsTargets(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  if (!category) return true;
-  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
-    category,
-  );
-}
-
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition, productControlsTargets };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -14627,6 +14611,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14659,7 +14644,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
@@ -20655,6 +20640,7 @@ export function CompletionPanel({
             })}
             {/* Products applied */}
             <Field label="Products applied">
+              {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -23077,6 +23063,7 @@ export function CompletionPanel({
           })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
+          {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {quickComplete ? (
             <div
               style={{
@@ -24323,36 +24310,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
-];
-
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
 // treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
 const ORNAMENTAL_TARGET_SUGGESTIONS = [
@@ -24370,24 +24327,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:
@@ -25050,6 +24989,8 @@ const PRODUCT_DESCRIPTIONS = {
   "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
   snapshot: "granular bed pre-emergent for long residual weed prevention",
   "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "8-0-12": "LESCO palm fertilizer #511542; dose in pounds from the canopy chart",
+  "0-0-16": "LESCO palm fertilizer #510513; potassium and magnesium without N or P",
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",

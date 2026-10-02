@@ -4,12 +4,23 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import VisitProtocol from './VisitProtocol';
+import reference from '../../../../server/config/tree-shrub-field-guide.json';
+import protocols from '../../../../server/config/protocols.json';
 
 const D = { card: '#fff', heading: '#18181b', muted: '#71717a', border: '#e4e4e7', bg: '#f4f4f5', white: '#fff', red: '#c8312f' };
 const procedure = { name: 'Synthetic procedure', source: 'Service template', title: 'Visit 9 · Sep', objective: 'Document conditions.', visitNotes: ['Do not enter the marked-off area.'], steps: ['Inspect the marked area.'], conditional: ['Take a detail photo if needed.'], notes: ['Reference note for this procedure.'] };
 const card = { strip: { program: 'Synthetic booked service' }, planBlocks: [{ message: 'Fixture block remains unresolved.' }], protocol: { procedure, addons: [{ name: 'Unmatched add-on', procedure: null, note: 'No protocol matched this add-on' }] } };
 beforeEach(() => { vi.stubGlobal('scrollTo', vi.fn()); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('keeps safety rules visible on the technician field guide and notes reachable in the SOP', () => {
+  const guide = { ...protocols.tree_shrub.visits[0].fieldGuide, ...reference, month: 'Jan' };
+  const guided = { ...procedure, fieldGuide: guide, safetyRules: protocols.tree_shrub.safety_rules };
+  render(<VisitProtocol card={{ ...card, protocol: { procedure: guided, addons: [] } }} D={D} onJobCard={() => {}} />);
+  for (const rule of guided.safetyRules) expect(screen.getByText(rule)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Read SOP' }));
+  expect(within(screen.getByRole('dialog')).getByText(procedure.notes[0])).toBeVisible();
+});
 
 it('reads the selected procedure in place, keeps blocks visible, and restores focus after Escape', () => {
   const onJobCard = vi.fn();

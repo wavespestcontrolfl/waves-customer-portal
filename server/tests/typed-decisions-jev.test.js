@@ -129,3 +129,71 @@ describe('normaliseAnswer', () => {
     expect(normaliseAnswer({ type: 'noul' }, undefined, thresholds)).toBeNull();
   });
 });
+
+describe('askPackage — second provider (Cloudflare Clef)', () => {
+  const saved = { main: process.env.GATE_TYPED_DECISIONS, clef: process.env.GATE_TYPED_DECISIONS_CLEF };
+  beforeEach(() => { mockDispatch.mockReset(); process.env.GATE_TYPED_DECISIONS = 'true'; process.env.GATE_TYPED_DECISIONS_CLEF = 'true'; });
+  afterAll(() => {
+    if (saved.main === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = saved.main;
+    if (saved.clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = saved.clef;
+  });
+
+  test('the Clef gate ships dark and is honoured only while the main gate is live', () => {
+    delete process.env.GATE_TYPED_DECISIONS_CLEF;
+    expect(gates.typedDecisionsClefLive()).toBe(false);
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    expect(gates.typedDecisionsClefLive()).toBe(true);
+    delete process.env.GATE_TYPED_DECISIONS;
+    expect(gates.typedDecisionsClefLive()).toBe(false);
+  });
+
+  test("provider 'cloudflare' dispatches the Clef route on its own lane and returns Jev-shaped answers with the provider named", async () => {
+    const pkg = PACKAGES['sms_courtesy.v1'];
+    mockDispatch.mockResolvedValue({ ok: true, json: { is_courtesy_only: { type: 'noul', noul: 0.97 } }, servedModel: 'clef-flash', usage: { input_tokens: 40 } });
+    const result = await askPackage(pkg.id, { previous_waves_text: 'See you Tuesday.', customer_text: 'Thanks!' }, { provider: 'cloudflare' });
+    expect(result).toMatchObject({ ok: true, provider: 'cloudflare', servedModel: 'clef-flash', packageId: pkg.id, packageHash: packageHash(pkg) });
+    expect(result.answers.is_courtesy_only).toEqual({ p: 0.97, yes: true, confident: true });
+    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ questions: pkg.questions, laneId: 'typed_decisions_clef', promptVersion: pkg.id }));
+  });
+
+  test('the default provider is still Jev: same route, same lane, provider named on the result', async () => {
+    const pkg = PACKAGES['sms_courtesy.v1'];
+    mockDispatch.mockResolvedValue({ ok: true, json: { is_courtesy_only: { type: 'noul', noul: 0.1 } }, servedModel: 'jev-1.13.0' });
+    const result = await askPackage(pkg.id, { previous_waves_text: null, customer_text: 'Can you come Friday?' });
+    expect(result).toMatchObject({ ok: true, provider: 'typesafe' });
+    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecision, expect.objectContaining({ laneId: 'typed_decisions' }));
+  });
+
+  test('Clef gate off, or an unknown provider, never dispatches', async () => {
+    delete process.env.GATE_TYPED_DECISIONS_CLEF;
+    const state = { previous_waves_text: null, customer_text: 'Thanks!' };
+    expect(await askPackage('sms_courtesy.v1', state, { provider: 'cloudflare' })).toEqual({ ok: false, reason: 'gate_off' });
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    expect(await askPackage('sms_courtesy.v1', state, { provider: 'mystery' })).toEqual({ ok: false, reason: 'unknown_provider', provider: 'mystery' });
+    expect(await askPackage('sms_courtesy.v1', state, { provider: 'constructor' })).toMatchObject({ ok: false, reason: 'unknown_provider' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('the Clef gate status carries its prerequisite (Codex r1 on #5557)', () => {
+  const saved = { main: process.env.GATE_TYPED_DECISIONS, clef: process.env.GATE_TYPED_DECISIONS_CLEF };
+  afterAll(() => {
+    if (saved.main === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = saved.main;
+    if (saved.clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = saved.clef;
+  });
+  const statusWith = (main, clef) => {
+    if (main === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = main;
+    if (clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = clef;
+    let fresh;
+    jest.isolateModules(() => { fresh = require('../config/feature-gates'); });
+    return { map: fresh.isEnabled('typedDecisionsClef'), live: fresh.typedDecisionsClefLive() };
+  };
+
+  test('the reported status and the call-time reader agree in every combination', () => {
+    expect(statusWith(undefined, 'true')).toEqual({ map: false, live: false }); // Clef set, main gate off: dark, and reported dark
+    expect(statusWith('true', undefined)).toEqual({ map: false, live: false });
+    expect(statusWith('true', 'true')).toEqual({ map: true, live: true });
+    expect(statusWith(undefined, undefined)).toEqual({ map: false, live: false });
+  });
+});
+

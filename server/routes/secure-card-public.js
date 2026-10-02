@@ -79,11 +79,29 @@ async function recordSecureCardView(req, token) {
   }
 }
 
+// Rendered-version attestation on the page load and on "use a different
+// payment method" (codex #5434 r1 P1): both MINT the SetupIntent the page
+// will confirm, and the page bundles its own copy of the saved-payment-method
+// consent text, so each carries the CONSENT_VERSION the bundle renders (the
+// GET as `?consentTextVersion=`, the POST in its body). A stale or absent
+// attestation — an older bundle refetching after a copy change — is refused
+// with the same 409 before any mint, so no intent is ever stamped with a
+// version the requesting tab did not render; the attested value is what the
+// mint stamps.
+function attestedConsentVersion(req, res, raw) {
+  const { consentVersionStaleResponse, renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
+  if (renderedConsentVersionIsCurrent(raw)) return String(raw).trim();
+  res.status(409).json(consentVersionStaleResponse());
+  return null;
+}
+
 router.get('/:token', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  const consentTextVersion = attestedConsentVersion(req, res, req.query?.consentTextVersion);
+  if (!consentTextVersion) return undefined;
   try {
-    const data = await loadSecureCardPageData(token);
+    const data = await loadSecureCardPageData(token, { consentTextVersion });
     if (!data) return res.status(404).json({ error: 'Not found' });
     void recordSecureCardView(req, token);
     if (data.state === 'ready' || data.state === 'prepay_selected') {
@@ -143,10 +161,13 @@ router.post('/:token/select-plan', async (req, res) => {
 router.post('/:token/replace-intent', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  const consentTextVersion = attestedConsentVersion(req, res, req.body?.consentTextVersion);
+  if (!consentTextVersion) return undefined;
   try {
     const result = await replaceSecureCardIntent({
       token,
       setupIntentId: typeof req.body?.setupIntentId === 'string' ? req.body.setupIntentId.trim() : null,
+      consentTextVersion,
     });
     if (!result.ok) {
       if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });
@@ -190,6 +211,14 @@ router.post('/:token/replace-intent', async (req, res) => {
 router.post('/:token/complete', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  // Rendered-version attestation (codex #5434 r1 P1): the page bundles its
+  // own copy of the saved-payment-method consent text, so the completing
+  // tab sends the CONSENT_VERSION it rendered beside the checkbox and the
+  // capture is refused — before any save, consent row or enrollment — when
+  // that is not this server's current version (or absent: a bundle from
+  // before the attestation existed). The client surfaces the 409 as
+  // "refresh the page"; a fresh load re-mints under the current text.
+  if (!attestedConsentVersion(req, res, req.body?.consentTextVersion)) return undefined;
   try {
     const result = await completeSecureCardCapture({
       token,
@@ -218,6 +247,15 @@ router.post('/:token/complete', async (req, res) => {
         // this customer (gate off / ACH state changed) — the client re-pulls
         // the payload so a card-only intent is minted.
         return res.status(409).json({ error: 'Bank accounts aren’t available right now — please use a card.', code: 'bank_not_allowed' });
+      }
+      if (result.code === 'consent_version_stale') {
+        // The intent this tab confirmed was minted for a page that rendered
+        // older consent text (the bundle attestation above passed, so the
+        // tab reloaded a newer bundle onto an old intent, e.g. a 3DS return
+        // across a copy change): nothing saved or enrolled — a fresh load
+        // re-mints under the current text.
+        const { consentVersionStaleResponse } = require('../services/payment-method-consent-text');
+        return res.status(409).json(consentVersionStaleResponse());
       }
       if (result.code === 'consent_echo_failed') {
         // The card IS saved (row completed via webhook) but the browser's

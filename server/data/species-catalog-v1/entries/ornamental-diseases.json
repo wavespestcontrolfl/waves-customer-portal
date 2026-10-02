@@ -706,9 +706,12 @@
       12
     ],
     "peak_months": [
+      1,
+      2,
       3,
-      4,
-      5
+      10,
+      11,
+      12
     ],
     "service": {
       "line": "none",
@@ -734,8 +737,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "d43d99000cc7f2cbcfae01641d41a5110aeac4780585c1b851ea6950a4301c8b"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "b21bc4aff0f30e3f3ebf3d6928bdedf74343f5f77b847ca676628a825bcdabd1"
     },
     "condition": {
       "hosts": [

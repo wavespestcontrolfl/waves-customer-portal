@@ -1643,15 +1643,21 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
     // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
     await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
-    // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
-    expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
-      { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
+    // A promise Waves made: a text a PERSON wrote after it closes it without the
+    // model (owner 2026-10-01; a call back or an automated notice stays the
+    // model's to judge), and a text with no person's mark is the model's.
+    const promise = { ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } };
+    expect(await verifySmsFulfillment(promise, { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'thanks', basis: 'person_text_after_promise' });
+    expect(await verifySmsFulfillment(promise, { records: [call], failures: [] })).toMatchObject({ verdict: 'open' });
+    expect(await verifySmsFulfillment(promise, { records: [reply('bare2', '2040-03-11T15:00:00Z', 'Thanks!', { operator_sent: false })], failures: [] }))
+      .toMatchObject({ verdict: 'open' });
     // The check is told a promise is kept only by doing it, on the day it named.
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
     // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
     const { basis: _basis, ...noBasis } = ask.sms_context;
     await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(5);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(6);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
@@ -1753,5 +1759,45 @@ describe('activation and intake', () => {
       message_type: 'appointment_reminder', status: 'delivered' })).toBe(false);
     expect(eligibleMessage({ ...source('Liked a message'), message_type: 'sms_reaction' })).toBe(false);
     expect(eligibleMessage({ ...source('Please send the estimate'), to_phone: numbers.tollFree.number })).toBe(false);
+  });
+});
+
+// PR #5499: lane (additive) narrows BOTH channel subqueries before the bounded
+// union, so one rendered population cannot crowd the other out of the page.
+describe('listSmsCommitments lane option', () => {
+  const { listSmsCommitments } = require('../services/sms-operational-actions');
+  const fakeConn = () => {
+    const parts = [];
+    const builder = () => {
+      const ops = [];
+      const b = new Proxy({}, { get: (_t, prop) => (...args) => { ops.push([prop, args]); if (prop === 'modify') args[0](b); return b; } });
+      parts.push(ops);
+      return b;
+    };
+    const conn = (table) => builder(table);
+    conn.raw = (sql) => ({ raw: sql });
+    const tail = { orderByRaw: () => tail, limit: () => tail, offset: async () => [] };
+    conn.unionAll = (list) => { conn.unioned = list.length; return tail; };
+    conn.parts = parts;
+    return conn;
+  };
+  const rawsOf = (ops) => ops.filter(([p]) => p === 'whereRaw').map(([, a]) => a[0]);
+
+  test("'request' and 'promise' filter both the sms and the email subquery; no lane leaves them unfiltered", async () => {
+    const req = fakeConn();
+    await listSmsCommitments(req, { customerId: 'c1', lane: 'request' });
+    expect(req.parts).toHaveLength(2);
+    for (const ops of req.parts) expect(rawsOf(ops)).toContain("cc.sms_context->>'basis' = 'request'");
+
+    const pro = fakeConn();
+    await listSmsCommitments(pro, { customerId: 'c1', lane: 'promise' });
+    for (const ops of pro.parts) {
+      expect(ops).toContainEqual(['where', ['cc.party', 'waves']]);
+      expect(rawsOf(ops)).toContain("COALESCE(cc.sms_context->>'basis', '') <> 'request'");
+    }
+
+    const none = fakeConn();
+    await listSmsCommitments(none, { customerId: 'c1' });
+    for (const ops of none.parts) expect(rawsOf(ops).some((sql) => /basis/.test(sql))).toBe(false);
   });
 });

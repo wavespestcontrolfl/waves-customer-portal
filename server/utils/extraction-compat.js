@@ -52,6 +52,7 @@ function flatView(extraction) {
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
+  const secondary = canonicalV2Secondary(extraction);
 
   return {
     first_name: caller.first_name || null,
@@ -124,8 +125,28 @@ function flatView(extraction) {
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
-    secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
+    secondary_contact: secondary,
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
+    // Flat mirrors of the first other party's on-site flags (schema 1.22.0) so
+    // replay variance watches them (FIELD_GROUPS high — they decide whether the
+    // recipient gets the opt-in ask). False when absent, like
+    // agent_committed_booking.
+    secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
+    secondary_on_site: secondary?.on_site === true,
+    // Order-stable per-contact signature over the whole secondary_contacts[]
+    // (phone-identity:role:wants-notifications:text-intent:on-site, '|'-joined, '' when none) so a
+    // flag flipping on entries 2+ shows in replay variance too (FIELD_GROUPS
+    // high). The singleton is ALWAYS fingerprinted first ('S=' entry), then
+    // the array: a candidate whose singleton drifts from secondary_contacts[0]
+    // (the live resolver reads both) cannot pass replay unnoticed.
+    secondary_contacts_consent_signature: (() => {
+      const sig = (c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`;
+      const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts);
+      // The RAW singleton (not the canonical merge, which falls back to the
+      // array mirror): its own drift is what the 'S=' entry watches.
+      const rawSingle = mapSecondaryContactToLegacy(extraction.secondary_contact);
+      return [...(rawSingle ? [`S=${sig(rawSingle)}`] : []), ...list.map(sig)].join('|');
+    })(),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -193,6 +214,79 @@ function mapAdditionalPropertiesToLegacy(entries) {
 // contact persistence expects (same keys as the V1 extraction's
 // secondary_contact). An entry with no name, phone, or email is dropped —
 // there is nothing to persist or review without one.
+
+// The singleton secondary_contact and secondary_contacts[0] are usually the
+// same person written twice. They count as one only when the two V2 shapes
+// positively agree on identity (shared phone, email, or full name) and neither
+// states a conflicting phone/email: otherwise one person's flags must never
+// attach to the other (pre-push codex P1).
+function sameV2Person(a, b) {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const nameOf = (c) => norm(c.name_full) || norm([c.first_name, c.last_name].filter(Boolean).join(' '));
+  // CONFLICTS veto first: two shapes that both state a phone or an email and
+  // DISAGREE are different people even when the names coincide.
+  if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) !== last10(b.phone_e164)) return false;
+  if (a.email && b.email && norm(a.email) !== norm(b.email)) return false;
+  if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) === last10(b.phone_e164)) return true;
+  if (a.email && b.email && norm(a.email) === norm(b.email)) return true;
+  const an = nameOf(a); const bn = nameOf(b);
+  return !!an && an === bn && an.includes(' ');
+}
+
+// The singleton and secondary_contacts[0] mirror each other, and a model may put
+// the on-site flags on only ONE of the two shapes. When they are the same
+// person (sameV2Person) the canonical contact ORs the flags, BEFORE any V1/V2
+// merge or replay fingerprint. A different person in entry 0 never lends its
+// flags.
+function canonicalV2Secondary(extraction) {
+  const single = mapSecondaryContactToLegacy(extraction?.secondary_contact);
+  const first = extraction?.secondary_contacts?.[0];
+  const mirror = mapSecondaryContactToLegacy(first);
+  // Array-only payload: the mirror IS the canonical contact (flags kept).
+  if (!single) return mirror;
+  if (!mirror) return single;
+  // A singleton with NO phone / email of its own also pairs with a mirror of
+  // the same (even one-word) name, or one whose full name starts with it
+  // ("John" / "John Smith") — nothing on it can conflict; otherwise the
+  // strict same-person rule applies.
+  const nameOf = (c) => [c.first_name, c.last_name].filter(Boolean).join(' ').trim().toLowerCase();
+  const sparseSameName = !single.phone && !single.email && !!nameOf(single)
+    && (nameOf(single) === nameOf(mirror) || nameOf(mirror).startsWith(`${nameOf(single)} `));
+  if (!sparseSameName && !sameV2Person(extraction.secondary_contact, first)) return single;
+  // Same person: the mirror fills any field the singleton left empty or
+  // 'unknown' (a name-only singleton with the phone on the mirror keeps the
+  // phone; an 'unknown' role takes the mirror's tenant / home_buyer), and the
+  // flags OR together.
+  const filled = { ...single };
+  for (const [k, v] of Object.entries(mirror)) {
+    if ([null, undefined, '', 'unknown'].includes(filled[k])) filled[k] = v;
+  }
+  // A flag rides only with the role of the shape that stated it: a mirror
+  // whose (specific) role conflicts with the canonical one lends no flags —
+  // a same-phone 'lender' mirror never makes a 'spouse_partner' singleton
+  // on-site (fail closed).
+  const mirrorFlagsCarry = mirror.role === filled.role;
+  return {
+    ...filled,
+    wants_appointment_texts: single.wants_appointment_texts || (mirrorFlagsCarry && mirror.wants_appointment_texts),
+    on_site: single.on_site || (mirrorFlagsCarry && mirror.on_site),
+  };
+}
+
+// Stable identity of a secondary contact for replay signatures: phone last-10,
+// else lowercased email, else normalized full name, else ''. Binds each entry
+// to WHO it is about, so two runs that swap flags between two people (or
+// reorder them) read as variance.
+function secondaryIdentityKey(c) {
+  const phone = String(c?.phone || '').replace(/\D/g, '').slice(-10);
+  if (phone) return phone;
+  const email = String(c?.email || '').trim().toLowerCase();
+  if (email) return email;
+  return [c?.first_name, c?.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
+}
+
 function mapSecondaryContactToLegacy(contact) {
   if (!contact || typeof contact !== 'object') return null;
   // A V2 contact can arrive with only name_full populated ("Joseph Haught"
@@ -212,6 +306,12 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
+    // On-site flags (schema 1.22.0): strict booleans, false when the extraction
+    // lacks them (older V2 rows). They only trigger the recipient opt-in ASK
+    // (call-recording-processor onSiteOptinAskTrigger); consent is the
+    // recipient's own YES.
+    wants_appointment_texts: contact.wants_appointment_texts === true,
+    on_site: contact.on_site === true,
     is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
@@ -695,6 +795,8 @@ function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {
 }
 
 module.exports = {
+  sameV2Person,
+  canonicalV2Secondary,
   isV2Extraction,
   flatView,
   mapSecondaryContactsToLegacy,

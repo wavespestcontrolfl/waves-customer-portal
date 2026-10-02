@@ -101,6 +101,7 @@ import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates'
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
+import { consentAttestation, CONSENT_VERSION_STALE_MESSAGE, isConsentVersionStale } from '../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -774,7 +775,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -799,7 +800,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // customer never has to reload the whole page to recover.
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadNonce, setLoadNonce] = useState(0);
-  const [selectedMethod, setSelectedMethod] = useState('card');
+  // A re-mount after a tender replacement starts on the tender the fresh
+  // intent was minted for (initialMethod); a first mount starts on card.
+  const [selectedMethod, setSelectedMethod] = useState(initialMethod || 'card');
   // Initial fallback uses the same two-step rounding as server
   // computeChargeAmount so the customer's first paint matches the
   // PaymentIntent total even if the /update-amount sync fails.
@@ -812,7 +815,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const displayedBaseRef = useRef(amount);
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
-  const selectedMethodRef = useRef('card');
+  const selectedMethodRef = useRef(initialMethod || 'card');
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
   // Counts ALL in-flight /update-amount requests, not just the latest sequence.
@@ -848,6 +851,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
           methodCategory,
           saveCard: saveCardOverride !== undefined ? saveCardOverride : !!saveCard,
+          // The consent text version this bundle renders beside the
+          // save-method checkbox (codex #5434 r1 P1) — the server stamps it
+          // on the PaymentIntent and refuses a stale one.
+          ...consentAttestation(),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -859,6 +866,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           window.location.reload();
           return new Promise(() => {});
         }
+        // The consent text changed under this tab: refresh prompt, never a
+        // silent save under copy the customer did not read.
+        if (isConsentVersionStale(data)) throw serverReportedError(data.error || CONSENT_VERSION_STALE_MESSAGE);
         throw serverReportedError(data.error || 'Could not update payment total');
       }
       // The server minted a fresh PaymentIntent for this tender (the old one
@@ -932,7 +942,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // mandate wording switches between one-time and recurring on the
   // setup_future_usage change.
   useEffect(() => {
-    if (!paymentIntentId || awaitingConfirm) return;
+    if (!paymentIntentId) return;
+    // A save-card change after Continue produced a quote invalidates that
+    // quote: the PaymentIntent's consent stamp no longer matches the choice
+    // and the server's /finalize fence would refuse it. Drop back to the
+    // review step and sync the intent now (a stamp change replaces it and
+    // re-mounts Elements), so the next Continue quotes a consistent session
+    // instead of the fence reloading the page (pre-push Codex on #5434).
+    if (awaitingConfirm) {
+      setAwaitingConfirm(false);
+      setQuoteData(null);
+    }
     syncAmountForMethod(selectedMethod, !!saveCard);
   }, [saveCard]);
 
@@ -1370,10 +1390,21 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       const finalRes = await fetch(`${API_BASE}/pay/${token}/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard }),
+        body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard, ...consentAttestation() }),
       });
       const result = await finalRes.json().catch(() => ({}));
-      if (!finalRes.ok) throw serverReportedError(result.error || 'Payment failed');
+      if (!finalRes.ok) {
+        // The server's consent-stamp fence (or combined-balance drift): the
+        // PaymentIntent no longer matches this tab's session — reload to a
+        // fresh /setup (which replaces the intent on a stamp change) instead
+        // of re-quoting into the same 409 (codex #5434 r7 P2). Same contract
+        // as the /setup and /update-amount staleBalance paths.
+        if (result.staleBalance) {
+          window.location.reload();
+          return new Promise(() => {});
+        }
+        throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
+      }
 
       if (result.requiresAction && result.clientSecret) {
         const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
@@ -1567,6 +1598,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <SaveCardConsent
             checked={!!saveCard}
             locked={saveCardLocked}
+            // No toggle while a charge or an intent sync is in flight — the
+            // save choice would diverge from the intent's consent stamp
+            // (Sonnet fallback audit on #5434).
+            disabled={processing || syncingAmount}
             collapsible
             style={PAY_BOX}
             headline={saveCardLocked
@@ -1789,7 +1824,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ setupIntentId }),
+        body: JSON.stringify({ setupIntentId, ...consentAttestation() }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1978,7 +2013,7 @@ export default function PayPageV2() {
         fetch(`${API_BASE}/pay/${token}/setup-complete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ setupIntentId: returnedSetupIntentId }),
+          body: JSON.stringify({ setupIntentId: returnedSetupIntentId, ...consentAttestation() }),
         })
           .then(async (r) => {
             const body = await r.json().catch(() => ({}));
@@ -2027,7 +2062,7 @@ export default function PayPageV2() {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify(consentAttestation()),
       });
       (async () => {
         let saveFlow = saveCardDefault;
@@ -2071,7 +2106,9 @@ export default function PayPageV2() {
     fetch(`${API_BASE}/pay/${token}/capture-setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      // The capture form renders the locked consent: attest the version
+      // this bundle renders so the mint can stamp it (codex #5434 r1 P1).
+      body: JSON.stringify(consentAttestation()),
     })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));
@@ -2167,7 +2204,10 @@ export default function PayPageV2() {
       // a PaymentIntent against an invoice an admin edited after our GET
       // (staleInvoice 409 below), so the customer never confirms a charge
       // for line items they aren't looking at.
-      body: JSON.stringify({ saveCard: saveCardDefault, invoiceVersion: data.invoice.version ?? undefined }),
+      // …and the consent text version this bundle renders beside the
+      // save-method checkbox (codex #5434 r1 P1): the mint stamps it on
+      // the PaymentIntent and refuses a stale one (409, refresh prompt).
+      body: JSON.stringify({ saveCard: saveCardDefault, invoiceVersion: data.invoice.version ?? undefined, ...consentAttestation() }),
     })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
@@ -2325,7 +2365,7 @@ export default function PayPageV2() {
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
   // PaymentForm is keyed by paymentIntentId, so it fully re-mounts Stripe
   // Elements against the new intent.
-  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined }) => {
+  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined, methodCategory }) => {
     if (!clientSecret || !paymentIntentId) return;
     setPaymentError(null);
     setStripeSetup((prev) => (prev ? {
@@ -2333,6 +2373,10 @@ export default function PayPageV2() {
       clientSecret,
       paymentIntentId,
       baseAmount: baseAmount ?? prev.baseAmount,
+      // The tender the replacement was minted for (codex local max-effort
+      // review on #5434): the re-mounted form starts on it instead of
+      // defaulting to card and syncing a bank intent back to card.
+      ...(methodCategory ? { initialMethod: methodCategory } : {}),
       // undefined = caller didn't carry a verdict; null = clear breakdown.
       ...(combined !== undefined ? { combined } : {}),
     } : prev));
@@ -2392,7 +2436,7 @@ export default function PayPageV2() {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method, methodCategory }),
+        body: JSON.stringify({ stripePaymentMethodId: paymentIntent.payment_method, methodCategory, ...consentAttestation() }),
       });
       try {
         let res = await postConsent();
@@ -2997,6 +3041,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
                 amount={stripeSetup.baseAmount}

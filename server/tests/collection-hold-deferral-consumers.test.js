@@ -104,7 +104,8 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     ['services/context-aggregator.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['services/customer-health.js', 'isNeverAttemptedHoldDeferral'],
     ['routes/billing-v2.js', 'isNeverAttemptedHoldDeferral'],
-    ['routes/billing-v2.js', 'excludeHoldDeferralPlaceholders'],
+    // The portal payment list (GET /api/billing) lives in this service.
+    ['services/portal-payment-history.js', 'excludeHoldDeferralPlaceholders'],
     ['services/stripe.js', 'excludeHoldDeferralPlaceholders'],
   ];
   test.each(consumers)('%s uses %s', (file, fn) => {

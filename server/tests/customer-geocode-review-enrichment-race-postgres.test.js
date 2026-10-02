@@ -43,6 +43,8 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.boolean('active'); t.boolean('is_primary');
       for (const field of ['address_line1', 'address_line2', 'city', 'state', 'zip']) t.string(field);
       t.decimal('latitude', 10, 7); t.decimal('longitude', 10, 7);
+      // 20261001190000_neighborhood_access: syncPrimaryAddress clears these on a street move.
+      t.uuid('neighborhood_id'); t.string('neighborhood_source'); t.string('county_subdivision'); t.timestamp('neighborhood_checked_at', { useTz: true });
     });
     await mockConnection.schema.createTable('customer_geocode_reviews', (t) => {
       t.uuid('customer_id').primary(); t.jsonb('address_snapshot'); t.string('status'); t.string('reason');

@@ -3,11 +3,16 @@
 // palm-spacing warnings. Synthetic data; a table-keyed fake knex (filters are
 // not interpreted — the SQL scoping is exercised by the Postgres lane).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/photos', () => ({
+  getViewUrl: jest.fn(async (key, ttl) => `https://signed.example.test/${key}?ttl=${ttl}`),
+}));
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const PhotoService = require('../services/photos');
+const logger = require('../services/logger');
 const {
   buildTreeShrubFastContext,
   treeShrubFastIneligibleReason,
@@ -28,10 +33,11 @@ const visit = (extra = {}) => ({
 
 // Rows the fake serves per table name. A value that is an Error rejects.
 function fakeKnex(tables) {
+  const calls = [];
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = () => chain;
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
     const settle = () => (data instanceof Error ? Promise.reject(data) : Promise.resolve(Array.isArray(data) ? data : []));
     chain.first = async () => {
       if (data instanceof Error) throw data;
@@ -42,6 +48,7 @@ function fakeKnex(tables) {
     return chain;
   });
   knex.raw = (sql) => ({ sql });
+  knex.calls = calls;
   return knex;
 }
 
@@ -117,7 +124,7 @@ describe('buildTreeShrubWarnings', () => {
   const kontos = cat('kontos', 'Kontos Insecticide/Miticide', { irac_group: '23' });
   const mainspring = cat('mainspring', 'Mainspring GNL Insecticide', { irac_group: '28' });
   const kphite = cat('kphite', 'KPHITE 7LP Systemic Fungicide', { frac_group: 'P07' });
-  const palm = cat('palm', 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+  const palm = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
   const orn = cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' });
   const plain = cat('plain', 'Cytogro Liquid Biostimulant');
   const catalogRows = [kontos, mainspring, kphite, palm, orn, plain];
@@ -207,10 +214,10 @@ describe('buildTreeShrubWarnings', () => {
   });
 
   test('an unlinked palm fertilizer application (named through its service product) still warns on spacing', () => {
-    const palmCandidate = cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+    const palmCandidate = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
     const unlinked = {
       application_date: '2026-08-12', product_id: null, category: 'fertilizer',
-      product_name: 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', moa_group: null, history_moa_group: null,
+      product_name: 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', moa_group: null, history_moa_group: null,
     };
     expect(buildTreeShrubWarnings({ catalogRows: [palmCandidate], applications: [unlinked], visitDate }))
       .toEqual([expect.objectContaining({ type: 'palm_fertilizer_spacing', productId: 'palm', daysAgo: 50 })]);
@@ -221,13 +228,16 @@ describe('buildTreeShrubWarnings', () => {
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
   });
 
-  test('a palm fertilizer within 75 days warns on palm fertilizer candidates only', () => {
+  test('a palm fertilizer within three months warns on palm fertilizer candidates only', () => {
     const warnings = buildTreeShrubWarnings({ catalogRows, applications: [app(70, palm)], visitDate });
     expect(warnings).toEqual([{
-      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 75,
+      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 92,
       daysAgo: 70, appliedProductName: palm.name, appliedOn: '2026-07-23',
     }]);
-    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toEqual([]);
+    // Day 76 is still inside three calendar months (the full form agrees).
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toHaveLength(1);
+    // Three full calendar months later (2026-07-01 → 2026-10-01) it is due again.
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(92, palm)], visitDate })).toEqual([]);
   });
 
   test('an ornamental (non-palm) fertilizer does not trigger the palm spacing warning', () => {
@@ -279,7 +289,7 @@ describe('per-area rate units never pre-fill', () => {
 describe('buildTreeShrubFastContext', () => {
   const catalog = [
     cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' }),
-    cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' }),
+    cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' }),
     cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' }),
     cat('kphite', 'KPHITE 7LP Systemic Fungicide', { category: 'fungicide', frac_group: 'P07' }),
   ];
@@ -308,12 +318,12 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx).toMatchObject({ ok: true, eligible: true, reason: null, lastVisit: null, warnings: [] });
     expect(ctx.warningsUnavailable).toBeUndefined();
     expect(ctx.service).toMatchObject({ id: 'visit-1', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1', serviceKey: 'tree_shrub_program' });
-    // October protocol: Snapshot, 8-2-12, 13-0-13, KPHITE — suggestions, no amounts invented.
+    // October protocol: Snapshot and 8-0-12 palm — suggestions, no amounts
+    // invented. KPHITE (method unverified) and 13-0-13 (exact label needed;
+    // hold dose) are withheld.
     expect(ctx.monthProducts).toEqual([
       { productId: 'snapshot', method: 'granular_broadcast' },
       { productId: 'palm', method: 'granular_broadcast' },
-      { productId: 'orn', method: 'granular_broadcast' },
-      { productId: 'kphite', method: 'foliar_spray' },
     ]);
     expect(ctx.products.map((p) => p.id)).toEqual(['snapshot', 'palm', 'orn', 'kphite']);
     expect(ctx.products.find((p) => p.id === 'kphite').tsFlags).toMatchObject({ needsIracFrac: true });
@@ -347,7 +357,7 @@ describe('buildTreeShrubFastContext', () => {
       products: [{ productId: 'kphite', productName: 'KPHITE 7LP Systemic Fungicide', totalAmount: 2, amountUnit: 'qt' }],
     });
     const byId = Object.fromEntries(ctx.monthProducts.map((m) => [m.productId, m]));
-    expect(byId.kphite.lastAmount).toEqual({ totalAmount: 2, amountUnit: 'qt', serviceDate: '2026-09-02' });
+    expect(byId.kphite).toBeUndefined();
     // Snapshot is quarterly: its amount comes from the earlier visit that applied it.
     expect(byId.snapshot.lastAmount).toEqual({ totalAmount: 25.5, amountUnit: 'lb', serviceDate: '2026-07-01' });
     expect(byId.palm.lastAmount).toBeUndefined();
@@ -401,12 +411,12 @@ describe('buildTreeShrubFastContext', () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
       service_products: [
-        { service_record_id: 'rec-inc', product_id: 'kphite', total_amount: '3', amount_unit: 'qt' },
-        { service_record_id: 'rec-ok', product_id: 'kphite', total_amount: '2', amount_unit: 'qt' },
+        { service_record_id: 'rec-inc', product_id: 'palm', total_amount: '3', amount_unit: 'lb' },
+        { service_record_id: 'rec-ok', product_id: 'palm', total_amount: '2', amount_unit: 'lb' },
       ],
     }));
     expect(ctx.lastVisit).toMatchObject({ serviceRecordId: 'rec-ok', plantGroups: ['Palms'] });
-    expect(ctx.monthProducts.find((m) => m.productId === 'kphite').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'qt', serviceDate: '2026-09-20' });
+    expect(ctx.monthProducts.find((m) => m.productId === 'palm').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'lb', serviceDate: '2026-09-20' });
   });
 
   test('recent ledger rows produce warnings on the context', async () => {
@@ -418,5 +428,93 @@ describe('buildTreeShrubFastContext', () => {
       }],
     }));
     expect(ctx.warnings).toEqual([expect.objectContaining({ type: 'rotation', productId: 'kphite', daysAgo: 10, group: 'FRAC P07' })]);
+  });
+  describe('lastVisitPhotos', () => {
+    const records = [
+      { id: 'rec-2', status: 'completed', service_date: '2026-09-02', typed_values: {} },
+      { id: 'rec-1', status: 'completed', service_date: '2026-07-01', typed_values: {} },
+    ];
+    const photo = (id, slot, extra = {}) => ({
+      id, s3_key: `service-photos/rec-2/${id}.jpg`, ai_tags: slot ? { slot } : { captionSource: 'ai' },
+      captured_at: '2026-09-02T14:05:00.000Z', created_at: '2026-09-02T14:06:00.000Z', ...extra,
+    });
+    const run = (service_photos, extra = {}) => {
+      const knex = fakeKnex({ scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records, service_photos, ...extra });
+      return buildTreeShrubFastContext('visit-1', knex).then((ctx) => ({ ctx, knex }));
+    };
+    beforeEach(() => { PhotoService.getViewUrl.mockClear(); logger.warn.mockClear(); });
+
+    test('per-slot photos from the last completed record, signed with a short-lived URL, never a raw key', async () => {
+      const { ctx, knex } = await run([
+        photo('p1', 'front_beds'),
+        photo('p2', 'whole_palm', { captured_at: null, created_at: '2026-09-02T14:10:00.000Z' }),
+        photo('p3', null),
+        photo('p4', 'not_a_slot'),
+        photo('p5', '__proto__'),
+        { ...photo('p6', 'leaf_close_up'), ai_tags: JSON.stringify({ slot: 'leaf_close_up' }) },
+        { ...photo('p7', 'oldest_fronds'), s3_key: null },
+      ]);
+      expect(ctx.lastVisitPhotos).toEqual({
+        front_beds: { url: 'https://signed.example.test/service-photos/rec-2/p1.jpg?ttl=3600', takenAt: '2026-09-02T14:05:00.000Z' },
+        whole_palm: { url: 'https://signed.example.test/service-photos/rec-2/p2.jpg?ttl=3600', takenAt: '2026-09-02T14:10:00.000Z' },
+        leaf_close_up: { url: 'https://signed.example.test/service-photos/rec-2/p6.jpg?ttl=3600', takenAt: '2026-09-02T14:05:00.000Z' },
+      });
+      // Scoped to the last completed record only (not rec-1), and to photos that carry tags.
+      const photoCalls = knex.calls.filter(([table]) => table === 'service_photos');
+      expect(photoCalls).toContainEqual(['service_photos', 'where', 'service_record_id', 'rec-2']);
+      expect(photoCalls).toContainEqual(['service_photos', 'whereNotNull', 'ai_tags']);
+      expect(JSON.stringify(photoCalls)).not.toContain('rec-1');
+      // The history read it rides on is scoped to this property and bounded by the visit date.
+      expect(knex.calls).toContainEqual(['service_records as sr', 'where', 'ss.property_id', 'prop-1']);
+      expect(knex.calls).toContainEqual(['service_records as sr', 'where', 'sr.service_date', '<=', '2026-10-01']);
+    });
+
+    test('newest photo wins when a slot repeats', async () => {
+      // The query orders newest first; the first row seen for a slot is the one shown.
+      const { ctx } = await run([photo('new', 'front_beds'), photo('old', 'front_beds', { captured_at: '2026-09-02T13:00:00.000Z' })]);
+      expect(ctx.lastVisitPhotos.front_beds.url).toContain('/new.jpg');
+    });
+
+    test('no slotted photos (prod today, or a full-form last visit) is an empty object', async () => {
+      expect((await run([])).ctx.lastVisitPhotos).toEqual({});
+      expect((await run([photo('p1', null)])).ctx.lastVisitPhotos).toEqual({});
+    });
+
+    test('no completed record, or an unresolved property, reads no photos', async () => {
+      const none = await run([photo('p1', 'front_beds')], { 'service_records as sr': [] });
+      expect(none.ctx.lastVisitPhotos).toEqual({});
+      expect(none.knex.calls.some(([table]) => table === 'service_photos')).toBe(false);
+      const knex = fakeKnex({ scheduled_services: visit({ property_id: null }), products_catalog: catalog, 'service_records as sr': records, service_photos: [photo('p1', 'front_beds')] });
+      const ctx = await buildTreeShrubFastContext('visit-1', knex);
+      expect(ctx.lastVisitPhotos).toEqual({});
+      expect(knex.calls.some(([table]) => table === 'service_photos')).toBe(false);
+    });
+
+    test('an incomplete record never supplies photos', async () => {
+      const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': [{ id: 'rec-inc', status: 'incomplete', service_date: '2026-09-20', typed_values: {} }] });
+      expect(ctx.lastVisitPhotos).toEqual({});
+    });
+
+    test('a failed photo read degrades to {} with a warning and the rest of the context stands', async () => {
+      const { ctx } = await run(new Error('connection to 10.0.0.1 refused'));
+      expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisitPhotos: {} });
+      expect(ctx.lastVisit.serviceRecordId).toBe('rec-2');
+      expect(ctx.products.length).toBeGreaterThan(0);
+      const warned = logger.warn.mock.calls.map(([message]) => message).join('\n');
+      expect(warned).toContain('last visit photos unavailable');
+      expect(warned).not.toContain('10.0.0.1');
+    });
+
+    test('a photo that will not sign loses only its own thumbnail', async () => {
+      PhotoService.getViewUrl.mockRejectedValueOnce(Object.assign(new Error('signer down'), { code: 'SignerDown' }));
+      const { ctx } = await run([photo('p1', 'front_beds'), photo('p2', 'whole_palm')]);
+      expect(Object.keys(ctx.lastVisitPhotos)).toEqual(['whole_palm']);
+      expect(logger.warn.mock.calls.map(([m]) => m).join('\n')).toContain('not signed');
+    });
+
+    test('a failed history read means no photos either', async () => {
+      const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': new Error('boom') });
+      expect(ctx.lastVisitPhotos).toEqual({});
+    });
   });
 });

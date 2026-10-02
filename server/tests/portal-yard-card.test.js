@@ -123,7 +123,9 @@ describe('month, location and items', () => {
   });
 
   test('info-only entries are flagged and sort after actionable ones of the same level', async () => {
-    const card = await build({ now: new Date('2026-06-15T16:00:00Z') });
+    // March: citrus greening (info-only, peak Oct-Mar per UF/IFAS CG086)
+    // shares the peak tier with aphids and the Asian citrus psyllid.
+    const card = await build({ now: new Date('2026-03-15T16:00:00Z') });
     const peakShrubs = card.items.filter((i) => i.level === 3 && i.category === 'shrub');
     expect(peakShrubs.some((i) => i.infoOnly)).toBe(true);
     const firstInfo = peakShrubs.findIndex((i) => i.infoOnly);

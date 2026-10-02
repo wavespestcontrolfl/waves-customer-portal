@@ -396,9 +396,8 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.names).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
   });
 
-  test('other curated-less programs (pest visit 1, tree & shrub, mosquito, termite) carry no field yet', () => {
+  test('other curated-less programs (pest visit 1, mosquito, termite) carry no field yet', () => {
     for (const visitList of Object.values({
-      tree_shrub: realProtocols.tree_shrub.visits,
       mosquito: realProtocols.mosquito.visits,
       termite: realProtocols.termite.visits,
     })) {
@@ -413,6 +412,24 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
 // ---- catalog name resolution (resolveCatalogProductForName) ----
 
 describe('resolveCatalogProductForName', () => {
+  test('ambiguous exact names, vendorless aliases and equally tight token matches stay unresolved', () => {
+    expect(resolveCatalogProductForName('Fixture product', [
+      { id: 'a', name: 'Fixture product' }, { id: 'b', name: 'Fixture product' },
+    ])).toBeNull();
+    expect(resolveCatalogProductForName('Fixture alias', [
+      { id: 'a', name: 'Product A', aliases: ['Fixture alias'] },
+      { id: 'b', name: 'Product B', aliases: ['Fixture alias'] },
+    ])).toBeNull();
+    expect(resolveCatalogProductForName('Fixture product', [
+      { id: 'a', name: 'Fixture product alpha' }, { id: 'b', name: 'Fixture product beta' },
+    ])).toBeNull();
+  });
+  test('T&S identities require one exact name or alias instead of a fuzzy SKU match', () => {
+    const rows = [{ id: 'a', name: 'LESCO palm fertilizer', aliases: ['LESCO 8-0-12 #511542'] }];
+    expect(resolveCatalogProductForName('LESCO 8-0-12 #511542', rows, { exactOnly: true }).id).toBe('a');
+    expect(resolveCatalogProductForName('LESCO palm', rows, { exactOnly: true })).toBeNull();
+    expect(resolveCatalogProductForName('LESCO 8-0-12 #511542', [...rows, { ...rows[0], id: 'b' }], { exactOnly: true })).toBeNull();
+  });
   const catalog = [
     { id: 'p1', name: 'Alpine WSG', active: true },
     { id: 'p2', name: 'Gentrol IGR', active: true },

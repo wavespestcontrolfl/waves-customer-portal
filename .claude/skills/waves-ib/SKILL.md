@@ -84,7 +84,13 @@ max_tokens for field speed.
   `services/intelligence-bar/write-gates.js`, mirrored by
   `tests/intelligence-bar-write-gate-contract.test.js`. New write tools MUST
   be added to those sets — load the **ib-write-tools skill** for the full
-  procedure.
+  procedure. ONE narrow exception (owner ruling 2026-10-01, PR #5563): with
+  `GATE_IB_OWNER_DIRECT=true` AND `GATE_IB_PLATFORM=true`, the full-access
+  owner login (`ibFullAccess`) commits the internal edits listed in
+  `services/intelligence-bar/owner-direct.js` in the same turn, with no
+  card — still proposed as a pending action and committed through the same
+  `commitPendingAction` path as a click (pins, receipt, audit row), never a
+  bare executor call. Every other login, context, and tool keeps the card.
 - **Admin contexts use `GlobalCommandPalette`.** `AdminLayoutV2` mounts
   the palette; update the palette's route context mapping instead of adding another
   page-level embed. The former admin embeds were retired. The dedicated

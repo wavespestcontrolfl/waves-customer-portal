@@ -105,6 +105,19 @@ function serviceContactsConsented(customer = {}) {
     || process.env.DISABLE_CONTACT_CONSENT_GATE === '1';
 }
 
+// Slot phones the account's consent stamp does NOT cover (#5467): an on-site
+// contact the call pipeline filed while keeping the account's existing stamp
+// for the other contacts. Held out of every TEXT resolver here until that
+// person's own YES clears them — independent of the double opt-in gate.
+function unconsentedSlotPhoneKeys(customer = {}) {
+  let prefs = customer.service_preferences;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { prefs = null; }
+  }
+  const keys = prefs && Array.isArray(prefs.unconsented_slot_phone_keys) ? prefs.unconsented_slot_phone_keys : [];
+  return new Set(keys.map((k) => String(k || '').replace(/\D/g, '').slice(-10)).filter(Boolean));
+}
+
 function getServiceContact(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
@@ -127,7 +140,8 @@ function getServiceContact(customer) {
 function getServiceContactSmsRecipient(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
-  if (svcPhone && !serviceContactsConsented(customer)) {
+  if (svcPhone && (!serviceContactsConsented(customer)
+    || unconsentedSlotPhoneKeys(customer).has(svcPhone.replace(/\D/g, '').slice(-10)))) {
     return { ...getPrimaryContact(customer), role: 'primary' };
   }
   return getServiceContact(customer);
@@ -169,11 +183,13 @@ function getAppointmentContacts(customer, prefs = {}, { skipConsentGate = false 
   // rerouted email to the primary against appointment_notify_primary=false
   // AND double-delivered via the slot sweep (main regression 2026-07-23).
   if (skipConsentGate || serviceContactsConsented(customer)) {
+    const held = skipConsentGate ? new Set() : unconsentedSlotPhoneKeys(customer);
     for (const slot of getServiceContactSlots(customer)) {
       const distinct = !!slot.phone
         && !samePhone(slot.phone, primary.phone)
         && !contacts.some(c => samePhone(c.phone, slot.phone));
       if (!distinct) continue;
+      if (held.has(clean(slot.phone).replace(/\D/g, '').slice(-10))) continue;
       contacts.push({
         phone: slot.phone,
         email: slot.email || primary.email,

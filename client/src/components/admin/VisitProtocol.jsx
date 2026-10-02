@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import TreeShrubFieldGuide from './TreeShrubFieldGuide';
 
 function ProcedureText({ procedure, D, full = false }) {
   return <>
@@ -71,7 +72,9 @@ export default function VisitProtocol({ card, D, onJobCard }) {
     {lines.map((line, i) => <section key={i} style={{ borderBottom: `1px solid ${D.border}`, padding: '20px 0' }}>
       <p style={{ color: D.muted }}>{line.name}</p>
       {line.procedure ? <>
-        <ProcedureText procedure={line.procedure} D={D} />
+        {line.procedure.fieldGuide
+          ? <TreeShrubFieldGuide guide={line.procedure.fieldGuide} mode="tech" safetyRules={line.procedure.safetyRules} />
+          : <ProcedureText procedure={line.procedure} D={D} />}
         <button type="button" onClick={() => setSheet(line.procedure)} style={{ minHeight: 44, padding: '8px 16px', background: D.heading, color: D.white, border: `1px solid ${D.heading}` }}>Read SOP</button>
       </> : <p>{line.note || 'No published procedure is available for this booked service.'}</p>}
     </section>)}

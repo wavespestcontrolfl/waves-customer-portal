@@ -237,6 +237,34 @@ describe('subject references are parsed defensively', () => {
 });
 
 describe('class rules', () => {
+  test('stale consent: settled only by a consent row at the CURRENT text version recorded after the bell (codex local review on #5434)', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    const row = note({ category: 'billing', metadata: { dedupeKey: 'consent_version_stale:pi_1', customerId: CUST, intentId: 'pi_1' } });
+    expect(classify(row)?.key).toBe('consent_version_stale');
+    // No re-authorization at all.
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: null });
+    // An older-version row after the bell is not a re-authorization.
+    // (The fake answers the grouped max() with pre-shaped rows, like the scheduled_services cases.)
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: 'v11_2026-08-25', latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: null });
+    // A current-version row from BEFORE the bell is what the bell already judged stale.
+    mockTables.payment_method_consents.push({ customer_id: CUST, consent_text_version: CONSENT_VERSION, latest_created_at: BEFORE_BELL });
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: null });
+    // The customer re-authorized under the current text after the bell: settled.
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: CONSENT_VERSION, latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: 'Authorization was re-collected' });
+    // An after-visit reauthorization (its own current version label) settles
+    // the bell too; a card-hold consent is not a recurring authorization.
+    const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: AFTER_VISIT_CONSENT_VERSION, latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: 'Authorization was re-collected' });
+    mockTables.payment_method_consents = [{ customer_id: CUST, consent_text_version: 'hold_v1_2026-10-01', latest_created_at: AFTER_BELL }];
+    expect(await reasonFor(row)).toEqual({ cls: 'consent_version_stale', reason: null });
+    // A bell naming no customer is never judged.
+    const anonymous = note({ category: 'billing', metadata: { dedupeKey: 'consent_version_stale:pi_2', intentId: 'pi_2' } });
+    expect(await reasonFor(anonymous)).toEqual({ cls: 'consent_version_stale', reason: null });
+  });
+
   test.each([
     ['unpriced-series:', 'alert', { series_root_id: PARENT }],
     ['prepay-coverage:', 'alert', {}],
