@@ -294,6 +294,8 @@ const SCOPE_SNAPSHOT = {
     // list_gap_reports' free-text summary/attempted fields are cleaned but not
     // customer-proven — a gap report can still carry an operator's phrasing.
     'list_gap_reports',
+    // needs_me returns alert headlines and reasons, which name customers.
+    'needs_me',
     // Operator free text passed through verbatim (a name or address can be
     // typed into any of these): technician notes and call snippets, restock
     // reasons, the pricing changelog, estimate service_interest, lost reasons.
@@ -343,7 +345,7 @@ const SCOPE_SNAPSHOT = {
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
     'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'submit_review_reply',
     'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',
-    'update_customer_property', 'update_lead_status', 'update_property_access',
+    'update_customer_property', 'update_lead_contact', 'update_lead_status', 'update_property_access',
   ],
 };
 

@@ -14,6 +14,7 @@
  * bad domain can't crash a harvest of hundreds.
  */
 
+const { decodeHTML } = require('entities');
 const net = require('net');
 const dns = require('dns');
 const http = require('http');
@@ -354,17 +355,28 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
  * for outreach personalization (reuses the same hardened fetch path as findContact:
  * private-IP/redirect guards, timeout, fail-soft). Strips scripts/styles/tags.
  */
-async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const html = await fetchText(url, { fetchFn, timeoutMs });
+// `withText` also returns the whole visible text (`text`), not only the
+// 400-character snippet — and `text: null` when the body was cut short (size
+// cap / early close) or is not HTML, so a caller never reads a partial page or
+// a binary document as a complete page —
+// plus `finalUrl`, the page the redirects actually ended on.
+async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, withText = false } = {}) {
+  const page = await fetchPage(url, { fetchFn, timeoutMs });
+  const html = page.html && page.status >= 200 && page.status < 300 ? page.html : null;
   if (!html) return null;
   const title = (html.match(/<title[^>]*>([\s\S]{1,200}?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || null;
-  const text = html
+  const stripped = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return { title, snippet: text.slice(0, 400) || null };
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ') // hidden fallback, not page content
+    .replace(/<[^>]+>/g, ' ');
+  // entities decoded (&nbsp;, &#32;, &amp; …) so the text reads as displayed
+  const text = decodeHTML(stripped).replace(/\s+/g, ' ').trim();
+  const out = { title, snippet: text.slice(0, 400) || null };
+  // a PDF, image or other explicitly non-HTML body was not read as a page
+  const readAsHtml = !page.contentType || /html/i.test(page.contentType);
+  if (withText) Object.assign(out, { text: page.truncated || !readAsHtml ? null : text, finalUrl: page.finalUrl || null });
+  return out;
 }
 
 module.exports = { findContact, fetchPageText, fetchPage };

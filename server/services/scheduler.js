@@ -4585,6 +4585,34 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
+            // LABEL FACTS revalidation: a scheduled reply that copies a label
+            // sentence (rainfast / re-entry) must still be backed by the
+            // customer's CURRENT latest performed visit - a newer visit, a
+            // visit today, or a changed label blocks it. Same fail-closed
+            // block+retire path, no new mechanism.
+            let labelStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const labelDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                // The reply guard runs on the final body of every real-answers
+                // decision (an edit may not add label timing); the visit recheck
+                // only for a body that still copies a snapshotted sentence.
+                // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
+                const labelReason = await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body });
+                // An unreadable latest visit (Codex #5416 r31 P2) says nothing about the message: do NOT retire the decision
+                // here. The send proceeds to the provider-boundary label check, which re-reads and, if still unreadable,
+                // refuses RETRYABLY onto the bounded retry rail - never sent unverified, never permanently stale.
+                if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {
+                  logger.warn(`[scheduled-sms] ${msg.id} label-facts recheck unreadable; deferring to the provider-boundary check`);
+                } else {
+                  labelStale = Boolean(labelReason);
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; deferring to the provider-boundary check`);
+              }
+            }
             // Re-service promise revalidation (Codex round-3 P2): the same
             // "reviewed wording can go stale before it fires" gap as the
             // checks above, for a free re-service promise — the customer's
@@ -4616,7 +4644,7 @@ function initScheduledJobs() {
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4635,9 +4663,11 @@ function initScheduledJobs() {
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : reserviceStale
-                        ? 'stale_reservice_agent_decision'
-                        : 'stale_eta_agent_decision';
+                      : labelStale
+                        ? 'stale_label_facts_agent_decision'
+                        : reserviceStale
+                          ? 'stale_reservice_agent_decision'
+                          : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4669,9 +4699,11 @@ function initScheduledJobs() {
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : reserviceStale
-                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                          : labelStale
+                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            : reserviceStale
+                              ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4927,6 +4959,11 @@ function initScheduledJobs() {
               parkedDecisionIds: Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length
                 ? claimMeta.parked_decision_ids
                 : undefined,
+              // The composer draft's linked visits (persisted by /schedule-sms): the shared send step holds the
+              // text at delivery while any of them is a live street-level address hold.
+              ...(Array.isArray(claimMeta.linked_scheduled_service_ids) && claimMeta.linked_scheduled_service_ids.length
+                ? { linked_scheduled_service_ids: claimMeta.linked_scheduled_service_ids }
+                : {}),
             },
           };
           // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
@@ -4935,10 +4972,12 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
+              labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -5073,6 +5112,34 @@ function initScheduledJobs() {
               `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'STREET_LEVEL_HOLD') {
+            // A visit the text is about is a street-level address hold awaiting the office confirm
+            // (street-level-hold.js): a validator deferral that can last as long as the office takes, so it
+            // must not spend the bounded 3-attempt rail and end terminally blocked. Like the send-window
+            // hold above: no provider send was tried, the attempt is REFUNDED and the row waits (re-polled
+            // every 15 minutes, the generic retry spacing) until the office confirms and the text sends, or
+            // the visit leaves the hold. No expiry of its own, same as the other wait branches.
+            const holdRetryAt = smsResult.nextAllowedAt ? new Date(smsResult.nextAllowedAt) : new Date(completedAt.getTime() + 15 * 60 * 1000);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: holdRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'street_level_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
             // Another attempt holds this notice's billing Text claim
             // (messaging/billing-text-leg-dedupe.js), so no provider send
@@ -5173,6 +5240,12 @@ function initScheduledJobs() {
                   updated_at: completedAt,
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
+                // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
+                if (smsResult.code === 'LINKED_VISIT_ENDED') {
+                  await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
+                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
+                  });
+                }
                 logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
                 // Terminal block on a deferred replay: delivery was refused,
                 // or an exhausted ambiguous review passed its safety hold.
@@ -7087,6 +7160,42 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:40 AM ET — Estimated AI spend check (dark, GATE_LLM_COST_TRACKING,
+  // checked inside the service). Refreshes the OpenRouter list prices when
+  // the stored ones are a week old, then raises ONE admin item when a lane's
+  // estimated spend yesterday jumped well above its own recent average, and
+  // closes it once spend is back to normal. Throws on failure so job_health
+  // records it.
+  // =========================================================================
+  cron.schedule('40 7 * * *', async () => {
+    try {
+      await runExclusive('llm-cost-check', async () => {
+        const { runLlmCostCheck } = require('./llm-cost');
+        const result = await runLlmCostCheck();
+        if (result.raised) logger.info(`[llm-cost] spend spike item raised: ${result.spikes} lane(s)`);
+        if (result.reason === 'alert_not_persisted') throw new Error('spend spike item was not persisted');
+      });
+    } catch (e) { logger.error(`[llm-cost] daily spend check failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
+  // Refreshes unknown outcome evidence, then raises ONE admin item for
+  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
+  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
+  // inside the service); nothing acts on a Jev answer.
+  // =========================================================================
+  cron.schedule('5 8 * * *', async () => {
+    await runExclusive('typed-decisions-daily-review', async () => {
+      try {
+        const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
+        const result = await runDailyReviewItem();
+        if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
+      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Send scheduled review request SMS
   // Picks up review requests whose scheduled_for has passed.
   // =========================================================================
@@ -7490,6 +7599,11 @@ function initScheduledJobs() {
         const candidates = await db('scheduled_services')
           .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
+          // A street-level address hold the office has not cleared was never dispatched, so it cannot be
+          // a customer no-show (no customer_noshow row, no repeated-miss outreach).
+          .whereNotExists(function unclearedAddressHold() {
+            require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
+          })
           .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at
@@ -7545,7 +7659,10 @@ function initScheduledJobs() {
             .first('id');
           if (alreadyFlagged) continue;
           try {
-            await missedAppointment.onSkip(svc.id, 'no_show');
+            // A promotion to a street-level hold can land after the candidate scan above: re-read the hold
+            // under the visit row lock (the promoter's own lock) right before recording, and skip if held.
+            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx));
+            if (guarded.held) continue;
             flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
@@ -8039,11 +8156,28 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.combinedBookingCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''}${result.combinedBookingCheckFailed ? ' COMBINED-BOOKING-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY :25, 7 AM-8 PM ET — the combined-booking check's urgent pass: a
+  // booking with a visit TODAY or TOMORROW that has no time or technician
+  // rings now, not at the next 6:40 run (by then a today visit is history).
+  // Catches bookings made, and technicians removed, after the daily tick, and
+  // retries a failed write. Same gate as the watchdog it belongs to.
+  cron.schedule('25 7-20 * * *', async () => {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('scheduleIntegrityWatchdog')) return;
+      const result = await runExclusive('combined-booking-check-urgent', () =>
+        require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
+      if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`[combined-booking-check] urgent pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

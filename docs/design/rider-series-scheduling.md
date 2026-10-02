@@ -358,16 +358,19 @@ counterpart flags every pair it's in as `host_ambiguous` or
 `rider_ambiguous` (not eligible), so the office resolves it rather than the
 report picking one. Output is ordered by customer id, then root id.
 
-## Why nothing is linked yet
+## Where the link is written
 
 `scheduled_services.rides_parent_id` (migration
-`20260928220000_scheduled_services_rides_parent`, copied verbatim from the
-write engine branch — it was already pushed and run against a preview
-database) is schema-only: nullable, self-referencing, `ON DELETE SET NULL`.
-Nothing in this repository sets or reads it on real data. The ops report
-finds candidate pairs by its own heuristic and previews them with an
-explicit `hostParentId`, exactly as PR 2 (estimate accept) and PR 3 (existing
-customers) would once they exist.
+`20260928220000_scheduled_services_rides_parent`) is nullable,
+self-referencing, `ON DELETE SET NULL`. It is written in ONE place: estimate
+accept, behind `GATE_PEST_RIDES_LAWN_AT_ACCEPT` (`rider-accept-seeding.js`).
+A quarterly rider (pest, tree & shrub, termite bait) accepted with a 6-week
+or monthly lawn is seeded on lawn dates and linked only when every rider date
+is a real lawn date AND the two first visits group into one stop under the
+canonical visit-group rules. Nothing reads the link yet: series extension
+riding the lawn is a follow-up PR, and the gate stays off until it lands. The
+ops report still finds candidate pairs by its own heuristic and previews them
+with an explicit `hostParentId`.
 
 ## Why a preview first
 

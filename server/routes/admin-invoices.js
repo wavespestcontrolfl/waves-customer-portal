@@ -3640,8 +3640,14 @@ const followupConfig = require('../config/invoice-followups');
 router.get('/:id/followup', async (req, res, next) => {
   try {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
+    // A customer on combined reminders (customer-dunning/wiring.js): the panel shows the combined step
+    // and invoice count, and send-now must confirm that step (Codex #5503 r2 P1). null otherwise.
+    const customerSchedule = seq
+      ? await require('../services/customer-dunning/wiring').customerScheduleSummary(seq.customer_id)
+      : null;
     res.json({
       sequence: seq || null,
+      customerSchedule,
       // Config-field rename: steps now expose daysAfterSend (PR #106
       // anchored the cadence to invoice.sent_at). daysAfterDue is kept
       // as an alias so any pre-update client still renders a number.
@@ -3702,7 +3708,38 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // Authenticated operator click — "now" means now: the SMS leg is exempt
     // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
     // cron path passes nothing and stays fenced.
-    await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
+    // A customer on combined reminders: the click sends the schedule's current
+    // step, and only with the operator's explicit confirmation of that step
+    // ({ combined: true, scheduleId, stepIndex } — what GET /:id/followup
+    // showed). Without it nothing is sent: 409 COMBINED_CONFIRM_REQUIRED, so a
+    // stale panel can never send the combined step unseen (Codex #5503 r2 P1).
+    const body = req.body || {};
+    const combined = body.combined === true
+      ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
+      : null;
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // Nothing to send (no sequence, a finished one, a paid or void invoice): never a 200 the panel
+    // would read as "Done".
+    if (routed?.reason === 'nothing_to_send') return res.status(409).json({ error: routed.message, code: 'NOT_SENT' });
+    // A customer on a customer-level reminder schedule: the click sent (or
+    // refused to send) the schedule's current step (dunning consolidation §8).
+    if (routed?.routedTo === 'customer_schedule') {
+      const Wiring = require('../services/customer-dunning/wiring');
+      const result = Wiring.httpResult(routed);
+      // On the customer's activity log like the customer page's send-now (who, when, what happened).
+      // Best effort: a failed lookup never turns the press's answer into a 500.
+      try {
+        const invoice = await db('invoices').where({ id: req.params.id }).first('customer_id');
+        if (invoice?.customer_id) {
+          await Wiring.recordStaffControl({
+            customerId: invoice.customer_id, control: 'send-now', adminId: req.technicianId || null, result, via: 'invoice',
+          });
+        }
+      } catch (err) {
+        logger.warn(`[admin-invoices] combined send-now activity record failed for invoice ${req.params.id}: ${err.message}`);
+      }
+      return res.status(result.status).json(result.body);
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

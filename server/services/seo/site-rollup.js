@@ -163,9 +163,14 @@ class SiteRollup {
       .count('* as calls')
       .select(db.raw("count(*) filter (where status in ('no-answer','busy','failed','canceled')) as missed"));
 
+    // Prospects only (scopeToProspects, the shared lead-volume definition): a
+    // /book request that closed itself as 'handled' and the other non-engaged
+    // rows are not leads here either (codex #5477 r7).
+    const { scopeToProspects } = require('../lead-statuses');
     const leadRows = await db('leads as l')
       .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
       .whereNull('l.deleted_at')
+      .modify((qb) => scopeToProspects(qb, 'l'))
       .where('l.first_contact_at', '>=', since)
       .groupBy('ls.id', 'ls.name', 'ls.domain')
       .select('ls.id as source_id', 'ls.name as source_name', 'ls.domain as source_domain')

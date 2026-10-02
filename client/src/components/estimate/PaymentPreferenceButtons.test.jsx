@@ -3,8 +3,10 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
+import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
+  AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
   CARD_CONSENT_TEXT as CLIENT_CARD_CONSENT_TEXT,
   CONSENT_VERSION as CLIENT_CONSENT_VERSION,
 } from '../../lib/paymentMethodConsentText';
@@ -16,6 +18,65 @@ import serverConsent from '../../../../server/services/payment-method-consent-te
 import stripePricing from '../../../../server/services/stripe-pricing';
 
 afterEach(() => cleanup());
+
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the monthly-tier (setup-only)
+// shape — a WaveGuard setup row and NO first-visit amount (billingFrequencyKey
+// 'monthly') — says the setup fee is billed with the first visit, and only
+// when the server flag is on. Everything else keeps today's invoice copy.
+describe('PaymentPreferenceButtons setup fee billed with the first visit', () => {
+  const monthlyTier = { billingFrequencyKey: 'monthly', monthly: 45 };
+  const quarterlyWithVisit = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const setupFee = { amount: 99, service: 'waveguard_setup' };
+
+  it('flag on + setup-only shape: no invoice total, nothing-due-today copy', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={setupFee}
+        selectedFrequency={monthlyTier}
+        prepayCardCapture
+        setupFeeAfterFirstVisit
+      />,
+    );
+    expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/setup fee is billed with your first visit/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/we will send the setup invoice/i)).not.toBeInTheDocument();
+  });
+
+  it('flag off: today\'s setup invoice copy and Invoice total row are unchanged', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={setupFee}
+        selectedFrequency={monthlyTier}
+        prepayCardCapture
+      />,
+    );
+    expect(screen.getByText('Invoice total')).toBeInTheDocument();
+    expect(screen.getByText(/we will send the setup invoice after confirmation/i)).toBeInTheDocument();
+    expect(screen.queryByText(/setup fee is billed with your first visit/i)).not.toBeInTheDocument();
+  });
+
+  it('shape predicate: a first-visit amount, a bait-station row, one-time or invoice mode never qualify', () => {
+    const base = { enabled: true, serviceMode: 'recurring', setupFee, selectedFrequency: monthlyTier };
+    expect(setupFeeBilledWithFirstVisit(base)).toBe(true);
+    expect(setupFeeBilledWithFirstVisit({ ...base, enabled: false })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, selectedFrequency: quarterlyWithVisit })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 99 }] })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, serviceMode: 'one_time' })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, invoiceMode: true })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, setupFee: null })).toBe(false);
+  });
+
+  it('client after-visit card consent mirrors the server variant text (snapshot of record)', () => {
+    expect(CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT).toBe(serverConsent.AFTER_VISIT_CARD_CONSENT_TEXT);
+    expect(CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT).toMatch(/one-time setup fee/);
+  });
+});
 
 describe('PaymentPreferenceButtons', () => {
   it('offers annual prepay when the service mix is eligible without a setupFee', () => {
@@ -324,5 +385,158 @@ describe('PaymentPreferenceButtons', () => {
 
     expect(screen.getByRole('button', { name: 'Accept + send invoice' })).toBeInTheDocument();
     expect(screen.getByText(/send an invoice pay link due immediately/i)).toBeInTheDocument();
+  });
+
+  // GATE_PAF_EXISTING_CUSTOMERS (PR-B): an existing customer on the
+  // pay-after-first-visit card rail gets no invoice and no pay link at accept,
+  // so the "we send the invoice after you approve" copy must not render.
+  describe('pay-after-first-visit (existing customer on the card rail)', () => {
+    const FREQ = { key: 'quarterly', billingFrequencyKey: 'quarterly', perVisit: 89, monthly: 30 };
+    // The component reads ONE timing answer (lib/paymentTiming.js). The cases
+    // below are written in the server's cohort terms (payAfterFirstVisit /
+    // autopayPaused / autopayOff, and paymentTimingDenied for a refused
+    // confirm); this builds the answer from them through the real resolver,
+    // exactly as EstimateViewPage does.
+    const renderButtons = (extra = {}) => {
+      const {
+        payAfterFirstVisit = false, autopayPaused = false, autopayOff = false, paymentTimingDenied = false, ...rest
+      } = extra;
+      const props = { onSelect: vi.fn(), disabled: false, serviceMode: 'recurring', setupFee: null, selectedFrequency: FREQ, ...rest };
+      const paymentTiming = resolvePaymentTiming({
+        policy: payAfterFirstVisit ? {
+          afterVisitExisting: true,
+          afterVisitConsent: props.prepayCardCapture === true && !autopayPaused && !autopayOff,
+          ...(autopayPaused ? { afterVisitPaused: true } : {}),
+          ...(autopayOff ? { afterVisitAutopayOff: true } : {}),
+        } : {},
+        serviceMode: props.serviceMode,
+        invoiceShape: standardInvoiceShape({
+          setupFee: props.setupFee, extraInvoiceRows: props.extraInvoiceRows, selectedFrequency: props.selectedFrequency,
+        }),
+        selectionKey: 'sel',
+        timingAnswer: paymentTimingDenied ? { key: 'sel', deferred: false } : null,
+      });
+      return render(<PaymentPreferenceButtons {...props} paymentTiming={paymentTiming} />);
+    };
+
+    it('gate off (flag absent): today\'s invoice-after-approval copy, byte for byte', () => {
+      renderButtons();
+      expect(screen.getByText(/we will send the first application invoice after confirmation/)).toBeInTheDocument();
+    });
+
+    it('flag on + Auto Pay paused: card kept but never charged automatically — says a pay link follows the visit (once)', () => {
+      renderButtons({ payAfterFirstVisit: true, autopayPaused: true });
+      expect(screen.getByText(/Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      expect(screen.queryByText(/is billed for your first visit/)).not.toBeInTheDocument();
+    });
+
+    it('flag on but a SETUP-ONLY invoice (no first-application amount): keeps the existing disclosure (its pay link goes out at accept)', () => {
+      renderButtons({
+        payAfterFirstVisit: true,
+        selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+        extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+      });
+      expect(screen.queryByText(/Nothing is charged today/)).not.toBeInTheDocument();
+      expect(screen.getByText(/we will send the setup invoice after confirmation/)).toBeInTheDocument();
+    });
+
+    it('flag on: says nothing is charged today and the saved payment method is billed after the first visit (tender-neutral: a bank capture is not "a card")', () => {
+      renderButtons({ payAfterFirstVisit: true });
+      expect(screen.getByText(/Nothing is charged today — your saved payment method is billed for your first visit after it is completed\./)).toBeInTheDocument();
+      expect(screen.queryByText(/we will send the/)).not.toBeInTheDocument();
+    });
+
+    it('flag on + Auto Pay explicitly off: neutral pay-link-after-the-visit wording, never an automatic charge', () => {
+      renderButtons({ payAfterFirstVisit: true, autopayOff: true });
+      expect(screen.getByText(/Nothing due today\. We send you a link to pay after your first visit\./)).toBeInTheDocument();
+      expect(screen.queryByText(/is billed for your first visit/)).not.toBeInTheDocument();
+    });
+
+    // GitHub Codex #5481 r1 P1: the invoice box's "Auto Pay bills your card"
+    // line rendered for every required-capture customer, including the paused
+    // and Auto-Pay-off cohorts that are never auto-charged.
+    describe('invoice-box "Auto Pay bills your card" line', () => {
+      const AUTO_PAY_LINE = /Auto Pay bills your card after your first application/;
+
+      it('renders for a customer who will be auto-charged (required capture, not held)', () => {
+        renderButtons({ payAfterFirstVisit: true, prepayCardCapture: true });
+        expect(screen.getByText(AUTO_PAY_LINE)).toBeInTheDocument();
+      });
+
+      it('is suppressed for a paused customer and says a pay link follows the visit instead (prepay-offered layout too, where the combined fineprint is hidden)', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayPaused: true, prepayCardCapture: true, annualPrepayEligible: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.getByText(/Nothing due today\. Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('is suppressed for an Auto-Pay-off customer, with neutral wording', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayOff: true, prepayCardCapture: true, annualPrepayEligible: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.getByText(/Nothing due today\. We send you a link to pay after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('a paused customer with a saved card (capture not required) still sees the pay-link sentence', () => {
+        renderButtons({ payAfterFirstVisit: true, autopayPaused: true, prepayCardCapture: false, annualPrepayEligible: true });
+        expect(screen.getByText(/Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      });
+
+      it('a held customer with a setup-only invoice gets no "nothing due" claim (its pay link goes out at accept)', () => {
+        renderButtons({
+          payAfterFirstVisit: true,
+          autopayPaused: true,
+          prepayCardCapture: true,
+          selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+          extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+        });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
+
+      it('r7: a saved-method customer on the after-visit rail is told when the saved method is charged', () => {
+        renderButtons({ payAfterFirstVisit: true, prepayCardCapture: false, annualPrepayEligible: true });
+        expect(screen.getByText(/Nothing due today — your saved payment method is charged after your first application\./)).toBeInTheDocument();
+      });
+
+      it('r6: after the server denied after-visit timing for this selection, the capture customer sees no deferred-payment claim', () => {
+        const props = { payAfterFirstVisit: true, prepayCardCapture: true };
+        const { unmount } = renderButtons(props);
+        expect(screen.getByText(AUTO_PAY_LINE)).toBeInTheDocument();
+        unmount();
+        renderButtons({ ...props, paymentTimingDenied: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
+
+      it('r5: a NOT-held capture customer with a setup-only invoice gets no Auto Pay line either (its pay link goes out at accept)', () => {
+        renderButtons({
+          payAfterFirstVisit: true,
+          prepayCardCapture: true,
+          selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+          extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+        });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
+    });
+  });
+});
+
+// GitHub Codex #5481 r3: the shared invoice-shape predicate behind the
+// after-visit card promise — a SETUP-ONLY invoice goes out unattached with a
+// pay link at accept, so it is never the "billed after your first visit" promise.
+describe('standardInvoiceShape (after-visit promise gate)', () => {
+  const PER_VISIT = { key: 'quarterly', perVisit: 60 };
+  it('setup + first application, or first application alone: deferrable (not setup-only)', () => {
+    expect(standardInvoiceShape({ setupFee: { amount: 99 }, selectedFrequency: PER_VISIT }).setupOnly).toBe(false);
+    expect(standardInvoiceShape({ selectedFrequency: PER_VISIT }).setupOnly).toBe(false);
+  });
+  it('a setup fee (or rodent setup row) with no first-application amount is setup-only', () => {
+    expect(standardInvoiceShape({ setupFee: { amount: 99 }, selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly' } }))
+      .toEqual({ hasSetupInvoice: true, hasFirstVisitInvoice: false, setupOnly: true });
+    expect(standardInvoiceShape({ extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 99 }], selectedFrequency: {} }).setupOnly).toBe(true);
+  });
+  it('no invoice rows at all is not setup-only (nothing is collected at accept)', () => {
+    expect(standardInvoiceShape({ selectedFrequency: {} }).setupOnly).toBe(false);
+    expect(standardInvoiceShape().setupOnly).toBe(false);
   });
 });

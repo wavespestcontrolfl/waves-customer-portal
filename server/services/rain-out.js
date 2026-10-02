@@ -435,12 +435,15 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
   // only the linked body, so it could tell the sheet a boundary note fits
   // when commit() — which already checked both — would then refuse it,
   // after the dispatcher had already acted on "fits").
+  // A grouped stop's Custom body quotes the projected stop start — measured
+  // on the SAME window commit() renders, so the sheet and enforcer agree.
+  const customWindow = isCustom ? await projectedStopWindow(service, target) : null;
   const measured = await measureWorstLinkVariant((rescheduleUrl) => (isCustom
     ? renderCustomMovedBody({
       firstName: service.first_name,
       serviceType: service.service_type,
       date: target.date,
-      window: target.window,
+      window: customWindow,
       customMessage: message || CUSTOM_DEFAULT_MESSAGE,
       rescheduleUrl,
       serviceId,
@@ -1617,6 +1620,14 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // re-check is the only place it can catch a visit that landed too soon
     // to move online again — including a plain read failure, {failed:true},
     // which also lands rescheduleUrl on null).
+    if (prebuiltSms?.body && prebuiltSms.windowStart && chosen.window?.start
+      && toHHMM(prebuiltSms.windowStart) !== toHHMM(chosen.window.start)) {
+      // The pre-move body quotes a stop start that is not where the stop
+      // landed (its members changed between the projection and the move):
+      // never send an arrival time nobody holds. The sheet reports it.
+      logger.warn(`[rain-out] Custom body for ${job.id} quoted ${prebuiltSms.windowStart}, the stop landed at ${chosen.window.start} — not sent`);
+      return { sent: false, reason: 'stop_start_changed' };
+    }
     if (prebuiltSms?.body && rescheduleUrl === prebuiltSms.url) {
       body = prebuiltSms.body;
     } else if (prebuiltSms?.body) {
@@ -1877,6 +1888,27 @@ const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
 // notice at all (codex round-2 P1 on PR #5308).
 // Returns { ok: false, reason } to refuse the move, or { ok: true,
 // prebuiltSms } — prebuiltSms is null when notifyCustomer is false.
+// The window a grouped stop will START at once `service` moves to `target`:
+// the unit mover's own read-only planner (visit-groups predictMemberWindows)
+// over the visit's open members — the earliest landed start when it is
+// earlier than the tapped service's own, else the target window unchanged.
+// Ungrouped rows, or a plan the mover would refuse, keep the target window.
+async function projectedStopWindow(service, target) {
+  if (!service.visit_id || !target.window?.start) return target.window;
+  const vg = require('./visit-groups');
+  const members = await vg.openMembers(db, service.visit_id);
+  if (members.length < 2) return target.window;
+  const visit = await db('service_visits').where({ id: service.visit_id }).first('window_start');
+  const predicted = vg.predictMemberWindows({
+    members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
+    requestedStart: target.window.start, requestedEnd: target.window.end, newDateStr: String(target.date),
+  });
+  if (!predicted.ok) return target.window;
+  // Zero-padded HH:MM (toHHMM) so '9:00' never sorts after '10:00'.
+  const earliest = predicted.targets.map((t) => t.start).filter(Boolean).map(toHHMM).sort()[0];
+  return earliest && earliest < toHHMM(target.window.start) ? { start: earliest, end: null } : target.window;
+}
+
 async function prepareCustomRungSms({ serviceId, service, target, note, notifyCustomer }) {
   if (!notifyCustomer) return { ok: true, prebuiltSms: null };
   let snap;
@@ -2087,11 +2119,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   let prebuiltSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
+    // A grouped stop's text quotes the STOP's landed start (its earliest
+    // member — the unit mover's visitMove.visitStart, which the send
+    // quotes), which can be earlier than the tapped service's own slot:
+    // render the pre-move body against that projection and pin the start,
+    // so the send can verify it against where the stop actually landed.
+    const stopWindow = await projectedStopWindow(service, target);
     const prepared = await prepareCustomRungSms({
-      serviceId, service, target, note, notifyCustomer,
+      serviceId, service, target: { ...target, window: stopWindow }, note, notifyCustomer,
     });
     if (!prepared.ok) return prepared;
-    prebuiltSms = prepared.prebuiltSms;
+    prebuiltSms = prepared.prebuiltSms && { ...prepared.prebuiltSms, windowStart: stopWindow.start || null };
   } else if (notifyCustomer && note && service.phone) {
     const prepared = await prepareNoteRungSms({
       serviceId, service, target, note, reasonCode,
@@ -2342,6 +2380,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
           // only on the single fallback (codex #3609 r3).
           coverMoved(seriesResult);
+          // A series result that moved a grouped stop reports where the stop
+          // landed (the anchor occurrence's visitWindowStart): the moved-SMS
+          // quotes that start, as the unit path quotes visitMove.visitStart.
+          const anchorOcc = (shiftedOccurrences || []).find((o) => String(o.id) === String(job.id));
+          if (anchorOcc?.visitWindowStart) unitVisitStart = String(anchorOcc.visitWindowStart);
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {

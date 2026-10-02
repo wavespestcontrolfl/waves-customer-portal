@@ -29,7 +29,7 @@ const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
 const { isEnabled } = require('../config/feature-gates');
@@ -188,7 +188,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
       // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
       // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
-      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+      // (a label-facts recheck that could not read the latest visit is the same case, Codex #5416 r31 P2)
+      if (!require('../services/agent-decision-send-checks').blockReasonIsRecheckInfrastructure(blockReason)) {
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       }
       return null;
@@ -318,6 +319,8 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
 }
 
 // POST /api/admin/communications/sms — send an SMS from admin
+const { linkedVisitIdsFrom } = require('../services/street-level-hold');
+
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
   let manualReservationId = null;
@@ -479,6 +482,7 @@ router.post('/sms', async (req, res, next) => {
       // auto-send check) still applies.
       leadId,
     } = req.body;
+    const linkedVisitIds = linkedVisitIdsFrom(req.body.linkedVisitIds);
     const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
     // The lead whose outreach this send records: ONLY a lead the bearer
     // check actually validated a consultation link for (Codex #4709 r17 P2)
@@ -1096,8 +1100,14 @@ router.post('/sms', async (req, res, next) => {
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
       ...(verifiedAgentDecision?.id ? {
-        providerPreSendCheck: require('../services/agent-decision-send-checks')
-          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
+        providerPreSendCheck: (() => {
+          const checks = require('../services/agent-decision-send-checks');
+          return checks.composeProviderPreSendChecks(
+            checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+          );
+        })(),
       } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
@@ -1177,6 +1187,9 @@ router.post('/sms', async (req, res, next) => {
         original_message_type: providerMessageType,
         ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
         ...(cardClaim ? { scheduled_service_id: cardVisitIds[0], trigger: 'admin', ...(cardVisitIds.length > 1 ? { scheduled_service_ids: cardVisitIds } : {}) } : {}),
+        // The visits the draft's reschedule / appointment links point at: the shared send step holds
+        // the text when any is a live street-level address hold (street-level-hold.js).
+        ...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
         // Parked ids ride into the provider-created sms_log row (same as
@@ -2565,6 +2578,10 @@ async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confi
     // `skip` may be async (the composer's pick reads the grouped page state).
     svc = null;
     for (const c of candidates) {
+      // A voice-agent booking a writer moved to 'confirmed' with customer_confirmed still false is a
+      // street-level address hold the office has not cleared: no link to it (the SQL filter above
+      // only drops the still-pending shape).
+      if (isUnreviewedDispatchOwned(c)) continue;
       if (!(await skip(c))) { svc = c; break; }
     }
     if (svc || candidates.length < PAGE) break;
@@ -3798,6 +3815,17 @@ router.post('/schedule-sms', async (req, res, next) => {
     const trusted = await trustedCustomerForScheduledSms(customerId, to);
     if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
     const trustedCustomerId = trusted.customerId;
+    // A draft whose reschedule / appointment link points at a street-level address hold is not queued:
+    // nothing about a held visit reaches the customer before the office confirms the address.
+    const scheduledLinkedVisitIds = linkedVisitIdsFrom(req.body?.linkedVisitIds);
+    if (scheduledLinkedVisitIds.length) {
+      const { isStreetLevelHoldVisit, HOLD_REFUSAL } = require('../services/street-level-hold');
+      for (const visitId of scheduledLinkedVisitIds) {
+        if (await isStreetLevelHoldVisit(visitId)) {
+          return res.status(409).json({ error: HOLD_REFUSAL, code: 'street_level_hold' });
+        }
+      }
+    }
     const explicitCustomerContext = Boolean(customerId && trustedCustomerId);
     // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
     // applicant would later hand their reply to the customer pipeline —
@@ -3899,6 +3927,9 @@ router.post('/schedule-sms', async (req, res, next) => {
         if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
         if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
         if (scheduledHumanAuthored) metaObj.human_authored = true;
+        // The visits the draft's links point at: the cron replay forwards them so the shared send step
+        // re-checks for a street-level hold at DELIVERY (a visit can become one after this enqueue).
+        if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;
         const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;
 
         const [inserted] = await trx('sms_log')
@@ -4020,6 +4051,9 @@ router.delete('/scheduled/:id', async (req, res, next) => {
  * the call-disposition-as-spam flow. Surfaced here so the SMS inbox can block
  * without routing through the calls tab. */
 
+// Block list role rule (owner 2026-10-02): any staff login may READ the list
+// (the SMS tab filters and labels blocked threads from it); only an admin may
+// block or unblock — unblocking releases that number's held texts.
 // GET /api/admin/communications/blocked-numbers — list + set for client-side filter
 router.get('/blocked-numbers', async (req, res, next) => {
   try {
@@ -4044,7 +4078,7 @@ router.get('/blocked-numbers', async (req, res, next) => {
 // formatting. A number that resolves to a live customer (main phone or a
 // service-contact slot) is refused, mirroring the call-disposition guard —
 // blocking it would silently drop that customer's texts.
-router.post('/blocked-numbers', async (req, res, next) => {
+router.post('/blocked-numbers', requireAdmin, async (req, res, next) => {
   try {
     const { blockType, reason } = req.body;
     const number = normalizePhone(req.body.number);
@@ -4094,7 +4128,7 @@ router.post('/blocked-numbers', async (req, res, next) => {
 });
 
 // DELETE /api/admin/communications/blocked-numbers/:number — unblock
-router.delete('/blocked-numbers/:number', async (req, res, next) => {
+router.delete('/blocked-numbers/:number', requireAdmin, async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.number }).del();
     res.json({ success: true });

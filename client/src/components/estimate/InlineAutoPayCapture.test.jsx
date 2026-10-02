@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import InlineAutoPayCapture from './InlineAutoPayCapture';
+import { AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 afterEach(() => cleanup());
 
@@ -184,7 +185,8 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     );
     await flush();
     await act(async () => { second.getByRole('checkbox').click(); });
-    expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+    // The tender the consent was rendered for rides the result (the page attests it).
+    expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1', methodType: 'us_bank_account' });
   });
 
   // "Use a different payment method" (customer report 2026-09-08): a
@@ -208,7 +210,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
       expect(getByText(/Your card is already saved for this plan/)).toBeInTheDocument();
       expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ ready: true, agreed: false, methodType: 'card' }));
       await act(async () => { getByRole('checkbox').click(); });
-      expect(await ref.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+      expect(await ref.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1', methodType: 'card' });
     });
 
     it('offers "Use a different payment method" and passes the saved intent id to onReplace', async () => {
@@ -270,5 +272,136 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     await act(async () => { handlers.change({ value: { type: 'card' } }); });
     expect(getByText(/your card is charged that service’s amount automatically/)).toBeInTheDocument();
     expect(getByText(/remove your card anytime/)).toBeInTheDocument();
+  });
+});
+
+// GATE_PAF_EXISTING_CUSTOMERS (PR-B): an existing customer on the
+// pay-after-first-visit card rail agrees to the after_visit_card (v12)
+// authorization — the same variant the accept records.
+describe('InlineAutoPayCapture afterVisit consent', () => {
+  const termsText = (container) => container.textContent;
+
+  it('renders the after_visit_card full terms when afterVisit is set (card)', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} afterVisit />,
+    );
+    await flush();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(/after my first service visit is completed/)).toBeInTheDocument();
+    expect(getByText(/Nothing is charged today\./)).toBeInTheDocument();
+  });
+
+  it('paused Auto Pay: says the card is kept and a pay link follows each service, and never promises a charge', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} paused />,
+    );
+    await flush();
+    expect(getByText('Card on file — nothing charged today')).toBeInTheDocument();
+    expect(getByText(/Your Auto Pay is paused, so we keep this card on file and send you a pay link after each completed service\./)).toBeInTheDocument();
+    expect(getByText('I authorize Waves to save this card on file and charge it for future invoices as agreed — cancel anytime.')).toBeInTheDocument();
+    expect(queryByText(/is charged that service/)).toBeNull();
+  });
+
+  it('r7: when the first invoice goes out at confirm (setup-only / timing denied), the held and Auto Pay copy say so', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const held = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} paused firstInvoiceNow />,
+    );
+    await flush();
+    expect(held.getByText(/^Your first invoice is sent when you confirm, with a link to pay it\. Your Auto Pay is paused/)).toBeInTheDocument();
+    held.unmount();
+    const plain = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} firstInvoiceNow />,
+    );
+    await flush();
+    expect(plain.getByText(/^Your first invoice is sent when you confirm, with a link to pay it\. After each completed service/)).toBeInTheDocument();
+  });
+
+  it('r9: a held customer saving a BANK account is told "Bank account on file", never "Card on file"', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account', replay: true }} loadStripeSdk={loadStripeSdk} paused />,
+    );
+    await flush();
+    expect(getByText('Bank account on file — nothing charged today')).toBeInTheDocument();
+    expect(queryByText('Card on file — nothing charged today')).toBeNull();
+  });
+
+  it('explicit Auto Pay off: same held shape as paused with neutral wording (no "paused" claim, no automatic-charge promise)', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} autopayOff />,
+    );
+    await flush();
+    expect(getByText('Card on file — nothing charged today')).toBeInTheDocument();
+    expect(getByText(/We keep this card on file and send you a pay link after each completed service\./)).toBeInTheDocument();
+    expect(queryByText(/paused/)).toBeNull();
+    expect(queryByText(/is charged that service/)).toBeNull();
+  });
+
+  it('keeps the base card terms when afterVisit is not set (gate off byte-identical)', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText, container } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(queryByText(/after my first service visit is completed/)).toBeNull();
+    expect(termsText(container)).toContain('By checking this box');
+  });
+});
+
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the monthly-tier setup fee is
+// billed WITH the first visit, so the capture says so and the card consent the
+// customer ticks (and the accept records as `after_visit_card`) is the
+// after-first-visit variant — never the base "after each completed service" text.
+describe('InlineAutoPayCapture afterVisitSetup (setup fee billed with the first visit)', () => {
+  it('names the first visit + one-time setup fee and shows the after_visit_card consent text', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} afterVisitSetup />,
+    );
+    await flush();
+    expect(getByText(/After your first visit is completed, your card is charged for that visit and your one-time setup fee/)).toBeInTheDocument();
+    expect(getByText(/charge this card after my first visit is completed \(that visit plus my one-time setup fee\)/)).toBeInTheDocument();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(AFTER_VISIT_CARD_CONSENT_TEXT)).toBeInTheDocument();
+    expect(queryByText(CARD_CONSENT_TEXT)).toBeNull();
+  });
+
+  it('a checked box is cleared when the rendered authorization switches to the setup-fee variant', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByRole, rerender } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { getByRole('checkbox').click(); });
+    expect(getByRole('checkbox')).toBeChecked();
+    rerender(<InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} afterVisitSetup />);
+    await flush();
+    expect(getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it('default (flag absent): today\'s copy and base consent text', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    expect(getByText(/charge this card after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/one-time setup fee/)).toBeNull();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(CARD_CONSENT_TEXT)).toBeInTheDocument();
   });
 });

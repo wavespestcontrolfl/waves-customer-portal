@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
@@ -145,6 +145,17 @@ const { isEnabled } = require('../config/feature-gates');
 // both processor lanes, so the gate alone never half-applies (codex #5371 r2).
 function unclearServiceAssessmentActive(enabled = isEnabled) {
   return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
+}
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING as the canAutoRoute option: INBOUND
+// calls only (outbound speaker labels have swapped) and only with
+// GATE_CALL_AGENT_COMMIT_BOOKING on, the kill switch of the commercial
+// exception; read at call time like the GATE_CALL_PROPERTY_ROLE reads. ONE
+// predicate for both processor lanes AND buildFailOpenRoutingContext (the
+// offline routing audits), so they derive it one way (codex #5377 r6).
+function commercialDictatedBookingActive(call = {}, gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const live = gates.commercialLive || (() => require('../config/feature-gates').callCommercialDictatedBookingLive?.());
+  return enabled('callAgentCommitBooking') === true && !isOutboundCall(call) && live() === true;
 }
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
@@ -1433,7 +1444,7 @@ const { resolveCallLeadSource } = require('../utils/call-lead-source');
 // estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'handled'];
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -1802,8 +1813,10 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // triage card instead), so this is the only one.
 // The dispatch schedule link for a held visit: ?appointment opens the visit,
 // ?date selects its day. Shared by the admin bell and the review card.
+// The card's "Open visit" link; the one builder lives in street-level-hold.js (the triage list rebuilds it
+// with a moved hold's live date).
 function streetLevelVisitLink(visitId, visitDate) {
-  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+  return require('./street-level-hold').streetLevelVisitLink(visitId, visitDate);
 }
 function streetLevelVisitWhen(scheduledDate, windowStart) {
   return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
@@ -2113,9 +2126,35 @@ function callerIdNameForPrompt(call) {
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
  */
+// The commercial dictated booking options the audits hand canAutoRoute: the processor
+// lanes' context, with the trusted-label gate, the routed transcript, the call's own
+// START (callStartedAt: a post-call fallback row's created_at is after the call ended;
+// codex #5377 r12 P2) and the audit's catalog-aware quote check.
+function auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) {
+  const routedTranscript = transcript !== undefined ? transcript : call.transcription;
+  return {
+    commercialDictatedBooking: true,
+    transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
+    transcript: routedTranscript,
+    callStartedAt: callStartedAt(call) || call.created_at,
+    commercialQuoteBookable: auditCommercialQuoteBookableFor({
+      extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+      transcription: routedTranscript,
+      services: bookableServices,
+    }),
+  };
+}
+
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
+  // The transcript the routing decision is grounded in (default: the row's
+  // own); `gates` lets a test inject the gate reads.
+  transcript = undefined, gates = undefined,
+  // The bookable service catalog (loadBookableCallServices) and the call's V1
+  // record, for the commercial quote check; without a catalog the check fails
+  // closed (the audit holds the call, never over-admits it).
+  bookableServices = null, extracted = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -2144,6 +2183,12 @@ function buildFailOpenRoutingContext({
       // (the live pass's own two-gate predicate). Absent when off, so the
       // options shape the audits compare is unchanged gate-off.
       ...(failOpenEnabled && unclearServiceAssessmentEnabled ? { unclearServiceAssessment: true } : {}),
+      // GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r6 P1): the processor
+      // lanes' commercial context, derived by the SAME predicate, with the
+      // trusted-label gate, the transcript and the call time the grounding reads
+      // off the call row every audit already has. Absent when the gate is off,
+      // so the options shape the audits compare is unchanged gate-off.
+      ...(commercialDictatedBookingActive(call, gates) ? auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
     },
   };
 }
@@ -2231,9 +2276,10 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     // branch files failedOpenFlags as advisory cards. Only the gate's own
     // waivers ride along (the on-file address flags stay dropped, as before),
     // so gate off the replacement verdict is unchanged.
-    ...(routingResult.unclearServiceDemotedFlags?.length ? {
-      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
-      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    ...(routingResult.gateDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.gateDemotedFlags],
+      gateDemotedFlags: [...routingResult.gateDemotedFlags],
+      ...(routingResult.unclearServiceDemotedFlags?.length ? { unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags] } : {}),
     } : {}),
   };
 }
@@ -5283,7 +5329,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         // quote hides in a closed lead the pipeline view never shows.
         const currentLead = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .first('id', 'status');
         if (!currentLead) return false;
@@ -5294,7 +5340,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         }
         const claimed = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
@@ -5336,13 +5382,13 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
       const updated = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .update({
           status: 'won',
@@ -6293,7 +6339,7 @@ async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisory
     const have = new Set((present || []).map((r) => r.reason_code));
     const missing = flags.filter((f) => !have.has(f));
     if (missing.length) {
-      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+      throw new Error(`gated advisory card missing for: ${missing.join(', ')}`);
     }
     return demoted;
   });
@@ -6389,6 +6435,83 @@ function v2BookingServiceView(extracted = {}, v2Extraction = null) {
   if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
   view.specific_service_name = v2Flat.specific_service_name || null;
   return view;
+}
+
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r9 P1): the dictated
+// booking is only safe when the agreed quote SURVIVES the booking path's own
+// catalog-aware price resolver. resolveCallBookingPrice discards every quote
+// when the resolved catalog row is not one_time (a recurring service bills
+// through the recurring machinery) or is a covered re-service, and books no
+// price at all: the caller's accepted amount would never reach the visit.
+// Returns `(quoted, v2Extraction) => boolean` that resolves the catalog row the
+// way the booking resolves it, on every view of the call's service (the V1
+// record before V2 adoption, the merged fields, the V2-overridden view — the same
+// views the whole-structure waiver judges), and requires resolveCallBookingPrice
+// to return exactly the quoted amount for each. FAILS CLOSED: no catalog loaded,
+// no row resolved (the booking's Waves Assessment fallback is not a settled
+// service), a re-service revisit, or any error. ONE builder for both processor
+// lanes and buildFailOpenRoutingContext (the offline audits).
+function parseLooseJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value) || {}; } catch (_e) { return {}; }
+}
+
+// The extraction fields the service resolvers read (resolveSchedulableCallService,
+// resolveCallBookingCatalogService, hasCallReServiceIntent). V2-primary adoption can
+// fill or replace them, so the V1 values it replaced are recorded on the canonical
+// extraction as `pre_adoption_service_fields` ({} when adoption touched none).
+const CALL_SERVICE_VIEW_FIELDS = Object.freeze(['matched_service', 'requested_service', 'specific_service_name', 'call_summary', 'pain_points']);
+function preAdoptionServiceFields(preAdoptionExtracted = {}, adoptedFields = []) {
+  return Object.fromEntries(CALL_SERVICE_VIEW_FIELDS
+    .filter((key) => adoptedFields.includes(key))
+    .map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
+}
+
+// The offline audits' commercial quote check (buildFailOpenRoutingContext): the live
+// check's views rebuilt from the persisted extraction. The pre-adoption view is the
+// canonical record with the recorded V1 service values restored. A row with a V2
+// extraction and no record (processed before it was written) has an unknown
+// pre-adoption view, so the audit holds it rather than over-admit (codex #5377 r17 P1).
+function auditCommercialQuoteBookableFor({ extracted = {}, transcription = '', services = null } = {}) {
+  const recorded = extracted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded);
+  const preAdoptionExtracted = hasRecord && Object.keys(recorded).length ? { ...extracted, ...recorded } : null;
+  const check = commercialQuoteBookableFor({ extracted, preAdoptionExtracted, transcription, services });
+  return (quoted, v2Extraction = null) => {
+    if (!hasRecord && isV2Extraction(v2Extraction)) return false;
+    return check(quoted, v2Extraction);
+  };
+}
+
+function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
+  return (quoted, v2Extraction = null) => {
+    try {
+      if (!Array.isArray(services) || !services.length) return false;
+      const views = [];
+      if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+      views.push(extracted || {});
+      const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
+      if (finalView) views.push(finalView);
+      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      // The approved booking re-asserts the owner's recurring-intent rule over the
+      // V2-merged service before it books (the singular-to-program override): judge
+      // each view as the booking will book it, so a one-time pick that becomes a
+      // quarterly program (which drops the quote) holds here (codex #5377 local r1 P1).
+      const serviceNames = services.map((s) => s.name).filter(Boolean);
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+        const coarse = resolveSchedulableCallService(view, { transcription });
+        const row = resolveCallBookingCatalogService({
+          extracted: view,
+          transcription,
+          services,
+          coarseServiceLabel: coarse.ok ? coarse.service : null,
+        });
+        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row }).price === quoted;
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
 }
 
 // Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
@@ -9921,6 +10044,7 @@ const CallRecordingProcessor = {
     // structure unit waiver must agree with it too (a V1 pick V2 overwrites
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
+    let serviceFieldsAdopted = [];
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -9936,6 +10060,14 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
+      serviceFieldsAdopted = adoption.adoptedFields;
+    }
+    // The V1 values of the service fields adoption replaced ride on the canonical
+    // extraction ({} when none, or when the primary gate kept adoption off), so the
+    // offline audits rebuild the same pre-adoption service view the live commercial
+    // quote check reads (codex #5377 r17 P1).
+    if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+      extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
     }
 
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
@@ -10332,6 +10464,9 @@ const CallRecordingProcessor = {
     // suppressed. Approved calls capture v2's validated scheduling fields so
     // the appointment is created from the data the gate actually checked.
     let v2RoutingBlocked = false;
+    // The enforce decision write's report (upsertRouteDecision `out`): which row
+    // of the decision's family this pass wrote, or null when it wrote none.
+    const routeDecisionWrite = {};
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
     // P1-C (callback_number_needed reminder hold): set true the moment the
@@ -10852,9 +10987,31 @@ const CallRecordingProcessor = {
             // Speaker labels are LLM-inferred today — the demotion stays dark
             // until this companion gate flips (see feature-gates.js).
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+            // Commercial dictated booking (GATE_CALL_COMMERCIAL_DICTATED_BOOKING,
+            // owner ruling 2026-09-30): staff dictated + caller accepted, both
+            // quotes grounded in the right speaker's turn. INBOUND ONLY for
+            // now (owner ruling, same day; codex #5377 r1 P1): it trusts the
+            // same "Agent:" labels the demotion above does, and outbound
+            // diarization has swapped them — outbound waits until staff
+            // identity on an outbound recording is established independently
+            // of the labels. Also needs GATE_CALL_AGENT_COMMIT_BOOKING, the
+            // kill switch of the commercial exception. Read at call time
+            // (like the GATE_CALL_PROPERTY_ROLE reads); off = false.
+            // Decision key: a force-reprocess whose verdict differs from a
+            // REVIEWED decision row records a '+r<n>' revision row
+            // (upsertRouteDecision, gate-agnostic; codex #5377 r4 P1) — no
+            // per-gate version is needed.
+            commercialDictatedBooking: commercialDictatedBookingActive(call),
+            // The agreed quote must survive the booking path's own catalog-aware
+            // price resolver (codex #5377 r9 P1); absent when the gate is off.
+            ...(commercialDictatedBookingActive(call) ? {
+              commercialQuoteBookable: commercialQuoteBookableFor({
+                extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+              }),
+            } : {}),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
-            callStartedAt: call.created_at,
+            callStartedAt: callStartedAt(call) || call.created_at,
             // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
             // address is not held on an unclear service — the Waves
             // Assessment fallback below books it (both directions, same as
@@ -10974,7 +11131,7 @@ const CallRecordingProcessor = {
           // dark gate flipped either way — replaces the recommendation and
           // created_at instead of leaving the first pass's verdict as the
           // newest decision. Fenced to the pass that owns the processing token.
-          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken }, routeDecisionWrite);
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -11181,9 +11338,12 @@ const CallRecordingProcessor = {
             // call (null = claim lost: abandon), the call is NOT booked — a
             // blocking card left standing on a booked visit is what invites a
             // duplicate booking.
+            // The same fenced, verified demotion serves EVERY gated waiver
+            // (gateDemotedFlags: unclear-service and commercial dictated
+            // booking alike; codex #5377 r4 P1).
             const demoted = await demoteOpenTriageCards(
-              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
-              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+              db, call.id, routingResult.gateDemotedFlags, procToken,
+              (routingResult.gateDemotedFlags || []).map((f) => buildTriageItem({
                 callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
               })),
             );
@@ -19890,16 +20050,24 @@ const CallRecordingProcessor = {
       try {
         // Row-locked like every write to an existing decision (codex #5371 r9 P1):
         // a verdict landing concurrently serializes on the route_decisions row.
-        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
-          // Same-run outcome update: targets the row THIS process wrote
-          // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row). A row a human has
-          // reviewed keeps the outcome that review judged.
-          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
-          {
-            final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
-            ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          }));
+        // Same-run outcome update: targets the row THIS pass wrote moments ago
+        // (upsertRouteDecision reports its version: the family's unreviewed
+        // member, the base or its '+r1' — every pass has exactly one writable
+        // row, whatever its verdict; codex #5377 r4 / r7 / r8 P1). Null only when
+        // the pass lost its claim and wrote nothing. A pass that never reached the
+        // write (report absent) keeps the old family-wide scope. A reviewed row is
+        // never updated either way.
+        const outcomeVersion = routeDecisionWrite.decisionVersion === undefined
+          ? routeDecisionFamilyVersions(V2_DECISION_VERSION)
+          : routeDecisionWrite.decisionVersion;
+        if (outcomeVersion) {
+          await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
+            { call_log_id: call.id, decision_version: outcomeVersion, mode: 'enforce', recording_sid: call.recording_sid || '' },
+            {
+              final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
+              ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
+            }));
+        }
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
@@ -20584,7 +20752,15 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
-          callStartedAt: call.created_at,
+          // Inbound-only and behind the agent-commit gate, mirroring the
+          // enforce lane (owner ruling 2026-09-30; codex #5377 r1 P1).
+          commercialDictatedBooking: commercialDictatedBookingActive(call),
+          ...(commercialDictatedBookingActive(call) ? {
+            commercialQuoteBookable: commercialQuoteBookableFor({
+              extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+            }),
+          } : {}),
+          callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
         });
@@ -22119,6 +22295,10 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  commercialDictatedBookingActive,
+  commercialQuoteBookableFor,
+  auditCommercialQuoteBookableFor,
+  preAdoptionServiceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

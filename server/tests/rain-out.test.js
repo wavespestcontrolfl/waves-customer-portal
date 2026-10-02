@@ -102,6 +102,7 @@ function chain({ rows = [], ...terminal } = {}) {
   const builder = {
     where: jest.fn(function where(arg) { if (typeof arg === 'function') arg.call(builder, builder); return builder; }),
     whereIn: jest.fn().mockReturnThis(),
+    whereNotIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
@@ -1011,6 +1012,25 @@ describe('rain-out service', () => {
       sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
       await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true, notified_at: null });
+    });
+
+    test('gate on: a series shift that reports a grouped stop start — the moved-SMS quotes that start', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [chain({ update: jest.fn().mockResolvedValue(1) }), chain({ update: jest.fn().mockResolvedValue(1) })],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00', visitId: 'v1', visitWindowStart: '11:00' }],
+      });
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const vars = renderSmsTemplate.mock.calls[renderSmsTemplate.mock.calls.length - 1][1];
+      expect(vars.new_option).toContain('11:00 AM - 1:00 PM');
     });
 
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
@@ -3373,6 +3393,73 @@ describe('rain-out service', () => {
       const result = await RainOut.commit(COMMIT_ARGS);
       expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    // A grouped stop whose pest partner (08:00-09:00) arrives before the
+    // tapped service (09:00-11:00): moved to 13:00 the partner shifts to
+    // 12:00, so the stop starts at 12:00 and the Custom text must say so.
+    function wireGrouped() {
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, visit_id: 'v1' }) }),
+          chain({ rows: [
+            { id: 'svc-1', scheduled_date: '2026-06-11', window_start: '09:00', window_end: '11:00', status: 'confirmed' },
+            { id: 'pest-1', scheduled_date: '2026-06-11', window_start: '08:00', window_end: '09:00', status: 'confirmed' },
+          ] }),
+        ],
+        service_visits: [chain({ first: jest.fn().mockResolvedValue({ window_start: '08:00' }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) })],
+      });
+    }
+
+    test('gate on: a grouped stop whose partner starts first — the Custom text quotes the STOP start', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireGrouped();
+      SmartRebooker.reschedule.mockResolvedValueOnce({ visitMove: { visitId: 'v1', visitStart: '12:00', moved: ['svc-1', 'pest-1'] } });
+      const result = await RainOut.commit(COMMIT_ARGS);
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 12:00 PM - 2:00 PM');
+    });
+
+    test('gate on: the sheet preview measures the same stop-start body commit() renders', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireGrouped();
+      await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE, target: COMMIT_ARGS.target });
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls.length).toBeGreaterThan(0);
+      for (const call of customCalls) expect(call[1].new_option).toContain('12:00 PM - 2:00 PM');
+    });
+
+    test('gate on: an unpadded start (9:00) is never ranked after 10:00 — the text keeps 9 AM', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, visit_id: 'v1' }) }),
+          chain({ rows: [
+            { id: 'svc-1', scheduled_date: '2026-06-11', window_start: '09:00', window_end: '10:00', status: 'confirmed' },
+            { id: 'pest-1', scheduled_date: '2026-06-11', window_start: '10:00', window_end: '11:00', status: 'confirmed' },
+          ] }),
+        ],
+        service_visits: [chain({ first: jest.fn().mockResolvedValue({ window_start: '09:00' }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) })],
+      });
+      SmartRebooker.reschedule.mockResolvedValueOnce({ visitMove: { visitId: 'v1', visitStart: '09:00', moved: ['svc-1', 'pest-1'] } });
+      const result = await RainOut.commit({ ...COMMIT_ARGS, target: { date: '2026-06-12', window: { start: '9:00', end: '10:00' } } });
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 9:00 AM - 11:00 AM');
+    });
+
+    test('gate on: a grouped stop that landed elsewhere than projected — the Custom text is not sent', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireGrouped();
+      SmartRebooker.reschedule.mockResolvedValueOnce({ visitMove: { visitId: 'v1', visitStart: '11:00', moved: ['svc-1', 'pest-1'] } });
+      const result = await RainOut.commit(COMMIT_ARGS);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).toContain('stop_start_changed');
     });
 
     test('gate on: route scope rejected — a custom message is stop-specific, like the note', async () => {

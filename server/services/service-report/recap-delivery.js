@@ -29,6 +29,16 @@ function backfilledCompletion(structuredNotes) {
   return Boolean(notes && typeof notes === 'object' && notes.backfill === true);
 }
 
+// Fast Complete's fixed re-service text (completionSmsRecapMode, written
+// before the provider call) is the visit's ONE customer text, so a video recap
+// queued before completion must not follow it with a second one.
+function fixedReserviceTextVisit(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+  return Boolean(notes && typeof notes === 'object'
+    && notes.completionSmsRecapMode === require('../reservice-fixed-recap').MODE);
+}
+
 async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   // A retired callback recap must never reach the customer's phone — the
   // public endpoints hide/404 the video, so the SMS would link a dead
@@ -57,6 +67,10 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
     .first();
   if (!service) return { ok: false, reason: 'no_service' };
   if (suppressedTypedReport(service.structured_notes)) return { ok: false, reason: 'suppressed_report' };
+  if (fixedReserviceTextVisit(service.structured_notes)) {
+    logger.info(`[recap-delivery] recap send refused for scheduled service ${scheduledServiceId}: the fixed re-service text was this visit's one completion text`);
+    return { ok: false, reason: 'reservice_fixed_text' };
+  }
   if (backfilledCompletion(service.structured_notes)) {
     logger.info(`[recap-delivery] recap send refused for scheduled service ${scheduledServiceId}: backfilled quiet closeout — no customer contact`);
     return { ok: false, reason: 'backfill_quiet_closeout' };

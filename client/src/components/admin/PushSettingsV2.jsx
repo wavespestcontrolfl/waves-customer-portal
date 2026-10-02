@@ -97,6 +97,7 @@ const BELL_CATEGORY_LABELS = {
   email_alert: "Email alerts (complaints, lead review)",
   email_rescue: "Email rescued from spam",
   email_rescue_review: "Spam rescue needs review",
+  llm_cost: "AI spend spikes",
 };
 
 const bellCategoryLabel = (cat) =>

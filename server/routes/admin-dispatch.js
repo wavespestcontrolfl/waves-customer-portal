@@ -62,14 +62,15 @@ const {
   REENTRY_SEND_SEAL_TTL_MS,
 } = require('../services/service-report/email-delivery');
 
-const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
+const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash, suggestLandscapeCondition } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -618,6 +619,51 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/promises — the completion form's
+// promise check (owner "ok yes add these" 2026-10-01): the open promises
+// Waves made this visit's customer that a technician can keep at a visit,
+// from calls, texts and emails (visit-promises.js). Only while
+// GATE_REPORT_WRITER_RULES is live and only on visits the writer covers
+// (never lawn or tree, shrub & palm); otherwise a no-read
+// { available: false }. Read-only. `include` (comma-separated ids): open
+// promises beyond the newest ten that a restored draft had marked, listed
+// after them (Codex #5516).
+router.get('/:serviceId/promises', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportWriterRulesLive()) {
+      return res.json({ available: false, promises: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's
+    // promises are customer data); admins keep office-wide reach.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // …and only while it is a current assignment: not cancelled or moved
+    // off them, inside the field access window (the shared predicate;
+    // Codex #5516).
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const VisitPromises = require('../services/service-report/visit-promises');
+    let profileFailed = false;
+    const completionProfile = await resolveCompletionProfileForScheduledService(svc)
+      .catch(() => { profileFailed = true; return null; });
+    if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
+      return res.json({ available: false, promises: [] });
+    }
+    const include = String(req.query?.include || '').split(',').map((id) => id.trim()).filter(Boolean);
+    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id, include });
+    res.json({ available: true, promises, total });
   } catch (err) { next(err); }
 });
 
@@ -2582,6 +2628,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
           await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
         }
+        // Record the address this approval is for (same transaction, same row lock), so a later retry of
+        // the activation cannot release the hold against an address that changed afterwards.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
@@ -3077,8 +3128,17 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
+    const scheduled = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
+    // The resolution reads the visit's application history; a reassignment
+    // during that read must not hand it to the former technician (same
+    // before-and-after check as the Job Card route).
+    const stillInScope = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!stillInScope) return res.status(404).json({ error: 'Service not found' });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -4137,6 +4197,48 @@ router.post('/slot-check', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/tree-shrub/fast-context
+// What the Tree & Shrub Fast Complete sheet loads: eligibility, the visit
+// identity (echoed back as `expectedVisit` on /complete), the catalog with
+// per-product compliance flags, the protocol month's suggested products, the
+// last visit's values and the rotation / palm-spacing warnings. Read-only;
+// behind GATE_TS_FAST_COMPLETE alone (owner 2026-10-01: every tech completes
+// T&S here, no per-tech flag). See services/tree-shrub-fast-context.js.
+router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
+  try {
+    if (!tsFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/lawn-reservice/fast-context
+// What the lawn re-service Fast Complete sheet loads: the visit identity
+// (echoed back as `expectedVisit` on /complete), the customer's booking words,
+// the active catalog the picker searches, and the property's last completed
+// lawn visit with its products (suggestion tiles, amounts only from what that
+// visit recorded). Read-only; dark behind GATE_LAWN_RESERVICE_FAST_COMPLETE (no
+// per-tech flag). A visit whose live completion profile is not lawn_re_service
+// is refused (409 not_lawn_re_service); any other ineligibility answers 200
+// `eligible: false` with a reason, like the tree-shrub context. See
+// services/lawn-reservice-fast-context.js.
+router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => {
+  try {
+    if (!lawnReserviceFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/lawn-reservice-fast-context').buildLawnReserviceFastContext(req.params.serviceId);
+    if (!ctx.ok) {
+      const status = ctx.reason === 'not_lawn_re_service' ? 409 : recapStatusForReason(ctx.reason);
+      return res.status(status).json({ error: ctx.reason, code: ctx.reason });
+    }
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -4176,12 +4278,15 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
       },
     });
     if (!result) {
-      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', status: 'failed' });
+      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', suggestedCondition: null, status: 'failed' });
     }
     // Sign the scores + observation + the EXACT photo set so the completion handler
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    // Fast Complete's condition suggestion — the tech confirms it; not part of
+    // the signed review.
+    result.suggestedCondition = suggestLandscapeCondition(result.scores?.overallScore);
     return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });
@@ -4421,6 +4526,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // but they are never texted, closed or re-armed here — nothing covers
   // them but the reminder cron (codex r19 P1).
   const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];
+  // Grouped-visit partners the move carried (GATE_SERIES_MOVE_CARRIES_VISIT)
+  // are the same appointment as their occurrence: the series notice covers
+  // them, so their reminders sync, close and re-arm exactly like the
+  // occurrences' (owned on the time THIS move recorded). They are never
+  // counted, conflicted or quoted by the text, and Quick Move's anchor-only
+  // close scope leaves them out like any sibling.
+  const carriedPartners = (Array.isArray(result.carriedVisitMembers) ? result.carriedVisitMembers : [])
+    .map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
+  const reminderOccurrences = [...occurrences, ...carriedPartners];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
   // the CURRENT lease can stamp or release.
@@ -4547,7 +4661,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // closed under the series notice nor re-armed here — closing would
     // silence the newer schedule's reminders, re-arming would clear flags
     // the newer move owns and duplicate its texts (codex r8 P1).
-    const recordedReminderTimeById = new Map(occurrences.map((occurrence) => [
+    const recordedReminderTimeById = new Map(reminderOccurrences.map((occurrence) => [
       String(occurrence.id),
       parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })).getTime(),
     ]));
@@ -4576,10 +4690,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // flags — either way a reminder for a window nobody set (hook r20 P1).
     // The sync itself still runs for them (handleReschedule keeps the
     // marker carve-out); only the close and the re-arm skip them.
-    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
+    const ownedOccurrences = () => reminderOccurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
       && occurrence.conflicted !== true && !!occurrence.windowStart);
     if (remindersThisPass) {
-      for (const occurrence of occurrences) {
+      for (const occurrence of reminderOccurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on
         // the slot THIS move recorded — a replayed/retried pass whose
         // occurrence was rescheduled again in between must not drag its
@@ -4635,7 +4749,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // the flush here.
       const ownsFlush = !qualityDates;
       const seriesQualityDates = qualityDates || new Set();
-      for (const occurrence of [...occurrences, ...followUps]) {
+      for (const occurrence of [...reminderOccurrences, ...followUps]) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
         } catch (err) {
@@ -4747,7 +4861,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -4759,10 +4873,19 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       const recordedStart = anchorOcc ? hm(anchorOcc.windowStart) : hm(parseRescheduleWindow(newWindow).start);
       const anchorStillOnRecordedSlot = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0]
         && (!anchorOcc || hm(row.window_start) === recordedStart);
+      // A grouped anchor's text quotes its stop's landed start: the anchor
+      // must still sit in that visit, and the visit still start there (a
+      // partner moved or detached since makes the quoted window obsolete).
+      const stopStillOnRecordedStart = async (row) => {
+        if (!anchorOcc?.visitWindowStart) return true;
+        if (String(row.visit_id || '') !== String(anchorOcc.visitId || '')) return false;
+        const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+        return !!visit && hm(visit.window_start) === hm(anchorOcc.visitWindowStart);
+      };
       if (!customer) {
         notificationError = 'Customer not found';
         definitiveNonSend = true;
-      } else if (!anchorStillOnRecordedSlot(svc)) {
+      } else if (!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))) {
         notificationError = 'anchor_changed';
         definitiveNonSend = true;
       } else {
@@ -4771,7 +4894,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // The anchor's landing window (the caller's, or its own kept window on
         // a date-only move) — window_text quotes the 2-hour arrival promise
         // from that start, never the job-duration block (see sms-time-format).
-        const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
+        // A grouped anchor quotes its STOP's landed start (the earliest member,
+        // recorded by the move as visitWindowStart) — the unit mover's rule
+        // (visitMove.visitStart, codex #3609 r25 P1).
+        const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
         // Persist the promised arrival instant the same way the single-visit
@@ -4819,12 +4945,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
             sendOutcome,
             preDispatchCheck: async () => {
-              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
               if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
               if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
                 return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
               }
-              return anchorStillOnRecordedSlot(row)
+              return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)
                 ? { ok: true }
                 : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
             },

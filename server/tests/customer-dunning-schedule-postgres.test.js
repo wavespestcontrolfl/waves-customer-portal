@@ -102,6 +102,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       t.timestamp('touch_claimed_at');
       t.timestamp('anchor_at');
       t.text('paused_reason');
+      t.uuid('paused_by_admin_id');
       t.timestamp('created_at').defaultTo(app.fn.now());
       t.timestamp('updated_at').defaultTo(app.fn.now());
     });

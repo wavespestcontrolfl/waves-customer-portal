@@ -25,6 +25,7 @@ function providerOf(id) {
   if (id.startsWith('gpt') || id.startsWith('text-embedding') || /^o\d/.test(id)) return 'openai';
   if (id.startsWith('gemini') || id.startsWith('veo')) return 'gemini';
   if (id.startsWith('jev')) return 'typesafe';
+  if (id === 'clef' || id.startsWith('clef-')) return 'cloudflare';
   if (id === 'sonar' || id.startsWith('sonar')) return 'perplexity';
   return 'unknown';
 }
@@ -69,6 +70,7 @@ const SELECTORS = [
   // with one pinned catalog version, so the row is read-only here: moving it
   // is the env change below after a replay on the new pinned version.
   { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; pin a new jev-N.N.N via MODEL_TYPESAFE_JEV after a replay, no picker discovery' } },
+  { key: 'CLOUDFLARE_CLEF', env: 'MODEL_CLOUDFLARE_CLEF', description: 'Typed decisions, second provider (Cloudflare Clef on Workers AI; dark behind GATE_TYPED_DECISIONS_CLEF)', accepts: { providers: ['cloudflare'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; clef-flash or clef via MODEL_CLOUDFLARE_CLEF, no picker discovery' } },
   // deep: true — same rationale as NEWSLETTER above: its only call site
   // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
   // through llm/call.js#dispatch, which already floors max_tokens for
@@ -81,6 +83,11 @@ const SELECTORS = [
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
   // through llm/call.js#dispatch and sends the visit's photos.
   { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; dark behind GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  // deep: true — its only call site (campaign-advisor.js, TEXT_POLICIES.adsAdvisor)
+  // goes through llm/call.js#dispatch, which floors max_tokens for always-thinking
+  // models and reads past thinking blocks; its default (Fable 5.1) is itself a
+  // requires:'deep' catalog model.
+  { key: 'ADS_ADVISOR', env: 'MODEL_ADS_ADVISOR', description: 'Daily Google Ads advisor (owner ruling 2026-10-01: Fable 5.1, effort high)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -123,12 +130,14 @@ const ROUTE_SELECTOR = {
   plantIdReferee: 'PLANT_ID_REFEREE',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
   typedDecision: 'TYPESAFE_JEV',
+  typedDecisionClef: 'CLOUDFLARE_CLEF',
 };
 const POLICY_SELECTOR = {
   report: { primary: 'OPENAI_REPORT_WRITER', fallback: 'FLAGSHIP' },
   customerCopy: { primary: 'FLAGSHIP', fallback: 'OPENAI_BALANCED' },
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
+  adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -387,6 +396,7 @@ const LANES = [
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
   // VISION only when both Gemini rungs miss.
   L('typed_decisions', 'Typed yes/no/choice decisions (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecision'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS dark' }),
+  L('typed_decisions_clef', 'Typed decisions, second provider (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecisionClef'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS_CLEF dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
@@ -488,7 +498,7 @@ const LANES = [
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('adsAdvisor', 'primary'), P('adsAdvisor', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
   L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'every chart; stage 2' }),
 
@@ -619,6 +629,7 @@ const LANE_AREA = {
   // Shadow typed decisions ride the nightly call self-audit (and inbound texts
   // in PR 2); one area per lane, so it sits with the audit it is scored against.
   typed_decisions: 'calls',
+  typed_decisions_clef: 'calls',
   lead_synopsis: 'calls',
   call_commitments: 'calls',
   csr_coach: 'calls',
@@ -783,6 +794,7 @@ const LANE_DESCRIBE = {
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
   plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',
+  typed_decisions_clef: 'The same fixed questions put to a second provider (Cloudflare Clef) for comparison, recorded for review only (dark)',
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',

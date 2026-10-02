@@ -26,6 +26,8 @@ jest.mock('../models/db', () => {
       where: (...args) => { mockState.wheres.push({ table, args }); return chain; },
       whereNot: () => chain,
       whereNotNull: () => chain,
+      whereIn: () => chain,
+      whereNull: () => chain,
       orderBy: () => chain,
       limit: () => chain,
       // The prior-thread scope scan is the only reader here; anything else
@@ -33,7 +35,7 @@ jest.mock('../models/db', () => {
       select: async () => (table === 'emails' ? mockState.threadEmails : []),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
-        return 1;
+        return table === 'leads' && mockState.leadClosed ? 0 : 1;
       },
       insert: (payload) => ({
         returning: async () => {
@@ -44,7 +46,9 @@ jest.mock('../models/db', () => {
     };
     return chain;
   };
-  return jest.fn((table) => builderFor(table));
+  const db = jest.fn((table) => builderFor(table));
+  db.transaction = async (fn) => fn(db);
+  return db;
 });
 
 const mockReadiness = jest.fn();
@@ -65,6 +69,8 @@ jest.mock('../services/estimate-automation-duplicates', () => ({
   // The lock hands its transaction executor to the callback — reuse the db
   // mock so trx('estimates') resolves to the same recording builder.
   withAutomatedEstimatePhoneLock: async (_phone, callback) => callback(require('../models/db')),
+  lockSupersededDraftInTx: async (_trx, { estimateId }) => ({ id: estimateId }),
+  archiveSupersededDraftInTx: async (_trx, stale, opts) => { mockState.archived.push({ id: stale.id, ...opts }); return true; },
 }));
 
 // The lock passes its executor to the callback; the db mock above must also
@@ -93,7 +99,7 @@ const EXTRACTED = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { inserts: [], updates: [], threadEmails: [], wheres: [] };
+  mockState = { inserts: [], updates: [], threadEmails: [], wheres: [], archived: [], leadClosed: false };
   mockReadiness.mockReturnValue({ ready: true, serviceInterest: 'Pest Control', missing: [] });
   mockBuilder.mockReturnValue({
     monthly: 62, annual: 744, oneTimeTotal: 0,
@@ -463,5 +469,12 @@ describe('maybeDraftEstimateFromEmailLead', () => {
 
     const link = mockState.updates.find((entry) => entry.table === 'leads');
     expect(link.payload.estimate_id).toBe(result.estimateId);
+  });
+
+  test('the lead closed (e.g. the customer booked online: handled) before the link: nothing linked, the draft archived (codex #5477 r16)', async () => {
+    mockState.leadClosed = true;
+    const result = await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
+    expect(result).toMatchObject({ created: false, archived: true });
+    expect(mockState.archived).toEqual([{ id: 'estimates-row-1', reason: 'lead_closed_before_link' }]);
   });
 });

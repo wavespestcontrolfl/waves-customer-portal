@@ -3055,6 +3055,50 @@ function roundPositiveMoney(value) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
 }
 
+// GATE_PAF_SETUP_FEE: the accept defers the setup-only (monthly-tier) fee onto
+// the first visit ONLY when that visit carries a billable price, and a tier
+// row's per-application price (billing-cadence perApplicationChargeAmount,
+// stamped as the converted row's estimated_price) resolves only when its visit
+// count is known. A tier plan whose count could not be read converts to an
+// UNPRICED visit that completion parks, so the accept keeps today's payable
+// setup invoice for it — and the page must not promise otherwise. True only
+// when the bundle has monthly-billed tier rows and EVERY one has a positive
+// visit count (the same field the accept reads), so the preview and the accept
+// agree on the determinable cases.
+function monthlyTierVisitCountsResolvable(frequencies) {
+  const monthlyRows = (Array.isArray(frequencies) ? frequencies : [])
+    .filter((frequency) => frequency && frequency.billingFrequencyKey === 'monthly');
+  return monthlyRows.length > 0 && monthlyRows.every((frequency) => Number(frequency.visitsPerYear) > 0);
+}
+
+// GATE_PAF_SETUP_FEE: the LANE half of the one setup-fee "promise" predicate
+// (the preview /data flag, the legacy page copy and the accept's attestation
+// check all call it). The accept defers the fee only onto a customer whose
+// billing lane is per_application AFTER the conversion; the converter
+// preserves an existing monthly member's lane (customerPreservesMonthlyMembership
+// on the resolved customer — linked row, or the phone-matched prospective one,
+// exactly as the accept resolves it), so promising "billed with your first
+// visit" to that customer would be followed by a payable invoice. True when the
+// resolved customer does NOT keep monthly billing, or none resolves (a new
+// contact converts per-application). FAILS CLOSED: any lookup failure answers
+// "no promise", so a page never promises what the accept might not do.
+async function estimateSetupFeePromiseLaneOk(estimate) {
+  try {
+    if (!estimate?.customer_id && !estimate?.customer_phone) return true;
+    let customer = null;
+    if (estimate.customer_id) {
+      customer = await db('customers').where({ id: estimate.customer_id }).first();
+    } else {
+      ({ match: customer } = await matchAcceptCustomerByPhone(estimate));
+    }
+    if (!customer) return true;
+    return !BillingCadence.customerPreservesMonthlyMembership(customer);
+  } catch (e) {
+    logger.warn(`[estimate-public] setup-fee promise lane lookup failed for estimate ${estimate?.id} — not promising: ${e.message}`);
+    return false;
+  }
+}
+
 function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
@@ -3066,10 +3110,18 @@ function buildStandardPayPerApplicationInvoiceCopy({
   // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): true only for a
   // customer on the card rail (card saved, nothing charged or sent before the
   // first visit). Every other customer keeps today's wording. The SETUP-ONLY
-  // shape never takes the new wording: its invoice is minted unattached and
-  // still delivered as a pay link at accept (see the standard accept mint),
-  // so "billed at your first visit" would be untrue for it.
+  // shape ignores this flag: unless the accept defers its fee (see
+  // payAfterSetupFee below) its invoice is minted unattached and delivered
+  // as a pay link at accept, so "billed at your first visit" would be untrue.
   payAfterFirstVisit = false,
+  // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): true only when the
+  // accept will DEFER the setup-only shape's fee onto the first visit
+  // (card rail + pafSetupFeeLive() + pure WaveGuard setup, no first-
+  // application line). Then the setup-only wording says nothing is charged
+  // today and the setup fee is billed with the first visit — true because
+  // the accept stamps the fee on the series instead of minting a payable
+  // invoice. Read ONLY by the setup-only branch below.
+  payAfterSetupFee = false,
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -3101,9 +3153,15 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
-      billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
+      payAfterBody: payAfterSetupFee
+        ? `Approve now; nothing is charged today. The ${fmtMoney(setup)} ${setupLabel} fee is billed with your first visit.`
+        : `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: payAfterSetupFee
+        ? `The ${setupLabel} fee (${fmtMoney(setup)}) is billed with your first visit.`
+        : `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
+      billingSmall: payAfterSetupFee
+        ? `No payment is charged on this page. The ${fmtMoney(setup)} setup fee is billed with your first visit.`
+        : `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
 
@@ -5472,12 +5530,28 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && firstServiceVisitTotal > 0
     ? firstServiceVisitTotal
     : 0;
+  // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the setup-only shape on
+  // the card rail has its fee STAMPED on the first visit's series at accept
+  // (no payable invoice, no pay link) and billed with the first performed
+  // visit — so the page may say so. Pure WaveGuard setup only: a rodent
+  // bait-station setup rides today's invoice, and a first-application line
+  // means the shape is not setup-only. The caller zeroes
+  // setupFeePromiseLaneOk off payAfterFirstVisitSetupFeeRail (a fresh card
+  // capture), the same predicate the accept's setup-fee deferral uses.
+  const payAfterSetupFeeCopy = payAfterFirstVisitCopy
+    && opts.setupFeePromiseLaneOk !== false
+    && require('../config/feature-gates').pafSetupFeeLive()
+    && setupDueToday > 0
+    && rodentSetupDueToday <= 0
+    && !(standardInvoiceFirstApplicationAmount > 0)
+    && monthlyTierVisitCountsResolvable(pricingFrequenciesForView);
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
     setupAmount: standardSetupDue,
     setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
     payAfterFirstVisit: payAfterFirstVisitCopy,
+    payAfterSetupFee: payAfterSetupFeeCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
   const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
@@ -5486,7 +5560,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ? `No payment is charged on this page. The setup plus first application, totaling ${standardInvoiceDynamicTotalHtml}, is billed at your first visit.`
       : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`)
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
+        ? (payAfterSetupFeeCopy
+          ? `No payment is charged on this page. The ${fmtMoney(standardSetupDue)} setup fee is billed with your first visit.`
+          : `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`)
         : (standardInvoiceCopy.hasFirstApplication
             ? (payAfterFirstVisitCopy
               ? `No payment is charged on this page. The first application (${standardInvoiceDynamicTotalHtml}) is billed at your first visit.`
@@ -5596,7 +5672,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const standardInvoiceLede = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? 'Pay per application with a setup + first application invoice after confirmation.'
     : (standardInvoiceCopy.hasSetup
-        ? 'Pay per application with a setup invoice after confirmation.'
+        ? (payAfterSetupFeeCopy
+          ? 'Pay per application; nothing is charged today and the setup fee is billed with your first visit.'
+          : 'Pay per application with a setup invoice after confirmation.')
         : (standardInvoiceCopy.hasFirstApplication
             ? 'Pay per application with a first application invoice after confirmation.'
             : 'Pay per application after completion.'));
@@ -5618,12 +5696,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
+          ${standardInvoiceTotal > 0 && !payAfterSetupFeeCopy ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
-        <p class="billing-small">${payAfterFirstVisitCopy && !(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
+        <p class="billing-small">${payAfterFirstVisitCopy && (!(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) || payAfterSetupFeeCopy) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -6969,6 +7047,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const PAY_AFTER_FIRST_VISIT_COPY = ${payAfterFirstVisitCopy ? 'true' : 'false'};
+  const PAY_AFTER_SETUP_FEE_COPY = ${payAfterSetupFeeCopy ? 'true' : 'false'};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -7260,6 +7339,17 @@ ${shellQuestionsBar()}
     return total > 0 ? fmt(total) : 'after completion';
   }
 
+  // GATE_PAF_SETUP_FEE: whether this page is showing "setup fee billed with
+  // your first visit" for the current choice — attested on the accept, which
+  // refuses (SETUP_FEE_TERMS_REFRESH) when it would bill differently.
+  function setupFeePromiseShown() {
+    return PAY_AFTER_SETUP_FEE_COPY
+      && bookingState.serviceMode === 'recurring'
+      && bookingState.pickedPref !== 'prepay_annual'
+      && Number(STANDARD_INVOICE_SETUP_DUE || 0) > 0
+      && !(STANDARD_INVOICE_HAS_FIRST_APPLICATION && currentFirstVisitAmount() > 0);
+  }
+
   function standardPayPerApplicationSummaryBody() {
     const setupDue = Number(STANDARD_INVOICE_SETUP_DUE || 0);
     const hasSetup = setupDue > 0;
@@ -7271,6 +7361,9 @@ ${shellQuestionsBar()}
       return 'No payment is charged here. After confirmation, we open an invoice for setup plus the first application totaling ' + standardInvoiceTotalText() + '; choose a service window to continue.';
     }
     if (hasSetup) {
+      if (PAY_AFTER_SETUP_FEE_COPY) {
+        return 'No payment is charged here. Your ' + fmt(setupDue) + ' setup fee is billed with your first visit; choose a service window to continue.';
+      }
       return 'No payment is charged here. After confirmation, we open the setup invoice for ' + fmt(setupDue) + '; choose a service window to continue.';
     }
     if (hasFirstApplication) {
@@ -8007,6 +8100,7 @@ ${shellQuestionsBar()}
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
         payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
       }
+      if (setupFeePromiseShown()) payload.setupFeeAfterFirstVisitShown = true;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8030,6 +8124,15 @@ ${shellQuestionsBar()}
         toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);
+        return;
+      }
+      if (r.status === 409 && data.code === 'SETUP_FEE_TERMS_REFRESH') {
+        // Billing terms, not a slot conflict: nothing was booked. Reload with
+        // the answer the accept would apply so the page shows those terms.
+        toast(data.error || 'Your billing terms were updated. Please review them and confirm again.');
+        const next = new URL(location.href);
+        if (typeof data.setupFeePromise === 'boolean') next.searchParams.set('setup_fee_terms', data.setupFeePromise ? '1' : '0');
+        setTimeout(() => location.replace(next.toString()), 1200);
         return;
       }
       if (r.status === 409) {
@@ -8656,6 +8759,11 @@ async function handleEstimateView(req, res, next) {
     // form. Policy-resolved (not just flag-gated) so exempt estimates — plan
     // members, payer-billed, already-on-Auto-Pay — keep their legacy/holdback
     // rendering. Dark by default: required is false until RECURRING_CARD_ON_FILE.
+    // GATE_PAF_EXISTING_CUSTOMERS: the whole after-visit cohort (capture, saved
+    // method, held) must accept through the React view — only it attests the
+    // "billed after your first visit" timing the accept now verifies
+    // (PAYMENT_TIMING_REFRESH), which the legacy confirmBooking never sends.
+    let pafExistingForcesReactView = false;
     const recurringCardForcesReactView = RecurringCards.isRecurringCardOnFileEnabled()
       && !effectiveInvoiceMode
       && !isStructuralOneTimeOnlyEstimate(estData, estimate)
@@ -8678,6 +8786,10 @@ async function handleEstimateView(req, res, next) {
           billByInvoice: effectiveInvoiceMode,
           paymentMethodPreference: null,
         });
+        if (viewPolicy.afterVisitCard === true) {
+          pafExistingForcesReactView = true;
+          return true;
+        }
         if (viewPolicy.required) return true;
         // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE) widens the React
         // requirement to the auto-satisfy exemptions: a customer whose
@@ -8801,7 +8913,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -8967,6 +9079,7 @@ async function handleEstimateView(req, res, next) {
     // one-time-only). Short-circuits before any lookup while the gate or the
     // card lane is off, so gate-off pages are byte-identical to today.
     let payAfterFirstVisitCopy = false;
+    let setupFeePromiseLaneOk = true;
     if (require('../config/feature-gates').payAfterFirstVisitLive()
       && RecurringCards.isRecurringCardOnFileEnabled()
       && !effectiveInvoiceMode && !depositStructuralOneTime) {
@@ -8986,6 +9099,22 @@ async function handleEstimateView(req, res, next) {
             paymentMethodPreference: null,
           });
           payAfterFirstVisitCopy = RecurringCards.payAfterFirstVisitCardRail(payAfterPolicy);
+          // The setup-fee promise's lane half (see estimateSetupFeePromiseLaneOk):
+          // only looked up when the page could otherwise promise it.
+          // A saved/enrolled-method customer sees no capture (so never the
+          // after-visit authorization): no setup-fee promise.
+          if (payAfterFirstVisitCopy && !RecurringCards.payAfterFirstVisitSetupFeeRail(payAfterPolicy)) {
+            setupFeePromiseLaneOk = false;
+          } else if (payAfterFirstVisitCopy && require('../config/feature-gates').pafSetupFeeLive()) {
+            // A SETUP_FEE_TERMS_REFRESH reload carries the answer the accept
+            // would apply (?setup_fee_terms=0|1): the page renders it instead of
+            // the pre-conversion lookup, so it cannot refuse on every confirm.
+            // Copy only — the accept still recomputes and verifies the promise.
+            const refreshAnswer = req.query?.setup_fee_terms;
+            setupFeePromiseLaneOk = refreshAnswer === '0' || refreshAnswer === '1'
+              ? refreshAnswer === '1'
+              : await estimateSetupFeePromiseLaneOk(estimate);
+          }
         }
       } catch (payAfterErr) {
         // Fail toward today's wording: never promise "nothing is charged"
@@ -9052,7 +9181,7 @@ async function handleEstimateView(req, res, next) {
       // record even with the gate off (codex #3338 r15 sibling) — same
       // committed definition the snapshot reconciler uses.
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
-    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy });
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy, setupFeePromiseLaneOk });
   } catch (err) { next(err); }
 }
 
@@ -9223,6 +9352,20 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   });
 }
 
+// A reloadable accept refusal makes the client DROP the SetupIntent it
+// captured, orphaning it (succeeded in Stripe, bound to nothing). Retire it so
+// no later recovery can read it as a legacy capture; when Stripe cannot confirm
+// the retirement the accept fails closed (503) and the tab keeps its intent.
+async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
+  const retired = await RecurringCards.retireOrphanedCaptureIntent({ estimate, setupIntentId });
+  if (!retired.ok) {
+    const err = new Error('We could not update your payment terms just now. Please try again in a moment.');
+    err.status = 503;
+    err.code = 'RECURRING_CARD_RETIRE_FAILED';
+    throw err;
+  }
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -9233,6 +9376,10 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+  // A captured SetupIntent a reloadable in-transaction refusal drops: retired
+  // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
+  // never retired by a refusal that did not end the accept).
+  let droppedCaptureToRetire = null;
   // The customer's authorization moment = SERVER RECEIPT of the submit
   // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
   // opt-out committed in another tab after the click — even during the
@@ -9394,6 +9541,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // estimate can never be accepted under the gate without its record
     // (pre-push Codex P1). Gate off ⇒ the field is ignored and nothing is
     // recorded: nothing was shown, so nothing is claimed.
+    // GATE_PAF_SETUP_FEE: the tab ATTESTS it rendered the "setup fee billed with
+    // your first visit" promise (render-bound, sent only under the predicate that
+    // renders it). The accept recomputes the promise inside its transaction and
+    // refuses on ANY difference (SETUP_FEE_TERMS_REFRESH), so what the customer
+    // saw and what is billed can never diverge.
+    const setupFeeAfterVisitAttested = req.body?.setupFeeAfterFirstVisitShown === true;
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
@@ -9913,16 +10066,123 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       });
     // A site-confirmation-held commercial accept collects nothing at accept
     // (manual billing after the on-site price confirmation).
-    if (recurringCardPolicy.required && commercialAcceptDepositExempt({
-      isCommercialAccept,
-      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
-      treatAsOneTime,
-      billByInvoice,
-    })) {
-      recurringCardPolicy.required = false;
-      recurringCardPolicy.exemptReason = 'commercial_manual_billing';
-    }
+    // (The helper also clears the pay-after-first-visit existing-customer
+    // shapes that do NOT set required — saved_method_consented — so a
+    // commercial accept never rides the card rail for that cohort either.)
+    RecurringCards.applyCommercialManualBillingExemption(recurringCardPolicy, {
+      commercialManualBilling: commercialAcceptDepositExempt({
+        isCommercialAccept,
+        siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
+        treatAsOneTime,
+        billByInvoice,
+      }),
+    });
     const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
+    // PR-B (GATE_PAF_EXISTING_CUSTOMERS) / GitHub Codex #5481 r3: the consent a
+    // capture records is ONE shared "collection promise"
+    // (RecurringCards.resolveCollectionPromise): policy cohort + the tender the
+    // customer actually used + whether the standard invoice is really deferred
+    // to the first visit. The tender and the invoice outcome are only known
+    // after verification / inside the accept transaction, so this is the
+    // BEST-CASE promise (card tender, invoice deferred): an attestation of any
+    // other variant is refused up front, and the exact check + the recorded
+    // variant are decided in the transaction from the same function.
+    const recurringCardPromiseCeiling = RecurringCards.resolveCollectionPromise({
+      policy: recurringCardPolicy,
+      tender: 'card',
+      annualPrepay: annualPrepaySelected,
+      // GATE_PAF_SETUP_FEE: a tab that showed "setup fee billed with your
+      // first visit" rendered the after-visit text on a fresh capture; the
+      // transaction decides whether the stamp really lands (else it refuses
+      // SETUP_FEE_TERMS_REFRESH) and checks the exact promise again.
+      setupFeeDeferred: setupFeeAfterVisitAttested
+        && require('../config/feature-gates').pafSetupFeeLive()
+        && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicy),
+    });
+    let acceptedCollectionPromise = null;
+    // Render attestation (GitHub Codex #5481 r1 P1): the capture UI sends the
+    // consent variant + version IT RENDERED (/data recurringCardPolicy
+    // .afterVisitConsent, never for prepay). The recorded variant is
+    // recomputed from live pause / opt-out state above, so a mismatch in
+    // either direction means the customer saw different text than we would
+    // record — refuse with the reloadable 409 (same shape as
+    // TERMS_VERSION_STALE) and record nothing. Only checked when a consent
+    // row is actually recorded (a captured card); an absent attestation is
+    // fine unless the after-visit text is what would be recorded.
+    // GitHub Codex #5481 r2 P0: the bind must hold from BOTH sides. Whenever
+    // the request carries a captured SetupIntent or a consent attestation it
+    // is validated against the LIVE policy, whatever shape that policy now
+    // has — the rollout gate turning off, a saved method landing from another
+    // tab, or a commercial/payer exemption flips `required` to false, and
+    // skipping the check there would commit the accept WITHOUT stamping the
+    // intent (the setup_intent.succeeded recovery then treats it as an
+    // unbound legacy capture and enrolls it with the base consent). A
+    // capture the live policy no longer expects is refused with the same
+    // reloadable 409 and nothing is recorded; the orphaned SetupIntent stays
+    // unstamped (webhook: unaccepted estimate -> retried / dropped, never
+    // enrolled).
+    const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+      ? req.body.recurringCardSetupIntentId.trim() : '';
+    const attestedConsentVariant = typeof req.body?.recurringCardConsentVariant === 'string'
+      ? req.body.recurringCardConsentVariant.trim().slice(0, 40) : '';
+    const attestedConsentVersion = typeof req.body?.recurringCardConsentVersion === 'string'
+      ? req.body.recurringCardConsentVersion.trim().slice(0, 40) : '';
+    // Tender family the capture UI actually RENDERED its consent for.
+    const attestedConsentTender = typeof req.body?.recurringCardConsentTender === 'string'
+      ? req.body.recurringCardConsentTender.trim().slice(0, 40) : '';
+    // The tab showed "billed after your first visit" timing for this selection
+    // (GitHub Codex #5481 r5 audit): verified against the accept's real
+    // invoice outcome in the transaction.
+    const afterVisitTimingAttested = req.body?.afterVisitTimingShown === true;
+    const requestCarriesCapture = recurringCardSetupIntentId !== '' || attestedConsentVariant !== '';
+    let consentMismatch = false;
+    if (recurringCardPolicy.required !== true) {
+      // Live policy expects no capture, yet the tab captured / attested one.
+      // One-time and invoice-mode accepts are the permanent webhook skips
+      // (stripe-webhook.js estimate_recurring_card returns for both): a card
+      // left over from toggling the plan mode can never be enrolled, so
+      // those keep ignoring it instead of bouncing the customer.
+      consentMismatch = requestCarriesCapture && !treatAsOneTime && !billByInvoice;
+    } else if (!annualPrepaySelected) {
+      // A variant the best-case promise cannot be is stale outright; the
+      // after-visit promise's exact tender / version / invoice-outcome check
+      // runs in the accept transaction (an ABSENT attestation is legitimate
+      // there for a bank tender or a setup-only invoice).
+      consentMismatch = attestedConsentVariant !== ''
+        && (attestedConsentVariant !== recurringCardPromiseCeiling.variant
+          || attestedConsentVersion !== recurringCardPromiseCeiling.version);
+    }
+    if (consentMismatch) {
+      // r3 pre-push P0: the client drops the intent it captured on this 409,
+      // so that SetupIntent is ORPHANED — succeeded in Stripe, bound to
+      // nothing. If the reload then accepts on a path that writes no marker
+      // (rollout gate off, exempt cohort), the setup_intent.succeeded recovery
+      // would read it as a legacy capture and enroll it — undoing an Auto Pay
+      // opt-out. Retire it in Stripe now (the recovery live-reads an unbound
+      // intent and skips a retired one). A retire that cannot be confirmed
+      // fails closed: the tab keeps its intent and retries.
+      if (recurringCardSetupIntentId) {
+        const retired = await RecurringCards.retireOrphanedCaptureIntent({
+          estimate,
+          setupIntentId: recurringCardSetupIntentId,
+        });
+        if (!retired.ok) {
+          return res.status(503).json({
+            error: 'We could not update your payment terms just now. Please try again in a moment.',
+            code: 'RECURRING_CARD_RETIRE_FAILED',
+          });
+        }
+      }
+      return res.status(409).json({
+        error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
+        code: 'CONSENT_VARIANT_STALE',
+        // The best-case promise this accept could record, so a tab whose
+        // bundled copy is a different version reloads instead of retrying it.
+        ...(recurringCardPolicy.required === true && !annualPrepaySelected
+          ? { collectionPromise: { variant: recurringCardPromiseCeiling.variant, tender: 'card', version: recurringCardPromiseCeiling.version } }
+          : {}),
+      });
+    }
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
     // contract) is removed — resolveDepositPolicy is permanently
@@ -10017,8 +10277,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // never trusted from the client. Enrollment runs post-commit — see
     // completeRecurringCardEnrollment below the accept transaction.
     // ─────────────────────────────────────────────
-    const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-      ? req.body.recurringCardSetupIntentId.trim() : '';
     let recurringCardVerification = null;
     if (recurringCardPolicy.required) {
       recurringCardVerification = await RecurringCards.verifyRecurringCardIntent({
@@ -11064,6 +11322,46 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         });
       }
 
+      // GitHub Codex #5481 r2 pre-push P0: an accept that commits WITHOUT a
+      // verified capture must say so durably WHEN a PR-B capture could have
+      // been bound to it. A SetupIntent a tab captured and the accept then
+      // refused (CONSENT_VARIANT_STALE: gate flipped, another tab saved a
+      // method, opt-out) stays succeeded in Stripe; after the reload the
+      // customer accepts on a no-capture path (no intent stamp) and the
+      // setup_intent.succeeded retry would read the unstamped accept as a
+      // LEGACY one and enroll that discarded card (undoing an opt-out, base
+      // consent). The marker makes every intent for this estimate
+      // "superseded" to the recovery.
+      // Narrowed (r3 pre-push P1): only the PR-B cohort is marked
+      // (recurringCardPolicy.afterVisitCard, set only while the
+      // GATE_PAF_EXISTING_CUSTOMERS sub-gate is live and cleared by the
+      // commercial exemption). Gate-off accepts and every exempt cohort
+      // (payer_billed, autopay_already_active, commercial_manual_billing,
+      // one-time / invoice-mode) leave estimate_data untouched, so a legacy
+      // recovery for them is exactly what it was before PR-B. A capture the
+      // accept REJECTED never reaches here (409 before commit).
+      if (RecurringCards.acceptDiscardsBindableCapture(recurringCardPolicy)
+        && !(recurringCardVerification?.ok && recurringCardVerification.setupIntentId)
+        && !treatAsOneTime && !billByInvoice) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text))",
+            [RecurringCards.ACCEPTED_NO_CAPTURE_MARKER],
+          ),
+        });
+      }
+
+      // PR-B: an explicit Auto Pay opt-out keeps the card but is never
+      // enrolled — stamp it with the accepted intent so the setup_intent
+      // recovery (stripe-webhook.js) honors the same decision.
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && recurringCardPolicy.autopayDisabled === true) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSkipEnrollment}', 'true'::jsonb)",
+          ),
+        });
+      }
+
       // Click-to-estimate mints only (GitHub #3391 P1): acceptance is the
       // customer self-booking the very thing the CTA request row asked
       // staff to follow up on — leaving it open pages staff after 24h
@@ -11382,6 +11680,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
         err.status = 402;
         err.code = 'RECURRING_CARD_REQUIRED';
+        throw err;
+      }
+      // PR-B (GitHub Codex #5481 r1 P1): the pay-after-first-visit existing-
+      // customer cohort was judged from an UNLOCKED customers snapshot. Re-judge
+      // it under this transaction's customer lock — billing_mode flipping to
+      // monthly_membership, a pause starting/ending or an Auto Pay opt-out
+      // landing since preflight would otherwise still suppress the pay link and
+      // enroll the card. On drift abort (nothing committed) with the reloadable
+      // 409; the refreshed page resolves today's behavior for the new state.
+      if (recurringCardPolicy.afterVisitCard === true
+        && await RecurringCards.pafExistingDriftUnderLock(trx, { customerId, policy: recurringCardPolicy })) {
+        // The client drops its captured intent on this 409 (like
+        // CONSENT_VARIANT_STALE) — retire it so the reloaded accept, which may
+        // be exempt and write no marker, can never have it recovered as a
+        // legacy capture (r3 pre-push P0). Fail closed if Stripe cannot confirm.
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+        }
+        const err = new Error('Your account just changed. Please reload the page and confirm again.');
+        err.status = 409;
+        err.isOperational = true;
+        err.code = 'ACCEPT_BILLING_CHANGED';
         throw err;
       }
       // The verified intent re-read UNDER THIS ROW LOCK (#4144): a
@@ -12324,6 +12644,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let standardConversionResult = null;
       let standardInvoiceMinted = false;
       let standardInvoiceAttached = false;
+      // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): true when the
+      // setup-only shape's fee was STAMPED on the first visit's series
+      // (scheduled_services.pending_setup_fee) instead of minted as a payable
+      // unattached invoice — the first PERFORMED completion bills it on the
+      // same invoice as the visit and charges the saved card once.
+      let setupFeeDeferredToFirstVisit = false;
+      // The accept's shape is the one the capture UI rendered the
+      // after_visit_card authorization for (setup-only on the card rail with
+      // GATE_PAF_SETUP_FEE live) — whether or not the stamp then landed. The
+      // consent snapshot of record must be the text the customer saw, so it
+      // keys on THIS, never on the deferral outcome (a fallback to the payable
+      // invoice still records what was displayed and agreed to).
+      let setupFeeAfterVisitConsentShown = false;
+      // Whether this accept reached the setup-fee promise check below. A tab
+      // that attested the promise on an accept that never evaluates it (bill
+      // by invoice, one-time, prepay or any other branch that mints its own
+      // payable invoice) is refused at the end of the transaction.
+      let setupFeePromiseEvaluated = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
         const EstimateConverter = require('../services/estimate-converter');
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
@@ -12448,7 +12786,161 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // not mint (codex #3591 r59 P1); the recurring conversion path is
           // the only one that owes it.
           const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
-          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
+          // Pay after the first visit — monthly-tier (setup-only) shape. On the
+          // card rail with GATE_PAF_SETUP_FEE live, a pure WaveGuard setup fee
+          // (no first-application line, no rodent bait-station setup) is not
+          // minted as a payable unattached invoice. It is stamped on the first
+          // visit's series parent instead — the SAME durable claim
+          // (scheduled_services.pending_setup_fee) the secure plan-choice
+          // lane uses — and the first performed completion adds it as a line
+          // to the visit's own mint (complete-scheduled-service.js, "Secure
+          // plan-choice setup fee" block), so setup + visit are one invoice
+          // and one saved-card charge. Nothing is charged, sent or linked at
+          // accept. Falls back to today's unattached payable invoice (never a
+          // silently dropped fee) when there is no series parent to carry the
+          // stamp or the parent already carries a different claim.
+          let deferSetupFeeStamp = null;
+          const deferShapeEligible = !!(shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
+            && !(acceptedRodentSetupAmount > 0)
+            && require('../config/feature-gates').pafSetupFeeLive()
+            && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicy)
+            // The SAME eligibility predicate the preview (/data flag, legacy
+            // page) applies: a tier whose visit count is unknown shows the
+            // BASE text and keeps today's payable invoice, so the accept
+            // never even attempts the stamp for it.
+            && monthlyTierVisitCountsResolvable(pricingFrequencies));
+          // Only a per-application customer's first visit bills on its own
+          // completion invoice. A monthly-membership / prepay lane is dues-
+          // covered at its first visit (the completion mint never runs the
+          // claim there), so a stamp would sit unbilled forever. Read AFTER
+          // convertEstimate, inside the trx: the converter is what sets (or,
+          // for an existing member, preserves) the billing lane.
+          const deferLaneRow = deferShapeEligible
+            ? await trx('customers').where({ id: customerId }).first('billing_mode')
+            : null;
+          const deferLaneIsPerApplication = deferLaneRow?.billing_mode === 'per_application';
+          // The promise, recomputed from the SAME inputs the preview used. The
+          // tab attested whether it rendered it; ANY difference (the customer
+          // is a monthly member the preview could not resolve, a gate or rail
+          // flipped, a stale tab) refuses retryably — the whole accept rolls
+          // back — so the customer is never billed differently than shown.
+          // A customer the TRANSACTION resolved (e.g. a phone match) whose bills
+          // go to a third-party payer is never the "saved card billed after the
+          // first visit" promise: the payer is invoiced, so the fee is not
+          // deferred onto a card (fail closed: an unreadable payer throws and
+          // the accept rolls back).
+          const deferPayerBilled = deferShapeEligible && deferLaneIsPerApplication
+            && !!(await require('../services/payer').resolveForInvoice({
+              database: trx,
+              customerId,
+              scheduledServiceId: standardConversionResult?.firstScheduledServiceId || null,
+              throwOnError: true,
+            }))?.payerId;
+          // Can the stamp actually land? Decided BEFORE the attestation check
+          // (Codex P1), so a shape it never can — no priced anchor visit of this
+          // customer, a different claim already on the series, or a
+          // MULTI-PROGRAM accept (the claim lives on one program's series and
+          // could not follow whichever program is performed first) — answers
+          // "no promise" and the retry takes today's payable setup invoice
+          // instead of refusing on every confirm.
+          let deferLanding = null;
+          if (deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled) {
+            const landAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
+            const landAnchorId = standardConversionResult?.firstScheduledServiceId || null;
+            const multiProgram = (standardConversionResult?.combinedInvoiceMemberIds || []).length > 0;
+            const landAnchor = landAmount > 0 && landAnchorId && !multiProgram
+              ? await trx('scheduled_services').where({ id: landAnchorId })
+                .first('id', 'recurring_parent_id', 'customer_id', 'estimated_price')
+              : null;
+            const landParentId = landAnchor ? (landAnchor.recurring_parent_id || landAnchor.id) : null;
+            if (landAnchor && Number(landAnchor.estimated_price) > 0 && landParentId
+              && String(landAnchor.customer_id) === String(customerId)) {
+              const landParent = await trx('scheduled_services').where({ id: landParentId }).forUpdate().first('pending_setup_fee');
+              const existing = landParent?.pending_setup_fee;
+              if (existing == null || Math.round(Number(existing) * 100) === Math.round(landAmount * 100)) {
+                deferLanding = { parentId: landParentId, amount: landAmount, alreadyStamped: existing != null };
+              }
+            }
+            if (!deferLanding) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} cannot ride the first visit (${multiProgram ? 'multi-program accept' : 'no priced anchor visit / a different claim on the series'}) — today's payable setup invoice applies`);
+            }
+          }
+          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled && !!deferLanding;
+          setupFeePromiseEvaluated = true;
+          if (setupFeeAfterVisitAttested !== deferPromisedNow) {
+            logger.warn(`[estimate-accept] setup-fee terms differ for estimate ${estimate.id} (tab rendered the first-visit promise: ${setupFeeAfterVisitAttested}, accept would apply it: ${deferPromisedNow}) — refusing for a refresh`);
+            const termsDiffErr = estimateAcceptError(
+              'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+              409,
+            );
+            termsDiffErr.code = 'SETUP_FEE_TERMS_REFRESH';
+            // The client drops its captured intent on this refresh: retire it after the
+            // rollback (same path as the consent refusals) so no recovery enrolls it.
+            if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+              droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+            }
+            // The answer the accept WOULD apply, so the reloaded tab renders it
+            // for this selection instead of re-attesting /data's pre-conversion
+            // read (the converter can land a different lane than /data saw, e.g.
+            // a pinned legacy rodent plan) and refusing on every confirm.
+            termsDiffErr.setupFeePromise = deferPromisedNow;
+            throw termsDiffErr;
+          }
+          if (deferShapeEligible) {
+            // (The lane was read above.) A customer who is not per-application
+            // was never shown the after-visit promise (attested false), so it
+            // keeps today's payable invoice and the base consent.
+            // The SAME answer the attestation check used: a dues-covered lane OR a
+            // payer-billed customer keeps today's payable setup invoice and the
+            // base consent (never a stamp, never after_visit_card).
+            if (!deferPromisedNow) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — customer ${customerId} billing lane is ${deferLaneRow?.billing_mode || 'unset'}${deferPayerBilled ? ' and payer-billed' : ''}; minting the payable setup invoice as before`);
+            } else {
+              // The page promised "billed with your first visit" and the
+              // capture UI rendered the after_visit_card authorization for
+              // exactly this shape — so the stamp MUST land, or the accept is
+              // refused (below). Never record the after-visit consent for an
+              // accept that then bills a payable invoice.
+              setupFeeAfterVisitConsentShown = true;
+              // Compare-and-swap from NULL (the same shape invoice.js and
+              // admin-schedule stamp with): never overwrites another claim. The
+              // parent row is locked above, so only an identical claim can be
+              // there already (idempotent).
+              if (deferLanding.alreadyStamped) {
+                deferSetupFeeStamp = { parentId: deferLanding.parentId, amount: deferLanding.amount };
+              } else {
+                const stampedRows = await trx('scheduled_services')
+                  .where({ id: deferLanding.parentId })
+                  .whereNull('pending_setup_fee')
+                  .update({ pending_setup_fee: deferLanding.amount, updated_at: new Date() });
+                if (stampedRows === 1) deferSetupFeeStamp = { parentId: deferLanding.parentId, amount: deferLanding.amount };
+              }
+              if (!deferSetupFeeStamp) {
+                // Refuse retryably (rolls the whole accept back, including the
+                // conversion): the customer was shown "billed with your first
+                // visit", and a payable setup invoice is not that. The
+                // standard 409 refresh shape the discount-slice guard uses.
+                logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} could not be deferred to the first visit — refusing the accept (the page promised first-visit billing)`);
+                const termsErr = estimateAcceptError(
+                  'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+                  409,
+                );
+                termsErr.code = 'SETUP_FEE_TERMS_REFRESH';
+                // The retry must take the payable-invoice path, not re-attest.
+                termsErr.setupFeePromise = false;
+                // The client drops its captured intent on this refresh: retire it after the
+                // rollback (same path as the consent refusals) so no recovery enrolls it.
+                if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+                  droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+                }
+                throw termsErr;
+              }
+            }
+          }
+          if (deferSetupFeeStamp) {
+            setupFeeDeferredToFirstVisit = true;
+            logger.info(`[estimate-accept] setup fee $${deferSetupFeeStamp.amount.toFixed(2)} for estimate ${estimate.id} stamped on series ${deferSetupFeeStamp.parentId} — billed with the first performed visit, no accept-time invoice`);
+          } else if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -12625,7 +13117,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;
-            if (recurringCardLaneActive && standardInvoiceAttached) {
+            if (RecurringCards.standardInvoiceDelivery({
+              laneActive: recurringCardLaneActive, minted: true, attached: standardInvoiceAttached,
+            }).suppressed) {
               // Card-on-file lane (spec §3.1, Codex #2680): the invoice is
               // still minted — it anchors the setup fee + first application
               // amount and the deposit credit — but NOTHING is due at
@@ -12649,6 +13143,125 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       }
 
+      // GitHub Codex #5481 r3 (structural): the collection promise this accept
+      // RECORDS is decided HERE, in the transaction, from the same predicates
+      // that just attached / suppressed (or didn't) the standard invoice and the
+      // verified tender — and the capture UI's attestation must equal it. A
+      // setup-only invoice (unattached, pay link at accept) or a bank tender
+      // is not the "billed after your first visit" promise the after-visit text
+      // makes, so a tab that rendered it is refused (reloadable 409) and the
+      // intent it dropped is retired; nothing is recorded on a mismatch.
+      // The payment-timing promise, for every after-visit cohort (capture,
+      // saved method, held): a tab that showed "billed after your first visit"
+      // never commits an accept whose standard invoice goes out payable now
+      // (an existing customer whose series already exists gets an UNATTACHED
+      // first invoice). Refused retryably with the real answer, which the page
+      // then renders for this selection.
+      // Judged against the real invoice outcome whatever the LIVE cohort now
+      // says (a sub-gate turned off since the page loaded drops the marker),
+      // on every branch: a one-time or invoice-mode accept bills now too.
+      if (afterVisitTimingAttested && !annualPrepaySelected
+        && (treatAsOneTime || invoiceModeResult === true || RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
+        }).collectsAtAccept)) {
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+        }
+        const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
+        err.status = 409;
+        err.code = 'PAYMENT_TIMING_REFRESH';
+        err.afterVisitDeferred = false;
+        throw err;
+      }
+      // The converse (GitHub Codex #5481 r7): an after-visit cohort accept that
+      // WILL defer its attached first invoice (no pay link now, charged or
+      // linked after the visit) needs the tab's positive attestation that it
+      // showed that timing. A tab that loaded before the sub-gate turned on
+      // showed "invoice after you confirm" and sends none — refused for a
+      // refresh rather than silently suppressing the pay link it promised.
+      if (!afterVisitTimingAttested && recurringCardPolicy.afterVisitCard === true && !annualPrepaySelected
+        && !treatAsOneTime && invoiceModeResult !== true
+        && RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
+        }).suppressed) {
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+        }
+        const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
+        err.status = 409;
+        err.code = 'PAYMENT_TIMING_REFRESH';
+        err.afterVisitDeferred = true;
+        throw err;
+      }
+
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && !annualPrepaySelected) {
+        const delivery = RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive,
+          minted: standardInvoiceMinted,
+          attached: standardInvoiceAttached,
+        });
+        const expectedPromise = RecurringCards.resolveCollectionPromise({
+          policy: recurringCardPolicy,
+          tender: recurringCardVerification.methodType,
+          collectsAtAccept: delivery.collectsAtAccept,
+          setupFeeDeferred: setupFeeAfterVisitConsentShown,
+        });
+        if (!RecurringCards.collectionPromiseMatches(expectedPromise, {
+          variant: attestedConsentVariant,
+          version: attestedConsentVersion,
+          tender: attestedConsentTender,
+        })) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          const err = new Error('Your payment terms were just updated. Please reload the page and review the card authorization before confirming.');
+          err.status = 409;
+          err.code = 'CONSENT_VARIANT_STALE';
+          // The promise the server WOULD record, so the reloaded tab renders it
+          // instead of re-attesting the same best case: an existing customer
+          // whose series already exists gets an UNATTACHED first invoice (pay
+          // link at accept) that /data cannot predict, and without this the
+          // customer would 409 on every confirm.
+          err.collectionPromise = {
+            variant: expectedPromise.variant,
+            tender: expectedPromise.tender,
+            version: expectedPromise.version,
+            // Whether this selection's first invoice is deferred to the visit:
+            // a base-consent answer (e.g. Auto Pay paused since the capture) is
+            // NOT by itself a "billed at confirm" answer.
+            deferred: !delivery.collectsAtAccept,
+          };
+          throw err;
+        }
+        acceptedCollectionPromise = {
+          ...expectedPromise,
+          // The exact authorization recorded as shown (verified against the
+          // tab's attested version above), persisted below for the webhook
+          // recovery so it never re-derives copy that may have changed since.
+          text: require('../services/payment-method-consent-text').getConsentText(expectedPromise.tender, { variant: expectedPromise.variant }),
+        };
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsent}', ?::jsonb)",
+            [JSON.stringify({
+              variant: acceptedCollectionPromise.variant,
+              version: acceptedCollectionPromise.version,
+              tender: acceptedCollectionPromise.tender,
+              text: acceptedCollectionPromise.text,
+            })],
+          ),
+        });
+        // Persist the variant with the accepted intent so the
+        // setup_intent.succeeded recovery (stripe-webhook.js) records the SAME
+        // authorization — read from the persisted promise, never recomputed.
+        if (expectedPromise.variant) {
+          await trx('estimates').where({ id: estimate.id }).update({
+            estimate_data: trx.raw(
+              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsentVariant}', to_jsonb(?::text))",
+              [expectedPromise.variant],
+            ),
+          });
+        }
+      }
+
       // Persist the lane decision on the estimate (Codex #2680 r3): the
       // already-accepted retry payload must key "completion auto-charges the
       // anchor invoice" off what THIS accept actually did — never off the
@@ -12662,7 +13275,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (typeof stampBase === 'string') {
           try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; }
         }
-        const stamped = { ...(stampBase && typeof stampBase === 'object' ? stampBase : {}), recurringCardLaneAccepted: true };
+        const stamped = {
+          ...(stampBase && typeof stampBase === 'object' ? stampBase : {}),
+          recurringCardLaneAccepted: true,
+          // Persisted so an already-accepted retry describes this accept as it
+          // was ("setup fee billed with your first visit"), not a missing invoice.
+          ...(setupFeeDeferredToFirstVisit ? { setupFeeDeferredToFirstVisit: true } : {}),
+        };
         await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
 
@@ -12720,6 +13339,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         });
       }
 
+      // One boundary for every acceptance branch (pre-push audit P0): a tab
+      // that rendered "setup fee billed with your first visit" never commits
+      // through a branch that did not apply it. Rolls the whole accept back.
+      if (setupFeeAfterVisitAttested && !setupFeePromiseEvaluated) {
+        logger.warn(`[estimate-accept] estimate ${estimate.id}: tab rendered the first-visit setup-fee promise but this accept's branch never applies it — refusing for a refresh`);
+        const branchErr = estimateAcceptError(
+          'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+          409,
+        );
+        branchErr.code = 'SETUP_FEE_TERMS_REFRESH';
+        // The client drops its captured intent on this refresh: retire it after the
+        // rollback (same path as the consent refusals) so no recovery enrolls it.
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+        }
+        branchErr.setupFeePromise = false;
+        throw branchErr;
+      }
+
       return {
         customerId,
         reservationCommitted,
@@ -12736,6 +13374,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
         standardInvoiceAttached,
+        setupFeeDeferredToFirstVisit,
       };
     }).catch((txErr) => {
       // PG 40P01 (deadlock_detected): Postgres aborted this transaction to
@@ -12898,17 +13537,34 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // fall back to the account payer and refuse.
           scheduledServiceId: postCommitPayerScopeSsId,
           authorizedAt: acceptAuthorizedAt,
+          // PR-B: explicit Auto Pay opt-out — save the card + record the base
+          // consent, but never enroll (autopay_enabled stays false).
+          skipEnrollment: recurringCardPolicy.autopayDisabled === true,
           // In-lane prepay renders + records the prepay authorization
           // (immediate 12-month charge) instead of the base card text. Keyed
           // off what the capture UI RENDERED (in-lane prepay accept), not
           // off whether the charge plan resolved — the snapshot must match
           // the checkbox the customer saw even when the quote step degraded.
+          // PR-B (GATE_PAF_EXISTING_CUSTOMERS): an existing customer the
+          // sub-gate moved onto the card rail saw the "charged after your
+          // first visit" authorization (/data recurringCardPolicy
+          // .afterVisitConsent), so that variant (v12) is what is recorded.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
-            && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
+            && RecurringCards.isPrepayCardAndChargeEnabled()
+            ? 'prepay_card'
+            // Paused Auto Pay (owner R5) keeps the card but is never charged
+            // automatically, so the "charged after your first visit"
+            // authorization is NOT what that customer was shown or agreed to.
+            : (acceptedCollectionPromise?.variant || null),
+          ...(!annualPrepaySelected && acceptedCollectionPromise?.text
+            ? { renderedConsent: { text: acceptedCollectionPromise.text, version: acceptedCollectionPromise.version } }
+            : {}),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
-      && recurringCardPolicy.savedMethodRowId && customerId) {
+      && recurringCardPolicy.savedMethodRowId && customerId
+      // PR-B: an explicit Auto Pay opt-out is never auto-enrolled from a saved card.
+      && recurringCardPolicy.autopayDisabled !== true) {
       // Auto-satisfy (spec §3.2): capture was skipped because a saved card
       // already carries an enrollment-qualifying consent — enroll THAT
       // method so the accept lands with the same Auto Pay protection a
@@ -12922,7 +13578,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // card (skip + office alert instead).
       try {
         const savedMethodRow = await db('payment_methods').where({ id: recurringCardPolicy.savedMethodRowId }).first('id', 'customer_id');
-        if (!savedMethodRow || String(savedMethodRow.customer_id) !== String(customerId)) {
+        // r2 P1: also pin to the customer the RESOLVER judged — a method
+        // that belongs to the in-trx customer but not the previewed one was
+        // quoted/consented against someone else's state.
+        if (!savedMethodRow || String(savedMethodRow.customer_id) !== String(customerId)
+          || (recurringCardPolicy.customerId && String(recurringCardPolicy.customerId) !== String(customerId))) {
           logger.warn(`[estimate-public] saved-method auto-enroll skipped: method ${recurringCardPolicy.savedMethodRowId} does not belong to resolved customer ${customerId} (estimate ${estimate.id})`);
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -14622,6 +15282,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
         invoiceKind,
+        afterVisitBilling: recurringCardPolicy.afterVisitCard === true
+          && recurringCardLaneActive
+          && require('../config/feature-gates').pafExistingCustomersLive(),
+        afterVisitPaused: recurringCardPolicy.autopayPaused === true,
+        afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
+        setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -14690,17 +15356,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
+      setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
       }),
     });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
+    // The transaction has rolled back: retire the capture an in-transaction
+    // refusal dropped, now that no row lock is held (fail closed: when Stripe
+    // cannot confirm, 503 and the tab keeps its intent).
+    if (droppedCaptureToRetire && err && err.status === 409) {
+      try {
+        await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
+      } catch (retireErr) {
+        return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+      }
+    }
+    if (err && err.code === 'RECURRING_CARD_RETIRE_FAILED' && err.status === 503) {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
     if (err && err.status >= 400 && err.status < 500) {
       // A 404 is the token route's GENERIC answer and carries no code: a
       // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
       // token (codex #4667 r38 P0).
       if (err.status === 404) return res.status(404).json({ error: 'Estimate not found' });
-      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.collectionPromise ? { collectionPromise: err.collectionPromise } : {}),
+        ...(typeof err.afterVisitDeferred === 'boolean' ? { afterVisitDeferred: err.afterVisitDeferred } : {}),
+        ...(typeof err.setupFeePromise === 'boolean' ? { setupFeePromise: err.setupFeePromise } : {}),
+      });
     }
     next(err);
   }
@@ -19492,6 +20178,10 @@ function buildAcceptSuccessPayload({
   // the success copy must confirm the credit coverage, never promise a
   // receipt (Codex r9).
   prepayCoveredByCredit = false,
+  // GATE_PAF_SETUP_FEE: the setup fee was stamped on the first visit rather
+  // than invoiced at accept — the success card says it is billed with that
+  // visit. Present in the payload only when true (gate-off byte-identical).
+  setupFeeAfterFirstVisit = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -19556,6 +20246,7 @@ function buildAcceptSuccessPayload({
     prepayChargeStatus,
     prepayChargedTotal,
     prepayCoveredByCredit,
+    ...(setupFeeAfterFirstVisit ? { setupFeeAfterFirstVisit: true } : {}),
   };
 }
 
@@ -19852,6 +20543,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
+      setupFeeAfterFirstVisit: rawEstData?.setupFeeDeferredToFirstVisit === true,
       // An unresolved auto-charge job renders as a confirmed outcome with
       // no pay step — the sweep owns the resolution (hook P0 r13). A
       // 'pending' stamp means no attempt is in flight (initial state, or a
@@ -19979,6 +20671,22 @@ function buildAcceptNotificationPayload({
   // 'annual_prepay_deferred' = a termite annual-plan accept parked for the
   // customer's signature — nothing is billed, booked or approved yet.
   invoiceKind = null,
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS): an existing customer moved onto the
+  // pay-after-first-visit card rail. Their accept mints an invoice attached
+  // to the visit but sends NO pay link, so the final "our team will follow up
+  // with the invoice details" fall-through would promise an invoice that is
+  // not coming — say what actually happens instead. False/omitted = today's
+  // copy byte for byte.
+  afterVisitBilling = false,
+  // ...and the customer's Auto Pay is paused: the card is kept but never
+  // auto-charged, so the copy says a pay link follows the first visit.
+  afterVisitPaused = false,
+  // ...or the customer explicitly turned Auto Pay off: same held shape (card
+  // kept, nothing auto-charged, a pay link follows the visit), neutral copy.
+  afterVisitDisabled = false,
+  // GATE_PAF_SETUP_FEE: the accept stamped the setup fee on the first visit
+  // instead of minting a payable invoice — nothing is due or sent today.
+  setupFeeDeferred = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -20227,6 +20935,19 @@ function buildAcceptNotificationPayload({
     };
   }
 
+  // Setup fee deferred to the first visit (GATE_PAF_SETUP_FEE): no invoice or
+  // pay link exists, so the generic "Invoice follow-up needed" fallthrough
+  // would be wrong in both directions.
+  if (setupFeeDeferred && !invoiceMode && !invoicePayUrl) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Payment method saved; setup fee stamped on the first visit and billed with it. No invoice or pay link sent.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your setup fee is billed with your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
   if (invoiceMode || invoicePayUrl) {
     const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; optional pay link available.';
     return {
@@ -20235,6 +20956,34 @@ function buildAcceptNotificationPayload({
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
+    };
+  }
+
+  if (afterVisitBilling && afterVisitDisabled && !afterVisitPaused) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay off: card kept on file, not enrolled, no auto-charge, pay link goes out after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. We'll send you a link to pay after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+  if (afterVisitBilling && afterVisitPaused) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay paused: card kept on file, no auto-charge, pay link goes out after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. Your Auto Pay is paused, so we'll send you a link to pay after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+  if (afterVisitBilling) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer on the card rail: no pay link sent, billed after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
+      customerLink: '/?tab=billing',
     };
   }
 
@@ -27505,20 +28254,28 @@ async function composeEstimateDataPayload(estimate, {
     // required:true here, walk the customer through card capture, and then the
     // accept-side exemption would skip enrollment — a captured card that never
     // enrolls (Codex #2668 P2). Matches /recurring-card-intent's mirror.
-    if (recurringCardPolicyForData.required && commercialAcceptDepositExempt({
-      isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
-      siteConfirmationHold,
-      treatAsOneTime: depositStructuralOneTime,
-      billByInvoice: effectiveInvoiceMode,
-    })) {
-      recurringCardPolicyForData.required = false;
-      recurringCardPolicyForData.exemptReason = 'commercial_manual_billing';
-    }
+    RecurringCards.applyCommercialManualBillingExemption(recurringCardPolicyForData, {
+      commercialManualBilling: commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold,
+        treatAsOneTime: depositStructuralOneTime,
+        billByInvoice: effectiveInvoiceMode,
+      }),
+    });
     // Card lane supersedes the deposit (mirrors the accept gate) — the
     // client keys the deposit modal off this policy, so during the rollout
     // window with both flags on it must see required:false or the "$0
     // today" story breaks (Codex #2680).
     const recurringCardLaneActiveForData = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData);
+    // GATE_PAF_SETUP_FEE: the setup-fee "billed with your first visit" promise,
+    // decided by the SAME inputs the accept uses (gate, card rail, every
+    // monthly tier row's visit count, and the resolved customer's lane via
+    // estimateSetupFeePromiseLaneOk). The accept recomputes it inside its
+    // transaction and refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+    const setupFeePromiseForData = require('../config/feature-gates').pafSetupFeeLive()
+      && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicyForData)
+      && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
+      && await estimateSetupFeePromiseLaneOk(estimate);
     if (recurringCardLaneActiveForData && depositPolicy.required) {
       // Prepay accepts sit OUTSIDE the card lane only while the legacy
       // carve-out is in force (the resolver exempts prepay_annual before any
@@ -28057,7 +28814,14 @@ async function composeEstimateDataPayload(estimate, {
         // payer-check-uncertain / commercial-manual-billing exemption must
         // NOT advertise a charge the accept route deliberately skips
         // (Codex r9). The accept gate re-resolves authoritatively either way.
-        prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled(),
+        // Never for the PR-B existing-customer cohort (GitHub Codex #5481 r1):
+        // an annual-prepay accept resolves those members exactly as today
+        // (existing_plan_customer / autopay_paused — the resolver does not widen
+        // a prepay_annual preference), so the in-lane prepay charge plan must
+        // not be advertised to them just because the widening put them on the
+        // rail here (this payload resolves with no preference).
+        prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled()
+          && recurringCardPolicyForData.afterVisitCard !== true,
         // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
         // is on the card rail AND the gate is on — the same predicate that
         // drives the server-rendered "nothing is charged today" wording
@@ -28066,6 +28830,42 @@ async function composeEstimateDataPayload(estimate, {
         // carries). PLUMBING ONLY: no client code reads it yet. Present only
         // when true so every gate-off response stays byte-identical.
         ...(RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData) ? { payAfterFirstVisit: true } : {}),
+        // PR-B (GATE_PAF_EXISTING_CUSTOMERS): this existing customer was moved
+        // onto the card rail by the sub-gate. The capture UI renders the
+        // after_visit_card authorization (v12) and the accept records that
+        // same variant. Present only when true — gate-off responses stay
+        // byte-identical.
+        ...(recurringCardPolicyForData.afterVisitCard === true && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitExisting: true } : {}),
+        // Paused Auto Pay (owner R5): card kept, never auto-charged, the normal
+        // pay link goes out after the visit — copy must NOT promise a charge.
+        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayPaused === true
+          && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitPaused: true } : {}),
+        // Explicit Auto Pay opt-out: same held shape as paused (card kept,
+        // never enrolled or charged, pay link after the visit), neutral copy.
+        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayDisabled === true
+          && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitAutopayOff: true } : {}),
+        // The collection promise's best case for a CARD tender (GitHub Codex
+        // #5481 r3): the SAME function the accept re-runs in its transaction
+        // with the verified tender and the real invoice outcome. A bank tender
+        // or a setup-only invoice (resolved per plan selection on the client)
+        // narrows it, and the accept 409s on any difference. The tab attests
+        // the version of the text its own bundle renders, so no version is
+        // emitted here.
+        ...(RecurringCards.resolveCollectionPromise({ policy: recurringCardPolicyForData, tender: 'card' }).variant
+          ? { afterVisitConsent: true } : {}),
+        // GATE_PAF_SETUP_FEE (PR-C): on the same rail, the monthly-tier
+        // (setup-only) shape's fee is stamped on the first visit instead of
+        // invoiced at accept. The client applies its "setup fee billed with
+        // your first visit" copy (and the after-visit consent text) only when
+        // this is true AND its own selection resolves to the setup-only
+        // shape (setup row, no first-visit amount, no bait-station setup row).
+        // Also requires every monthly-billed tier row to carry a visit count
+        // (the accept defers only onto a priced first visit). Present only
+        // when true so every gate-off response stays byte-identical.
+        ...(setupFeePromiseForData ? { setupFeeAfterFirstVisit: true } : {}),
       },
       estimate: {
         id: estimate.id,
@@ -28787,6 +29587,8 @@ module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
+module.exports.monthlyTierVisitCountsResolvable = monthlyTierVisitCountsResolvable;
+module.exports.estimateSetupFeePromiseLaneOk = estimateSetupFeePromiseLaneOk;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;

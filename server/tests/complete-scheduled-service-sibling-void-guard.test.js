@@ -85,7 +85,7 @@ describe('complete-scheduled-service.js — in-lock covered-member mint guard', 
 
   test('a covered-member refusal releases for resume (the retry reuses the combined invoice) and never rings the manual-billing bell', () => {
     expect(source).toContain("const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;");
-    expect(source).toContain('if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {');
+    expect(source).toContain('if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {');
     const branchAt = source.indexOf('if (coveredByCombined) {');
     const bellAt = source.indexOf("logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);");
     expect(branchAt).toBeGreaterThan(-1);

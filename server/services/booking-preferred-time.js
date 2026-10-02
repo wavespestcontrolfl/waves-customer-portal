@@ -8,10 +8,12 @@
  * day and time of day they'd like. The request becomes OFFICE WORK: one lead
  * (lead_type 'book_preferred_time', status 'new', so it shows in Leads, the
  * "leads awaiting contact" dashboard alert and the new_lead admin bell) that
- * staff answer by hand.
+ * staff answer by hand — or that closes itself ('handled') when the customer
+ * then books online (closeBookedPreferredLeads below).
  *
  * NOTHING here sends to the customer — no SMS, no email, no confirmation text.
- * The only outbound side effect is the internal new_lead admin bell. To keep
+ * The only outbound side effects are internal: the new_lead admin bell, and
+ * the one admin FYI when a booking closes the request. To keep
  * the abandoned-booking recovery worker from texting the same person about the
  * slot they walked away from, every OPEN booking_intent for the same phone or
  * session is retired (suppressed) INSIDE the submit's own transaction, and
@@ -199,7 +201,8 @@ async function lockPhone(trx, phone) {
 
 // Visit statuses that no longer hold a self-booking; mirrors the replay guard in
 // routes/booking.js (createSelfBooking) so both agree on "live".
-const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
+// no_show (20260615000005) is terminal too: the customer missed it (codex #5477 r14).
+const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled', 'no_show'];
 // App/DB clock skew a booking may sit either side of a request it belongs to.
 const BOOKING_SLACK_MS = 60 * 1000;
 
@@ -207,13 +210,13 @@ const BOOKING_SLACK_MS = 60 * 1000;
  * True when this phone's owner booked on /book at or after `since` and that
  * booking holds a LIVE, non-callback visit: the request is then moot, so the
  * caller must not ring the new_lead bell for it. A booking never converts a
- * preferred-time lead (owner ruling 2026-09-30, codex #5399 r13): this leaves
- * the same one system note noteBookingOnPreferredLeads writes on every booking
- * path and staff close the request. Runs AFTER the submit's commit: a booking
- * that commits later than this check finds the committed lead and notes it
- * itself; one that committed earlier is seen here. Never throws.
+ * preferred-time lead (codex #5399 r13): closeBookedPreferredLeads closes it
+ * as 'handled' with the one admin FYI instead (owner ruling 2026-10-01), the
+ * same close every booking path makes. Runs AFTER the submit's commit: a
+ * booking that commits later than this check finds the committed lead and
+ * closes it itself; one that committed earlier is seen here. Never throws.
  */
-async function reconcileBookingSince(db, { phone, since }) {
+async function reconcileBookingSince(db, { phone, since, leadId = null }) {
   try {
     const bookings = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
@@ -224,8 +227,19 @@ async function reconcileBookingSince(db, { phone, since }) {
       .limit(10)
       .select('sba.id', 'sba.customer_id', 'sba.created_at');
     for (const candidate of bookings || []) {
-      const out = await noteBookingOnPreferredLeads(db, { customerId: candidate.customer_id, booking: candidate });
-      if (out.live) return true;
+      const out = await closeBookedPreferredLeads(db, { customerId: candidate.customer_id, booking: candidate });
+      // The booking's own funnel row may already exist (its attribution ran before
+      // this close): then this closer is the second and drops the request's row.
+      await dropSupersededPreferredFunnelRows(db, { booking: candidate });
+      // The bell is moot only when THIS request is now closed (a booking on a shared
+      // phone that does not corroborate it leaves it open). Judged on THIS request: on a shared phone the close may have taken an older
+      // request of the booker's and left the new one open (its bell must ring).
+      if (leadId) {
+        const row = await db('leads').where({ id: leadId }).first('status');
+        if (row && row.status === CLOSED_STATUS) return true;
+      } else if (out.closed > 0) {
+        return true;
+      }
     }
     return false;
   } catch (err) {
@@ -242,7 +256,7 @@ async function reconcileBookingSince(db, { phone, since }) {
  */
 async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serviceKey = null, notify = true } = {}) {
   // Taken BEFORE the transaction: a booking that commits from here on may have
-  // run its own note step before this lead became visible (see
+  // run its own close step before this lead became visible (see
   // reconcileBookingSince below). A minute of slack absorbs app/DB clock skew;
   // a booking that close before the request is moot for it too.
   const startedAt = new Date(Date.now() - 60 * 1000);
@@ -383,13 +397,28 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     return { leadId: row.id, created: true };
   });
 
-  // A booking that won the race with this submit (its post-commit note ran
-  // before this lead was visible) is reconciled here: the lead gets the same
-  // note and an already-booked customer does not ring the bell. Best-effort:
-  // on any failure the lead simply stays open and rings.
-  const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt });
+  // A booking that won the race with this submit (its post-commit close ran
+  // before this lead was visible) is reconciled here: the lead closes the same
+  // way (with the admin FYI) and an already-booked customer does not ring the
+  // new_lead bell. Best-effort: on any failure the lead simply stays open and
+  // rings.
+  const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt, leadId });
 
   if (created && notify && !alreadyBooked) {
+    // A booking can close the request after the reconcile above, even while the
+    // bell is being dispatched (codex #5477 r14): the dispatcher re-asks right
+    // before it writes the bell (shouldContinue) and again before the push
+    // (beforePush), so a committed close suppresses both. A failed read rings
+    // (the request then simply stays open work, as on any failure here).
+    const stillOpen = async () => {
+      try {
+        const now = await db('leads').where({ id: leadId }).first('status');
+        return now?.status !== CLOSED_STATUS;
+      } catch (err) {
+        logger.warn(`[booking:preferred-time] pre-bell status recheck failed: ${err.message}`);
+        return true;
+      }
+    };
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {
@@ -401,7 +430,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
         service: serviceLabel || null,
         phone: phoneE164,
         leadId,
-      });
+      }, { shouldContinue: stillOpen, beforePush: stillOpen });
     } catch (err) {
       logger.warn(`[booking:preferred-time] admin bell failed: ${err.message}`);
     }
@@ -410,25 +439,306 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   return { created, leadId };
 }
 
+const CLOSE_REASON = 'booking_on_preferred_request';
+
+// A phone is not an identity: a household or business line is shared by people
+// whose requests are their own (codex #5477 r2 P1). A request closes itself only
+// when something besides the phone ties it to the booked customer: its own
+// customer link, the same email, or the same first AND last name (letters only,
+// case and punctuation ignored). The booking carries no funnel session id and
+// booking_intents are converted by phone alone, so a session match would prove
+// nothing here. Anything else stays open for the office.
+const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^\p{L}]/gu, '');
+const normEmail = (v) => String(v == null ? '' : v).trim().toLowerCase();
+function corroboratesBookedCustomer(lead, customer, customerId) {
+  if (lead.customer_id && String(lead.customer_id) === String(customerId)) return true;
+  const email = normEmail(customer && customer.email);
+  if (email && email === normEmail(lead.email)) return true;
+  const first = normName(customer && customer.first_name);
+  const last = normName(customer && customer.last_name);
+  return !!(first && last && first === normName(lead.first_name) && last === normName(lead.last_name));
+}
+// The whole identity test the close applies under its locks: the request's phone
+// (same last-10 rule as tenMatch) still matches the booked customer's CURRENT phone,
+// it is linked to no customer or to this one (`customerIds`: the visit's current
+// owner, and the booking's own id when a merge has since repointed the visit), and
+// something besides the phone corroborates it.
+function requestIdentifiesCustomer(lead, customer, customerIds) {
+  const ten = tenDigitPhone(customer && customer.phone);
+  const ids = customerIds.filter(Boolean).map(String);
+  return !!ten
+    && String(lead.phone || '').replace(/\D/g, '').slice(-10) === ten
+    && (!lead.customer_id || ids.includes(String(lead.customer_id)))
+    && corroboratesBookedCustomer(lead, customer, ids[0]);
+}
+const CLOSED_STATUS = 'handled';
+// A booking settles only the request it answers (codex #5477 r9/r10): every service
+// line the request asked for (lawn, pest, mosquito, termite...) must be in the booked
+// visit. Both sides may be composites ('Lawn Care + Pest Control', the multi-service
+// label; 'Lawn & Pest'), so each is read as its full set of lines. A request that
+// named no service is answered by any booking; one asking for a line the visit does
+// not carry (a lawn + pest request, then a lawn-only booking) stays open.
+const serviceLines = (text) => new Set(String(text || '').split(/[+&]/)
+  .map((part) => part.trim()).filter(Boolean).map(inferServiceLine));
+function bookingAnswersRequest(requestedService, bookedService) {
+  const booked = serviceLines(bookedService);
+  return [...serviceLines(requestedService)].every((line) => booked.has(line));
+}
+// A booking settles only a request for the SAME property (terminal Codex passes
+// 3-4): a customer with two homes on one phone and name can ask for lawn at A and
+// book lawn at B. Judged by /book's own address matcher (addressMatchesCustomer:
+// normalized street with suffix variants, unit value, zip), so 'St' vs 'Street'
+// never splits one home while a different street or unit never joins two. The
+// visit's service address is its own stamp, else the customer's (the COALESCE
+// every dispatch reader uses). A side with no street cannot be told apart and does
+// not block the close.
+function sameProperty(lead, visit, customer) {
+  const meta = typeof lead.extracted_data === 'string'
+    ? (() => { try { return JSON.parse(lead.extracted_data); } catch { return {}; } })()
+    : (lead.extracted_data || {});
+  const requestedStreet = meta.address_line1;
+  const booked = {
+    address_line1: visit.service_address_line1 || (customer && customer.address_line1),
+    address_line2: visit.service_address_line1 ? visit.service_address_line2 : (customer && customer.address_line2),
+    zip: visit.service_address_zip || (customer && customer.zip),
+  };
+  if (!String(requestedStreet || '').trim() || !String(booked.address_line1 || '').trim()) return true;
+  // Lazy: routes/booking requires this module (the matcher is on its _internals).
+  const { addressMatchesCustomer } = require('../routes/booking')._internals;
+  return addressMatchesCustomer(booked, requestedStreet, lead.zip, meta.address_line2 || null);
+}
+// The words the audit row and the FYI name the visit by.
+const visitWords = (visit) => ({
+  service: clean(visit.service_type, 120) || 'a service',
+  day: visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day',
+});
+
+// The one FYI the office gets when a request closes itself. composeAdminAlert
+// enforces docs/admin-notifications.md (headline 60, one-sentence why of 110, no
+// code-shaped tokens), so the customer-supplied name and service are tidied
+// first. Best-effort and deduped per (lead, visit): a replay never rings twice.
+async function notifyRequestClosed({ lead, customerName, service, day, visitId }) {
+  try {
+    const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
+    const who = clean(customerName, 40).replace(/[._]+/g, ' ').trim() || 'The customer';
+    const what = service.replace(/_/g, ' ');
+    await raiseAdminAlert('lead', {
+      area: 'Leads',
+      action: 'Request closed, customer booked online',
+      why: cutAtWord(`${who} booked ${what} for ${day}; the time request closed on its own.`, 110),
+      severity: 'fyi',
+      link: `/admin/leads?lead=${lead.id}`,
+      subject: { type: 'lead', id: String(lead.id) },
+      doneWhen: 'already_done',
+      who: 'person',
+    }, { dedupeKey: `preferred-time-auto-close:${lead.id}:${visitId}`, bell: true, fyiRow: true });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] auto-close admin notice failed for lead=${lead.id}: ${err.message}`);
+  }
+}
+
 /**
- * A customer who books on /book after asking for a preferred time may not need
- * the office to chase that request, but a booking NEVER closes it (owner ruling
- * 2026-09-30, codex #5399 r13): no lead is marked won and no funnel row is
- * touched — the booking's own attribution runs exactly as it does for any other
- * booking. Instead each open preferred-time lead on the booked customer's phone
- * that the customer asked for at or before the booking (60 s of app/DB clock
- * slack) gets ONE system note naming the visit, deduped per (lead, visit), so
- * staff see it and close the request themselves.
+ * The close FYI is best-effort and written AFTER the status commit, so a failure
+ * (or a crash) there would lose it for good: a replay finds the lead already
+ * handled and the audit row already written. Every closer therefore re-sends it
+ * for every request THIS booking closed, found from the persisted close audit
+ * rows (the lookup the funnel cleanup uses). The send is deduped by its
+ * persistent key (preferred-time-auto-close:<lead>:<visit>, an advisory-locked
+ * lookup on notifications.metadata->>'dedupeKey'), so a retry never rings twice.
+ * Best-effort; never throws into the booking.
+ */
+async function resendCloseNotices(db, { booking }) {
+  try {
+    const audits = (await db('lead_activities as a')
+      .join('leads as l', 'l.id', 'a.lead_id')
+      .where('a.activity_type', 'status_change')
+      .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+      .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
+      .where('l.status', CLOSED_STATUS)
+      // ...and only while that close is the request's CURRENT one (codex #5477 r17):
+      // a request reopened and closed again by a later booking is that booking's to
+      // announce, so this booking's missed FYI is stale and never replayed.
+      .whereNotExists(function laterClose() {
+        this.select(1).from('lead_activities as later')
+          .whereRaw('later.lead_id = a.lead_id AND later.id > a.id')
+          .where('later.activity_type', 'status_change')
+          .whereRaw("later.metadata->>'reason' = ?", [CLOSE_REASON]);
+      })
+      .select('a.lead_id', 'a.metadata', 'l.first_name', 'l.last_name')) || [];
+    for (const row of audits) {
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      const visitId = meta && meta.visit_id;
+      if (!visitId) continue;
+      // The close's own snapshot (codex #5477 r15); an audit written before it was
+      // recorded falls back to the visit as it stands.
+      let words = meta.service && meta.day ? { service: meta.service, day: meta.day } : null;
+      if (!words) {
+        const visit = await db('scheduled_services').where({ id: visitId }).first('service_type', 'scheduled_date');
+        if (!visit) continue;
+        words = visitWords(visit);
+      }
+      await notifyRequestClosed({
+        lead: { id: row.lead_id },
+        customerName: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        ...words, visitId,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] close notice retry failed for booking=${booking.id}: ${err.message}`);
+  }
+}
+
+/**
+ * Close ONE request for the booked visit, every fact re-proven under its locks
+ * (customer FOR SHARE, then the visit FOR UPDATE, then the lead FOR UPDATE).
+ * Returns the FYI words on a close, null when the request is not this booking's
+ * to close, or { ownerMoved } when a merge repointed the visit after the owner
+ * read: the caller then starts over, so the new owner is again locked BEFORE
+ * the visit (codex #5477 r18).
+ */
+function closeOneRequest(db, lead, { customerId, visit, booking, bookedMs, convertedIds }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_note:${lead.id}:${visit.id}`]);
+    const seen = await trx('lead_activities')
+      .where({ lead_id: lead.id, activity_type: 'status_change' })
+      .whereRaw("metadata->>'reason' = ? AND metadata->>'visit_id' = ?", [CLOSE_REASON, String(visit.id)])
+      .first('id');
+    if (seen) return null;
+    // The visit read above is a point-in-time check (codex #5477 r5): it may
+    // have been cancelled, skipped or rescheduled since. Lock and re-read it
+    // here so a request never closes on a booking that no longer holds a
+    // live, non-callback visit.
+    // The booked customer's identity, re-read under a share lock (codex #5477 r8):
+    // staff may have corrected or reassigned their phone, email or name since the
+    // snapshot above, and the corroboration must judge the identity as it is now.
+    // Taken BEFORE the visit lock (codex #5477 r9): a customer merge locks the
+    // customer rows first and then sweeps their visits, so this order matches it.
+    // The customer is the visit's CURRENT owner (codex #5477 r12): a merge that
+    // committed since the booking repointed the visit to the winner and retired
+    // the loser's phone, so the booking's own customer id may be stale.
+    const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
+    const ownerId = (owner && owner.customer_id) || customerId;
+    const readCustomer = (id) => trx('customers').where({ id }).forShare()
+      .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'zip');
+    const liveCustomer = await readCustomer(ownerId);
+    const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
+      .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_line2', 'service_address_zip');
+    if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
+    // A merge repointed the visit between the owner read and the lock (codex #5477
+    // r13, r18): start over (the caller retries once), so the new owner is locked
+    // BEFORE the visit again; never a customer lock taken while the visit is held.
+    if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) return { ownerMoved: true };
+    // Re-read the lead under a row lock (codex #5399 r14): staff may have
+    // reassigned its phone, linked it to another customer or closed it since
+    // the open-lead query above, and the customer may have refreshed the
+    // request (a newer last_requested_at is new work, never this booking's
+    // to close). The advisory lock only orders closers, so the lead's own
+    // state, phone identity and request recency are re-proven right here.
+    const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
+      'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'extracted_data', 'zip',
+      trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
+    );
+    const stillOurs = current
+      && current.lead_type === LEAD_TYPE
+      && OPEN_LEAD_STATUSES.includes(current.status)
+      && !current.converted_at
+      && !current.deleted_at
+      && !current.estimate_id // staff may have attached an estimate since the query above
+      && current.requested_in_time === true
+      && requestIdentifiesCustomer(current, liveCustomer, [ownerId, customerId])
+      && bookingAnswersRequest(current.service_interest, liveVisit.service_type)
+      && sameProperty(current, liveVisit, liveCustomer);
+    if (!stillOurs) return null;
+    // Named from the visit as locked (codex #5477 r10), not the earlier read.
+    const { service, day } = visitWords(liveVisit);
+    await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
+    await trx('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'status_change',
+      description: `Closed automatically — customer booked ${service} for ${day} (visit ${visit.id}) on /book`,
+      performed_by: 'system',
+      metadata: JSON.stringify({
+        reason: CLOSE_REASON,
+        visit_id: String(visit.id),
+        booking_id: String(booking.id),
+        previous_status: current.status,
+        status: CLOSED_STATUS,
+        auto: true,
+        // The words the FYI names the visit by, as locked: a retried FYI replays
+        // these, so it always agrees with this audit row (codex #5477 r15).
+        service,
+        day,
+        // The genuine lead(s) this booking's own conversion converted (the funnel-row
+        // cleanup's replacement lineage when the booking records no row of its own).
+        ...(convertedIds.length ? { converted_lead_ids: convertedIds } : {}),
+      }),
+    });
+    return { name: [current.first_name, current.last_name].filter(Boolean).join(' '), service, day };
+  });
+}
+
+/**
+ * The candidate lookup and per-request close for ONE owner of the booked visit:
+ * the requests on that customer's phone, each re-proven under its locks. Run for the
+ * visit's owner as first read, and once more when a merge has since repointed the
+ * visit to a winner whose phone (and requests) differ (codex #5477 r15).
+ */
+async function closeRequestsForOwner(db, { ownerId, customerId, visit, booking, bookedMs, convertedIds }) {
+  const customer = await db('customers').where({ id: ownerId }).first('phone', 'first_name', 'last_name', 'email');
+  const ten = tenDigitPhone(customer && customer.phone);
+  if (!ten) return 0;
+  const open = (await tenMatch(
+    db('leads')
+      .where({ lead_type: LEAD_TYPE })
+      .whereNull('deleted_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      // A request staff worked into an estimate is that estimate's deal, never
+      // 'handled' (codex #5477 r5/r6): it stays open, exactly as on main, and
+      // converts the way any estimate-linked lead does (the estimate's
+      // acceptance, markLinkedLeadEstimateAccepted) or by staff.
+      .whereNull('estimate_id')
+      .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
+    ten,
+  ).select('id')) || [];
+  let closed = 0;
+  for (const lead of open) {
+    // Per-(lead, visit) advisory lock: the booking's own post-commit path and
+    // the submit's reconcile can both arrive for the same visit.
+    // One restart when a merge repointed the visit mid-transaction (see closeOneRequest).
+    const ctx = { customerId, visit, booking, bookedMs, convertedIds };
+    let result = await closeOneRequest(db, lead, ctx);
+    if (result?.ownerMoved) result = await closeOneRequest(db, lead, ctx);
+    if (!result || result.ownerMoved) continue;
+    closed += 1;
+    await notifyRequestClosed({ lead, customerName: result.name, service: result.service, day: result.day, visitId: visit.id });
+  }
+  return closed;
+}
+
+/**
+ * A customer who books on /book after asking for a preferred time no longer
+ * needs the office to chase that request, so it closes itself (owner ruling
+ * 2026-10-01, superseding the 2026-09-30 note-only rule): each open
+ * preferred-time lead on the booked customer's phone that the customer asked
+ * for at or before the booking (60 s of app/DB clock slack) moves to the
+ * terminal status 'handled' — closed, neither won nor lost. It deliberately
+ * never converts the lead and settles no funnel row (the booking's own attribution
+ * runs exactly as for any other booking; 'handled' has no funnel mapping), so
+ * no deal is counted twice and no lost-lead number moves. ONE status_change
+ * activity row is the audit trail, deduped per (lead, visit), and the office
+ * gets ONE admin FYI per close — nothing goes to the customer.
  *
  * `booking` is the self_booked_appointments row ({ id, created_at }). Only a
  * LIVE, non-callback visit counts: a free re-service callback is a warranty
  * visit and a cancelled / skipped / rescheduled one no longer holds the booking.
- * Returns { live, noted }: `live` = the booking holds such a visit (the submit's
- * reconcile keys its bell on it), `noted` = notes written by this call.
- * Best-effort; never throws into the booking.
+ * Returns { live, closed }: `live` = the booking holds such a visit (the
+ * submit's reconcile keys its new_lead bell on it), `closed` = leads closed by
+ * this call. Best-effort; never throws into the booking.
  */
-async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = {}) {
-  const none = { live: false, noted: 0 };
+async function closeBookedPreferredLeads(db, { customerId, booking = null, convertedLeadIds = [] } = {}) {
+  const none = { live: false, closed: 0 };
   if (!customerId || !booking || !booking.id) return none;
   try {
     const visit = await db('scheduled_services')
@@ -437,65 +747,206 @@ async function noteBookingOnPreferredLeads(db, { customerId, booking = null } = 
       .first();
     if (!visit || visit.is_callback) return none;
     const bookedMs = new Date(booking.created_at).getTime();
-    if (Number.isNaN(bookedMs)) return { live: true, noted: 0 };
-    const customer = await db('customers').where({ id: customerId }).first('phone');
-    const ten = tenDigitPhone(customer && customer.phone);
-    if (!ten) return { live: true, noted: 0 };
-    const open = (await tenMatch(
-      db('leads')
-        .where({ lead_type: LEAD_TYPE })
-        .whereNull('deleted_at')
-        .whereIn('status', OPEN_LEAD_STATUSES)
-        .whereNull('converted_at')
-        .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
-      ten,
-    ).select('id')) || [];
-    const service = clean(visit.service_type, 120) || 'a service';
-    const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
-    let noted = 0;
-    for (const lead of open) {
-      // Per-(lead, visit) advisory lock: the booking's own post-commit path and
-      // the submit's reconcile can both arrive for the same visit.
-      const wrote = await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_note:${lead.id}:${visit.id}`]);
-        const seen = await trx('lead_activities')
-          .where({ lead_id: lead.id, activity_type: 'note' })
-          .whereRaw("metadata->>'reason' = 'booking_on_preferred_request' AND metadata->>'visit_id' = ?", [String(visit.id)])
-          .first('id');
-        if (seen) return false;
-        // Re-read the lead under a row lock (codex #5399 r14): staff may have
-        // reassigned its phone, linked it to another customer or closed it since
-        // the open-lead query above. The advisory lock only orders note writers,
-        // so the lead's own state and phone identity are re-proven right here.
-        const current = await trx('leads').where({ id: lead.id }).forUpdate().first('lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id');
-        const stillOurs = current
-          && current.lead_type === LEAD_TYPE
-          && OPEN_LEAD_STATUSES.includes(current.status)
-          && !current.converted_at
-          && !current.deleted_at
-          && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
-          && (!current.customer_id || String(current.customer_id) === String(customerId));
-        if (!stillOurs) return false;
-        await trx('lead_activities').insert({
-          lead_id: lead.id,
-          activity_type: 'note',
-          description: `Customer booked ${service} for ${day} (visit ${visit.id}) on /book — close this request if nothing else is needed.`,
-          performed_by: 'system',
-          metadata: JSON.stringify({ reason: 'booking_on_preferred_request', visit_id: String(visit.id), booking_id: String(booking.id) }),
-        });
-        return true;
-      });
-      if (wrote) noted += 1;
+    const convertedIds = (Array.isArray(convertedLeadIds) ? convertedLeadIds : []).filter(Boolean).map(String);
+    if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
+    // The visit's current owner (a merge since the booking repoints it; codex #5477 r12),
+    // and once more if a merge repointed it while this ran (codex #5477 r15).
+    const firstOwner = visit.customer_id || customerId;
+    const ctx = { customerId, visit, booking, bookedMs, convertedIds };
+    let closed = await closeRequestsForOwner(db, { ...ctx, ownerId: firstOwner });
+    // Read under a share lock on the first owner (codex #5477 r16): a merge locks the
+    // loser's customer row FOR UPDATE before it repoints the visit, so an in-flight
+    // merge is waited out here and its committed repoint is what this read sees.
+    const now = await db.transaction(async (trx) => {
+      await trx('customers').where({ id: firstOwner }).forShare().first('id');
+      return trx('scheduled_services').where({ id: visit.id }).first('customer_id');
+    });
+    if (now?.customer_id && String(now.customer_id) !== String(firstOwner)) {
+      closed += await closeRequestsForOwner(db, { ...ctx, ownerId: now.customer_id });
     }
-    return { live: true, noted };
+    // Every request THIS booking closed (just now, or on an earlier run), including one
+    // whose FYI above failed and was swallowed: the FYI is re-sent here. The persistent
+    // dedupe key makes the repeat for one that did go out a no-op, so the normal, replay
+    // and reconcile closers all heal a lost FYI.
+    await resendCloseNotices(db, { booking });
+    return { live: true, closed };
   } catch (err) {
-    logger.warn(`[booking:preferred-time] booking note failed for customer=${customerId}: ${err.message}`);
+    logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);
     return none;
   }
 }
 
+/**
+ * Once a booking's OWN attribution row exists, the funnel row of a request that
+ * booking closed is a duplicate of the same journey (one lead + one booked row =
+ * two leads, one booking in the dashboard / Ads funnels; codex #5477 r1 P1), so
+ * it is removed. Only then: a booking that recorded no row (no attribution
+ * capture, an owned recovery / estimate-originated link, a replay that never
+ * reached attributeSelfBooking) leaves the request's row as the journey's only
+ * funnel entry.
+ *
+ * The requests are resolved from the persisted audit rows THIS booking wrote when
+ * it closed them (status_change, reason booking_on_preferred_request, this
+ * booking_id; the lead still 'handled'), never from an in-memory result, so it
+ * does not matter which closer won the race (the booking's own post-commit close,
+ * the submit's reconcileBookingSince, or a replay): each calls this after its
+ * own step and whichever runs SECOND, once the booking's row exists, deletes.
+ * Idempotent. The replacement (a row keyed to this booking's id, or the booked /
+ * completed row of a genuine lead THIS booking converted: won_booking_id stamped
+ * on the lead by the conversion itself, or ids passed by the booking path or
+ * persisted on its close audit row) belonging to another lead is
+ * verified in the same statement as the delete, and a row already at booked /
+ * completed (revenue attached) is never removed.
+ * Best-effort: never throws into the booking. Returns the rows removed.
+ */
+async function dropSupersededPreferredFunnelRows(db, { booking = null, convertedLeadIds = [] } = {}) {
+  if (!booking || !booking.id) return 0;
+  try {
+    // The genuine lead(s) this booking converted, from its own lineage only: the ids
+    // the booking path passes, plus the ids it persisted on the close's audit rows
+    // for THIS booking (a later closer, such as the reconcile or a replay, reads those).
+    // Never "any recently updated booked/completed row for the customer".
+    const audits = (await db('lead_activities')
+      .where('activity_type', 'status_change')
+      .whereRaw("metadata->>'reason' = ?", [CLOSE_REASON])
+      .whereRaw("metadata->>'booking_id' = ?", [String(booking.id)])
+      .select('metadata')) || [];
+    const persisted = audits.flatMap((row) => {
+      let meta = row && row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      return meta && Array.isArray(meta.converted_lead_ids) ? meta.converted_lead_ids : [];
+    });
+    const converted = [...new Set([...(Array.isArray(convertedLeadIds) ? convertedLeadIds : []), ...persisted].filter(Boolean).map(String))];
+    // One transaction that LOCKS the closed requests' lead rows and re-checks 'handled'
+    // under the lock before deleting: staff reopening a request (and the funnel bridge
+    // restoring its row, which takes the same lock) goes before or after, never in between.
+    return await db.transaction(async (trx) => {
+      const locked = (await trx('leads as l')
+        .whereIn('l.id', function closedByThisBooking() {
+          // ...whose CURRENT close is this booking's (terminal Codex pass 3): staff may
+          // have reopened a request this booking closed and a later booking closed it
+          // again, and that later close's funnel row is not this booking's to drop.
+          this.select('a.lead_id').from('lead_activities as a')
+            .where('a.activity_type', 'status_change')
+            .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+            .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
+            .whereNotExists(function laterClose() {
+              this.select(1).from('lead_activities as later')
+                .whereRaw('later.lead_id = a.lead_id AND later.id > a.id')
+                .where('later.activity_type', 'status_change')
+                .whereRaw("later.metadata->>'reason' = ?", [CLOSE_REASON]);
+            });
+        })
+        .where('l.status', CLOSED_STATUS)
+        .forUpdate()
+        .select('l.id')) || [];
+      const closedIds = locked.map((r) => r.id);
+      if (!closedIds.length) return 0;
+      // The rows that replace a closed request's row: the booking's own row (keyed to
+      // this booking), OR the booked / completed funnel row of a genuine lead this
+      // booking converted instead (recurring / estimate-linked bookings convert that
+      // lead, so attributeSelfBooking writes no row of its own). The converted lead is
+      // known from the ids the booking path passes or persisted on its close audit
+      // rows, or from the lineage persisted AT the conversion (extracted_data.
+      // won_booking_id, written in the same statement as the win), so a crash between
+      // the conversion and the close loses nothing. One scope for the transfer target
+      // and the delete's existence check.
+      const replacementScope = (q) => {
+        q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
+        if (converted.length) {
+          q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
+        }
+        q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
+          .whereIn('booked.lead_id', function convertedByThisBooking() {
+            this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
+              .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
+          }));
+      };
+      // First touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8-r11): a
+      // request that came in paid (is_paid: a paid click, or paid UTMs whose click id
+      // was stripped) is the journey's first touch unless the replacement's own touch
+      // is older, so the replacement takes the request's touch before the request's
+      // row goes, the same credit an ordinary lead's own row gets when its booking
+      // advances it. The earliest paid request wins; a replacement with a paid click of
+      // its own keeps it (whatever its is_paid: attributeSelfBooking's new-customer
+      // mint leaves it NULL), and so does a converted lead whose own first contact
+      // came no later than the request. The booking's own row is preferred as the target.
+      // The touch columns are the ones lead-funnel-bridge stampLeadFunnelRow writes
+      // (fbp is a browser id, not a click).
+      const { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS } = require('./lead-funnel-bridge');
+      const touchColumns = ['lead_source', 'lead_source_detail', 'lead_date', ...CLICK_ID_COLUMNS, 'utm_campaign', 'utm_term', 'is_paid'];
+      const target = await trx('ad_service_attribution as booked')
+        .where((q) => q.whereNull('booked.lead_id').orWhereNotIn('booked.lead_id', closedIds))
+        .where(replacementScope)
+        .orderByRaw('(booked.self_booked_appointment_id = ?) DESC NULLS LAST, booked.id ASC', [booking.id])
+        .forUpdate()
+        .first('booked.*');
+      const hasPaidClick = (row) => PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
+      const CONTACTED_AT = 'COALESCE(%s.first_contact_at, %s.created_at)';
+      const contactedAt = (alias) => CONTACTED_AT.replace(/%s/g, alias);
+      // Provenance (terminal Codex pass 4): the request whose touch an earlier cleanup
+      // already gave this target, recorded on that request's close audit (touch_to).
+      // A close that runs in parts (one request now, an older one on a replay) is then
+      // judged on the same earliest-contact rule whatever the order: an inherited click
+      // is not the target's own, and a later cleanup compares against its instant.
+      const inherited = target ? await trx('lead_activities as a')
+        .join('leads as il', 'il.id', 'a.lead_id')
+        .where('a.activity_type', 'status_change')
+        .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+        .whereRaw("a.metadata->>'touch_to' = ?", [String(target.id)])
+        .orderByRaw(`${contactedAt('il')} ASC`)
+        .first(trx.raw(`${contactedAt('il')} AS contacted_at`)) : null;
+      if (target && (inherited || !hasPaidClick(target))) {
+        // Earliest first contact wins: ordered by the requests' contact instants (the
+        // calendar lead_date ties same-day, and the row id is not contact order).
+        const requestRows = (await trx('ad_service_attribution as r')
+          .join('leads as rl', 'rl.id', 'r.lead_id')
+          .whereIn('r.lead_id', closedIds)
+          .where((q) => q.whereNull('r.funnel_stage').orWhereNotIn('r.funnel_stage', ['booked', 'completed']))
+          .orderByRaw(`${contactedAt('rl')} ASC NULLS LAST, r.lead_date ASC NULLS LAST, r.id ASC`)
+          .select('r.*', trx.raw(`${contactedAt('rl')} AS contacted_at`))) || [];
+        const firstPaid = requestRows.find((row) => row.is_paid === true);
+        // The touch the target holds now, and since when: one it inherited from an
+        // earlier request, else a converted genuine lead's own (codex #5477 r12: judged
+        // on first-contact instants, not the calendar lead_date). A booking's own row
+        // with no paid click holds nothing to defend. A tie, or no instant to compare,
+        // keeps what the target holds.
+        let held = null;
+        if (inherited) held = { at: inherited.contacted_at };
+        else if (target.lead_id) {
+          held = { at: (await trx('leads').where({ id: target.lead_id }).first(trx.raw(`${contactedAt('leads')} AS contacted_at`)))?.contacted_at };
+        }
+        const keepsHeld = !!held && (!held.at || !firstPaid?.contacted_at
+          || new Date(held.at).getTime() <= new Date(firstPaid.contacted_at).getTime());
+        if (firstPaid && !keepsHeld) {
+          await trx('ad_service_attribution').where({ id: target.id })
+            .update({ ...Object.fromEntries(touchColumns.map((col) => [col, firstPaid[col] ?? null])), updated_at: trx.fn.now() });
+          await trx('lead_activities')
+            .where({ lead_id: firstPaid.lead_id, activity_type: 'status_change' })
+            .whereRaw("metadata->>'reason' = ? AND metadata->>'booking_id' = ?", [CLOSE_REASON, String(booking.id)])
+            .update({ metadata: trx.raw("metadata || ?::jsonb", [JSON.stringify({ touch_to: String(target.id) })]) });
+        }
+      }
+      return (await trx('ad_service_attribution')
+        .whereIn('lead_id', closedIds)
+        .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
+        .whereExists(function replacementRow() {
+          this.select(1).from('ad_service_attribution as booked')
+            .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
+            .where(replacementScope);
+        })
+        .del()) || 0;
+    });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] superseded funnel row cleanup failed for booking=${booking.id}: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
-  noteBookingOnPreferredLeads,
+  closeBookedPreferredLeads,
+  dropSupersededPreferredFunnelRows,
+  reconcileBookingSince,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,

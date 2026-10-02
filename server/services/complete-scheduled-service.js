@@ -12,6 +12,13 @@ const { stampedDivergesSql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
+// How long a NEGATIVE pending_setup_fee marker (a completion mid-mint) stays
+// an in-flight lease that no other completion may adopt: the SAME window after
+// which the owning completion attempt itself is stale and its own retry takes
+// over its side effects, so the two can never disagree about whether the owner
+// is still alive (pre-push audit P1). A mint is a few seconds.
+const SETUP_FEE_CLAIM_LEASE_MS = CompletionAttempts.STALE_SIDE_EFFECTS_MS;
+
 // The visit columns the issued-invoice closeout's record, service line and
 // attribution are derived from before the row lock; any of them moving under
 // the lock refuses the closeout (GitHub r11 P2 #4127).
@@ -107,7 +114,8 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeS
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -1936,6 +1944,117 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Plain words for each writer-rules rejection, for the edit heads-up.
+const REPORT_RULE_FINDING_LABELS = Object.freeze({
+  amount: 'An amount or measurement',
+  footage: 'A measured area (feet or acres)',
+  percent: 'A percentage',
+  rate: 'A rate or mix strength',
+  per_visit: '"Per visit"',
+  company_name: 'A company name other than Waves Pest Control',
+  safe_word: 'The word "safe" (or harmless, non-toxic)',
+  chemical: 'The word "chemical"',
+  owner_phrase: 'A word the report leaves out',
+  unscoped_absence: '"No activity" for the whole property',
+  aftercare: 'Care instructions (the report prints its own)',
+  reentry: 'Re-entry or drying instructions (the report prints its own)',
+  timeframe: 'A timeframe not from the approved wording',
+  gauge: "The activity gauge's number",
+  quote: 'The customer quoted word for word',
+  price: 'A price, or free, included or covered',
+  date: 'A date or day',
+  time: 'A time or arrival window',
+  active_ingredient: 'An active ingredient name',
+  report_shape: 'The report no longer has its four titled parts with one line each, so the customer would get the standard summary instead',
+});
+// The writer's own titles, so a re-checked sentence is screened inside its
+// section: a timeframe allowed in WHAT TO EXPECT is refused in WHAT WE DID
+// AND WHY (Codex #5500). An unknown key screens as WHAT WE FOUND, where
+// nothing extra is allowed.
+const SECTION_SCREEN_TITLES = Object.freeze({
+  whatWeFound: 'WHAT WE FOUND', whatWeDid: 'WHAT WE DID AND WHY', whatToExpect: 'WHAT TO EXPECT', whatsNext: "WHAT'S NEXT",
+});
+const normalizeSentence = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
+  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/)
+    .map((sentence) => ({ key: section?.key || null, sentence: sentence.trim() })))
+  .filter((entry) => entry.sentence);
+const REFUSED_WORDS_LABEL = 'Words the report can\'t publish (it would show the plain summary instead)';
+// Unchanged means the same sentence in the same section.
+const sectionSentenceKey = (entry) => `${entry.key}|${normalizeSentence(entry.sentence)}`;
+
+// Edit heads-up for the four-section report (owner 2026-10-01: "it
+// shouldn't stop us, but we should rerun it if I or a tech edits it";
+// Codex #5500). The writer rules run again on every sentence that differs
+// from the installed generated draft; any finding returns one 409 the tech
+// confirms ("send as is") or goes back to edit. Never blocks: a confirmed
+// resubmit passes. Only the four-section report is checked, and it exists
+// only while GATE_REPORT_WRITER_RULES is live. Fail-open on checker errors.
+function reportRulesReviewBlockPayload({
+  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null, activeIngredients = [],
+}) {
+  if (isIncompleteVisit || reportRulesConfirmed) return null;
+  try {
+    // Structure, not the publishable parse: an edit that adds a refused
+    // word ("safe") drops the whole body at render, and the tech must hear
+    // about that too (Codex #5500).
+    const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
+      ? fourSectionReport(reportDraftBase)
+      : null;
+    const submitted = fourSectionReport(technicianNotes);
+    if (!submitted) {
+      // An installed draft edited out of its shape (a second line in a
+      // section, a changed title): the render parse refuses it too and the
+      // customer gets the standard summary, so the tech hears about it
+      // (Codex #5500). Notes with no installed draft are not a report, and
+      // notes in the older two-section layout still publish as one.
+      if (!base || normalizeSentence(technicianNotes) === normalizeSentence(reportDraftBase)) return null;
+      const legacy = technicianReportCustomerCopy(technicianNotes);
+      if (legacy?.body) return null;
+      return reportRulesReviewPayload([legacy
+        ? { reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: legacy.violations.join(', ') }
+        : { reason: 'report_shape', label: REPORT_RULE_FINDING_LABELS.report_shape, sentence: null }]);
+    }
+    const unchanged = new Set(reportSentences(base?.sections).map(sectionSentenceKey));
+    // The same context the generation screen had: this visit's catalog
+    // actives, and the timeframes and dates the generated draft carried
+    // (they passed that screen), so an edit that keeps them is no finding.
+    const screenOptions = {
+      activeIngredients,
+      allowedPhrases: groundedTimeframePhrases([base?.body || '']),
+      allowedDates: draftDatePhrases(base?.body || ''),
+    };
+    const findings = [];
+    if (submitted.violations.length) {
+      findings.push({ reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: submitted.violations.join(', ') });
+    }
+    for (const entry of reportSentences(submitted.sections)) {
+      if (unchanged.has(sectionSentenceKey(entry))) continue;
+      const titled = `${SECTION_SCREEN_TITLES[entry.key] || SECTION_SCREEN_TITLES.whatWeFound}\n${entry.sentence}`;
+      const reason = writerRulesRejection(titled, screenOptions);
+      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence: entry.sentence });
+    }
+    if (!findings.length) return null;
+    return reportRulesReviewPayload(findings);
+  } catch {
+    return null;
+  }
+}
+
+function reportRulesReviewPayload(findings) {
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code, so the plain-words list
+      // rides in the error string; the structured list stays for tests.
+      error: findings.map((finding) => (finding.sentence ? `${finding.label}: "${finding.sentence}"` : finding.label)).join('\n'),
+      code: 'report_rules_review',
+      findings,
+      confirmable: true,
+    },
+  };
+}
+
 // Completion invoice-candidate lookups + reconciliation live in
 // services/completion-invoice-candidate.js (shared with the card-expiry
 // exemption so both read the same rows through the same rules).
@@ -2122,8 +2241,11 @@ function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
   reportToken,
+  // The fixed re-service text is only a pointer to the report, so it needs a
+  // real report token on any template version (never the portal home link).
+  reserviceFixedRecap = false,
 }) {
-  if (!serviceReportV1Delivery) return false;
+  if (!serviceReportV1Delivery && !reserviceFixedRecap) return false;
   if (typedDeliveryMode === 'disabled') return false;
   return !reportToken;
 }
@@ -2505,7 +2627,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       thatchMeasurement,
       soilPh,
       soilMoisture,
-      sendCompletionSms,
+      sendCompletionSms: sendCompletionSmsRequested,
+      // Fast Complete's fixed re-service text (GATE_FAST_COMPLETE_RECAP): the
+      // sheet names the mode, the server builds the text — see
+      // services/reservice-fixed-recap.js. Honored only below, once the live
+      // completion profile and both dark gates are known.
+      customerRecapMode,
       requestReview,
       reviewTiming,
       reviewScheduledFor,
@@ -2565,6 +2692,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
+      reportDraftBase = null, // the installed generated draft the notes were edited from
+      promiseMarks = null, // the promise check: [{ id, mark, stillLeft? }] — OPTIONAL (visit-promises.js)
+      promiseMarksConfirmed = false, // tech confirmed sending though a marked promise changed
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -3074,6 +3205,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
         code: 'completion_profile_lookup_failed',
       } });
     }
+    // Fast Complete's fixed re-service text. Asked for by the sheet, honored
+    // only while both dark gates are on and the visit is (still) a pest
+    // re-service. A request that is NOT honored sends no completion text at
+    // all — never the templated one — so a stale sheet cannot cause a second
+    // kind of text; gate off is byte-identical to today.
+    const ReserviceFixedRecap = require('./reservice-fixed-recap');
+    const reserviceFixedRecapRequested = customerRecapMode === ReserviceFixedRecap.MODE;
+    const reserviceFixedRecap = ReserviceFixedRecap.reserviceFixedRecapHonored({
+      requestedMode: customerRecapMode,
+      fastCompleteGate: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      recapGate: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
+      serviceKey: completionProfile?.serviceKey,
+      visitOutcome,
+    });
+    const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
+      ? false
+      : sendCompletionSmsRequested;
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -3193,6 +3341,51 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (reconcileBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
+      }
+    }
+    // Edit heads-up on the four-section report (see
+    // reportRulesReviewBlockPayload): same 409 shape, same committed-retry
+    // exemption as the reconciliation prompt just above.
+    {
+      // This visit's catalog actives, as the generation screen reads them
+      // (fail-soft: the common list still applies inside the screen).
+      const reviewProductIds = (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
+      const reviewActives = reportRulesConfirmed || !reviewProductIds.length
+        ? []
+        : (await failSoftRead(db, (k) => k('products_catalog').whereIn('id', reviewProductIds).select('active_ingredient'), []))
+          .map((row) => row?.active_ingredient).filter(Boolean);
+      const rulesBlock = reportRulesReviewBlockPayload({
+        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
+      });
+      if (rulesBlock
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: rulesBlock.status, body: rulesBlock.payload });
+      }
+    }
+    // The promise check: a mark that no longer holds (the office closed,
+    // reworded or moved the promise after the report was written) asks
+    // before the report goes out, since the report may speak to it. Same
+    // confirmable 409 and committed-retry exemption as the heads-up above;
+    // a read failure never blocks (Codex #5516).
+    if (!promiseMarksConfirmed && Array.isArray(promiseMarks) && promiseMarks.length
+      && !isIncompleteVisit && visitOutcome !== 'customer_declined' && !isBackfillCompletion
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      const stalePromiseIds = await (async () => {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (!completionProfile || !VisitPromises.promiseCheckInScope(svc.service_type, completionProfile)) return [];
+        // An optional read: in a grouped closeout `db` is the packet's
+        // transaction, so it runs in a savepoint and a ledger error never
+        // aborts the closeout (Codex #5516; waves-db failSoftRead).
+        return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
+      })().catch(() => []);
+      if (stalePromiseIds.length
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: 409, body: {
+          error: 'A promise you marked changed after the report was written (the office closed, reopened, reworded or moved it). The report may still mention it.',
+          code: 'promise_marks_changed',
+          promiseIds: stalePromiseIds,
+          confirmable: true,
+        } });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
@@ -5268,6 +5461,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // The body came from the four-section report (writer rules): the
+        // frozen cards carrying it are stamped so a later kill switch hides
+        // them (report-data).
+        let technicianReportFourSection = false;
         // Request-context rejections (trade names from THIS visit's
         // products, companion contradictions) must survive to the RENDER
         // path: untyped completions have no governing snapshot, so
@@ -5281,6 +5478,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          technicianReportFourSection = Boolean(technicianReport?.sections);
           // The generate endpoint screens trade names per-request, but a
           // post-generation inline edit reaches completion with only the
           // static banned-word checks — rerun the visit-specific product
@@ -5837,6 +6035,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
+            // Frozen with the record itself, so no reader (recap-delivery's
+            // video-recap refusal) can ever see this visit's record without
+            // the fixed-text marker: the record and the marker commit together.
+            ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6405,6 +6607,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (companionActivity) companionActivityInserts.push(companionActivity);
             }
             if (companionSnapshots.length) serviceData.companionReportSnapshots = companionSnapshots;
+          }
+          if (technicianReportFourSection) {
+            for (const snapshot of [serviceData.typedReportSnapshot, ...(serviceData.companionReportSnapshots || [])]) {
+              if (snapshot?.todaysResult?.bodySource === 'technician_report') snapshot.todaysResult.bodyFormat = 'four_section';
+            }
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')
@@ -7656,6 +7863,49 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
 
+    // The promise check (owner "ok yes add these" 2026-10-01): the
+    // technician's marks reach the office's promise list. It runs here, right
+    // after the durable commit and the committed-truth re-derivation above,
+    // before any later step can return early (a resumable invoice, report or
+    // text error) or deliver the report, so a closeout that was saved never
+    // leaves its marks behind (Codex #5516). A street-level address hold whose
+    // release fails returns before this point; the retry that finalizes that
+    // closeout runs it. POST-COMMIT: a failed write never fails the
+    // completion and nothing contacts the customer; a mark that did not reach
+    // the list rings one office bell to settle it by hand. Only while the
+    // writer rules are live, on a visit the writer covers, judged on the
+    // profile the completion transaction used (null skips). Only a visit
+    // that did its work: never a declined (or incomplete) one. Backfills
+    // excluded, like the comms guard. Re-runnable on a resume.
+    if (!isBackfillCompletion && visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'
+      && Array.isArray(promiseMarks) && promiseMarks.length
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      try {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
+          let promiseResults = null;
+          try {
+            promiseResults = await VisitPromises.applyVisitPromiseMarks(db, {
+              customerId: svc.customer_id,
+              marks: promiseMarks,
+              visitDate: svc.scheduled_date,
+              reviewedBy: completionInput.actor?.technicianId || null,
+            });
+          } catch (applyErr) {
+            logger.warn(`[dispatch] promise marks not applied (${VisitPromises.errorCode(applyErr)})`);
+          }
+          const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
+          });
+          await VisitPromises.alertUnsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, serviceId: svc.id, visitDate: svc.scheduled_date, unsaved,
+          });
+        }
+      } catch (promiseErr) {
+        logger.warn(`[dispatch] promise marks failed (non-blocking) (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
+      }
+    }
+
     // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
     // end-instant rule the transaction applied to the kept lifecycle stamps,
     // for markComplete's completed_at below — a wall-clock completed_at
@@ -8891,7 +9141,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true')) {
       try {
         const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
-        const obligation = await findUnmintedSetupFeeObligation({
+        const obligationArgs = {
           sourceEstimateId: svc.source_estimate_id,
           customerId: svc.customer_id,
           excludeScheduledServiceId: svc.id,
@@ -8903,7 +9153,45 @@ async function completeScheduledService(completionInput, packetContext = null) {
             is_recurring: svc.is_recurring,
             recurring_parent_id: svc.recurring_parent_id || null,
           },
-        }, db);
+        };
+        let obligation = await findUnmintedSetupFeeObligation(obligationArgs, db);
+        // A live stamp on this estimate's series that NO completion can ever
+        // consume (dues-covered lane / no live consumer) is not a deferral, and
+        // it must never be cleared into nothing: it is PARKED FOR THE OFFICE
+        // (owner ruling 2026-10-01), in its own transaction per stamp: the stamp
+        // is cleared and a setup_fee_office_billing alert is the durable
+        // owed-fee record. NO invoice is created outside the normal completion
+        // mint. The detector reads that alert as covered, so the obligation is
+        // judged again on the new state and the visit is not parked for a
+        // second manual bill; the office bills the fee once, by hand. A failure
+        // here fails the lookup CLOSED (503 + resume) like any other read.
+        // Only a performed LIVE visit hands a stranded stamp to the office: a
+        // declined / inspection-only visit, a backfill or a recap-only record
+        // performed no application, so the stamp stays for the visit that does.
+        if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length
+          && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly
+          && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+          const { parkSetupFeeStampForOffice } = require('../services/setup-fee-obligation');
+          const parked = [];
+          for (const stamp of obligation.unconsumableStamps) {
+            const result = await db.transaction((trx) => parkSetupFeeStampForOffice(trx, {
+              parentId: stamp.parentId, rawAmount: stamp.rawAmount, customerId: svc.customer_id,
+              estimateId: obligation.estimateId || svc.source_estimate_id,
+              origin: `visit ${svc.id}`,
+              alertContext: { visitId: svc.id, serviceId: svc.id },
+              billToScheduledServiceId: svc.id,
+              visit: svc,
+            }));
+            if (result) parked.push(result);
+          }
+          if (parked.length) {
+            logger.warn(`[dispatch] visit ${svc.id}: parked ${parked.length} unconsumable setup-fee stamp(s) on estimate ${obligation.estimateSlug || obligation.estimateId} for the office to bill by hand (alert ${parked.map((p) => p.alertId).join(', ')})`);
+            obligation = await findUnmintedSetupFeeObligation(obligationArgs, db);
+            if (obligation.owed) {
+              obligation.setupFeeParkedNote = ` NOTE: a queued setup-fee stamp ($${parked.reduce((sum, p) => sum + p.amount, 0).toFixed(2)}) on this estimate's series was handed to the office to bill by hand (a "setup_fee_office_billing" alert) — it must be billed once, never twice.`;
+            }
+          }
+        }
         const setupFeeDedupeKey = `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`;
         // Stale-alert reconciliation (Codex P0, pre-push rounds 8–10):
         // runs on EVERY completion that does not itself park, whatever
@@ -8927,7 +9215,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // parking a second one (Codex P0, pre-push round 11).
           // Retain the accepted fee for the terminal alert's locked coverage recheck.
           unmintedSetupFeeObligation = obligation;
-          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.`;
+          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.${obligation.setupFeeParkedNote || ''}`;
         } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
           // the fee obligation stays owed while a parked visit sits
@@ -8978,7 +9266,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 const created = await require('../services/notification-service').notifyAdmin(
                   'billing',
                   'Setup fee never invoiced — historic first visit billed without it',
-                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.`,
+                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.${obligation.setupFeeParkedNote || ''}`,
                   {
                     link: `/admin/customers?customerId=${svc.customer_id}`,
                     bell: true,
@@ -9731,6 +10019,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } else {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
+          alertBody += unmintedSetupFeeObligation.setupFeeParkedNote || '';
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
             // resolved round means the obligation REOPENED (coverage
@@ -10122,7 +10411,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // operator-reachable "today's visit" text days after the fact — so this
     // rail is gated like the other customer-contact rails. Recap delivery also
     // refuses the structured_notes.backfill marker as defense in depth.
-    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    // The fixed re-service text is the visit's ONE customer text: no video
+    // recap is queued behind it (an approved recap would text a second,
+    // differently worded completion message). recap-delivery.js also refuses
+    // the completionSmsRecapMode marker, for a row queued before completion.
+    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id && !reserviceFixedRecap) {
       if (isBackfillCompletion) {
         logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
       } else {
@@ -10335,6 +10628,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // adoption) collapses concurrent completions to one fee. Never under
     // backfill (frozen-money posture) and never for callbacks.
     let secureSetupFee = null;
+    // A FRESH negative marker this completion could not adopt: its owning
+    // completion may be a crashed attempt this very retry replaced (the
+    // attempt lease starts before the fee lease), so minting now would bill
+    // the visit without its fee and finalize. Refused below through the
+    // mint's release/503 path; the retry re-reads the marker (null once the
+    // owner commits, adoptable once its lease lapses).
+    let setupFeeClaimInFlight = false;
     if (shouldInvoice && !isBackfillCompletion && !svc.is_callback) {
       try {
         const setupParentId = svc.recurring_parent_id || svc.id;
@@ -10342,7 +10642,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           .where({ id: setupParentId })
           .first('pending_setup_fee', 'updated_at');
         const rawFee = parentRow?.pending_setup_fee != null ? Number(parentRow.pending_setup_fee) : null;
-        if (rawFee) {
+        // A deferred WaveGuard setup fee an annual prepay covering this visit
+        // waives (owner 2026-10-01, decide at the visit) is not claimed: the
+        // stamp waits for a visit no prepay covers.
+        const prepayWaived = rawFee > 0 && await require('../services/setup-fee-obligation')
+          .prepayWaivesDeferredSetupFee(db, { seriesId: setupParentId, visit: svc });
+        // A non-recurring booster / add-on under the plan's parent is not a plan
+        // application: it never takes the plan's queued first-visit fee.
+        const boosterUnderPlan = !!svc.recurring_parent_id && !svc.is_recurring;
+        if (rawFee && !prepayWaived && !boosterUnderPlan) {
           const amount = Math.round(Math.abs(rawFee) * 100) / 100;
           if (rawFee < 0) {
             // Orphaned claim from a dead worker. The durable truth is the
@@ -10384,12 +10692,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 .update({ pending_setup_fee: null, updated_at: new Date() });
               logger.info(`[dispatch] orphaned setup-fee claim healed for series ${setupParentId} — fee already on invoice ${lineExists.id}`);
             } else {
+              // The negative marker is a LEASE, not just a flag: a claim
+              // written seconds ago belongs to a completion that is mid-mint
+              // right now (another visit of this series), and its invoice
+              // simply is not committed yet, so the line check above cannot
+              // see it. Adopting it would mint + charge the fee twice
+              // (Codex P1 on #5485). Only a marker idle for the whole lease
+              // is a dead worker's orphan; the updated_at CAS then still
+              // collapses concurrent adopters to one.
               const adopted = await db('scheduled_services')
                 .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee, updated_at: parentRow.updated_at })
+                .where('updated_at', '<', new Date(Date.now() - SETUP_FEE_CLAIM_LEASE_MS))
                 .update({ updated_at: new Date() });
               if (adopted === 1) {
                 secureSetupFee = { parentId: setupParentId, amount };
                 logger.warn(`[dispatch] orphaned setup-fee claim ADOPTED for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+              } else {
+                setupFeeClaimInFlight = true;
               }
             }
           } else {
@@ -10399,17 +10718,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (claimed === 1) {
               secureSetupFee = { parentId: setupParentId, amount };
               logger.info(`[dispatch] setup-fee claim consumed for series ${setupParentId} ($${amount}) — minting on visit ${svc.id}`);
+            } else {
+              // Lost the CAS: another visit of this series just took the
+              // claim (its mint is in flight) or the stamp moved. Never mint
+              // fee-less beside it — release for a retry, which re-reads.
+              setupFeeClaimInFlight = true;
             }
           }
         }
       } catch (e) {
-        // Unreadable stamp mints the plain visit invoice — the fee stays
-        // stamped for the next completion rather than risking a double line.
-        logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
+        // The claim (or the prepay-coverage read that decides it) could not
+        // be verified: never mint a fee-less visit invoice the customer was
+        // promised would carry the fee — release for a retry instead.
+        logger.warn(`[dispatch] setup-fee claim could not be verified for visit ${svc.id}: ${e.message} — releasing for retry`);
+        setupFeeClaimInFlight = true;
       }
     }
     if (shouldInvoice) {
       try {
+        if (setupFeeClaimInFlight) {
+          const inFlightErr = new Error('a setup-fee claim on this series is still in flight (fresh lease) — refusing to mint without it; retry');
+          inFlightErr.code = 'SETUP_FEE_CLAIM_IN_FLIGHT';
+          throw inFlightErr;
+        }
         // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
         // fix round 10): reaching here without it (a record committed
         // before the money freeze existed, or corrupt notes) means the only
@@ -10729,6 +11060,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   invoice_id: invoice.id,
                   scheduled_service_id: secureSetupFee.parentId,
                   amount: secureSetupFee.amount,
+                  // Provenance for the refund path: which accept owns this fee
+                  // (an adopted child's parent may belong to another series).
+                  ...(svc.source_estimate_id ? { estimate_id: svc.source_estimate_id } : {}),
                 })
                 .onConflict('invoice_id')
                 .ignore();
@@ -10835,6 +11169,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // Refused before any mint because a fresh setup-fee claim on the series
+        // is still in flight (see setupFeeClaimInFlight): release for resume on
+        // every lane, never a finalize without the fee.
+        const setupFeeInFlight = invErr?.code === 'SETUP_FEE_CLAIM_IN_FLIGHT' && !invoice?.id;
         // Visit went non-live (cancelled/no-show/skipped) WHILE this
         // REQUIRED mint waited on the shared schedule.invoice.mint lock
         // (Codex #5244 r7 P0 — the exact race this fix closes): unlike a
@@ -10858,7 +11196,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
-        if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {
+        if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
           // the resume this release promises mints the frozen cents with
@@ -10962,6 +11300,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
+        if (setupFeeInFlight) {
+          logger.warn(`[dispatch] visit ${svc.id}: a setup-fee claim on its series is still in flight — releasing for resume instead of minting without the fee`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 503, body: {
+            error: released
+              ? 'This visit\'s setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+              : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'setup_fee_claim_in_flight',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
         if (coveredByCombined) {
           // Retryable, never a quiet finalize (Codex r5 P1 on #5237): the
           // pre-lock lookups ran before the stamp, so this run has no
@@ -11036,7 +11386,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : NotificationService.notifyAdmin(
                 'billing',
                 'Completion invoice not created — bill this visit by hand',
-                `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
+                `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons. A setup fee owed on this plan is NOT part of it: it is raised in its own setup-fee alert — bill it there, once.`,
                 {
                   link: `/admin/customers?customerId=${svc.customer_id}`,
                   bell: true,
@@ -11078,6 +11428,55 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Treat already-paid / prepaid pre-mint as the same SMS branch.
       if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
+    }
+
+    // The FIRST PERFORMED visit carries a queued setup fee (scheduled_services
+    // .pending_setup_fee on its series parent). If this completion's billing
+    // did not consume it - the visit billed nothing (unpriced, an
+    // authoritative $0, or a reviewed 100% discount), or an invoice already on
+    // the visit (Charge Now, an office bill) kept the mint from running - the
+    // fee must neither slide to a later visit nor be lost. It is PARKED FOR THE
+    // OFFICE (owner ruling 2026-10-01), in its own transaction: the stamp is
+    // cleared and a setup_fee_office_billing alert is the durable owed-fee
+    // record; the office bills it by hand. No draft invoice is created outside
+    // the normal completion mint. Read AFTER the mint: a stamp the mint
+    // consumed is null, and a negative stamp (a mint in flight) is never
+    // touched. Only a performed, non-callback, non-always-free, live
+    // completion. FAIL CLOSED: if the park cannot be persisted the stamp is
+    // still armed, so the completion attempt is released for resume (503)
+    // rather than finalized with the fee queued behind a swallowed error.
+    if (!packetEffects && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion
+      && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      try {
+        const feeParentId = svc.recurring_parent_id || svc.id;
+        const feeParent = await db('scheduled_services').where({ id: feeParentId }).first('pending_setup_fee');
+        if (Number(feeParent?.pending_setup_fee) > 0) {
+          const { parkSetupFeeStampForOffice } = require('../services/setup-fee-obligation');
+          const parked = await db.transaction((trx) => parkSetupFeeStampForOffice(trx, {
+            parentId: feeParentId, rawAmount: feeParent.pending_setup_fee, customerId: svc.customer_id,
+            estimateId: svc.source_estimate_id || null,
+            origin: `first performed visit ${svc.id} did not bill the fee`,
+            alertContext: { visitId: svc.id, serviceId: svc.id },
+            billToScheduledServiceId: svc.id,
+            visit: svc,
+          }));
+          if (parked) logger.warn(`[dispatch] visit ${svc.id} did not bill its queued setup fee ($${parked.amount}) - parked for the office to bill by hand (alert ${parked.alertId})`);
+        }
+      } catch (parkErr) {
+        logger.error(`[dispatch] setup_fee_park_failed for visit ${svc.id} - closeout NOT finalized (the stamp stays queued): ${parkErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, parkErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} - retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return ({ status: 503, body: {
+          error: released
+            ? 'This visit\'s queued setup fee could not be handed to the office - the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+            : `This visit's queued setup fee could not be handed to the office - the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes - retry the closeout then.`,
+          code: 'setup_fee_park_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
     }
 
     // An annual-prepay-COVERED visit's invoice and its add-ons — the covered
@@ -11665,7 +12064,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
-      && !suppressTypedCustomerComms;
+      && !suppressTypedCustomerComms
+      // The fixed re-service text is the ONE text: no review ask rides it or
+      // follows it (scope: "leave it off on re-services").
+      && !reserviceFixedRecap;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -12581,7 +12983,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (handOverExit) return handOverExit;
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
-      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken, reserviceFixedRecap })) {
       // Report-v1 visit with no public report token (mint failed above): the
       // report-lane template would render "your report is ready" around
       // reportUrl, which is the portal HOME on this path (delivery.js only
@@ -12795,7 +13197,52 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && serviceReportV1SmsContext.smsType === 'service_report_v1_with_invoice'
           && require('../config/feature-gates').isEnabled('reportV1InvoiceSms')
           && await isOptInSmsTemplateEnabled('service_report_v1_with_invoice');
-        if (completionUsesReportLane({
+        // Fast Complete's fixed re-service text replaces the whole template
+        // chain below: exactly one text, built from the saved facts.
+        let reserviceFixedBody = null;
+        if (reserviceFixedRecap) {
+          let reserviceFixedFacts;
+          try {
+            // Shortened here (the same tracked report code the report lane
+            // mints), so the body is final before the send: GATE_SMS_LINK_WRAP
+            // leaves an /l/ link alone, and a send-window replay goes out
+            // with exactly the text stored and shown now.
+            const fixedReportLink = reportSmsUrl && reportSmsUrl !== reportUrl
+              ? reportSmsUrl
+              : await shortenOrPassthrough(reportUrl, {
+                kind: 'service_report',
+                entityType: 'service_records',
+                entityId: record.id,
+                customerId: svc.customer_id,
+                codePrefix: 'report',
+              });
+            reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
+              svc,
+              recordId: record.id,
+              reportUrl: fixedReportLink,
+            });
+          } catch (factsErr) {
+            // A read outage before any send: nothing went out and no send
+            // fence is written yet, so the closeout stays open and the tech's
+            // retry composes and sends the text (finalizing here would replay
+            // a stored result with no text, for good).
+            logger.warn(`[dispatch] fixed re-service text facts read failed for ${record.id}; closeout left open for retry: ${factsErr.message}`);
+            return exitForCompletionSmsResume(factsErr);
+          }
+          reserviceFixedBody = ReserviceFixedRecap.buildReserviceFixedRecap(reserviceFixedFacts);
+          if (!reserviceFixedBody) throw new Error('Re-service completion text has no report link');
+        }
+        if (reserviceFixedBody) {
+          // Message type stays the completion family's (channel routing and
+          // the customer's completion-text preference are the same); the
+          // template key and notes name the fixed text.
+          sentSmsType = 'service_complete';
+          // The body the provider is handed (scheme stripped, GSM punctuation
+          // normalized, as sendCustomerMessage does), so what is audited, stored
+          // and shown to the tech is what the customer gets.
+          sentSmsBody = ReserviceFixedRecap.providerBody(reserviceFixedBody);
+          completionSmsWasTruncated = false;
+        } else if (completionUsesReportLane({
           reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
           invoiceCreated,
           usePaidCompletionTemplate,
@@ -13004,6 +13451,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // resume still cannot replay a message that may have gone out.
             completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
+            ...(reserviceFixedBody ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
@@ -13015,6 +13463,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
+          // The fixed re-service text is not a DB template: name it, so the
+          // sms_log row and the office read what it really is.
+          if (reserviceFixedBody) smsMetadata.templateKey = ReserviceFixedRecap.TEMPLATE_KEY;
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -13058,6 +13509,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // The fixed text adopts the provider-handed body (link wrap) even
+            // when the send was accepted but its audit insert threw.
+            fixedRecap: !!reserviceFixedBody,
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
@@ -13106,6 +13560,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
             : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
+          // GATE_SMS_LINK_WRAP can swap the report link for a fresh /l/ short
+          // link inside sendCustomerMessage. The fixed text stores (and shows
+          // the tech) the body the provider was actually handed, or, for a
+          // send-window hold, the transformed body the queued row replays.
+          const fixedBodyFinal = smsResult.sent === true
+            || (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred === true);
+          if (reserviceFixedBody && fixedBodyFinal
+            && typeof smsResult.sentBody === 'string' && smsResult.sentBody) {
+            sentSmsBody = smsResult.sentBody;
+            smsNotesDelta.completionSmsBody = sentSmsBody;
+            sendingNotes.completionSmsBody = sentSmsBody;
+            completionSmsAcceptedSnapshot.body = sentSmsBody;
+          }
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -13164,7 +13631,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   replay_purpose: 'service_completion',
                   // The frozen body above came from this template row; the
                   // morning replay records it on the sent sms_log row.
-                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
+                  ...(reserviceFixedBody
+                    ? { template_key: ReserviceFixedRecap.TEMPLATE_KEY }
+                    : (sentSmsType ? { template_key: sentSmsType } : {})),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
@@ -13390,7 +13859,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
+          if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
+          // The normal result never arrived to switch the snapshot to push:
+          // the accepted outcome itself names the provider.
+          if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
           const acceptedDelta = {
+            ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',
             completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
@@ -13922,6 +14396,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       completionSmsError: finalRecordNotes.completionSmsError || null,
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
+      // Fast Complete's fixed re-service text: what the tech sees after
+      // Complete — the exact text, or why none went. Only when the sheet
+      // asked, so every other response is unchanged.
+      ...(reserviceFixedRecapRequested ? {
+        customerText: ReserviceFixedRecap.customerTextOutcome({
+          honored: reserviceFixedRecap,
+          status: completionSmsStatus,
+          body: finalRecordNotes.completionSmsBody || finalRecordNotes.sentSmsBody || null,
+          channel: finalRecordNotes.sentSmsChannel || null,
+          error: finalRecordNotes.completionSmsError || null,
+          deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,
+        }),
+      } : {}),
       completionPhotoUpload: completionPhotoUploadResult,
       completionAdvisories: completionAdvisoryMessages({
         blackout: waveguardBlackoutApproval,
@@ -14022,6 +14509,7 @@ module.exports = {
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,
+  reportRulesReviewBlockPayload,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   reportV1InvoiceBodyCarriesPayLink,
@@ -14036,3 +14524,9 @@ module.exports = {
   parseCompletionReviewDelayMinutes,
   deriveCockroachWorkFromSubmittedProducts,
 };
+// The method vocabulary and area rules /complete enforces per product row,
+// exported so the lawn re-service fast-context offers exactly what it accepts.
+module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportApplicationMethod;
+module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
+module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
+module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;

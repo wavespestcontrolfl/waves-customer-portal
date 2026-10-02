@@ -10829,7 +10829,7 @@ const InvoiceService = {
     // from its own reversal. The editable description only decides for
     // claim-less invoices (unsent accept drafts).
     let completionClaimToConsume = null;
-    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id", "estimate_id");
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
@@ -10852,6 +10852,54 @@ const InvoiceService = {
     // already restores.
     const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
     if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
+    // A pay-after-first-visit setup fee (GATE_PAF_SETUP_FEE) rides the same
+    // stamp + claim mechanism but is NOT a rodent obligation: a refunded
+    // claim-backed fee stays resolved. Provenance is resolved across the whole
+    // series (the claim's estimate, the anchor, the billed visit's series and
+    // every child, so an adopted appointment's estimate is found even when a
+    // sibling billed the fee).
+    if (claimRecord) {
+      let billedSeries = null;
+      if (invoiceRow.scheduled_service_id) {
+        const billed = await conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id }).first("id", "recurring_parent_id");
+        billedSeries = billed?.recurring_parent_id || billed?.id || null;
+      }
+      const deferredByPaf = await require("./setup-fee-obligation").seriesSetupFeeDeferredByPaf(
+        conn,
+        [claimRecord.scheduled_service_id, billedSeries, invoiceRow.scheduled_service_id].filter(Boolean),
+        [claimRecord.estimate_id],
+      );
+      if (deferredByPaf) {
+        // A deliberately REFUNDED fee stays resolved (no re-bill). A VOIDED
+        // invoice collected nothing: the fee is owed again, so put the stamp
+        // back (CAS onto NULL) for the next performed visit to bill. The claim
+        // is KEPT as provenance, so un-voiding the invoice retires this stamp
+        // again (retireRodentSetupObligationForReinstatedInvoice, claim anchor).
+        if (String(invoiceRow.status || "").toLowerCase() !== "void" || !claimRecord.scheduled_service_id) {
+          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee stays resolved (refunded; never re-armed)`);
+          return null;
+        }
+        const anchorId = claimRecord.scheduled_service_id;
+        const restamped = await conn("scheduled_services").where({ id: anchorId }).whereNull("pending_setup_fee")
+          .update({ pending_setup_fee: amount, updated_at: new Date() });
+        if (restamped !== 1) return null;
+        // A DEAD series (cancelled / completed, no live child) can never bill
+        // the restored stamp: hand it to the office now, tagged with this
+        // invoice so un-voiding it reconciles the handoff
+        // (retireRodentSetupObligationForReinstatedInvoice).
+        const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status");
+        if (!(await require("./secure-appointment-plans").seriesCanStillConsume(conn, anchorRow))) {
+          await require("./setup-fee-obligation").parkSetupFeeStampForOffice(conn, {
+            parentId: anchorId, rawAmount: amount, customerId: invoiceRow.customer_id,
+            estimateId: claimRecord.estimate_id || null,
+            origin: `voided invoice ${invoiceRow.id}; no visit left to bill it`,
+            alertContext: { sourceInvoiceId: String(invoiceRow.id) },
+          });
+        }
+        logger.info(`[invoice] voided invoice ${invoiceRow.id}: pay-after-first-visit setup fee ($${amount.toFixed(2)}) owed again on series ${anchorId}`);
+        return { scheduledServiceId: anchorId, amount };
+      }
+    }
     if (claimRecord) {
       // A COMPLETION invoice writes a claim record too (crash-resume
       // evidence, admin-dispatch), consumed only AFTER a successful
@@ -11264,6 +11312,71 @@ const InvoiceService = {
 
   async retireRodentSetupObligationForReinstatedInvoice(conn, invoiceId, { strict = false } = {}) {
     if (!invoiceId) return null;
+    // A pay-after-first-visit setup fee this invoice's VOID handed to the
+    // office (dead series): the reinstated invoice owns the fee again. An
+    // alert the office has not acted on is closed here; one it already acted
+    // on (billed or dismissed) means the fee may now be billed twice — a strict
+    // caller (unvoid) refuses, the others raise it for a person.
+    // A completion parks the fee under its series row lock and inserts the
+    // handoff in the same transaction, so the series this invoice's fee lives
+    // on (its claim's anchor, its own visit's root) is locked FIRST: a park
+    // racing this reinstatement is then committed and visible to the read.
+    const lockSeries = new Set();
+    // The series this invoice's own claim billed the fee from, and when.
+    const claimSeries = new Map();
+    for (const claim of (await conn("setup_fee_claims").where({ invoice_id: invoiceId }).select("scheduled_service_id", "created_at")) || []) {
+      if (!claim.scheduled_service_id) continue;
+      lockSeries.add(String(claim.scheduled_service_id));
+      claimSeries.set(String(claim.scheduled_service_id), claim.created_at || null);
+    }
+    const linkedVisitId = (await conn("invoices").where({ id: invoiceId }).first("scheduled_service_id"))?.scheduled_service_id;
+    if (linkedVisitId) {
+      const linkedVisit = await conn("scheduled_services").where({ id: linkedVisitId }).first("id", "recurring_parent_id");
+      if (linkedVisit) lockSeries.add(String(linkedVisit.recurring_parent_id || linkedVisit.id));
+    }
+    for (const seriesId of [...lockSeries].sort()) {
+      await conn("scheduled_services").where({ id: seriesId }).forUpdate().first("id");
+    }
+    const handoffs = [...((await conn("dispatch_alerts")
+      .where({ type: "setup_fee_office_billing" })
+      .whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoiceId)])
+      .select("id", "resolved_at", "payload")) || [])];
+    // The same fee may have been handed off through a LATER carrier (a rebill
+    // of it voided in turn, then parked: that alert names the rebill, not this
+    // invoice). Any handoff on the series this invoice's claim billed from,
+    // raised after that claim, is this fee too (pre-push audit P0).
+    for (const [seriesId, claimedAt] of claimSeries) {
+      let q = conn("dispatch_alerts")
+        .where({ type: "setup_fee_office_billing" })
+        .whereRaw("payload->>'seriesId' = ?", [seriesId]);
+      if (claimedAt) q = q.where("created_at", ">=", claimedAt);
+      for (const row of (await q.select("id", "resolved_at", "payload")) || []) {
+        if (!handoffs.some((h) => String(h.id) === String(row.id))) handoffs.push(row);
+      }
+    }
+    for (const handoff of handoffs) {
+      const handoffPayload = typeof handoff.payload === "string" ? JSON.parse(handoff.payload || "{}") : (handoff.payload || {});
+      // Closed by an earlier reinstatement (not the office): nothing to refuse.
+      if (handoffPayload.systemRetired === true) continue;
+      // A handoff that lists live partial setup charges (parked as the
+      // remainder) overlaps the fee this invoice would bill again: never
+      // auto-closed — it reads as office action (pre-push audit P0).
+      const overlapsCharges = Array.isArray(handoffPayload.existingSetupCharges) && handoffPayload.existingSetupCharges.length > 0;
+      if (!handoff.resolved_at && !overlapsCharges) {
+        const closed = await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({
+          resolved_at: new Date(),
+          payload: conn.raw("coalesce(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ systemRetired: true, retiredBy: `reinstated invoice ${invoiceId}` })]),
+        });
+        // Lost the CAS: the office resolved it between the read and this
+        // write — that is office action, so it falls through to the refusal.
+        if (Number(closed) > 0) continue;
+      }
+      const message = overlapsCharges
+        ? `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and other invoices already bill part of it — reconcile those before restoring this invoice`
+        : `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
+      if (strict) throw new Error(message);
+      logger.error(`[invoice] FIX: ${message}`);
+    }
     const invoiceRow = await conn("invoices")
       .where({ id: invoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");

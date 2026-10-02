@@ -8,7 +8,7 @@ let mockKbRows = [];
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/knowledge-bridge', () => ({
   unifiedSearch: jest.fn(async () => ({
-    claudeopedia: mockKbRows.map((row) => ({ id: row.id, title: row.title, category: 'chemicals' })),
+    claudeopedia: mockKbRows.map((row) => ({ id: row.id, title: row.title, category: row.category || 'chemicals' })),
     wiki: [],
   })),
 }));
@@ -79,5 +79,25 @@ describe('search_knowledge_base leaves an mL label rate out of a tech answer', (
     const content = productPage('Default Rate: 5-10 ml/gal');
     mockKbRows = [{ id: 1, title: 'Sample Kelp', content }];
     expect(await snippets({})).toEqual([content]);
+  });
+
+  test('a protocol page reads up to 2,500 characters, so its visit steps reach the answer', async () => {
+    const steps = Array.from({ length: 40 }, (_, i) => `Visit ${i + 1}: treat the perimeter band.`).join('\n');
+    const content = `**Pest Control Protocol**\n${steps}`;
+    mockKbRows = [
+      { id: 1, title: 'Pest Control Protocol', category: 'protocols', content },
+      { id: 2, title: 'Sample Kelp', content: `${'kelp note. '.repeat(60)}` },
+    ];
+    const [protocol, product] = await snippets();
+    expect(content.length).toBeGreaterThan(300);
+    expect(content.length).toBeLessThan(2500);
+    expect(protocol).toBe(content);
+    expect(Array.from(product)).toHaveLength(300);
+  });
+
+  test('a protocol page longer than 2,500 characters is cut at 2,500', async () => {
+    mockKbRows = [{ id: 1, title: 'Lawn', category: 'protocols', content: 'x'.repeat(4000) }];
+    const [snippet] = await snippets();
+    expect(snippet).toHaveLength(2500);
   });
 });

@@ -135,7 +135,20 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
-      hits.forEach((row) => Object.assign(row, obj));
+      hits.forEach((row) => {
+        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
+        // accept writes — assigning the raw token would clobber the column.
+        const raw = obj.estimate_data && obj.estimate_data.__raw;
+        if (raw && /jsonb_set/.test(raw)) {
+          const key = /'\{(\w+)\}'/.exec(raw)[1];
+          const wasString = typeof row.estimate_data === 'string';
+          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
+          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
+          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
+        } else {
+          Object.assign(row, obj);
+        }
+      });
       return {
         returning: async () => hits.map((r) => ({ ...r })),
         then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
@@ -2354,5 +2367,1013 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.customers).toHaveLength(0);
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// GitHub Codex #5481 r2 — the accept must bind to exactly what /data showed.
+describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  // The accept route rate-limits per token — a fresh token per seed keeps
+  // each case independent of how many accepts the earlier ones sent.
+  let TOKEN = 'tok-pafb-r2-x0123456789';
+  let tokenSeq = 0;
+  let resolverSpy;
+  let retireSpy;
+
+  function seed() {
+    retireSpy = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+    tokenSeq += 1;
+    TOKEN = `tok-pafb-r2-${tokenSeq}-x0123456789`;
+    resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
+  }
+  function livePolicy(policy) {
+    resolverSpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue(policy);
+  }
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+  const CAPTURED = {
+    recurringCardSetupIntentId: 'seti_captured_1',
+    recurringCardConsentVariant: 'after_visit_card',
+    recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+  };
+
+  afterEach(() => {
+    if (resolverSpy) resolverSpy.mockRestore();
+    resolverSpy = null;
+    if (retireSpy) retireSpy.mockRestore();
+    retireSpy = null;
+  });
+
+  test('P0: rollout gate turned off mid-flight (policy no longer enforced) — captured intent + attestation 409, nothing committed', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    // r3 P0: the orphaned capture is retired in Stripe so it can never be recovered later.
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: a captured intent alone (no attestation) is refused the same way', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: another tab saved a consented method (saved_method_consented) after this tab captured — 409, intent stays unbound', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: a retire that cannot be confirmed fails closed (503), nothing committed, no 409 that would drop the intent', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(503);
+    expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: an after-visit variant mismatch on a still-required policy also retires the dropped intent', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true, autopayDisabled: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+  });
+
+  test('r3 P0: an attestation alone (no intent) retires nothing', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardConsentVariant: 'after_visit_card' });
+    expect(res.status).toBe(409);
+    expect(retireSpy).not.toHaveBeenCalled();
+  });
+
+  test('control: a not-required policy with NO intent / attestation still accepts', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  function acceptedData() {
+    const raw = storedEstimate().estimate_data;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  }
+
+  test('pre-push P0: PAF 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
+    seed();
+    // Tab 1 captured under the after-visit flow; another tab then saved a
+    // consented method, so the live policy is the PAF saved-method cohort.
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const stale = await putAccept(TOKEN, CAPTURED);
+    expect(stale.status).toBe(409);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    // The reloaded tab accepts without the (dropped) intent; the locked-row
+    // eligibility recheck is a DB read this in-memory store does not model.
+    const driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    driftSpy.mockRestore();
+    expect(acceptedData().acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
+  });
+
+  test('r3 P1: a gate-off no-capture accept writes NO marker (byte-identical to pre-PR-B)', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  test.each([
+    ['payer_billed', { enforced: true, required: false, exemptReason: 'payer_billed' }],
+    ['autopay_already_active', { enforced: true, required: false, exemptReason: 'autopay_already_active' }],
+    ['commercial_manual_billing', { enforced: true, required: false, exemptReason: 'commercial_manual_billing' }],
+    ['payer_check_uncertain', { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }],
+    ['existing_plan_customer', { enforced: true, required: false, exemptReason: 'existing_plan_customer' }],
+    ['saved_method_consented (non-PAF)', {
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1',
+    }],
+  ])('r3 P1: exempt cohort %s writes NO marker — a legacy recovery stays exactly as before', async (_name, policy) => {
+    seed();
+    livePolicy(policy);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  describe('r3 P0: ACCEPT_BILLING_CHANGED drift under the customer lock orphans the verified capture', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType: 'card',
+      });
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(true);
+    });
+    afterEach(() => {
+      verifySpy.mockRestore();
+      bankSpy.mockRestore();
+      driftSpy.mockRestore();
+    });
+
+    test('drift -> the captured intent is retired before the reloadable 409', async () => {
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a retire Stripe cannot confirm fails closed (503), nothing committed', async () => {
+      retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+  });
+
+  // GitHub Codex #5481 r3 (structural): ONE collection promise decided in the
+  // accept transaction from the verified tender + the real invoice outcome.
+  describe('r3: the collection promise the accept records equals what the capture UI attested', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    let underLockSpy;
+    let enrollSpy;
+    const BASE_VERSION = require('../services/payment-method-consent-text').CONSENT_VERSION;
+    // The in-memory DB keeps a ?::jsonb binding as its string (Postgres stores the object).
+    const asJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    const AFTER_VISIT = {
+      recurringCardSetupIntentId: 'seti_captured_1',
+      recurringCardConsentVariant: 'after_visit_card',
+      recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+      recurringCardConsentTender: 'card',
+      // A current tab attests the "billed after your first visit" timing it shows.
+      afterVisitTimingShown: true,
+    };
+    function verification(methodType) {
+      verifySpy.mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType,
+      });
+    }
+    function conversion(firstScheduledServiceId) {
+      EstimateConverter.convertEstimate.mockResolvedValueOnce({
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      });
+    }
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent');
+      verification('card');
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+      underLockSpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+      enrollSpy = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    });
+    afterEach(() => {
+      [verifySpy, bankSpy, driftSpy, underLockSpy, enrollSpy].forEach((spy) => spy.mockRestore());
+    });
+
+    test('attached first-application invoice + card tender + after-visit attestation: accepted, variant stamped, enrollment records it', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+      expect(enrollSpy).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+      expect(retireSpy).not.toHaveBeenCalled();
+    });
+
+    test('an UNATTACHED standard invoice (setup-only shape / no first visit: pay link at accept) is not the after-visit promise — 409, nothing recorded, dropped intent retired', async () => {
+      conversion(null);
+      // A setup-only page shows no first-visit timing, so it attests none.
+      const { afterVisitTimingShown: _shown, ...noTiming } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, noTiming);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      // The promise the server would record rides the 409 so the reloaded tab
+      // renders the base text for this selection instead of looping.
+      // deferred:false — the unattached first invoice goes out at accept.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card', version: require('../services/payment-method-consent-text').CONSENT_VERSION, deferred: false });
+    });
+
+    test('the same unattached shape accepts when the tab rendered (and attests) the base text — recorded variant is base', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+    });
+
+    test('ACH tender captured but the tab attests the after-visit CARD text (rendered ACH) — 409, nothing recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('ACH tender, tab attests the tender-specific base text: accepted, no after-visit variant stamped or recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+      // r5 P1: the exact text + version shown is persisted for the webhook
+      // recovery and handed to the inline enrollment verbatim.
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: null, version: BASE_VERSION, tender: 'us_bank_account', text: ConsentText.getConsentText('us_bank_account'),
+      });
+      expect(enrollSpy.mock.calls[0][0].renderedConsent).toEqual({ text: ConsentText.getConsentText('us_bank_account'), version: BASE_VERSION });
+    });
+
+    test('r5 audit: a tab that showed "billed after your first visit" timing is refused when the first invoice goes out payable at accept (unattached)', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(false);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+
+    test('r6 audit: the timing attestation is judged even after the cohort marker is gone (sub-gate turned off): a payable invoice is refused', async () => {
+      resolverSpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5 audit: the same timing attestation is honored when the invoice really is deferred (attached)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { ...AFTER_VISIT, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+    });
+
+    test('r5: a bank capture whose tab attests an OLDER base ACH version is refused (the newer wording is never recorded)', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      // The attached first invoice is still deferred: a version refresh is not a timing change.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION, deferred: true });
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5: an after-visit card accept persists the exact v12 text + version for recovery', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: 'after_visit_card', version: ConsentText.AFTER_VISIT_CONSENT_VERSION, tender: 'card',
+        text: ConsentText.getConsentText('card', { variant: 'after_visit_card' }),
+      });
+    });
+
+    test('a tab that attests a tender different from the verified one is refused even with no variant', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
+    test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
+      conversion('ss-first');
+      const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, legacy);
+      expect(res.status).toBe(200);
+    });
+
+    test('r7: an after-visit accept that WILL defer its attached invoice but carries no timing attestation (a tab from before the gate) is refused for a refresh', async () => {
+      conversion('ss-first');
+      const { afterVisitTimingShown: _shown, ...unattested } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, unattested);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(true);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+  });
+
+  test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'resolver-customer-not-the-trx-one', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// ── Pay after the first visit — monthly-tier (setup-only) setup fee ─────────
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): on the card rail, the
+// setup-only shape's WaveGuard setup fee is STAMPED on the first visit's
+// series parent (scheduled_services.pending_setup_fee) instead of minted as a
+// payable unattached invoice. The shape is forced at the route's own decision
+// point (resolveFirstApplicationAmount → 0) rather than rebuilt through the
+// tier-pricing ladder in this fake-knex harness; the tier derivation
+// (selectedServiceTierBillsMonthly → firstApplicationInvoiceAmount null) is
+// unchanged by this lane.
+describe('PAF setup fee — setup-only accept stamps the series instead of minting an invoice', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const NotificationService = require('../services/notification-service');
+  const SAVED_RAIL_POLICY = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1' };
+  const FRESH_CAPTURE_POLICY = { enforced: true, required: true, exemptReason: null };
+  const savedEnv = {};
+  let policySpy;
+  let retireCapture;
+  // The setup-fee promise rides only a FRESH capture (the one surface that
+  // renders the after_visit_card authorization), so the default customer here
+  // captures a card; a saved/enrolled-method customer keeps today's invoice.
+  // A capture-required policy sends the captured SetupIntent with the accept.
+  const accept = async (token, body = {}) => {
+    const policy = await policySpy.getMockImplementation()?.();
+    return putAccept(token, policy?.required === true ? { recurringCardSetupIntentId: 'seti_paf_default', ...body } : body);
+  };
+  // A tab showing the promise attests it, and its capture rendered the
+  // after_visit_card authorization for a card (the accept's one collection
+  // promise records exactly that, or refuses CONSENT_VARIANT_STALE).
+  const acceptShown = async (token, body = {}) => {
+    const policy = await policySpy.getMockImplementation()?.();
+    return accept(token, {
+      ...(policy?.required === true ? {
+        recurringCardConsentVariant: 'after_visit_card',
+        recurringCardConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+        recurringCardConsentTender: 'card',
+      } : {}),
+      ...body,
+      setupFeeAfterFirstVisitShown: true,
+    });
+  };
+
+  function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50, billingMode = 'per_application', visitsKnown = true } = {}) {
+    resetStore(recurringPestEstimate({
+      id,
+      token: `tok-${id}-x0123456789`,
+      // A solo MOSQUITO plan: the setup fee applies to it, and the engine's
+      // mosquito ladder (monthly12 / seasonal9) is monthly-billed tier rows with
+      // known visit counts — the REAL setup-only shape, no spy needed.
+      monthly_total: 79,
+      annual_total: 948,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: {
+            discount: 0,
+            services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, ...(visitsKnown ? { visitsPerYear: 12 } : {}) }],
+          },
+          oneTime: { items: [], membershipFee: 99 },
+          results: {
+            // visitsKnown=false: a plan whose tier ladder cannot be resolved
+            // to monthly tier rows with a visit count (no frequency rows at
+            // all) — the preview keeps the BASE copy for it.
+            mq: visitsKnown ? [
+              { n: 'Monthly', key: 'monthly12', v: 12, mo: 79, ann: 948, pv: 79 },
+              { n: 'Seasonal', key: 'seasonal9', v: 9, mo: 65, ann: 780, pv: 86.67 },
+            ] : [],
+          },
+        },
+      }),
+    }));
+    db.__state.tables.scheduled_services = withAnchor ? [
+      ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
+      { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null, estimated_price: price },
+    ] : [];
+    // The real converter stamps the converted customer's billing lane
+    // (per_application unless it preserves an existing membership); the fake
+    // trx's customers table is where the accept's in-trx lane read looks.
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
+      for (const row of db.__state.tables.customers) row.billing_mode = billingMode;
+      return {
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId: withAnchor ? `ss-${id}` : null,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      };
+    });
+    return `tok-${id}-x0123456789`;
+  }
+
+  beforeEach(() => {
+    for (const k of ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT', 'GATE_PAF_SETUP_FEE']) savedEnv[k] = process.env[k];
+    process.env.RECURRING_CARD_ON_FILE = 'true';
+    jest.spyOn(EstimateConverter, 'resolveFirstApplicationAmount').mockReturnValue(0);
+    policySpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_default', paymentMethodId: 'pm_paf_default', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    retireCapture = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    jest.restoreAllMocks();
+  });
+
+  function gateOn() {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+  }
+
+  test('gate OFF: exactly today — the unattached payable setup invoice is minted and its pay link delivered', async () => {
+    const token = setupOnlyFixture('paf-off');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(InvoiceService.create.mock.calls[0][0].scheduledServiceId).toBeUndefined();
+    expect(response.data.invoiceMode).toBe(true);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    const stamp = db.__state.ops.find((op) => op.type === 'update' && op.table === 'scheduled_services' && op.data && 'pending_setup_fee' in op.data);
+    expect(stamp).toBeUndefined();
+  });
+
+  test('master gate on but the setup-fee sub-gate off: still today\'s payable invoice', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    delete process.env.GATE_PAF_SETUP_FEE;
+    const token = setupOnlyFixture('paf-subgate-off');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+  });
+
+  test('gate ON: no invoice minted, nothing delivered, the fee is stamped on the series parent, the customer is told it bills with the first visit', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-on');
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(response.data.invoiceMode).toBe(false);
+    expect(response.data.invoiceId).toBeNull();
+    expect(response.data.invoicePayUrl).toBeFalsy();
+    expect(response.data.nextStep).toBe('confirmed');
+    expect(response.data.setupFeeAfterFirstVisit).toBe(true);
+    // The durable claim the first PERFORMED completion consumes.
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+    // Persisted so an already-accepted retry describes the same accept.
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.recurringCardLaneAccepted).toBe(true);
+    expect(stored.setupFeeDeferredToFirstVisit).toBe(true);
+    const customerNote = NotificationService.notifyCustomer.mock.calls.map((c) => c[3]).join(' ');
+    expect(customerNote).toMatch(/Nothing is charged today/);
+    expect(customerNote).toMatch(/setup fee is billed with your first visit/);
+    expect(customerNote).not.toMatch(/pay link/i);
+  });
+
+  test('gate ON: the stamp lands on the SERIES PARENT when the first visit is a follow-up child', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-child', { parentId: 'ss-parent-1' });
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(200);
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-parent-1').pending_setup_fee).toBe(99);
+    expect(rows.find((r) => r.id === 'ss-paf-child').pending_setup_fee).toBeNull();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: a capture-required accept records the after_visit_card consent variant', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_1', paymentMethodId: 'pm_paf_1', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent');
+    const response = await acceptShown(token, { recurringCardSetupIntentId: 'seti_paf_1' });
+
+    expect(response.status).toBe(200);
+    expect(enroll).toHaveBeenCalledTimes(1);
+    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Reviewer P2-A (supersedes Codex pre-push r2 P1's "record after_visit_card
+  // even on fallback"): the capture UI showed the after-first-visit promise, so
+  // when the stamp cannot land the accept is REFUSED retryably (409, the whole
+  // accept — conversion, invoice, consent — rolls back). It never falls back to
+  // a payable setup invoice with the after-visit consent on record.
+  test('gate ON, capture-required, stamp CANNOT land (no first visit / occupied claim): the accept fails 409 (refresh) — no payable invoice, no after_visit_card consent, nothing committed', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fb', paymentMethodId: 'pm_paf_fb', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+
+    const noAnchor = setupOnlyFixture('paf-consent-noanchor', { withAnchor: false });
+    const first = await acceptShown(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(first.status).toBe(409);
+    expect(first.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(first.data.error).toMatch(/reload the page/i);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(storedEstimate().status).not.toBe('accepted');
+
+    const occupied = setupOnlyFixture('paf-consent-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const second = await acceptShown(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(second.status).toBe(409);
+    expect(second.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+  });
+
+  // Reviewer P3: the accept attempts the stamp only where the preview applied
+  // the same eligibility — a tier whose visit count is unknown shows the BASE
+  // text, so it keeps today's payable invoice and records the BASE consent.
+  test('gate ON, a monthly tier with an UNKNOWN visit count: never attempted — the payable invoice is minted, nothing stamped, BASE consent recorded', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_uk', paymentMethodId: 'pm_paf_uk', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-unknown-visits', { visitsKnown: false, price: null });
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_uk' });
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  // Reviewer P2-B: a monthly-membership / prepay lane covers its first visit
+  // with dues, the completion mint never runs the claim there, so the stamp
+  // would strand. The lane is read INSIDE the trx after the converter set it.
+  test.each(['monthly_membership', 'annual_prepay', null])('gate ON, converted customer billing lane %s (not per_application): never stamped — today\'s payable invoice, BASE consent', async (lane) => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_ln', paymentMethodId: 'pm_paf_ln', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture(`paf-lane-${lane}`, { billingMode: lane });
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_ln' });
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  test('gate ON but not on the setup-only shape (first-application line present): base consent, no after_visit_card', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    EstimateConverter.resolveFirstApplicationAmount.mockReturnValue(40);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fa', paymentMethodId: 'pm_paf_fa', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent-firstapp');
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_fa' });
+    expect(response.status).toBe(200);
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  test('gate ON but no first visit exists to carry the stamp: the accept is refused retryably — a fee is never dropped and no payable invoice contradicts the page', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex pre-push r3 P1: a monthly-tier quote with an unknown visit count
+  // converts to an UNPRICED visit; the completion mint gate refuses it, so a
+  // stamp there would queue the fee indefinitely. The preview already keeps
+  // the BASE text for such a tier (monthlyTierVisitCountsResolvable), so the
+  // accept never attempts the stamp: today's payable invoice, nothing stamped.
+  test('gate ON, tier visit count unknown (the converter leaves the visit unpriced): never deferred — the payable invoice is minted and nothing is stamped', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-${price}`, { price, visitsKnown: false });
+      const response = await accept(token);
+
+      expect(response.status).toBe(200);
+      expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+      expect(response.data.nextStep).toBe('pay_invoice');
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
+  // Defense in depth: the preview said "billed with your first visit" (visit
+  // counts known) yet the converted first visit carries no billable price — a
+  // stamp there would never be consumed, a payable invoice would contradict
+  // the page: refuse retryably.
+  test('gate ON, counts known but the first visit has no billable price (unpriced / $0): the accept is refused 409, nothing stamped, nothing minted', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-known-${price}`, { price });
+      const response = await acceptShown(token);
+
+      expect(response.status).toBe(409);
+      expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
+  // The visit price on a converted tier row comes from the converter's own
+  // derivation (billing-cadence perApplicationChargeAmount, the figure it
+  // stamps as estimated_price). Feed the REAL derivation through the accept:
+  // a monthly-tier plan whose visit count is unknown resolves no price (the
+  // converter leaves the row unpriced and completion parks it) and the page
+  // shows the base text → never deferred; a known count resolves one → deferred.
+  test('real converter derivation: unknown-visit-count monthly tier resolves no price and is never deferred; a known count is deferred at that price', async () => {
+    gateOn();
+    const BillingCadence = require('../services/billing-cadence');
+    const cadence = { frequencyKey: 'monthly', amount: 96 };
+    const derive = (visitsPerYear) => BillingCadence.perApplicationChargeAmount({
+      billingCadence: cadence, annualRate: 1152, monthlyRate: 96, visitsPerYear, serviceKey: 'mosquito',
+    });
+    expect(derive(null)).toBeNull();
+    expect(derive(9)).toBe(128);
+
+    const unresolved = setupOnlyFixture('paf-real-unknown', { price: derive(null), visitsKnown: false });
+    const first = await accept(unresolved);
+    expect(first.status).toBe(200);
+    expect(first.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+
+    InvoiceService.create.mockClear();
+    const resolved = setupOnlyFixture('paf-real-known', { price: derive(9) });
+    const second = await acceptShown(resolved);
+    expect(second.status).toBe(200);
+    expect(second.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+  });
+
+  test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the accept is refused 409 (no payable invoice contradicting the page)', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(409);
+    // The real answer rides the refusal (Codex P1): the retry keeps the payable
+    // setup invoice instead of re-attesting a promise that can never land.
+    expect(response.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex PR r(d22e49b0c3) P1: a customer satisfied by a saved / enrolled
+  // method sees no capture, so never the after-visit authorization — the fee
+  // is not deferred onto that method (today's payable invoice, base consent).
+  test.each(['saved_method_consented', 'autopay_already_active'])('gate ON, %s (no capture shown): today\'s payable setup invoice; an attested promise is refused with the real answer', async (exemptReason) => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...SAVED_RAIL_POLICY, exemptReason });
+    const attested = await acceptShown(setupOnlyFixture(`paf-saved-attested-${exemptReason}`));
+    expect(attested.status).toBe(409);
+    expect(attested.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(attested.data.setupFeePromise).toBe(false);
+
+    InvoiceService.create.mockClear();
+    const response = await accept(setupOnlyFixture(`paf-saved-${exemptReason}`));
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(JSON.parse(storedEstimate().estimate_data).acceptedRecurringCardConsentVariant).not.toBe('after_visit_card');
+  });
+
+  test('gate ON but not on the card rail (exempt customer): today\'s payable invoice', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+    const token = setupOnlyFixture('paf-exempt');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  // Codex round 2 P0: the page promised first-visit billing to a customer the
+  // accept then converts onto a non-per_application lane (a current monthly
+  // member the preview could not see). The tab's attestation and the accept's
+  // recomputation differ, so the accept is REFUSED for a refresh — never a
+  // payable setup invoice after the promise.
+  test.each(['monthly_membership', 'annual_prepay'])('gate ON, the tab attested the first-visit promise but the converted lane is %s: the accept is refused 409 SETUP_FEE_TERMS_REFRESH, nothing committed', async (lane) => {
+    gateOn();
+    const token = setupOnlyFixture(`paf-attested-lane-${lane}`, { billingMode: lane });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    // The answer the accept would apply rides the 409 so the tab stops promising it.
+    expect(response.data.setupFeePromise).toBe(false);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('gate ON, the transaction resolves a PAYER-billed customer: the fee is never deferred onto a card (409 with the real answer, nothing stamped)', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-billed');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(false);
+    // The ONLY payer lookup is the in-transaction one (the policy saw self-pay).
+    expect(Payer.resolveForInvoice).toHaveBeenCalledTimes(1);
+    expect(Payer.resolveForInvoice.mock.calls[0][0]).toMatchObject({ throwOnError: true });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('gate ON, payer-billed: the retry WITHOUT the attestation accepts with the payable setup invoice, no stamp and base consent', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-retry');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    try {
+      const response = await accept(token);
+      expect(response.status).toBe(200);
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+      expect(InvoiceService.create).toHaveBeenCalled();
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    } finally {
+      Payer.resolveForInvoice.mockResolvedValue(null);
+    }
+  });
+
+  // Pre-push audit P1: the client drops its captured intent on every
+  // SETUP_FEE_TERMS_REFRESH, so the accept retires it after the rollback.
+  test('gate ON, a SETUP_FEE_TERMS_REFRESH refusal retires the captured SetupIntent the tab will drop', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-refresh-retire', { billingMode: 'monthly_membership' });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(retireCapture).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-unattested');
+    const response = await accept(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  test('gate ON, an accept that records the after-visit consent persists acceptedRecurringCardConsentVariant for the setup_intent recovery', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-variant-persist');
+    const response = await acceptShown(token);
+    expect(response.status).toBe(200);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+    // The one collection promise records the after-visit TEXT too (the
+    // setup_intent recovery records it verbatim).
+    const recorded = typeof stored.acceptedRecurringCardConsent === 'string'
+      ? JSON.parse(stored.acceptedRecurringCardConsent) : stored.acceptedRecurringCardConsent;
+    expect(recorded).toMatchObject({ variant: 'after_visit_card', tender: 'card' });
+    expect(recorded.text).toBe(require('../services/payment-method-consent-text').getConsentText('card', { variant: 'after_visit_card' }));
+  });
+
+  test('gate ON, a capture tab that showed the setup-fee promise but attests the BASE consent (older bundle): refused CONSENT_VARIANT_STALE, nothing committed', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-variant-unattested');
+    const retire = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+    const response = await accept(token, { setupFeeAfterFirstVisitShown: true });
+    expect(retire).toHaveBeenCalled();
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(response.data.collectionPromise).toMatchObject({ variant: 'after_visit_card', deferred: true });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('retry of the deferred accept says the same thing and never produces a pay link', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-retry');
+    const first = await acceptShown(token);
+    expect(first.status).toBe(200);
+    const retry = await accept(token);
+
+    expect(retry.status).toBe(200);
+    expect(retry.data.alreadyAccepted).toBe(true);
+    expect(retry.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(retry.data.invoicePayUrl).toBeFalsy();
+    expect(retry.data.nextStep).toBe('confirmed');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex P1 on #5485: a MULTI-PROGRAM accept never defers the fee — the claim
+  // would live on one program's series and could not follow whichever program
+  // is performed first. A tab that promised it is refused with the real answer
+  // (setupFeePromise: false, nothing stamped); the retry takes today's payable
+  // setup invoice (no stamp anywhere).
+  test('R9 (route): a multi-program accept never defers the setup fee — the promise is refused with the real answer, and the retry keeps the payable setup invoice', async () => {
+    gateOn();
+    const multiConverter = () => {
+      EstimateConverter.convertEstimate.mockReset();
+      EstimateConverter.convertEstimate.mockImplementation(async () => {
+        for (const row of db.__state.tables.customers) row.billing_mode = 'per_application';
+        return {
+          customerId: 'cust-1',
+          tier: 'Bronze',
+          monthlyRate: 60,
+          firstScheduledServiceId: 'ss-paf-multi',
+          combinedInvoiceMemberIds: ['ss-member-2'],
+          recurringConversionSkipped: false,
+          welcomeSms: null,
+          membershipEmail: null,
+          deferredFollowUpReminderRows: [],
+        };
+      });
+    };
+    const token = setupOnlyFixture('paf-multi');
+    db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null, estimated_price: 40 });
+    multiConverter();
+    const promised = await acceptShown(token);
+    expect(promised.status).toBe(409);
+    expect(promised.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+
+    const retried = await accept(token);
+    expect(retried.status).toBe(200);
+    expect(retried.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+  });
+
+  // R9 (plan §7): a multi-program first visit shares a combined invoice. The
+  // stamp rides the anchor's series PARENT; the combined-invoice stamper only
+  // writes first_application_invoice_id, so it never reads, clears or
+  // overwrites the claim. (The stamper itself is the real implementation here.)
+  test('R9: stampCombinedFirstApplicationInvoiceCoverage on an anchor carrying the claim leaves pending_setup_fee untouched', async () => {
+    const actual = jest.requireActual('../services/estimate-converter');
+    const rows = [
+      { id: 'anchor-1', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: 40, pending_setup_fee: 99, first_application_invoice_id: null },
+      { id: 'member-2', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: null, pending_setup_fee: null, first_application_invoice_id: null },
+    ];
+    const updates = [];
+    const trx = (table) => {
+      const q = { table, ids: null };
+      const chain = {
+        where: () => chain,
+        whereNull: () => chain,
+        whereIn: (col, ids) => { q.ids = ids; return chain; },
+        first: async () => (q.table === 'scheduled_services' ? { customer_id: 'c1', source_estimate_id: 'e1' } : undefined),
+        select: async () => (q.ids ? rows.filter((r) => q.ids.includes(r.id) && r.estimated_price == null).map((r) => ({ id: r.id })) : []),
+        update: async (patch) => { updates.push({ ids: q.ids, patch }); return (q.ids || []).length; },
+      };
+      return chain;
+    };
+    await actual.stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId: 'inv-9', anchorId: 'anchor-1', memberIds: ['member-2'] });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].ids).toEqual(['anchor-1', 'member-2']);
+    expect(updates[0].patch).toEqual({ first_application_invoice_id: 'inv-9' });
+    expect(rows[0].pending_setup_fee).toBe(99);
   });
 });

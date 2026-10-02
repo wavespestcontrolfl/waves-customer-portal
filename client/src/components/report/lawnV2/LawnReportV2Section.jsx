@@ -24,10 +24,45 @@ import {
   RainLast7DaysChart,
   MowingHeightGauge,
   LawnTrends,
+  LawnProgramLine,
 } from './LawnReportV2';
+
+// GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout.
+// The lead card itself is mounted by ReportViewPage right under the watering
+// banner (the real top of the report, codex P1 #5496 r1), so this section
+// opens with the photo strip (its summary outside the lead's word budget) →
+// findings → water → progression → the score breakdown → rain → mowing →
+// trends. The findings, water card and photo notes fold their secondary text
+// into native <details> (open in print/PDF) and the Turf Health sub-line
+// carries the score breakdown. The follow-up card is mounted only when the
+// lead could not carry its reason (otherwise that reason is lead.next). Without
+// `lead` the legacy layout below is untouched.
+function LawnReportV2LeadSection({ data, print }) {
+  return (
+    <PrintContext.Provider value={print}>
+    <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
+      {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} lead /> : null}
+      {/* A planned follow-up the lead could not carry (its reason was watering
+          wording under the banner, or over its word cap) keeps its own card,
+          without the "Your part" line: the banner and the lead own that
+          (codex P2 #5496 r7). */}
+      {data.followUp?.scheduled && data.followUp.reason && !data.lead.next ? <LawnFollowUpCard followUp={data.followUp} showYourPart={false} /> : null}
+      {data.insights?.length ? <LawnInsightCards insights={data.insights} lead={data.lead} /> : null}
+      {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} lead coverageCardShown={(data.insights || []).some((card) => card && card.kind === 'coverage_watch')} /> : null}
+      {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}
+      {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} lead scoreExplanation={data.snapshot?.scoreExplanation && data.snapshot.scoreExplanation !== data.lead.why ? data.snapshot.scoreExplanation : null} /> : null}
+      {data.rain7d?.length ? <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} source={data.rain7dSource} /> : null}
+      {data.mowing ? <MowingHeightGauge mowing={data.mowing} /> : null}
+      <LawnProgramLine snapshot={data.snapshot} />
+      {data.trends ? <LawnTrends trends={data.trends} baselineScore={data.snapshot?.overallScore} hasNextVisit={Boolean(data.snapshot?.nextVisit?.label && data.snapshot.nextVisit.label !== 'Invalid Date')} /> : null}
+    </div>
+    </PrintContext.Provider>
+  );
+}
 
 export default function LawnReportV2Section({ data, print = false }) {
   if (!data) return null;
+  if (data.lead) return <LawnReportV2LeadSection data={data} print={print} />;
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
