@@ -188,6 +188,20 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await sweepSavedGateCodes()).customers).toBe(0);
   });
 
+  test('a property re-linked back to the SAME neighborhood keeps its active code active', async () => {
+    const n = await neighborhood('Same Grove');
+    const customerId = await customerWithCode('2323', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    // An address correction cleared the link; the county roll resolves it back to the same place.
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: null, neighborhood_source: null, neighborhood_checked_at: null });
+    const lookup = jest.fn(async () => ({ county: 'Manatee', subdivision: 'SAME GROVE PH II PB2/2', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' }));
+    const same = await trx('neighborhoods').where({ id: n }).first('match_key');
+    await trx('neighborhoods').where({ id: n }).update({ match_key: 'manatee|same grove' });
+    await sweepSavedGateCodes({ lookup });
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['2323', 'active']]);
+    await trx('neighborhoods').where({ id: n }).update({ match_key: same.match_key });
+  });
+
   test('the ledger seed keeps a code the office retired after the backfill from coming back', async () => {
     const seed = require('../models/migrations/20261002110000_neighborhood_access_filings_seed');
     const n = await neighborhood('Retired Gate');

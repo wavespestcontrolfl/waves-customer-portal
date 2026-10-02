@@ -379,19 +379,22 @@ async function fileOneSavedCode(customerId, lookup) {
     // ("Gate code 2424 is unconfirmed: confirm on site."); a replacement code
     // saved later, with the old note left behind, is not the one it doubted.
     const markedUnconfirmed = String(prefs?.access_notes || '').includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
-    // The same value already filed in ANOTHER neighborhood: the property moved
-    // (or the office re-linked it), so the code is old evidence — it may be the
-    // former address's gate. File it for the office to confirm, never active.
-    const [carried] = (await trx.raw(`SELECT (f.value_hash = ${VALUE_HASH_SQL}) AS same_value, f.neighborhood_id
-      FROM neighborhood_access_filings f JOIN property_preferences pp ON pp.customer_id = f.customer_id
-      WHERE f.customer_id = ?`, [customerId])).rows;
-    const unconfirmed = markedUnconfirmed || Boolean(carried?.same_value && carried.neighborhood_id);
     let neighborhoodId = active[0].neighborhood_id;
     if (!neighborhoodId && parcel) {
       const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });
       neighborhoodId = linked.neighborhood ? linked.neighborhood.id : null;
     }
     if (!neighborhoodId) return { status: 'no_neighborhood' };
+    // The same value already filed in a DIFFERENT neighborhood than the one just
+    // resolved: the property moved (or the office re-linked it), so the code is
+    // old evidence — it may be the former address's gate. File it for the
+    // office to confirm, never active. Back in the same neighborhood, nothing
+    // is carried and an active code stays active.
+    const [carried] = (await trx.raw(`SELECT (f.value_hash = ${VALUE_HASH_SQL}) AS same_value, f.neighborhood_id
+      FROM neighborhood_access_filings f JOIN property_preferences pp ON pp.customer_id = f.customer_id
+      WHERE f.customer_id = ?`, [customerId])).rows;
+    const carriedFromElsewhere = Boolean(carried?.same_value && carried.neighborhood_id && carried.neighborhood_id !== neighborhoodId);
+    const unconfirmed = markedUnconfirmed || carriedFromElsewhere;
     const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId, unconfirmed });
     if (FINAL_OUTCOMES.has(filed.status)) {
       // Ledger the value filed, in the same transaction as the filing.
