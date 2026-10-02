@@ -3,7 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
-const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianServicesCustomer, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { REVIEW_LINK_CLICKED_REASON } = require('../services/review-click-guard');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -38,6 +38,24 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A technician's review ask is bound to a visit of their own, not just the
+// customer (codex #5568 r15 P1): with two technicians on one customer, A must
+// not trigger an ask attributed to B's record. A record linked to a visit is
+// judged on that visit's current assignment; a legacy record with no visit
+// on its own technician. Admins are unscoped.
+async function technicianOwnsReviewSubject(req, { serviceRecord = null, scheduledServiceId = null } = {}) {
+  if (!isTechnicianRequest(req)) return true;
+  const visitId = serviceRecord ? serviceRecord.scheduled_service_id : scheduledServiceId;
+  if (visitId) {
+    const owned = await technicianCurrentVisitFilter(
+      req,
+      db('scheduled_services').where('scheduled_services.id', visitId),
+    ).first('scheduled_services.id');
+    return !!owned;
+  }
+  return !!serviceRecord && String(serviceRecord.technician_id || '') === String(req.technicianId || '');
+}
+
 // POST /trigger — manually trigger a review request for a customer
 router.post('/trigger', async (req, res, next) => {
   try {
@@ -63,7 +81,9 @@ router.post('/trigger', async (req, res, next) => {
       if (sr.customer_id !== customerId) {
         return res.status(409).json({ error: 'serviceRecordId does not belong to customerId' });
       }
+      if (!(await technicianOwnsReviewSubject(req, { serviceRecord: sr }))) return res.status(404).json({ error: 'serviceRecordId not found' });
     } else if (scheduledServiceId) {
+      if (!(await technicianOwnsReviewSubject(req, { scheduledServiceId }))) return res.status(404).json({ error: 'scheduledServiceId not found for customerId' });
       const sr = await db('service_records')
         .where({ customer_id: customerId, scheduled_service_id: scheduledServiceId })
         .first();
@@ -120,6 +140,7 @@ router.post('/tech-trigger', async (req, res, next) => {
     const sr = await db('service_records').where({ id: serviceRecordId }).first();
     if (!sr) return res.status(404).json({ error: 'Service record not found' });
     if (!(await technicianServicesCustomer(req, sr.customer_id))) return res.status(404).json({ error: 'Service record not found' });
+    if (!(await technicianOwnsReviewSubject(req, { serviceRecord: sr }))) return res.status(404).json({ error: 'Service record not found' });
 
     const request = await ReviewService.create({
       customerId: sr.customer_id,

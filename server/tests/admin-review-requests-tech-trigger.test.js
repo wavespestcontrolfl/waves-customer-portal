@@ -82,7 +82,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation((table) => {
     if (table === 'service_records') {
-      return { where: jest.fn(() => ({ first: jest.fn(async () => ({ id: 'sr-1', customer_id: 'cust-1' })) })) };
+      return { where: jest.fn(() => ({ first: jest.fn(async () => ({ id: 'sr-1', customer_id: 'cust-1', technician_id: 'technician-1' })) })) };
     }
     throw new Error(`unexpected table ${table}`);
   });

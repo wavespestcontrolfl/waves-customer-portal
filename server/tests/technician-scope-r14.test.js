@@ -197,3 +197,26 @@ describe('portal usage for a technician', () => {
     expect(src).toMatch(/if \(scope === 'me'\) q\.where\('technician_id', req\.technicianId\);/);
   });
 });
+
+describe('codex #5568 r15', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('the handoff re-checks ownership under lock right after the credit seam, before the prepaid exit', () => {
+    const s = src('routes/stripe-terminal.js');
+    const seam = s.indexOf('const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);');
+    const fence = s.indexOf('if (!(await db.transaction((trx) => technicianMayCollectInvoiceLocked(trx, req, invoice)))) {', seam);
+    const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", seam);
+    expect(seam).toBeGreaterThan(-1);
+    expect(fence).toBeGreaterThan(seam);
+    expect(fence).toBeLessThan(prepaidExit);
+    expect(s.slice(fence, prepaidExit)).toMatch(/reverseAppliedCredit\(\{ invoiceId: invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_not_assigned' \}\)/);
+  });
+
+  test('review triggers bind the record or visit to the technician, not only the customer', () => {
+    const s = src('routes/admin-review-requests.js');
+    expect(s.match(/technicianOwnsReviewSubject\(req, \{ serviceRecord: sr \}\)/g)).toHaveLength(2);
+    expect(s).toMatch(/technicianOwnsReviewSubject\(req, \{ scheduledServiceId \}\)/);
+  });
+});

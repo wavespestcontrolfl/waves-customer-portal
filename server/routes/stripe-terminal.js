@@ -233,6 +233,21 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
     invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;
+    // Locked re-validation right after the credit seam, before ANY return —
+    // including the full-coverage 'prepaid' exit below, which never reaches
+    // the mint transaction's own re-check (codex #5568 r15 P1). A miss gives
+    // the applied credit back and answers as the pre-check does.
+    if (!(await db.transaction((trx) => technicianMayCollectInvoiceLocked(trx, req, invoice)))) {
+      if (handoffAppliedCredit > 0) {
+        try {
+          const { reverseAppliedCredit } = require('../services/customer-credit');
+          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_not_assigned' });
+        } catch (e) {
+          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
+        }
+      }
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
     if (invoice.status === 'prepaid') {
       return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
     }
