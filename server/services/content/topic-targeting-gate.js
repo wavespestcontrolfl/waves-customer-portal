@@ -1183,8 +1183,13 @@ function retiredIndex() {
   const byTopic = new Map();
   for (const post of RETIRED_POSTS) {
     const url = normalizeSlug(post.url);
-    byUrl.set(url, post);
-    byLeaf.set(slugLeaf(url), post);
+    // A `live` row is a kept post that owns its topic: its own URL stays
+    // open (the live corpus already blocks a new blog there, and refreshes
+    // are the sanctioned move), only the topic is protected.
+    if (!post.live) {
+      byUrl.set(url, post);
+      byLeaf.set(slugLeaf(url), post);
+    }
     // Keys come from the row's canonical `topics` and its slug leaf (a
     // decorative slug like skip-the-guesswork-… alone would miss "diy pest
     // control vs pro"). A post made only of generic words (get-rid-of-pests)
@@ -1223,7 +1228,9 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
     code: CODES.RETIRED_TOPIC,
     url: hit.url,
     merged_into: hit.merged_into,
-    message: hit.redirected === false
+    message: hit.live
+      ? `The ${where} matches the topic of the live post ${hit.url}. A new blog may not split that topic; grow ${hit.url} as a refresh instead.`
+      : hit.redirected === false
       ? `The ${where} matches the retired post ${hit.url}, deleted with no redirect (no page fit it). A new blog may not bring a retired topic back; if it is worth covering, grow the closest live page, ${hit.merged_into}, as a refresh.`
       : `The ${where} matches the retired post ${hit.url}, merged into ${hit.merged_into} and redirected there. A new blog may not bring a retired topic back; grow ${hit.merged_into} as a refresh instead.`,
   }];

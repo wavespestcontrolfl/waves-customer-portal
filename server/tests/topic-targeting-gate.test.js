@@ -1286,8 +1286,20 @@ describe('retired topics', () => {
     }
   });
 
-  test('registry size is deliberate (45: 51 proposed minus 6 kept live)', () => {
-    expect(gate._internals.RETIRED_POSTS).toHaveLength(45);
+  test('a live topic owner: its topic is refused for NEW blogs, its own URL and its refreshes are not', async () => {
+    const f = gate.evaluate(blog({ query: 'dollar spot treatment', category: 'lawn-care' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC);
+    expect(f).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
+    expect(f.message).toMatch(/live post/);
+    const row = await gate.evaluateBlogPostRow({ slug: 'venice-dollar-spot-fungus-lawn-treatment', status: 'published' });
+    expect(row.skipped).toBe('already_live');
+    expect(gate.evaluate({ actionType: 'refresh_existing_page', query: 'dollar spot' }, { requireCorpus: false }).ok).toBe(true);
+    const { resolveRetiredLinks } = require('../services/content/retired-blog-links');
+    expect(resolveRetiredLinks(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/'])).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
+  });
+
+  test('registry size is deliberate (45 retired of 51 proposed, plus 1 live topic owner)', () => {
+    expect(gate._internals.RETIRED_POSTS.filter((p) => !p.live)).toHaveLength(45);
+    expect(gate._internals.RETIRED_POSTS.filter((p) => p.live).map((p) => p.url)).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
   });
 
   test('a different topic in the same family still passes', () => {
@@ -1310,7 +1322,7 @@ describe('retired topics', () => {
     const { RETIRED_POSTS } = gate._internals;
     const urls = RETIRED_POSTS.map((p) => p.url);
     expect(new Set(urls).size).toBe(urls.length);
-    for (const p of RETIRED_POSTS) {
+    for (const p of RETIRED_POSTS.filter((r) => !r.live)) {
       expect(p.url).toMatch(/^\/[a-z-]+\/[a-z0-9-]+\/$/);
       expect(p.merged_into).toMatch(/^\/[a-z0-9-]+\/(?:[a-z0-9-]+\/)?$/);
       expect(urls).not.toContain(p.merged_into);

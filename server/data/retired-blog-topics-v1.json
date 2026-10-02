@@ -1,5 +1,5 @@
 {
-  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. 45 of the 51 first proposed: get-rid-of-bagworms became the outdoor-bagworm winner, get-rid-of-webworms (fall webworms) and get-rid-of-crickets-in-lakewood-ranch-fl (house crickets) have no matching live page, and the Sarasota-spoke sarasota-active-pests-by-neighborhood stays live (owner 10-01); pest-transmitted-diseases stays live (owner 10-01: 3 backlinks, no fitting page); venice-dollar-spot-fungus-lawn-treatment stays live (no live page covers dollar spot management; Codex on astro #650). kid-safe-lawn and get-rid-of-boxelder-bugs are deleted with NO redirect (redirected: false; merged_into is the closest live page to refresh). Add a row whenever a post is merged away. `topics` are the canonical phrasings the gate matches (with the slug leaf); an empty list = URL protection only (too generic to match on).",
+  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. 45 of the 51 first proposed: get-rid-of-bagworms became the outdoor-bagworm winner, get-rid-of-webworms (fall webworms) and get-rid-of-crickets-in-lakewood-ranch-fl (house crickets) have no matching live page, and the Sarasota-spoke sarasota-active-pests-by-neighborhood stays live (owner 10-01); pest-transmitted-diseases stays live (owner 10-01: 3 backlinks, no fitting page); venice-dollar-spot-fungus-lawn-treatment stays live (no live page covers dollar spot management; Codex on astro #650) as a `live: true` row: its URL is not refused (refreshes are the point) but its topic still is, so the engine grows the live post instead of writing a sibling. kid-safe-lawn and get-rid-of-boxelder-bugs are deleted with NO redirect (redirected: false; merged_into is the closest live page to refresh). Add a row whenever a post is merged away. `topics` are the canonical phrasings the gate matches (with the slug leaf); an empty list = URL protection only (too generic to match on).",
   "retired_on": "2026-10-01",
   "posts": [
     {
@@ -59,6 +59,16 @@
         "st augustine lawn care",
         "st augustine lawn care schedule",
         "st augustine fertilizer schedule"
+      ]
+    },
+    {
+      "url": "/lawn-care/venice-dollar-spot-fungus-lawn-treatment/",
+      "merged_into": "/lawn-care/venice-dollar-spot-fungus-lawn-treatment/",
+      "live": true,
+      "topics": [
+        "dollar spot",
+        "dollar spot fungus",
+        "dollar spot treatment"
       ]
     },
     {
