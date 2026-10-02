@@ -1330,7 +1330,8 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
-    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null })');
+    // an amount-only edit of its own term (coverage omitted) is judged on the coverage that term keeps, never as unlabeled
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null })');
     expect(call).toBeGreaterThan(0);
     // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
     // preserves them when no start is sent), so the guard judges the preserved start, never today
@@ -1345,13 +1346,17 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
   test('a DELIVERED notice not yet applied by the nightly tick still guards the renewal (the term carries no frozen amount yet); a draft notice does not', async () => {
     const pending = (over = {}) => fixture.noticeRow(1, {
       billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: null, status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), email_sent: true,
-      new_amount_cents: 48400, noticed_new_cents: 48400, current_amount_cents: 46800, noticed_current_cents: 46800, metadata: { term_id: TERM(1), next_term_amount_cents: 48400 }, ...over,
+      new_amount_cents: 48400, noticed_new_cents: 48400, current_amount_cents: 46800, noticed_current_cents: 46800, effective_date: '2027-05-15', metadata: { term_id: TERM(1), next_term_amount_cents: 48400 }, ...over,
     });
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending()] });
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(484)).toBeNull();
     // the family comes from the notice: a lawn renewal is not blocked by a pest notice
     expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull();
+    // delivered fewer than 30 days before its effective date → the apply refuses it (notice_too_recent), so it guards nothing either
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ sent_at: new Date('2027-04-20T15:00:00Z'), effective_date: '2027-05-15' })] });
+    expect(await renew(468)).toBeNull();
+    expect(await renew(484)).toBeNull();
     // never delivered → the customer was told nothing yet
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false })] });
     expect(await renew(468)).toBeNull();

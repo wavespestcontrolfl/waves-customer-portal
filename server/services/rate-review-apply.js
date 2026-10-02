@@ -1257,12 +1257,16 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   // guards the renewal from delivery, not from the next 03:10 apply.
   const prepayNotices = await dbh('price_change_notices')
     .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
-    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents');
+    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
   const familyByTerm = new Map();
   const deliveredCents = new Map();
   for (const n of prepayNotices) {
     const termId = parseMetadata(n.metadata).term_id;
-    const told = !n.applied_at && wasDelivered(n) && Number(n.noticed_new_cents ?? n.new_amount_cents);
+    // Delivered with the 30-day lead the apply requires (applyNotice's
+    // notice_too_recent rule): a notice the apply refuses guards nothing.
+    const told = !n.applied_at && wasDelivered(n)
+      && daysBetweenYmd(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS
+      && Number(n.noticed_new_cents ?? n.new_amount_cents);
     if (told > 0) deliveredCents.set(String(termId), told);
     if (termId && (n.applied_at || told > 0)) familyByTerm.set(String(termId), n.family_key);
   }
