@@ -848,7 +848,10 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     const profile = await resolveCompletionProfileForScheduledService(svc);
     const findingsType = voiceTypeFor(profile);
     if (!findingsType) return res.json({ available: false });
-    const facts = await readTypedFacts({ note, findingsType });
+    // The form's present values judge the fill (never stored): a field
+    // already set is never filled, and a fill that clashes with one is left
+    // for a person.
+    const facts = await readTypedFacts({ note, findingsType, current: req.body?.current });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });

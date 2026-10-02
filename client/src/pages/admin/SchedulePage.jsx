@@ -378,15 +378,15 @@ function markerTexts(notes, tags) {
   const wanted = new Set(tags);
   return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
 }
-// Lane voice fill (GATE_LANE_VOICE_FILL): the words a lane field was filled
-// from on Generate, shown under the field while it still holds the filled
-// value; or, for a group the notes left unclear and nobody picked, an ask
-// to pick one.
-function LaneHeardLine({ quotes, unclear, color }) {
+// Lane and typed voice fill (GATE_LANE_VOICE_FILL, GATE_TYPED_VOICE_FILL):
+// the words a field was filled from on Generate, shown under the field while
+// it still holds the filled value; or, for a field the notes left unclear
+// and nobody picked, an ask to pick (one, or what applies for a list).
+function LaneHeardLine({ quotes, unclear, color, ask = "Pick one." }) {
   if (quotes?.length) {
     return <div style={{ fontSize: 14, color, marginTop: 4 }}>Heard: {quotes.map((quote) => `“${quote}”`).join(" · ")}</div>;
   }
-  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. Pick one.</div>;
+  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. {ask}</div>;
   return null;
 }
 export function labelsPresentInMarkerNotes(notes, labels) {
@@ -9644,6 +9644,11 @@ export function TypedFindingsSection({
   onRecommendationsChange,
   pesticideProductPresent = true,
   frozen = false,
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
+  // came from ({ key: { value, quotes } }) and the fields the notes left
+  // unclear (keys). Null off.
+  heard = null,
+  unclear = null,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9696,7 +9701,11 @@ export function TypedFindingsSection({
   // the stale value would otherwise hide in the drawer and still reach the
   // server's contradiction check as a 422 (codex P1 r2 on #3536).
   const holdsValue = (f) => String(values?.[f.key] ?? "").trim() !== "";
-  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f);
+  // A field the notes left unclear asks to be picked, so it shows too.
+  const leftUnclear = (f) => !!unclear?.includes(f.key) && !holdsValue(f);
+  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f) || leftUnclear(f);
+  // The words a field was filled from, while it still holds that value.
+  const heardQuotes = (f) => (heard?.[f.key] && heard[f.key].value === values?.[f.key] ? heard[f.key].quotes : null);
   const primaryFields = visibleFields.filter(staysPrimary);
   const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
@@ -9736,6 +9745,12 @@ export function TypedFindingsSection({
         value={values[field.key] || ""}
         onChange={(value) => onFieldChange(field.key, value)}
         inputStyle={{ width: "100%", boxSizing: "border-box" }}
+      />
+      <LaneHeardLine
+        quotes={heardQuotes(field)}
+        unclear={leftUnclear(field)}
+        color={mutedColor}
+        ask={field.type === "chips" ? "Pick what applies." : "Pick one."}
       />
     </div>
   );
@@ -13651,6 +13666,8 @@ export function CompletionPanel({
   // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
   // from the notes (each field's words) and the groups it left for a person.
   const [laneHeard, setLaneHeard] = useState(null);
+  // Typed voice fill: { values: { key: { value, quotes } }, unclear: [keys] }.
+  const [typedHeard, setTypedHeard] = useState(null);
   // The fill's picks land on the next render; Generate then writes the
   // report from them.
   const [generateQueued, setGenerateQueued] = useState(0);
@@ -14377,6 +14394,9 @@ export function CompletionPanel({
   // schedule payload says when Generate first fills this visit's own record
   // (its places and findings) from the notes.
   const laneVoiceFill = service.laneVoiceFillEnabled === true && !!specialtyCompletion && !isTypedFindings;
+  // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
+  // notes for a typed visit's own findings (the schedule row's flag).
+  const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -16812,6 +16832,56 @@ export function CompletionPanel({
       setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
     }
   }
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): reads the tech's own words
+  // (groundingNotes) for the typed form's findings and fills only fields
+  // still empty. The server judges every fill beside the form's present
+  // values (sent only for that, never stored): a field set is never filled
+  // over and a clash is left for a person. Best effort: a failed read fills
+  // nothing and Generate carries on.
+  async function fillTypedFromNotes() {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/typed-facts`, {
+        method: "POST",
+        body: JSON.stringify({ note, current: findingsValues }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) return;
+    const fills = Object.entries(heard.values || {}).filter(([key, value]) => (
+      typeof value === "string" && value && String(findingsValues[key] ?? "").trim() === ""
+    ));
+    if (fills.length) applyTypedFill(fills);
+    // Words heard earlier stay beside values still standing; a field filled
+    // again takes its new words.
+    setTypedHeard((prev) => ({
+      values: {
+        ...(prev?.values || {}),
+        ...Object.fromEntries(fills.map(([key, value]) => [key, { value, quotes: (heard.heard?.[key] || []).map((entry) => entry.quote) }])),
+      },
+      unclear: Array.isArray(heard.unclearFields) ? heard.unclearFields : [],
+    }));
+  }
+  // A fill changes what an installed report was written from, as a typed
+  // edit does (the report goes and the notes come back). It writes the
+  // values itself: handleTypedFindingChange refuses writes while generating,
+  // and the fill runs inside Generate. An untouched gauge follows its derive
+  // field, as a pick does.
+  function applyTypedFill(fills) {
+    invalidateGeneratedReportOnTypedEdit();
+    setFindingsValues((prev) => {
+      const next = { ...prev };
+      for (const [key, value] of fills) if (String(prev[key] ?? "").trim() === "") next[key] = value;
+      return next;
+    });
+    const activity = typedFindingsSchema?.activity;
+    const derive = activity?.deriveField && !typedActivityTouched
+      ? fills.find(([key]) => key === activity.deriveField)
+      : null;
+    if (derive) {
+      const derived = activity.deriveScores?.[String(derive[1])];
+      setTypedActivityScore(derived == null ? null : derived);
+    }
+  }
   // The report itself, from the form as it stands.
   async function runGenerate() {
     const { payload, hasReportInput } = buildAiReportPayload();
@@ -16829,8 +16899,8 @@ export function CompletionPanel({
     }
     setGenerating(false);
   }
-  // Generate AI report (computer and phone layouts). With the lane fill on,
-  // the record is filled from the notes first and the report is written on
+  // Generate AI report (computer and phone layouts). With the lane or typed
+  // fill on, the record is filled from the notes first and the report is written on
   // the next render, from the picks as they landed; the form stays locked
   // (generating) all the way through.
   async function handleGenerateClick() {
@@ -16853,13 +16923,14 @@ export function CompletionPanel({
       return;
     }
     if (dictation.listening) dictation.toggle();
-    if (!laneVoiceFill) {
+    if (!laneVoiceFill && !typedVoiceFill) {
       await runGenerate();
       return;
     }
     setGenerating(true);
     try {
-      await fillLaneFromNotes();
+      if (laneVoiceFill) await fillLaneFromNotes();
+      else await fillTypedFromNotes();
     } catch {
       // The fill is best effort: the report is written either way.
     }
@@ -20891,6 +20962,8 @@ export function CompletionPanel({
                 onActivityTap={handleTypedActivityTap}
                 recommendations={typedRecommendations}
                 onRecommendationsChange={handleTypedRecommendationsChange}
+                heard={typedVoiceFill ? typedHeard?.values : null}
+                unclear={typedVoiceFill ? typedHeard?.unclear : null}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -23343,6 +23416,8 @@ export function CompletionPanel({
               onActivityTap={handleTypedActivityTap}
               recommendations={typedRecommendations}
               onRecommendationsChange={handleTypedRecommendationsChange}
+              heard={typedVoiceFill ? typedHeard?.values : null}
+              unclear={typedVoiceFill ? typedHeard?.unclear : null}
             />
           )}
           {/* Companion sections — one typed form per companion schema,
