@@ -857,13 +857,47 @@ describe('customer surfaces', () => {
       mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
       return { sent: true, attempted: true };
     });
+    // the text leg's last abort point re-reads ownership the same way, while the letter is still claimed
+    smsLeg.mockImplementation(async (args) => {
+      const check = args.sendOptions.preDispatchCheck;
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
+      expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
+      expect(await check()).toEqual({ ok: true });
+      return { sent: true, attempted: true };
+    });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    // the text leg's last abort point re-reads ownership the same way
-    const check = smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck;
-    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
-    expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
-    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
-    expect(await check()).toEqual({ ok: true });
+    expect(smsLeg).toHaveBeenCalledTimes(1);
+    // once the letter is stamped the claim is over: the same check refuses
+    expect(await smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck()).toMatchObject({ ok: false });
+  });
+
+  test('a stalled send whose claim another request took over sends nothing and leaves the other request\'s rows untouched', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    const dispatched = jest.fn(async () => {});
+    let takenOver = null;
+    emailLeg.mockImplementation(async (args) => {
+      // this sender stalled in preparation; meanwhile another request reclaimed the row (a new generation, its own frozen letter)
+      const row = mockDb.store.price_change_notices[0];
+      row.metadata = JSON.stringify({ ...JSON.parse(row.metadata), claim_gen: 'another-request', pending_letter: { key: 'theirs', letter: { lines: [] } } });
+      takenOver = row.metadata;
+      const res = await args.sendOptions.withProviderHandoff(dispatched, { to: args.recipient.email });
+      expect(res).toEqual({ ok: false, reason: 'notice_repointed' });
+      return { sent: false, attempted: true };
+    });
+    smsLeg.mockImplementation(async (args) => {
+      expect(await args.sendOptions.preDispatchCheck()).toMatchObject({ ok: false });
+      const refusal = await args.sendOptions.withSmsHandoff(dispatched);
+      expect(refusal).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
+      return { sent: false, attempted: false, blockedCode: refusal.code };
+    });
+    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(dispatched).not.toHaveBeenCalled(); // no email, no text from the stalled sender
+    expect(out.sent).toBe(0);
+    // the other request's claim is exactly as it left it
+    expect(notices()[0].status).toBe('sending');
+    expect(notices()[0].metadata).toBe(takenOver);
   });
 
   test('send: the text pointer holds the comms + phone fence through dispatch; a notice repointed after the pre-check sends no text and records the hold', async () => {

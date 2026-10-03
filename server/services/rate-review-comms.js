@@ -772,7 +772,15 @@ class ClaimLost extends Error {}
 // line that cannot be claimed, or any error part-way, rolls the whole claim back, so
 // nothing is ever left half 'sending'. The fence is not held through the provider
 // call — the SMS sender takes the same fence on its own connection.
+// Each claim mints a generation and stores it on every claimed row. A claim that stalls
+// before its provider handoff can be reclaimed (staleUnhanded) by another request, which
+// mints a new one: the original sender then no longer owns the rows, and every later step
+// of its send (the freeze, each handoff, the stamp, every settlement) checks the generation
+// and leaves rows it does not own untouched. Returns { ids, gen } or null.
+const ownsClaim = (row, gen) => !gen || String(parseJson(row && row.metadata, {}).claim_gen || '') === String(gen);
+
 async function claimLines(dbh, entry, now = new Date()) {
+  const gen = crypto.randomUUID();
   try {
     return await dbh.transaction(async (trx) => {
       await lockCustomerComms(trx, entry.customerId);
@@ -790,14 +798,12 @@ async function claimLines(dbh, entry, now = new Date()) {
         if (!n) throw new ClaimLost();
         // A new attempt starts with no failures remembered from an earlier one.
         const claimedRow = await trx('price_change_notices').where({ id: l.noticeId }).first('metadata');
-        const claimedMeta = parseJson(claimedRow && claimedRow.metadata, {});
-        if (claimedMeta.early_failures) {
-          const { early_failures: _gone, ...rest } = claimedMeta;
-          await trx('price_change_notices').where({ id: l.noticeId }).update({ metadata: JSON.stringify(rest) });
-        }
+        // ...nor a letter frozen by a claim that died before its handoff.
+        const { early_failures: _gone, pending_letter: _stale, ...rest } = parseJson(claimedRow && claimedRow.metadata, {});
+        await trx('price_change_notices').where({ id: l.noticeId }).update({ metadata: JSON.stringify({ ...rest, claim_gen: gen }) });
         claimed.push(l.noticeId);
       }
-      return claimed;
+      return { ids: claimed, gen };
     });
   } catch (err) {
     if (err instanceof ClaimLost) return null;
@@ -823,20 +829,31 @@ function frozenLetter(entry, payload, costBlock) {
 // Freeze the letter on the claimed rows BEFORE any provider call: if the
 // outcome turns out uncertain, the public page still shows exactly what
 // that email said (only a delivered message carries the token).
+// The generation check and the write are one step: under the customer-comms fence (which a
+// reclaim takes) and the row lock, so a reclaim either committed first and is seen, or waits.
 async function freezeLetter(dbh, entry, frozen) {
-  for (const l of entry.lines) {
-    const meta = parseJson(l.notice.metadata, {});
-    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: frozen }) });
-  }
+  await dbh.transaction(async (trx) => {
+    await lockCustomerComms(trx, entry.customerId);
+    for (const l of entry.lines) {
+      const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first('metadata');
+      if (!live || !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request
+      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...parseJson(live.metadata, {}), pending_letter: frozen }) });
+    }
+  });
 }
 
 // hold: a named reason the send was refused before any provider took it
 // (recorded on each line as metadata.send_hold; the next attempt clears it).
-async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
+async function settleLines(root, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
+  // One step under the customer-comms fence and the row lock (as freezeLetter): the
+  // generation check cannot be overtaken by a reclaim before the write.
+  await root.transaction(async (dbh) => {
+  await lockCustomerComms(dbh, entry.customerId);
   for (const l of entry.lines) {
     // The LIVE row's metadata, not the copy read before the provider calls: a callback
     // (a bounce, a failed text) may have written early_failures onto it meanwhile.
-    const live = await dbh('price_change_notices').where({ id: l.noticeId }).first('metadata');
+    const live = await dbh('price_change_notices').where({ id: l.noticeId }).forUpdate().first('metadata');
+    if (live && !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request: not this send's row
     const { pending_letter: livePending, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
     // The failures belong to the attempt that is ending: kept only while it is parked uncertain.
     const next = { ...meta, ...(status === UNCERTAIN && early ? { early_failures: early } : {}), ...extra, ...(keepFrozen ? { pending_letter: livePending || frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
@@ -844,6 +861,7 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
   }
+  });
 }
 
 // Parking a send whose outcome is unknown: the evidence on the LIVE rows decides. A
@@ -864,7 +882,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   await lockCustomerComms(trx, entry.customerId);
   for (const l of entry.lines) {
     const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first();
-    if (!live) continue;
+    if (!live || !ownsClaim(live, entry.claimGen)) continue;
     const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
     const handoff = (livePending && livePending.handoff) || {};
     const emailStill = emailUnknown && !!handoff.email && !early.email;
@@ -910,9 +928,12 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   return { retryable, holdReason };
 }
 
-async function stillOwned(dbh, noticeIds, customerId) {
-  const rows = await dbh('price_change_notices').whereIn('id', noticeIds).select('id', 'customer_id');
-  return rows.length === noticeIds.length && rows.every((r) => String(r.customer_id) === String(customerId));
+// gen: this send's claim generation — the rows must still be in ITS claim (not settled,
+// and not reclaimed by another request after this one stalled).
+async function stillOwned(dbh, noticeIds, customerId, gen = null) {
+  const rows = await dbh('price_change_notices').whereIn('id', noticeIds).select('id', 'customer_id', 'status', 'metadata');
+  return rows.length === noticeIds.length && rows.every((r) => String(r.customer_id) === String(customerId)
+    && (!gen || (String(r.status) === 'sending' && ownsClaim(r, gen))));
 }
 
 // The text pointer's named holds: the canonical sender's refusal code from the
@@ -929,8 +950,8 @@ const phoneKey = (p) => { const e = toE164(String(p || '').trim()); return e ? S
 // Run INSIDE the customer-comms + phone fence, immediately before the Twilio
 // request: the notice must still belong to the letter's customer and that
 // customer must still own the number being texted. null = clear to send.
-async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = null, { emailLeg = null } = {}) {
-  if (!(await stillOwned(trx, noticeIds, customerId))) {
+async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = null, { emailLeg = null, gen = null } = {}) {
+  if (!(await stillOwned(trx, noticeIds, customerId, gen))) {
     return { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer', retryable: false };
   }
   // The same eligibility the post-claim revalidation ran, now under the fence and
@@ -1024,11 +1045,14 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
 
 async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, clock, progress = {} }) {
   let entry = originalEntry;
-  const claimed = await claimLines(dbh, entry, clock());
-  if (!claimed) return { outcome: 'in_flight' };
+  const claim = await claimLines(dbh, entry, clock());
+  if (!claim) return { outcome: 'in_flight' };
+  const claimed = claim.ids;
+  const claimGen = claim.gen;
+  entry = { ...entry, claimGen };
   // What the caller needs to settle an exception: the claimed rows, and whether a
   // provider boundary has been crossed yet (set just before the first handoff).
-  progress.entry = originalEntry;
+  progress.entry = entry;
   progress.claimed = claimed;
   progress.crossed = false;
   // The recipient is re-read after the claim (a corrected address or phone
@@ -1037,7 +1061,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // claim untouched.
   const customer = await dbh('customers').where({ id: entry.customerId }).first();
   if (!customer || customer.deleted_at || customer.active === false) {
-    await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
+    await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null });
     return { outcome: 'in_flight' };
   }
   // The ET delivery day is read NOW, not at batch start: a batch that crosses
@@ -1051,7 +1075,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null, hold: fresh.reason });
     return { outcome: fresh.reason === 'gate_off' ? 'gate_off' : 'in_flight', holdReason: fresh.reason };
   }
-  entry = fresh.entry;
+  entry = { ...fresh.entry, claimGen };
   const claimKey = claimKeyFor(claimed, priorAttempts(entry.lines));
   // The billing recipient is resolved BEFORE the payload is built, digested
   // and frozen, so the greeting in the frozen letter and the public page is the
@@ -1068,7 +1092,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // that repointed a claimed notice stops the send (the fence itself can't
   // be held across the call — the SMS sender takes it on its own
   // connection, which would deadlock).
-  if (!(await stillOwned(dbh, claimed, entry.customerId))) {
+  if (!(await stillOwned(dbh, claimed, entry.customerId, claimGen))) {
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen });
     return { outcome: 'in_flight' };
   }
@@ -1121,7 +1145,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       for (const id of claimed) {
         const row = await mark('price_change_notices').where({ id, status: 'sending' }).forUpdate().first('metadata');
         const meta = parseJson(row && row.metadata, {});
-        if (!meta.pending_letter) continue;
+        if (!meta.pending_letter || !ownsClaim(row, claimGen)) continue;
         const pending = meta.pending_letter;
         await mark('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...pending, handoff_at: pending.handoff_at || at, handoff: { ...(pending.handoff || {}), [channel]: at } } }) });
       }
@@ -1150,7 +1174,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // dispatch. `to` is the address this send resolved.
       withProviderHandoff: (dispatch, { to } = {}) => dbh.transaction(async (trx) => {
         await lockCustomerComms(trx, entry.customerId);
-        if (!(await stillOwned(trx, claimed, entry.customerId))) { emailHold = 'notice_repointed'; return { ok: false, reason: 'notice_repointed' }; }
+        if (!(await stillOwned(trx, claimed, entry.customerId, claimGen))) { emailHold = 'notice_repointed'; return { ok: false, reason: 'notice_repointed' }; }
         // Eligibility again, under the fence and immediately before the request.
         const eligible = await recheckEligibility(trx);
         if (!eligible.ok) { emailHold = eligible.reason; return { ok: false, reason: eligible.reason }; }
@@ -1196,7 +1220,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // Marks the lane for the canonical sender's locked SMS handoff.
       metadata: { rate_review_letter: true },
       // Early, cheap abort before provider preparation (not the last word).
-      preDispatchCheck: async () => ((await stillOwned(dbh, claimed, entry.customerId))
+      preDispatchCheck: async () => ((await stillOwned(dbh, claimed, entry.customerId, claimGen))
         ? { ok: true } : { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer' }),
       // The authoritative check: the customer-comms + phone fence (the order
       // every SMS authority takes) is held through the Twilio request, and
@@ -1205,7 +1229,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // closed with a named code; one that arrives later waits for the
       // request. A notice token therefore never texts a previous customer.
       withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
-        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility, { emailLeg: hasContact(customer, prefs).email });
+        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility, { emailLeg: hasContact(customer, prefs).email, gen: claimGen });
         if (refusal) return refusal;
         // The canonical sender's own provider-start hook: it fires after the sender's
         // consent, suppression and send-window rechecks, immediately before the request.
@@ -1268,6 +1292,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // commits before the stamp, which then sees it, or waits for the stamp.
   const orphaned = [];
   const undeliveredEarly = [];
+  let reclaimed = false;
   const resolvedAlertKeys = [];
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
@@ -1281,6 +1306,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // were still running was recorded on this 'sending' row (early_failures);
       // it counts here, so a failed channel is never stamped delivered.
       const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).forUpdate().first();
+      // In another request's claim (this one stalled and was reclaimed): not this send's row.
+      if (live && !ownsClaim(live, claimGen)) { reclaimed = true; continue; }
       if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
@@ -1347,6 +1374,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       });
     }
   });
+  if (reclaimed) return { outcome: 'in_flight' };
   if (orphaned.length) {
     logger.error(`[rate-review-comms] letter to customer ${entry.customerId} was delivered but ${orphaned.length} notice(s) moved to another customer before the stamp — held as ${UNCERTAIN}`);
     return { outcome: 'uncertain', holdReason: 'delivered_repointed', delivered: entry.lines.length - orphaned.length };
