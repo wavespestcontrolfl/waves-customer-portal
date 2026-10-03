@@ -92,9 +92,10 @@ function SoonCard({ change, onDismiss, busy }) {
 // returns); the breakdown reads the rows on hand.
 function summaryOf(changes, total = changes.length) {
   const n = Math.max(total, changes.length);
-  // Named after auto-dispatch only when the rows on hand show it (none on
-  // hand: the plain count).
-  const allAuto = changes.length > 0 && changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
+  // Named after auto-dispatch only when every folded change is on hand and
+  // shows it: a capped sample never speaks for the whole backlog.
+  const complete = changes.length > 0 && changes.length >= total;
+  const allAuto = complete && changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
   const title = allAuto ? `Auto-dispatch moved ${plural(n, 'visit')}` : plural(n, 'schedule change');
   const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
   const days = changes.map((c) => c.payload?.date).filter(Boolean).sort();
@@ -105,7 +106,7 @@ function summaryOf(changes, total = changes.length) {
   if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
   const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
   if (moved) parts.push(moved);
-  const allMoves = changes.length > 0 && changes.every((c) => c.type === 'visit_rescheduled');
+  const allMoves = complete && changes.every((c) => c.type === 'visit_rescheduled');
   return { title, detail: parts.join(' · '), counts, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
 }
 
@@ -144,6 +145,7 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
                   ? <>
                     <div className="tf-change-when"><span className="tf-struck">{p.previous_when}</span><span aria-hidden="true"> → </span><strong>{p.when}</strong></div>
                     <div className="tf-muted">{[p.service_type, partners.has(c.id) && `Swapped with ${partners.get(c.id)}`].filter(Boolean).join(' · ')}</div>
+                    {p.actor && <div className="tf-muted">{`${VERB[c.type]} ${p.actor}`}</div>}
                   </>
                   : <>
                     {/* Same details the card itself shows: where a new visit is, who holds a removed one, who acted. */}
@@ -182,7 +184,9 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
       setFeed({ laterTotal: Number(data.later_total) || 0, asOf: data.as_of || null });
       onReady?.(true);
     } catch {
-      // A failed poll keeps what is on screen; the next one retries.
+      // A failed poll keeps what is on screen and hands schedule changes back
+      // to the floating cards until a read succeeds again (Codex #5786 P2).
+      onReady?.(false);
     }
   }, []);
 

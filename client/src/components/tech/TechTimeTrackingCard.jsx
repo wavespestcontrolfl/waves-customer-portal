@@ -55,7 +55,7 @@ function actionStyle(color, disabled, field = false) {
   if (field) {
     return {
       flex: 1,
-      minHeight: 40,
+      minHeight: 44,
       padding: '6px 12px',
       borderRadius: 4,
       border: '0.5px solid var(--border-strong, #d6d3d1)',

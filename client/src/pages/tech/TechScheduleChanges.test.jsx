@@ -78,6 +78,8 @@ describe('TechScheduleChanges', () => {
     expect(rows[0]).toHaveTextContent('Houser');
     expect(rows[0]).toHaveTextContent('LATER');
     expect(rows[0]).toHaveTextContent('Swapped with Graham');
+    // Who moved it, as on the card.
+    expect(rows[0]).toHaveTextContent('Moved by auto-dispatch');
     expect(rows[1]).toHaveTextContent('EARLIER');
 
     fireEvent.click(within(review).getByRole('button', { name: 'Earlier 1' }));
@@ -88,8 +90,9 @@ describe('TechScheduleChanges', () => {
   it('a backlog past the rows returned: the summary counts all of it and Review says Clear all covers the rest', async () => {
     stubApi([FAR_A, FAR_B], 412);
     await renderChanges();
-    expect(await screen.findByTestId('schedule-changes-summary')).toHaveTextContent('Auto-dispatch moved 412 visits');
-    fireEvent.click(screen.getByRole('button', { name: 'Review moves' }));
+    // A capped sample never names the whole backlog after auto-dispatch (Codex #5786 P2).
+    expect(await screen.findByTestId('schedule-changes-summary')).toHaveTextContent('412 schedule changes');
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(screen.getByText('410 more not shown. Clear all covers them too.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Got it, clear all 412' })).toBeInTheDocument();
   });
@@ -171,6 +174,23 @@ describe('TechScheduleChanges', () => {
     stubApi([]);
     await renderChanges({ onReady });
     expect(onReady).toHaveBeenCalledWith(true);
+  });
+
+  it('a later poll that fails hands schedule changes back to the floating cards (onReady(false))', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onReady = vi.fn();
+      stubApi([FAR_A]);
+      await renderChanges({ onReady });
+      expect(onReady).toHaveBeenLastCalledWith(true);
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+      await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); await Promise.resolve(); });
+      expect(onReady).toHaveBeenLastCalledWith(false);
+      // What was on screen stays on screen.
+      expect(screen.getByTestId('schedule-changes-summary')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('still shows the summary when the folded changes are counted but none came back in the rows', async () => {
