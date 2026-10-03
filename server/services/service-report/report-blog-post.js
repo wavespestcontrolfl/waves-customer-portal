@@ -37,7 +37,7 @@ const MAX_TITLE_CHARS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLUMNS = ['id', 'title', 'status', 'astro_status', 'astro_live_url', 'astro_published_at'];
 const REGISTRY_COLUMNS = [
-  'id', 'title', 'h1', 'meta_description', 'target_keyword', 'live_url', 'canonical_url', 'canonical_url_normalized',
+  'id', 'title', 'h1', 'meta_description', 'live_url', 'canonical_url', 'canonical_url_normalized',
   'content_type', 'workflow_status', 'astro_status', 'live_status', 'reconciliation_status', 'noindex_detected',
   'metadata', 'published_at',
 ];
@@ -53,8 +53,11 @@ const REGISTRY_LIVE_STATUSES = ['live', 'live_visible'];
 const REGISTRY_ATTRIBUTABLE_STATES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync'];
 // The text a search reads, per source, by where it sits: the title (and the
 // headline), the keyword the post targets, and the summary under it (the
-// article itself lives in the site's repository, not here).
-const REGISTRY_FIELDS = { title: ['title', 'h1'], keyword: ['target_keyword'], summary: ['meta_description'] };
+// article itself lives in the site's repository, not here). A registry row is
+// read by the deployed page's own words only: its title, headline and summary
+// come from the live page, but its keyword prefers the portal's database, which
+// can be edited before the page is republished (GitHub Codex P2 on 3d597eb15d).
+const REGISTRY_FIELDS = { title: ['title', 'h1'], keyword: [], summary: ['meta_description'] };
 const PORTAL_FIELDS = { title: ['title'], keyword: ['keyword'], summary: ['meta_description'] };
 // An absolute URL, and one on the hub host, as Postgres patterns.
 const ABSOLUTE_URL_RE = '^https?://';
@@ -151,6 +154,11 @@ async function registryRowsForPortal(knex, ids) {
 const FILLER_WORDS = new Set([
   'the', 'and', 'for', 'how', 'with', 'your', 'you', 'get', 'rid', 'what', 'why', 'when', 'are', 'can', 'does',
   'from', 'about', 'this', 'that', 'our', 'out', 'into', 'its', 'any', 'all', 'not',
+  // question and helper words name no topic either ("where are ants coming
+  // from"; GitHub Codex P2 on 3d597eb15d)
+  'where', 'which', 'who', 'whom', 'whose', 'there', 'their', 'they', 'them', 'these', 'those',
+  'have', 'has', 'had', 'was', 'were', 'been', 'being', 'did', 'will', 'would', 'should', 'could',
+  'come', 'comes', 'coming', 'going', 'goes',
 ]);
 // Plurals no suffix rule makes, as [singular, plural] (GitHub Codex P2 r2 on
 // #5652: "mice" never found a "mouse" post; r5: mosquito "larvae").
@@ -294,7 +302,7 @@ async function searchReportBlogPosts(knex, query) {
     found.set(key, { post, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
   for (const row of registryFound) {
-    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: row.target_keyword, summary: row.meta_description }, row.published_at);
+    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: '', summary: row.meta_description }, row.published_at);
   }
   // A portal post the registry keeps a row for is the registry's alone
   // (portalLink): found above by its current text, or not at all (GitHub

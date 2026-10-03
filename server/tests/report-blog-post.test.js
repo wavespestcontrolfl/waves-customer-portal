@@ -285,7 +285,6 @@ describe('searchReportBlogPosts', () => {
       ['content_registry inner orWhereRaw', "COALESCE(title, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
       ['content_registry inner orWhereRaw', "COALESCE(meta_description, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
       ['content_registry inner orWhereRaw', "COALESCE(h1, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
-      ['content_registry inner orWhereRaw', "COALESCE(target_keyword, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
       ['blog_posts where', 'astro_status', 'live'],
       ['blog_posts whereRaw', 'astro_live_url ILIKE ?', ['%wavespestcontrol.com%']],
       ['blog_posts inner orWhereRaw', "COALESCE(keyword, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
@@ -329,6 +328,22 @@ describe('searchReportBlogPosts', () => {
     const control = [11, 12].map((i) => registryRow(`dddddddd-0000-4000-8000-0000000000${i}`, `Weed Control Tips ${i}`, { published_at: '2026-09-01T00:00:00Z' }));
     const knex = recordingKnex({ content_registry: [...spokeTicks, ...control, tick] });
     expect((await searchReportBlogPosts(knex, 'tick control')).map((post) => post.id)).toEqual([tick.id, ...control.map((row) => row.id)]);
+  });
+
+  test('a registry row is read by the live page\'s own words, never the portal\'s unpublished keyword (GitHub Codex P2 on 3d597eb15d)', async () => {
+    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    expect(knex.calls.some(([name, sql]) => name.startsWith('content_registry') && String(sql).includes('target_keyword'))).toBe(false);
+    // A row that holds the words only in its (database-first) keyword is not found.
+    const keywordOnly = { ...registryRow('aaaaaaaa-0000-4000-8000-000000000061', 'Spring Yard Checklist'), target_keyword: 'ghost ant control' };
+    expect(await searchReportBlogPosts(recordingKnex({ content_registry: [keywordOnly] }), 'ghost ants')).toEqual([]);
+  });
+
+  test('question words name no topic: "where are ants coming from" ranks the ant post over "Where Do Roaches Hide?" (GitHub Codex P2 on 3d597eb15d)', async () => {
+    expect(searchTerms('where are ants coming from').map((term) => term.word)).toEqual(['ant']);
+    const roaches = registryRow('aaaaaaaa-0000-4000-8000-000000000062', 'Where Do Roaches Hide?', { published_at: '2026-09-30T00:00:00Z' });
+    const ants = registryRow('aaaaaaaa-0000-4000-8000-000000000063', 'Ghost Ants After Rain', { published_at: '2026-01-01T00:00:00Z' });
+    expect((await searchReportBlogPosts(recordingKnex({ content_registry: [roaches, ants] }), 'where are ants coming from')).map((post) => post.id)).toEqual([ants.id]);
   });
 
   test('a "bed-bug" search finds a post about bed bugs (GitHub Codex P2 on 6fda3eb2fb)', async () => {
