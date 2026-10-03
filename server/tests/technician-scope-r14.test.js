@@ -430,4 +430,21 @@ describe('codex #5568 r17', () => {
     }
     expect(doc).toContain('`/api/admin/email/inbox`');
   });
+
+  // Two PRs merged side by side must add up to what the census writes, so
+  // the file carries no totals and no admin-only table (a new admin route on
+  // any PR made it stale on main and failed gates for every open PR).
+  test('the committed list carries only technician reach: no totals, no admin-only table', () => {
+    const { census, render, renderAdminOnly } = require('../../scripts/staff-route-census');
+    const rows = census();
+    const doc = render(rows);
+    const adminOnly = rows.filter((r) => !r.today);
+    expect(adminOnly.length).toBeGreaterThan(0);
+    expect(doc).not.toContain('Admin-only already');
+    expect(doc).not.toMatch(/\b(reaches|The) \d+ routes\b/);
+    const listed = new Set([...doc.matchAll(/^\| (\w+) \| `([^`]+)` \| ([\w-]+)/gm)].map((m) => `${m[1]} ${m[2]} ${m[3]}`));
+    expect(listed.size).toBe(rows.length - adminOnly.length);
+    for (const r of adminOnly) expect(listed.has(`${r.method} ${r.path} ${r.file}`)).toBe(false);
+    expect(renderAdminOnly(rows).split('\n').filter((l) => l.startsWith('| ') && l.includes('`')).length).toBe(adminOnly.length);
+  });
 });
