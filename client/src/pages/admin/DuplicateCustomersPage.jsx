@@ -25,6 +25,9 @@ const REASON_LABELS = {
   same_address_different_phone: "Same address, different phone",
   same_address_phone_missing: "Same address — a phone number is missing",
   same_address_phone_shared: "Same address and the same phone — not in the shared-phone list because a record is not marked active",
+  same_name_different_phone: "Same name, different phone",
+  same_name_phone_missing: "Same name — a phone number is missing",
+  same_name_phone_shared: "Same name and the same phone — not in the shared-phone list because a record is not marked active",
   name_conflict: "Names differ",
   address_conflict: "Different addresses",
   address_unit_conflict: "Different units at the same address",
@@ -116,6 +119,21 @@ function sameAddressConfirm(customer, winner, evidence) {
   return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.trim();
 }
 
+// Confirmation text for a same-name merge. The two addresses and phones differ
+// (or one is missing), so the copy says which address the kept customer keeps
+// and which one is dropped, and what happens to the phone.
+function sameNameConfirm(customer, winner, evidence, { keepAddress }) {
+  const kept = fmtAddress(evidence?.addresses?.winner) || "no address on file";
+  const other = fmtAddress(evidence?.addresses?.loser) || "no address on file";
+  const state = evidence?.phone_state;
+  let base = `They have the same name but are two customers with ${state === "shared_phone" ? "the same phone number (one record is not marked active, so they are not in the shared-phone list)" : "different phone numbers or addresses"}.`;
+  if (state === "one_missing" || state === "both_missing") base = "They have the same name; a phone number is missing on at least one record.";
+  const addressLine = keepAddress
+    ? `${displayName(winner)} keeps ${kept}, and ${other} is saved as an additional property.`
+    : `${displayName(winner)} keeps ${kept}. ${other} is NOT saved — use Merge + keep address to save it.`;
+  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${addressLine} ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.trim();
+}
+
 function fmtAddress(addr) {
   return [addr?.address_line1, addr?.address_line2, addr?.city, addr?.zip].filter(Boolean).join(", ");
 }
@@ -163,6 +181,9 @@ export default function DuplicateCustomersPage() {
   // Present only when GATE_DUPLICATES_SAME_ADDRESS is on (the API omits the key otherwise).
   const [sameAddressGroups, setSameAddressGroups] = useState([]);
   const [sameAddressError, setSameAddressError] = useState("");
+  // Present only when GATE_DUPLICATES_SAME_NAME is on (the API omits the key otherwise).
+  const [sameNameGroups, setSameNameGroups] = useState([]);
+  const [sameNameError, setSameNameError] = useState("");
   const [merges, setMerges] = useState([]);
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState("");
@@ -186,6 +207,8 @@ export default function DuplicateCustomersPage() {
       setGroups(data.groups || []);
       setSameAddressGroups(data.sameAddressGroups || []);
       setSameAddressError(data.sameAddressError || "");
+      setSameNameGroups(data.sameNameGroups || []);
+      setSameNameError(data.sameNameError || "");
       if (journal) setMerges(journal.merges || []);
       else if (!background) setMerges([]);
       setReadError("");
@@ -222,15 +245,26 @@ export default function DuplicateCustomersPage() {
     }
   };
 
-  const pendingCount = [...groups, ...sameAddressGroups].reduce((n, g) => n + g.candidates.length, 0);
+  const pendingCount = [...groups, ...sameAddressGroups, ...sameNameGroups].reduce((n, g) => n + g.candidates.length, 0);
 
-    const renderGroupCard = (group, sameAddress = false) => {
+    // kind: "phone" (shared-phone list), "same_address" or "same_name".
+    const renderGroupCard = (group, kind = "phone") => {
+      const sameAddress = kind === "same_address";
+      const sameName = kind === "same_name";
+      // The two review-only sections carry the phone-carry result and show a
+      // phone line on every card.
+      const reviewOnly = sameAddress || sameName;
       // Same-address cards: the premise the pair matched on, per member.
       const keptMatched = sameAddress ? (group.candidates[0]?.evidence?.matched_address?.winner || null) : null;
       return (
-      <Card key={sameAddress ? `same-address:${group.winner.id}` : group.winner.id}>
+      <Card key={sameAddress ? `same-address:${group.winner.id}` : (sameName ? `same-name:${group.winner.id}` : group.winner.id)}>
         <CardBody>
-          {sameAddress ? (
+          {sameName ? (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-ui-caption font-medium text-ink-secondary">Same name</span>
+              <span className="break-words text-ui-body font-medium text-zinc-900">{displayName(group.winner)}</span>
+            </div>
+          ) : sameAddress ? (
             <div className="mb-2 flex items-center gap-2">
               <span className="text-ui-caption font-medium text-ink-secondary">Same address</span>
               <span className="break-words text-ui-body font-medium text-zinc-900">
@@ -247,7 +281,7 @@ export default function DuplicateCustomersPage() {
           )}
 
           <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} matched={keptMatched} phoneState={sameAddress ? group.candidates[0]?.evidence?.phones?.winner : null} />
+            <CustomerLine customer={group.winner} isWinner showPhone={reviewOnly} matched={keptMatched} phoneState={reviewOnly ? group.candidates[0]?.evidence?.phones?.winner : null} />
           </div>
 
           <div className="grid gap-2">
@@ -257,7 +291,10 @@ export default function DuplicateCustomersPage() {
               const acting = actionKey.startsWith(`${customer.id}:`);
               // Every positive address disagreement (street, unit, ZIP,
               // city) is a potential second property worth preserving.
-              const addressConflict = reasons.some((r) => r.startsWith("address_"));
+              // A same-name pair always offers BOTH actions: its addresses
+              // differ by definition (or one is missing), and the office
+              // chooses whether the other address survives as a property.
+              const addressConflict = sameName ? !!customer.address_line1 : reasons.some((r) => r.startsWith("address_"));
               return (
                 <div
                   key={customer.id}
@@ -268,7 +305,7 @@ export default function DuplicateCustomersPage() {
                       this column to slivers; md:basis-auto restores the
                       side-by-side row once there is width for both */}
                   <div className="min-w-0 basis-full flex-1 md:basis-auto">
-                    <CustomerLine customer={customer} showPhone={sameAddress} matched={matchedAddress} phoneState={sameAddress ? evidence?.phones?.loser : null} />
+                    <CustomerLine customer={customer} showPhone={reviewOnly} matched={matchedAddress} phoneState={reviewOnly ? evidence?.phones?.loser : null} />
                     {keptHere && keptMatched && fmtAddress(keptHere) !== fmtAddress(keptMatched) && (
                       <div className="break-words text-ui-body text-ink-secondary">
                         Kept customer matched this one at {fmtAddress(keptHere)}
@@ -288,7 +325,7 @@ export default function DuplicateCustomersPage() {
                     {/* Address-conflict candidates must go through
                         "Merge + keep address" — the server 409s a plain
                         merge so the second service address isn't lost. */}
-                    {tier !== "red" && !addressConflict && (
+                    {tier !== "red" && (!addressConflict || sameName) && (
                       <Button
                         size="sm"
                         variant="secondary"
@@ -296,11 +333,13 @@ export default function DuplicateCustomersPage() {
                         onClick={() => runAction({
                           key: `${customer.id}:merge`,
                           endpoint: "/admin/customer-duplicates/merge",
-                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}) },
-                          confirmText: sameAddress
-                            ? sameAddressConfirm(customer, group.winner, evidence)
-                            : `Merge ${displayName(customer)} into ${displayName(group.winner)}? All history moves to the kept customer.`,
-                          ...(sameAddress
+                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}), ...(sameName ? { kind: "same_name" } : {}) },
+                          confirmText: sameName
+                            ? sameNameConfirm(customer, group.winner, evidence, { keepAddress: false })
+                            : sameAddress
+                              ? sameAddressConfirm(customer, group.winner, evidence)
+                              : `Merge ${displayName(customer)} into ${displayName(group.winner)}? All history moves to the kept customer.`,
+                          ...(reviewOnly
                             ? {
                               onResult: (res) => {
                                 const carry = phoneCarryResult(res?.phoneCarry, customer, { shared: evidence?.phone_state === "shared_phone" });
@@ -322,13 +361,15 @@ export default function DuplicateCustomersPage() {
                         onClick={() => runAction({
                           key: `${customer.id}:link`,
                           endpoint: "/admin/customer-duplicates/link-as-property",
-                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}) },
-                          confirmText: `Merge ${displayName(customer)} into ${displayName(group.winner)} and keep ${customer.address_line1} as an additional property?`,
+                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}), ...(sameName ? { kind: "same_name" } : {}) },
+                          confirmText: sameName
+                            ? sameNameConfirm(customer, group.winner, evidence, { keepAddress: true })
+                            : `Merge ${displayName(customer)} into ${displayName(group.winner)} and keep ${customer.address_line1} as an additional property?`,
                           // The merge can commit while the property write
                           // fails — never claim the address was saved
                           // unless the server says it was.
                           onResult: (res) => {
-                            const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer, { shared: evidence?.phone_state === "shared_phone" }) : null;
+                            const carry = reviewOnly ? phoneCarryResult(res?.phoneCarry, customer, { shared: evidence?.phone_state === "shared_phone" }) : null;
                             if (!res?.propertyLinked) setActionError(`Merged, but the address could NOT be saved as a property — add it to the kept customer manually.${carry?.error ? ` ${carry.error}` : ""}`);
                             else if (carry?.error) setActionError(carry.error);
                             else setToast(carry?.sentence ? `Merged — address saved as a property. ${carry.sentence}` : "Merged — address saved as a property");
@@ -410,7 +451,28 @@ export default function DuplicateCustomersPage() {
           </div>
           {sameAddressError && <ActionFeedback error className="mb-3">{sameAddressError}</ActionFeedback>}
           <div className="grid gap-3">
-            {sameAddressGroups.map((group) => renderGroupCard(group, true))}
+            {sameAddressGroups.map((group) => renderGroupCard(group, "same_address"))}
+          </div>
+        </div>
+      )}
+
+      {(sameNameGroups.length > 0 || sameNameError) && (
+        <div className="mt-4">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-ui-caption font-medium text-ink-secondary">Same name, different phone and address</span>
+            <span className="text-ui-body text-ink-secondary">review only · never merged automatically</span>
+          </div>
+          <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
+            These customers have the same first and last name but a different phone number and
+            address — often one person who called from a new number, or whose address was typed
+            wrong on an old record. Check both addresses and phones before you merge. Merge into
+            kept keeps the highlighted customer’s address and saves the other person’s phone as a
+            contact on it; Merge + keep address also saves the other address as an additional
+            property. If they are different people, choose Not a duplicate.
+          </div>
+          {sameNameError && <ActionFeedback error className="mb-3">{sameNameError}</ActionFeedback>}
+          <div className="grid gap-3">
+            {sameNameGroups.map((group) => renderGroupCard(group, "same_name"))}
           </div>
         </div>
       )}
