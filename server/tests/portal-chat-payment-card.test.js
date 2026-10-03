@@ -132,11 +132,29 @@ test('a read failure shows nothing, never throws, and still offers Open Billing'
   expect(actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
-test('a cancelled payment read propagates instead of becoming an unavailable card', async () => {
-  const cancelled = Object.assign(new Error('cancelled'), { name: 'AbortError' });
-  listPortalPayments.mockRejectedValue(cancelled);
+test.each([
+  ['cancelled read', 'read'],
+  ['deadline after the read', 'assert'],
+])('a %s preserves the completed payment card and actions', async (_label, phase) => {
+  const cancelled = Object.assign(new Error('cancelled'), phase === 'read' ? { name: 'AbortError' } : { code: 'PORTAL_CHAT_DEADLINE' });
+  if (phase === 'read') listPortalPayments.mockRejectedValue(cancelled);
+  else listPortalPayments.mockResolvedValue({ payments: PAYMENTS });
 
-  await expect(executeToolCall('show_recent_payments', {}, 'cust-1', [], [])).rejects.toBe(cancelled);
+  const prior = { type: 'payments', title: 'Completed payment card', rows: [{ id: 'old' }] };
+  const actions = [{ type: 'tab', label: 'Open plan', tab: 'plan' }];
+  const cards = [prior];
+  const turn = {
+    transaction: jest.fn((_stage, read) => read({ bounded: true })),
+    assertActive: jest.fn(() => {
+      if (phase === 'assert') throw cancelled;
+    }),
+  };
+
+  await expect(executeToolCall('show_recent_payments', {}, 'cust-1', actions, cards, {}, turn)).rejects.toBe(cancelled);
+  expect(cards).toEqual([prior]);
+  expect(actions).toEqual([{ type: 'tab', label: 'Open plan', tab: 'plan' }]);
+  if (phase === 'assert') expect(turn.assertActive).toHaveBeenCalledWith('payment card');
+  else expect(turn.assertActive).not.toHaveBeenCalled();
 });
 
 test('refuses a model-supplied customer id and a channel without cards', async () => {

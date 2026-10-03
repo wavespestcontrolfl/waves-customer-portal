@@ -293,18 +293,12 @@ function shortDateLabel(dateKey) {
 }
 
 // The visit as the reschedule page loads it, when that page's own GET verdict
-// would let the customer move it; null otherwise. Any failure fails closed.
+// would let the customer move it; null otherwise. The caller fails closed
+// after the bounded transaction has rolled back.
 async function movableVisit(id, database = db) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
-  const svc = await loadById(id, database).catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    return null;
-  });
-  const verdict = svc && await pageEligibility(svc, new Date(), database).catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
-    return null;
-  });
+  const svc = await loadById(id, database);
+  const verdict = svc && await pageEligibility(svc, new Date(), database);
   return verdict?.ok ? svc : null;
 }
 
@@ -338,9 +332,16 @@ async function offerRescheduleLink(customerId, actions, turn) {
     const rows = turn ? await turn.query(query, 'reschedule visits') : await query;
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-      const svc = turn
-        ? await turn.transaction('reschedule eligibility', (database) => movableVisit(row.id, database))
-        : await movableVisit(row.id);
+      let svc;
+      try {
+        svc = turn
+          ? await turn.transaction('reschedule eligibility', (database) => movableVisit(row.id, database))
+          : await movableVisit(row.id);
+      } catch (err) {
+        if (isToolCancellation(err)) throw err;
+        logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
+        svc = null;
+      }
       if (svc) movable.push({ row, property: String(svc.address_line1 || '').trim() });
     }
     if (rows.length < RESCHEDULE_PAGE) break;
@@ -389,13 +390,7 @@ const methodLabel = (p) => {
 async function showRecentPayments(customerId, actions, cards, turn) {
   const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
   if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
-  // Every read starts clean: a card from an earlier call in this turn never
-  // outlives a later read that says it must not be shown.
   const prior = cards.findIndex((c) => c.type === 'payments');
-  if (prior !== -1) cards.splice(prior, 1);
-  // The Billing page is the fallback on every exit below, so the button goes
-  // on first: the model is not allowed to write a link itself.
-  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   let page;
   try {
     page = turn
@@ -404,8 +399,14 @@ async function showRecentPayments(customerId, actions, cards, turn) {
   } catch (err) {
     if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
+    turn?.assertActive('payment card fallback');
+    if (prior !== -1) cards.splice(prior, 1);
+    addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
     return NOT_SHOWN;
   }
+  turn?.assertActive('payment card');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   // Any payment the card cannot label means no card at all: a card that
   // skipped the newest (say, disputed) payment would present an older one
   // as the latest, and the model would confirm a payment that did not land.
@@ -436,7 +437,6 @@ async function showRecentPayments(customerId, actions, cards, turn) {
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };
   }
-  turn?.assertActive('payment card');
   cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
   return {
     shown: true,
@@ -451,11 +451,7 @@ async function showRecentPayments(customerId, actions, cards, turn) {
 async function getRecentVisits(customerId, actions, cards, turn) {
   const UNAVAILABLE = { visits: null, instruction: 'The visit history could not be read. Tell the customer the Completed visits page has it and, for a question about a specific visit, use the escalate tool.' };
   if (!customerId || !Array.isArray(actions) || !Array.isArray(cards)) return UNAVAILABLE;
-  // Every read starts clean, and the page that lists every completed visit
-  // is the fallback on every exit.
   const prior = cards.findIndex((c) => c.type === 'visits');
-  if (prior !== -1) cards.splice(prior, 1);
-  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   let page;
   try {
     page = turn
@@ -466,8 +462,14 @@ async function getRecentVisits(customerId, actions, cards, turn) {
   } catch (err) {
     if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
+    turn?.assertActive('visit card fallback');
+    if (prior !== -1) cards.splice(prior, 1);
+    addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
     return UNAVAILABLE;
   }
+  turn?.assertActive('visit card');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   if (!page.services.length) {
     return {
       visits: [],
@@ -493,7 +495,6 @@ async function getRecentVisits(customerId, actions, cards, turn) {
     // that the assistant never names a product brand.
     productKinds: [...new Set((svc.products || []).map((p) => String(p.product_category || '').trim()).filter(Boolean))],
   }));
-  turn?.assertActive('visit card');
   cards.push({
     type: 'visits',
     title: rows.length === 1 ? 'Your most recent visit' : `Your last ${rows.length} visits`,
@@ -545,11 +546,7 @@ async function bookedReserviceResult(customerId, line, booked, database = db) {
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
   if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
   // The button is optional: a failed lookup keeps the booked visit's facts.
-  const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
-    return null;
-  });
+  const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
   const movable = Boolean(row && await movableVisit(row.id, database));
   return {
     result: bookedReserviceFacts(line, booked, movable),
@@ -620,9 +617,27 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
   const refusal = reportRefusal(customerMessage, line, input);
   if (refusal) return refusal;
   const read = (database) => offerReserviceResult(customerId, line, database);
-  const decision = turn
-    ? await turn.transaction('re-service offer', read)
-    : await read(db);
+  let decision;
+  try {
+    decision = turn
+      ? await turn.transaction('re-service offer', read)
+      : await read(db);
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] re-service read failed, no button: ${err.message}`);
+    return RESERVICE_HAND_OFF;
+  }
+  if (decision.booked) {
+    try {
+      decision = turn
+        ? await turn.transaction('booked re-service move', (database) => bookedReserviceResult(customerId, line, decision.booked, database))
+        : await bookedReserviceResult(customerId, line, decision.booked);
+    } catch (err) {
+      if (isToolCancellation(err)) throw err;
+      logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
+      decision = { result: bookedReserviceFacts(line, decision.booked, false) };
+    }
+  }
   if (decision.action) {
     turn?.assertActive('re-service button');
     addAction(actions, decision.action);
@@ -634,37 +649,21 @@ async function offerReserviceResult(customerId, line, database = db) {
   // An open re-service in the line is read on its own, as the page does: a
   // visit booked while the plan covered the line stays on the schedule after
   // coverage changes, and the customer is told about it.
-  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId, database).catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
-    return null;
-  });
-  if (!open) return { result: RESERVICE_HAND_OFF };
-  if (open[line]) return bookedReserviceResult(customerId, line, open[line], database);
-  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
-    return null;
-  });
+  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId, database);
+  if (open[line]) return { booked: open[line] };
+  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token');
   const token = String(customer?.reservice_token || '');
   // The /reservice page's own token format and verdict for this token (its
   // customer load, lane catalog, coverage and open re-services), so the chat
   // offers exactly what the page would show. Any failure hands off.
   const page = require('../../routes/reservice-public')._internals;
   if (!page.TOKEN_RE.test(token)) return { result: RESERVICE_HAND_OFF };
-  const state = await page.pageLaneState(token, database).catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
-    return null;
-  });
+  const state = await page.pageLaneState(token, database);
   if (!state || String(state.customer.id) !== String(customerId)) return { result: RESERVICE_HAND_OFF };
   if (!state.bookableLanes.includes(line)) return { result: RESERVICE_HAND_OFF };
   // An address held for staff review shows no times on the page, only
   // instructions to text or call: hand off rather than promise a time.
-  const reviewHold = await page.reserviceLocationReviewRequired(state.customer, database).catch((err) => {
-    if (isToolCancellation(err)) throw err;
-    return true;
-  });
+  const reviewHold = await page.reserviceLocationReviewRequired(state.customer, database);
   if (reviewHold) return { result: RESERVICE_HAND_OFF };
   // One label for both lines: the page lets the customer pick the line, and a
   // second call for the other line shares this href (one button).

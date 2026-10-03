@@ -110,6 +110,38 @@ describe('portal tools', () => {
     expect(result.available).toBe(true);
   });
 
+  test('a failed eligibility transaction rolls back before checking the next visit', async () => {
+    mockUpcoming([
+      { id: 1, scheduled_date: '2026-10-10', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_1' },
+      { id: 2, scheduled_date: '2026-10-11', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_2' },
+    ]);
+    loadById.mockImplementation(async (id, database) => {
+      if (id === 1) {
+        database.aborted = true;
+        throw new Error('lookup failed');
+      }
+      return { id };
+    });
+    pageEligibility.mockResolvedValue({ ok: true });
+    const actions = [];
+    const turn = {
+      query: jest.fn(async (query) => query),
+      transaction: jest.fn(async (_stage, read) => {
+        const database = { aborted: false };
+        const result = await read(database);
+        if (database.aborted) throw Object.assign(new Error('transaction is aborted'), { code: '25P02' });
+        return result;
+      }),
+      assertActive: jest.fn(),
+    };
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions, null, {}, turn);
+
+    expect(turn.transaction).toHaveBeenCalledTimes(2);
+    expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 11', href: '/reschedule/tok_2' }]);
+    expect(result.available).toBe(true);
+  });
+
   test('visits at more than one property carry the street on the button', async () => {
     mockUpcoming([
       { id: 1, scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' },
