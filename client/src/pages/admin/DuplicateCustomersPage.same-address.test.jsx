@@ -195,3 +195,76 @@ it("phone-group cards render exactly as before (no matched-address wording)", as
   expect(screen.queryByText(/Matched at/)).toBeNull();
   expect(screen.queryByText(/Primary address/)).toBeNull();
 });
+
+function listWithPhones({ winnerPhone = "+19415550101", loserPhone = "+19415550102", state, carry, winnerState, loserState }) {
+  return {
+    groups: [],
+    sameAddressGroups: [{
+      kind: "same_address",
+      winner: { id: "w", first_name: "Alex", last_name: "Example", phone: winnerPhone, address_line1: "100 Example Loop", city: "Sarasota", zip: "34231" },
+      candidates: [{
+        customer: { id: "l", first_name: "Blake", last_name: "Sample", phone: loserPhone, address_line1: "100 Example Loop", city: "Sarasota", zip: "34231" },
+        tier: "yellow",
+        reasons: [state === "both_usable" ? "same_address_different_phone" : "same_address_phone_missing"],
+        evidence: {
+          phone_state: state,
+          phones_differ: state === "both_usable",
+          phones: { winner: winnerState, loser: loserState },
+          phone_carry: { status: carry },
+        },
+      }],
+    }],
+  };
+}
+
+it("a phone-less member says 'No phone on file' where the number would show, and the pair is not called a different-phone pair", async () => {
+  mockApi({ list: listWithPhones({ loserPhone: "", state: "one_missing", carry: "not_applicable", winnerState: "usable", loserState: "none" }) });
+  renderPage();
+  expect(await screen.findByText("No phone on file")).toBeInTheDocument();
+  expect(screen.getByText("(941) 555-0101")).toBeInTheDocument();
+  expect(screen.getByText("Same address — a phone number is missing")).toBeInTheDocument();
+  expect(screen.queryByText("Same address, different phone", { selector: "span.text-ui-body" })).toBeNull();
+});
+
+it("both phone-less: both rows say so", async () => {
+  mockApi({ list: listWithPhones({ winnerPhone: null, loserPhone: "12345", state: "both_missing", carry: "not_applicable", winnerState: "none", loserState: "none" }) });
+  renderPage();
+  expect(await screen.findAllByText("No phone on file")).toHaveLength(2);
+  expect(screen.queryByText("12345")).toBeNull();
+});
+
+it.each([
+  ["both_usable", "carried", /with different phones\. All history moves to the kept customer\. Blake Sample’s phone number is saved as a contact on them\./, "winner", "usable", "usable"],
+  ["both_usable", "no_free_slot", /Blake Sample’s phone number will NOT be saved — add it by hand afterwards\./, "winner", "usable", "usable"],
+  ["both_usable", "already_on_winner", /Blake Sample’s number is already saved on the kept customer\./, "winner", "usable", "usable"],
+  ["one_missing", "not_applicable", /Blake Sample has no phone number on file\. All history moves to the kept customer\. Blake Sample has no usable phone number on file, so no number is saved\./, "loser", "usable", "none"],
+  ["one_missing", "carried", /Alex Example has no phone number on file\./, "winner", "none", "usable"],
+  ["both_missing", "not_applicable", /neither has a phone number on file\./, "both", "none", "none"],
+])("the merge confirmation for %s / %s says exactly what will happen", async (state, carry, expected, _who, winnerState, loserState) => {
+  mockApi({ list: listWithPhones({ state, carry, winnerState, loserState, winnerPhone: winnerState === "none" ? "" : "+19415550101", loserPhone: loserState === "none" ? "" : "+19415550102" }) });
+  renderPage();
+  const card = (await screen.findByText("Blake Sample")).closest("div.rounded-sm");
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  expect(window.confirm.mock.calls[0][0]).toMatch(expected);
+  if (state !== "both_usable") expect(window.confirm.mock.calls[0][0]).not.toMatch(/different phones/);
+  if (carry === "not_applicable") expect(window.confirm.mock.calls[0][0]).not.toMatch(/saved as a contact/);
+});
+
+it.each([
+  ["carried", /saved as a contact on the kept customer/],
+  ["no_free_slot", /no free contact slot/],
+  ["not_applicable", /Blake Sample had no usable phone number on file, so no number was saved\./],
+  ["already_on_winner", /number was already saved on the kept customer\./],
+])("the result toast for phoneCarry %s never promises a number it did not save", async (status, expected) => {
+  mockApi({
+    list: listWithPhones({ state: "both_usable", carry: "carried", winnerState: "usable", loserState: "usable" }),
+    mergeResult: { ok: true, journalId: "j", phoneCarry: { status } },
+  });
+  renderPage();
+  const card = (await screen.findByText("Blake Sample")).closest("div.rounded-sm");
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  const text = await screen.findByText(expected);
+  expect(text).toBeInTheDocument();
+  if (status !== "carried") expect(text.textContent).not.toMatch(/saved as a contact/);
+});

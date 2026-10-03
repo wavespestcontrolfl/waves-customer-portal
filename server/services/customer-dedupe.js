@@ -502,6 +502,19 @@ const SAME_ADDRESS_KIND = 'same_address';
 // section from the group kind, and this keeps the reason list non-empty so the
 // pair can never read as an unqualified green.
 const SAME_ADDRESS_REASON = 'same_address_different_phone';
+// The pair is at one address but a record has no usable phone (blank or
+// malformed), so "different phone" would be a lie: still listed (a likely
+// duplicate household), labeled plainly.
+const SAME_ADDRESS_PHONE_MISSING_REASON = 'same_address_phone_missing';
+
+// Contact-slot columns the carry prediction reads. Selected for same-address
+// rows only so the card can say what the merge will do with the phone; they
+// are stripped before the row is shipped to the browser.
+const SAME_ADDRESS_SLOT_COLUMNS = [
+  'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role',
+  'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role',
+  'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role',
+];
 
 // Visits that still describe a real future appointment (the ICS eligibility
 // helper's own set — one definition of "upcoming").
@@ -598,14 +611,24 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
       candidates: losers.map((loser) => {
         const verdict = verdicts.get(loser.id);
         const { via, matched } = edgeOf(loser.id);
+        const phones = { winner: phone10(winner.phone) ? 'usable' : 'none', loser: phone10(loser.phone) ? 'usable' : 'none' };
+        const phonesMissing = phones.winner === 'none' || phones.loser === 'none';
+        // What a merge would do with the loser's phone — the executor's own
+        // prediction, so the confirmation copy can never promise otherwise.
+        const { status: carryStatus, slot: carrySlot } = predictWinnerBackfills(winner, loser).phoneCarry;
         return {
           loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
           // Review-only by construction: green never leaves this function.
           tier: verdict.tier === 'red' ? 'red' : 'yellow',
-          reasons: [SAME_ADDRESS_REASON, ...verdict.reasons],
+          reasons: [phonesMissing ? SAME_ADDRESS_PHONE_MISSING_REASON : SAME_ADDRESS_REASON, ...verdict.reasons],
           evidence: {
             kind: SAME_ADDRESS_KIND,
-            phones_differ: true,
+            // True only when BOTH records have a usable phone and the keys
+            // differ (same key = the phone queue's pair, never listed here).
+            phones_differ: !phonesMissing,
+            phones,
+            phone_state: phones.winner === 'none' && phones.loser === 'none' ? 'both_missing' : (phonesMissing ? 'one_missing' : 'both_usable'),
+            phone_carry: { status: carryStatus, slot: carrySlot },
             names_compatible: verdict.namesOk,
             address: verdict.addrStatus,
             matched_via: { winner: via[winner.id], loser: via[loser.id] },
@@ -635,8 +658,10 @@ function buildSameAddressGroups(input) {
 }
 
 function decorateSameAddress(sanitized, row, upcomingVisits) {
+  const shipped = { ...sanitized };
+  for (const col of SAME_ADDRESS_SLOT_COLUMNS) delete shipped[col];
   return {
-    ...sanitized,
+    ...shipped,
     upcoming_visits: upcomingVisits ? (upcomingVisits.get(String(row.id)) || 0) : null,
   };
 }
@@ -651,7 +676,7 @@ function decorateSameAddress(sanitized, row, upcomingVisits) {
 // table (the queue); an id list narrows every leg to those customers (the
 // merge-time pair recheck, which must not rescan the building under locks).
 async function readSameAddressRows(database, ids = null) {
-  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'property_type', 'waveguard_tier'].map((c) => `c.${c}`);
+  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
   const customerQuery = database('customers as c')
     .where((q) => q.where('c.active', true).orWhereNull('c.active'))
     .whereNull('c.deleted_at')
@@ -745,7 +770,8 @@ async function sameAddressPairEligibility(winnerId, loserId, database = db) {
     .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
   if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
   const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
-  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [SAME_ADDRESS_REASON, ...verdict.reasons] };
+  const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
+  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [phonesMissing ? SAME_ADDRESS_PHONE_MISSING_REASON : SAME_ADDRESS_REASON, ...verdict.reasons] };
   if (candidate.tier === 'red') {
     return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
   }
@@ -6543,6 +6569,7 @@ module.exports = {
   _test: {
     buildSameAddressGroups,
     SAME_ADDRESS_REASON,
+    SAME_ADDRESS_PHONE_MISSING_REASON,
     backfillValueUnchanged,
     classifyPair,
     lockedPairAutoEligibility,

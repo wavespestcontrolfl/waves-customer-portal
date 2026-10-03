@@ -237,6 +237,55 @@ describe('same-address grouping', () => {
   });
 });
 
+describe('a record with no usable phone is still listed, and says so', () => {
+  const strong = (extra = {}) => cust({ pipeline_stage: 'active_customer', stripe_customer_id: 'cus_s', ...extra });
+  const only = (rows) => {
+    const groups = buildSameAddressGroups({ customers: rows });
+    expect(groups).toHaveLength(1);
+    expect(groups[0].candidates).toHaveLength(1);
+    return { group: groups[0], cand: groups[0].candidates[0], ev: groups[0].candidates[0].evidence };
+  };
+
+  test.each([[''], [null], ['12345'], ['not a phone'], ['merged-1a2b3c4d']])('malformed/blank phone %p on the loser: listed, flagged as phone missing, nothing to carry', (bad) => {
+    const { cand, ev } = only([strong(), cust({ phone: bad })]);
+    expect(cand.reasons[0]).toBe(dedupe._test.SAME_ADDRESS_PHONE_MISSING_REASON);
+    expect(cand.reasons).not.toContain(SAME_ADDRESS_REASON);
+    expect(ev).toMatchObject({ phones_differ: false, phone_state: 'one_missing', phones: { winner: 'usable', loser: 'none' }, phone_carry: { status: 'not_applicable' } });
+  });
+
+  test('phone-less WINNER with a usable loser: flagged, and the loser number is predicted to be carried', () => {
+    const { ev } = only([strong({ phone: '' }), cust()]);
+    expect(ev).toMatchObject({ phones_differ: false, phone_state: 'one_missing', phones: { winner: 'none', loser: 'usable' }, phone_carry: { status: 'carried', slot: 1 } });
+  });
+
+  test('both phone-less: listed, both_missing, nothing to carry', () => {
+    const { ev, cand } = only([strong({ phone: null }), cust({ phone: '' })]);
+    expect(ev).toMatchObject({ phones_differ: false, phone_state: 'both_missing', phones: { winner: 'none', loser: 'none' }, phone_carry: { status: 'not_applicable' } });
+    expect(cand.reasons[0]).toBe(dedupe._test.SAME_ADDRESS_PHONE_MISSING_REASON);
+  });
+
+  test('two usable, distinct phones: both_usable and phones_differ true; the same key (any formatting) is still excluded', () => {
+    const { ev, cand } = only([strong(), cust()]);
+    expect(ev).toMatchObject({ phones_differ: true, phone_state: 'both_usable', phones: { winner: 'usable', loser: 'usable' }, phone_carry: { status: 'carried', slot: 1 } });
+    expect(cand.reasons[0]).toBe(SAME_ADDRESS_REASON);
+    expect(buildSameAddressGroups({ customers: [strong({ phone: '+19415550123' }), cust({ phone: '(941) 555-0123' })] })).toEqual([]);
+  });
+
+  test('a number that only appears in the OTHER record\'s contact slot is still a different primary phone: listed, and the merge says it is already saved', () => {
+    const winner = strong({ phone: '+19415550101', service_contact_name: 'Blake', service_contact_phone: '(941) 555-0102' });
+    const loser = cust({ phone: '+19415550102' });
+    const { ev } = only([winner, loser]);
+    expect(ev).toMatchObject({ phones_differ: true, phone_state: 'both_usable', phone_carry: { status: 'already_on_winner' } });
+  });
+
+  test('contact-slot columns used for the prediction never ship to the browser', () => {
+    const [group] = buildSameAddressGroups({ customers: [strong({ service_contact_phone: '+19415550177', service_contact_name: 'Pat' }), cust()] });
+    const text = JSON.stringify(group);
+    expect(text).not.toContain('service_contact');
+    expect(text).not.toContain('+19415550177');
+  });
+});
+
 describe('same-address tier is review-only, never green', () => {
   test('a name-compatible, billing-free shell pair that would be GREEN in a phone group is yellow here', () => {
     const real = cust({ first_name: 'Sample', last_name: 'Example', pipeline_stage: 'active_customer' });

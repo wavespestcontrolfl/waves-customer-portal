@@ -148,6 +148,17 @@ maybeDescribe('findSameAddressGroups (TEMP tables)', () => {
     expect(pairsOf([group])).toEqual([pair(owner, tenant)]);
   });
 
+  test('a pair with a blank phone is listed as phone-missing and passes the pair recheck', async () => {
+    const a = await customer({ pipeline_stage: 'active_customer' });
+    const b = await customer({ phone: '' });
+    const [group] = await dedupe.findSameAddressGroups(conn);
+    expect(pairsOf([group])).toEqual([pair(a, b)]);
+    expect(group.candidates[0].evidence).toMatchObject({ phones_differ: false, phone_state: 'one_missing', phone_carry: { status: 'not_applicable' } });
+    const verdict = await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_address' });
+    expect(verdict.code).toBe('eligible');
+    expect(verdict.candidate.reasons[0]).toBe('same_address_phone_missing');
+  });
+
   test('one bounded read: a fixed handful of queries however many customers there are', async () => {
     for (let i = 0; i < 40; i += 1) await customer({ address_line1: `${200 + i} Sample Row`, zip: '34233' });
     await customer({ address_line1: '200 Sample Row', zip: '34233' });
@@ -322,6 +333,15 @@ maybeDescribe('same-address merge carries the phone, holds consent, and the undo
       await undo(journalId);
       expect((await db('customers').where({ id: winnerId }).first()).service_contact_phone).toBeNull();
     });
+  });
+
+  test('merging a pair whose loser has no phone succeeds and reports nothing to carry', async () => {
+    const { winnerId, loserId } = await pairAtNewAddress({ loserExtra: { phone: '' } });
+    const result = await mergeSameAddress(winnerId, loserId);
+    expect(result.phoneCarry).toMatchObject({ status: 'not_applicable' });
+    const winner = await db('customers').where({ id: winnerId }).first();
+    expect(winner.service_contact_phone).toBeNull();
+    expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
   });
 
   test('no free slot: the merge still succeeds, the phone is left, and the result says so', async () => {

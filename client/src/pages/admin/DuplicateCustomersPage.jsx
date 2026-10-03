@@ -23,6 +23,7 @@ const TIER_LABEL = {
 
 const REASON_LABELS = {
   same_address_different_phone: "Same address, different phone",
+  same_address_phone_missing: "Same address — a phone number is missing",
   name_conflict: "Names differ",
   address_conflict: "Different addresses",
   address_unit_conflict: "Different units at the same address",
@@ -66,16 +67,48 @@ function visitsText(count) {
   return count === 0 ? "no upcoming visits" : `${count} upcoming visit${count === 1 ? "" : "s"}`;
 }
 
-// What the merge did with the merged-away person's phone (same-address merges).
-function phoneCarryResult(carry, customer) {
+// What a same-address merge does (or did) with the merged-away person's phone,
+// one plain sentence per carry status. The status is the server's prediction
+// before the click (evidence.phone_carry) and its result after (phoneCarry),
+// so the copy never promises to save a number there is none to save.
+function carrySentence(status, customer, { past }) {
+  const name = displayName(customer);
   const phone = fmtPhone(customer?.phone);
-  if (carry?.status === "carried") {
-    return { toast: `Merged — ${displayName(customer)}’s number${phone ? ` ${phone}` : ""} is saved as a contact on the kept customer, so their next call finds this account. It is held from automated texts — it has not agreed to receive them.` };
+  if (status === "carried") {
+    return past
+      ? `${name}’s number${phone ? ` ${phone}` : ""} is saved as a contact on the kept customer, so their next call finds this account. It is held from automated texts — it has not agreed to receive them.`
+      : `${name}’s phone number is saved as a contact on them.`;
   }
-  if (carry?.status === "no_free_slot") {
-    return { error: `Merged, but the kept customer has no free contact slot — add ${phone || "that phone number"} to them manually so ${displayName(customer)}’s next call finds this account.` };
+  if (status === "no_free_slot") {
+    return past
+      ? `The kept customer has no free contact slot — add ${phone || "that phone number"} to them manually so ${name}’s next call finds this account.`
+      : `The kept customer has no free contact slot, so ${name}’s phone number will NOT be saved — add it by hand afterwards.`;
   }
-  return { toast: "Merged" };
+  if (status === "not_applicable") {
+    return past ? `${name} had no usable phone number on file, so no number was saved.` : `${name} has no usable phone number on file, so no number is saved.`;
+  }
+  if (status === "already_on_winner") {
+    return past ? `${name}’s number was already saved on the kept customer.` : `${name}’s number is already saved on the kept customer.`;
+  }
+  return "";
+}
+
+function phoneCarryResult(carry, customer) {
+  const sentence = carrySentence(carry?.status, customer, { past: true });
+  if (carry?.status === "no_free_slot") return { error: `Merged, but ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`, sentence };
+  return { toast: sentence ? `Merged — ${sentence}` : "Merged", sentence };
+}
+
+// Confirmation text for a same-address merge, driven by the pair's phone state
+// and the predicted carry — never implies two different numbers when a record
+// has none.
+function sameAddressConfirm(customer, winner, evidence) {
+  const state = evidence?.phone_state;
+  let base = "They are two customers at the same address";
+  if (state === "both_usable" || (!state && evidence?.phones_differ !== false)) base += " with different phones.";
+  else if (state === "both_missing") base += "; neither has a phone number on file.";
+  else base += `; ${displayName(evidence?.phones?.winner === "none" ? winner : customer)} has no phone number on file.`;
+  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${carrySentence(evidence?.phone_carry?.status, customer, { past: false })}`.trim();
 }
 
 function fmtAddress(addr) {
@@ -85,7 +118,7 @@ function fmtAddress(addr) {
 // matched (same-address cards only): the address this customer matched on —
 // their own row or a saved property. A saved-property match leads with that
 // address and labels the primary address as such.
-function CustomerLine({ customer, isWinner, showPhone = false, matched = null }) {
+function CustomerLine({ customer, isWinner, showPhone = false, matched = null, phoneState = null }) {
   return (
     <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -101,7 +134,7 @@ function CustomerLine({ customer, isWinner, showPhone = false, matched = null })
       </div>
       {showPhone && (
         <div className="u-nums break-words text-ui-body text-ink-secondary">
-          {[fmtPhone(customer.phone) || "No phone", visitsText(customer.upcoming_visits)].filter(Boolean).join(" · ")}
+          {[phoneState === "none" ? "No phone on file" : (fmtPhone(customer.phone) || "No phone on file"), visitsText(customer.upcoming_visits)].filter(Boolean).join(" · ")}
         </div>
       )}
       {matched && matched.via === "property" && (
@@ -209,7 +242,7 @@ export default function DuplicateCustomersPage() {
           )}
 
           <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} matched={keptMatched} />
+            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} matched={keptMatched} phoneState={sameAddress ? group.candidates[0]?.evidence?.phones?.winner : null} />
           </div>
 
           <div className="grid gap-2">
@@ -230,7 +263,7 @@ export default function DuplicateCustomersPage() {
                       this column to slivers; md:basis-auto restores the
                       side-by-side row once there is width for both */}
                   <div className="min-w-0 basis-full flex-1 md:basis-auto">
-                    <CustomerLine customer={customer} showPhone={sameAddress} matched={matchedAddress} />
+                    <CustomerLine customer={customer} showPhone={sameAddress} matched={matchedAddress} phoneState={sameAddress ? evidence?.phones?.loser : null} />
                     {keptHere && keptMatched && fmtAddress(keptHere) !== fmtAddress(keptMatched) && (
                       <div className="break-words text-ui-body text-ink-secondary">
                         Kept customer matched this one at {fmtAddress(keptHere)}
@@ -260,7 +293,7 @@ export default function DuplicateCustomersPage() {
                           endpoint: "/admin/customer-duplicates/merge",
                           body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}) },
                           confirmText: sameAddress
-                            ? `Merge ${displayName(customer)} into ${displayName(group.winner)}? They are two customers at the same address with different phones. All history moves to the kept customer, and ${displayName(customer)}’s phone number is saved as a contact on them.`
+                            ? sameAddressConfirm(customer, group.winner, evidence)
                             : `Merge ${displayName(customer)} into ${displayName(group.winner)}? All history moves to the kept customer.`,
                           ...(sameAddress
                             ? {
@@ -293,7 +326,7 @@ export default function DuplicateCustomersPage() {
                             const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer) : null;
                             if (!res?.propertyLinked) setActionError(`Merged, but the address could NOT be saved as a property — add it to the kept customer manually.${carry?.error ? ` ${carry.error}` : ""}`);
                             else if (carry?.error) setActionError(carry.error);
-                            else setToast(carry && carry.toast !== "Merged" ? "Merged — address saved as a property, and the number saved as a contact (held from automated texts — not yet agreed to receive them)" : "Merged — address saved as a property");
+                            else setToast(carry?.sentence ? `Merged — address saved as a property. ${carry.sentence}` : "Merged — address saved as a property");
                           },
                         })}
                       >
