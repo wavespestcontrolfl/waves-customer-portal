@@ -1745,8 +1745,25 @@ function buildDiscountLineItem({
 // MEMBERSHIP_DUES_COVERED, which the completion treats exactly like dues
 // that were covered before the mint (no invoice, the visit completes).
 async function stampMembershipDuesUnderLock(conn, { customerId, scheduledServiceId, month, lineItems, derivedAmount = null }) {
-  const duesLine = lineItems.find((li) => li._kind !== "discount" && Number(li.amount) > 0);
-  if (!duesLine) return lineItems;
+  // The stamp goes ONLY on the line the builder marks as this visit's PRIMARY
+  // service line (client_id scheduled_<visit>_primary, buildScheduledServiceInvoiceLines;
+  // the explicit-amount mint tags its single line the same way), never on the
+  // first positive line by position: when scheduled add-ons total at least the
+  // rate the builder emits no primary line, and an add-on stamped as "the
+  // month" would make every later visit and the collector skip the real dues.
+  // No such line means an UNSTAMPED mint, the same posture as every other dues
+  // visit whose lines are not the plain primary shape (see the provenance check
+  // below): the visit's own invoice is still billed, nothing is skipped, and the
+  // month is simply not marked covered, so the next plan visit or the monthly
+  // charge still bills the dues.
+  const primaryClientId = `scheduled_${scheduledServiceId}_primary`;
+  const duesLine = lineItems.find((li) => li && li._kind !== "discount" && Number(li.amount) > 0 && li.client_id === primaryClientId);
+  if (!duesLine) {
+    if (lineItems.some((li) => li && li._kind !== "discount" && Number(li.amount) > 0)) {
+      logger.warn(`[invoice] dues mint for visit ${scheduledServiceId} has no primary service line (add-ons only) — minted unstamped, the month is not marked covered`);
+    }
+    return lineItems;
+  }
   const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
   const visit = await acquireScheduledMintLockChain(conn, {
     scheduledServiceId,
@@ -2027,38 +2044,60 @@ async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
 }
 
 // A void releases a stamped dues invoice's month. Completed visits of that
-// month, unpriced, with no invoice of their own and not the invoice's own
-// visit, may have skipped their dues mint because of it (or of autopay / a cron
-// payment: this identification is advisory, from existing durable rows only,
-// and over-reports rather than under-reports). completed_at is NOT compared to
-// the invoice's creation: a backdated closeout stores the real service end, so
-// a visit closed out after the invoice existed can carry an earlier time. When nothing
-// else covers the month after the void and there are such visits, ONE office
-// alert asks a person to bill the month again if it is still owed. Never mints.
-// Best effort after the void commits; a failure here never fails the void.
+// month with no invoice of their own, other than the invoice's own visit, may
+// have skipped their dues mint because of it (or of autopay / a cron payment:
+// this identification is advisory, from existing durable rows only, and
+// over-reports rather than under-reports). "Skipped because dues cover it" is
+// decided by THE coverage predicate completion itself uses
+// (billing-lane membershipDuesCoverVisit, with the month's dues as the cover),
+// not by a hand-copied price test: a recurring plan visit that carries a
+// positive display price is covered too, a callback or a non-recurring priced
+// visit (billed on its own) is not. completed_at is NOT compared to the
+// invoice's creation: a backdated closeout stores the real service end, so a
+// visit closed out after the invoice existed can carry an earlier time. When
+// nothing else covers the month after the void and there are such visits, ONE
+// office alert asks a person to bill the month again if it is still owed. The
+// alert is an episode (admin-alert-episodes): restoring the invoice closes it
+// (unvoidInvoice), and a later void raises a fresh one with its own details.
+// Never mints. Best effort after the void commits; a failure here never fails
+// the void.
+const duesCoverageReleasedKey = (invoiceId) => `dues_coverage_released:${invoiceId}`;
 async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
   const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
   if (!month || !invoiceRow.customer_id) return;
   try {
     if (await monthlyDuesCollected(db, invoiceRow.customer_id, new Date(`${month}-15T12:00:00Z`))) return;
-    const rows = await db("scheduled_services as s")
+    const customer = await db("customers").where({ id: invoiceRow.customer_id })
+      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier", "payer_id");
+    const { membershipDuesCoverVisit } = require("./billing-lane");
+    const candidates = await db("scheduled_services as s")
       .where({ "s.customer_id": invoiceRow.customer_id, "s.status": "completed" })
       .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
-      .where((q) => q.whereNull("s.estimated_price").orWhere("s.estimated_price", 0))
       .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
       .whereNot("s.id", invoiceRow.scheduled_service_id || "00000000-0000-0000-0000-000000000000")
       .whereNotExists(db("invoices as i")
         .whereRaw("i.scheduled_service_id = s.id")
         .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
-      .select("s.id");
+      .select("s.id", "s.estimated_price", "s.is_recurring", "s.payer_id", "s.self_pay_override");
+    const rows = candidates.filter((v) => membershipDuesCoverVisit({
+      visitIsPayerBilled: !v.self_pay_override && !!(v.payer_id || customer?.payer_id),
+      perApplicationBilling: customer?.billing_mode === "per_application",
+      annualPrepayBilling: customer?.billing_mode === "annual_prepay",
+      customerAutopayActive: false,
+      duesCollectedThisMonth: true,
+      hasVisitPrice: v.estimated_price != null && Number(v.estimated_price) > 0,
+      isRecurring: v.is_recurring,
+      waveguardTier: customer?.waveguard_tier,
+      monthlyRate: customer?.monthly_rate,
+      billingMode: customer?.billing_mode,
+    }));
     if (!rows.length) return;
-    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const { composeAdminAlert, raiseAdminAlert } = require("./admin-alert-compose");
     const { fitAction } = require("./admin-alert-names");
-    const customer = await db("customers").where({ id: invoiceRow.customer_id }).first("first_name", "last_name");
     const [y, m] = month.split("-").map(Number);
     const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
     const n = rows.length;
-    await raiseAdminAlert("billing", {
+    const spec = {
       area: "Billing",
       action: fitAction("Billing", `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "the customer", [
         (who) => `rebill ${who}'s ${monthName} dues`,
@@ -2070,11 +2109,25 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       subject: { type: "invoice", id: String(invoiceRow.id) },
       doneWhen: "month_billed",
       who: "person",
-    }, {
+    };
+    const opts = {
       detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided or cancelled, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} that month (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
       bell: true,
-      dedupeKey: `dues_coverage_released:${invoiceRow.id}`,
-    });
+      dedupeKey: duesCoverageReleasedKey(invoiceRow.id),
+    };
+    let composed = null;
+    try { composed = composeAdminAlert(spec); } catch { composed = null; }
+    if (composed && require("../config/feature-gates").alertEpisodesLive()) {
+      // Reopen: a standing alert stays one row; one closed by a restore of the
+      // invoice (unvoidInvoice) rings again, with this void's own details.
+      await require("./admin-alert-episodes").raiseAdminAlertWithReopen("billing", composed.headline, composed.why, {
+        ...opts, link: composed.link, refreshOnDedupe: true, metadata: composed.metadata,
+      });
+    } else {
+      // ALERT_EPISODES killed (or the copy broke the notification rule): the
+      // plain deduped raise, one bell per invoice.
+      await raiseAdminAlert("billing", spec, opts);
+    }
   } catch (err) {
     logger.warn(`[invoice] dues-coverage-released check failed for invoice ${invoiceRow.id}: ${err.message}`);
   }
@@ -6290,6 +6343,12 @@ const InvoiceService = {
           ];
       let membershipDuesStamped = false;
       if (membershipDuesMonth && conn && sr.scheduled_service_id) {
+        // The explicit-amount mint's single line IS the visit's primary charge
+        // (the caller derived it from the monthly rate); mark it as the builder
+        // marks a replayed primary so the stamp can find it by identity.
+        if (!scheduledInvoice?.lineItems?.length && lineItems.length === 1 && !lineItems[0].client_id) {
+          lineItems = [{ ...lineItems[0], client_id: `scheduled_${sr.scheduled_service_id}_primary` }];
+        }
         lineItems = await stampMembershipDuesUnderLock(conn, {
           customerId: sr.customer_id,
           scheduledServiceId: sr.scheduled_service_id,
@@ -10620,6 +10679,14 @@ const InvoiceService = {
         throw new Error("Invoice ownership changed while unvoiding — re-check and retry");
       }
       await assertStampedDuesMonthFreeToRestore(trx, updated);
+      // The month is billed on this invoice again: a standing "rebill the
+      // month" alert from its void is stale, so it closes with the restore
+      // (same transaction); a later void raises a fresh one.
+      if (membershipDuesStampMonth(updated.line_items) && require("../config/feature-gates").alertEpisodesLive()) {
+        await require("./admin-alert-episodes").closeAdminAlertKeys(trx, [duesCoverageReleasedKey(id)], "dues invoice restored", {
+          resolution: "The dues invoice was restored, so the month is billed on it again",
+        });
+      }
       // The preserved withdrawal stamp is re-judged against LIVE ownership
       // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
       // by the Bill-To reconciliation (void is terminal), so a payer cleared

@@ -1217,6 +1217,59 @@ postgres('membership dues — locked terms, covered-skip commit, void alert (B08
     } finally { await cleanup(f); }
   });
 
+  test('a recurring plan visit with a positive display price, covered by the dues invoice, is named by the void alert; a callback and an independently invoiced visit are not', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const priced = await seedVisit(f, { label: 'Pest Control', estimatedPrice: 85 });
+      expect(await complete(f, priced)).toMatchObject({ status: 200 }); // recurring + priced: covered by the dues, no invoice
+      const callback = await seedVisit(f, { label: 'Callback Visit' });
+      await mockPg('scheduled_services').where({ id: callback }).update({ is_callback: true });
+      expect(await complete(f, callback)).toMatchObject({ status: 200 });
+      const billed = await seedVisit(f, { label: 'One-off Treatment', estimatedPrice: 120 });
+      await mockPg('scheduled_services').where({ id: billed }).update({ is_recurring: false });
+      expect(await complete(f, billed)).toMatchObject({ status: 200 }); // not covered: bills on its own invoice
+      expect(await mockPg('invoices').where({ scheduled_service_id: priced })).toHaveLength(0);
+      expect((await mockPg('invoices').where({ scheduled_service_id: billed })).length).toBeGreaterThan(0);
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      const alerts = await dueAlertRows(a.invoice.id);
+      expect(alerts).toHaveLength(1);
+      const text = JSON.stringify(alerts[0]);
+      expect(text).toContain(priced);
+      expect(text).not.toContain(callback);
+      expect(text).not.toContain(billed);
+    } finally { await cleanup(f); }
+  });
+
+  test('void, restore, cover another visit, void again: the restore closes the standing alert and the second void raises it again with the new details', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const first = await seedVisit(f, { label: 'Pest Control' });
+      expect(await complete(f, first)).toMatchObject({ status: 200 });
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      let rows = await dueAlertRows(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0])).toContain(first);
+
+      await InvoiceSvc.unvoidInvoice(a.invoice.id);
+      rows = await dueAlertRows(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0].metadata)).toContain('autoCleared');
+      expect(rows[0].read_at).not.toBeNull();
+
+      const second = await seedVisit(f, { label: 'Mosquito' });
+      expect(await complete(f, second)).toMatchObject({ status: 200 }); // covered by the restored A
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      rows = await dueAlertRows(a.invoice.id);
+      const open = rows.filter((r) => r.read_at == null);
+      expect(open).toHaveLength(1);
+      const text = JSON.stringify(open[0]);
+      expect(text).toContain(second);
+      expect(text).toContain(first);
+    } finally { await cleanup(f); }
+  });
+
   test('no alert when nothing was unbilled by the void: no other covered visit, or the month is still covered by another stamped invoice', async () => {
     const f = await seedMember();
     try {
@@ -1229,6 +1282,54 @@ postgres('membership dues — locked terms, covered-skip commit, void alert (B08
       await InvoiceSvc.voidInvoice(b.invoice.id);
       // B voided: the month is uncovered and visit c relied on it → one alert for B.
       expect(await dueAlertRows(b.invoice.id)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+});
+
+// The stamp goes only on the line the builder marks as the visit's primary
+// service line. Scheduled add-ons that total at least the monthly rate leave no
+// primary line (the builder emits add-on lines plus a price adjustment down to
+// the rate): that invoice must NOT be stamped as the month's dues.
+postgres('membership dues — add-ons totaling the rate never carry the dues stamp (B08)', () => {
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+
+  test('an unpriced plan visit whose scheduled add-on is at least the rate mints UNSTAMPED (no primary line), and the next plan visit still bills the month (stamped)', async () => {
+    const f = await seedMember(); // rate 49
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      // One add-on of 60: no primary line is emitted (49 - 60 < 0) and a -11 price adjustment brings the
+      // invoice to 49, so add-on + adjustment equals the rate: the shape the old position-based pick stamped.
+      await mockPg('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: lawn, service_name: 'Big Add-on', estimated_price: 60 });
+      expect(await complete(f, lawn)).toMatchObject({ status: 200 });
+      let rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(49);
+      expect(rows.filter((r) => stampedOf(r))).toHaveLength(0);
+      // The month is not marked covered: the next plan visit bills it.
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      expect(await complete(f, pest)).toMatchObject({ status: 200 });
+      rows = await invoicesFor(f);
+      const stamped = rows.filter((r) => stampedOf(r));
+      expect(stamped).toHaveLength(1);
+      expect(stamped[0].scheduled_service_id).toBe(pest);
+      expect(Number(stamped[0].total)).toBe(49);
+    } finally {
+      await mockPg('scheduled_service_addons').whereIn('scheduled_service_id', f.visitIds).del().catch(() => {});
+      await cleanup(f);
+    }
+  });
+
+  test('a plain unpriced plan visit stamps its PRIMARY service line (identified by client_id), not another line', async () => {
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      expect(await complete(f, lawn)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(stampedOf(rows[0])).toMatchObject({ client_id: `scheduled_${lawn}_primary` });
     } finally { await cleanup(f); }
   });
 });

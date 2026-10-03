@@ -985,7 +985,8 @@ function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
 // lock must NEVER wait on it, because the holder may be queued behind that very
 // lock (a void holds the month, then wants the customer FOR UPDATE that a mint's
 // FOR SHARE blocks): it uses the try form (completion's commit-time
-// confirmation, un-voiding) or the bounded poll below (the mint), and a miss is
+// confirmation; un-voiding, which takes its customer / visit / invoice rows
+// first and the month last) or the bounded poll below (the mint), and a miss is
 // the same retryable refusal, never a wait. So the lock graph has no edge from
 // a row/advisory lock into a blocking month wait, and no cycle can close.
 async function acquireMembershipDuesMonthLock(trx, customerId, month) {
