@@ -642,7 +642,9 @@ async function announcedAmount(job, svc, conn) {
   // A bill retotaled to zero has nothing to charge, and one retotaled above
   // the authorized base would exceed the ceiling the sweep enforces (it falls
   // to the pay link): no charge-now text for either (GitHub Codex #5640 r3).
-  if (currentDueCents <= 0 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
+  // Below the processor's 50-cent minimum the charge is refused and falls to
+  // the pay link (GitHub Codex #5640 r9).
+  if (currentDueCents < 50 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
   // …and the pre-credit bill within the approved total, the cap the charge
   // enforces before any credit (GitHub Codex #5640 r5).
   if (Number.isInteger(job.authorized_invoice_total_cents)
@@ -683,18 +685,30 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     const { estimateId, job } = found;
     const term = await conn('annual_prepay_terms').where({ prepay_invoice_id: job.invoice_id || null }).first('id');
     if (!term || String(svc.paf_held_term_id || '') !== String(term.id)) return null;
+    // A wrong-party / dispute messaging hold never gets the amount and the
+    // method named to it (GitHub Codex #5640 r9): the messaging predicate, not
+    // the charge-only one.
+    if ((await require('./collections/collection-hold').messagingHeldByCollectionHold(svc.customer_id, conn))?.held) return null;
     const method = await autoChargeMethod(job, svc.customer_id, conn);
     const amount = method ? await announcedAmount(job, svc, conn) : null;
     if (!amount) return null;
     // A reservation whose visit no longer qualifies (reopened, cancelled,
     // re-closed not performed, its stamp cleared) passes to this visit
     // (GitHub Codex #5640 r5); a standing one blocks.
-    const holder = job.first_charge_text_visit_id ? String(job.first_charge_text_visit_id) : null;
-    const replaceable = holder && holder !== String(svc.id) && !(await reservationStands(holder, term.id));
-    if (holder && holder !== String(svc.id) && !replaceable) return null;
-    const expected = replaceable ? holder : String(svc.id);
-    const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
-      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [expected, expected]), conn);
+    // The reservation is a claim token (`<visit>:<nonce>`). A standing claim
+    // of THIS visit (the same closeout retried) is kept; any other change,
+    // a takeover of a claim that no longer stands or a rejected holder's own
+    // retry, swaps the exact current token for a fresh one, so of two racing
+    // writers only one can win (GitHub Codex #5640 r9).
+    const currentClaim = job.first_charge_text_claim ? String(job.first_charge_text_claim) : null;
+    const holder = currentClaim ? currentClaim.split(':')[0] : null;
+    const holderStands = holder ? await reservationStands(holder, term.id) : false;
+    if (holder && holder !== String(svc.id) && holderStands) return null;
+    const keepOwn = holder === String(svc.id) && holderStands;
+    const nextClaim = keepOwn ? currentClaim : `${svc.id}:${require('crypto').randomUUID()}`;
+    const reserved = await patchJob(estimateId, { first_charge_text_claim: nextClaim, first_charge_text_visit_id: String(svc.id) }, (q) => (currentClaim
+      ? whileAwaiting(q).whereRaw(`${JOB} ->> 'first_charge_text_claim' = ?`, [currentClaim])
+      : whileAwaiting(q).whereRaw(`${JOB} ->> 'first_charge_text_claim' IS NULL`)), conn);
     if (!reserved) return null;
     const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
     return { amount, methodLine: bank ? 'saved bank account' : 'card on file' };

@@ -645,6 +645,38 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await facts(f.childId)).toBeNull();
     });
 
+    it('a bill under the processor minimum, or a messaging hold, keeps the regular text (GitHub Codex #5640 r9)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const tiny = await deferredAccept();
+      await trx('scheduled_services').where({ id: tiny.parentId }).update({ paf_held_term_id: tiny.termId });
+      await trx('invoices').where({ id: tiny.invoiceId }).update({ total: 0.4, subtotal: 0.4 });
+      expect(await facts(tiny.parentId)).toBeNull();
+      const held = await deferredAccept();
+      await trx('scheduled_services').where({ id: held.parentId }).update({ paf_held_term_id: held.termId });
+      const hold = require('../services/collections/collection-hold');
+      const spy = jest.spyOn(hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'hold' });
+      try {
+        expect(await facts(held.parentId)).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('a rejected holder retrying and a takeover racing: only one wins the claim (GitHub Codex #5640 r9)', async () => {
+      const f = await deferredAccept();
+      const Release = require('../services/paf-prepay-release');
+      const facts = async (id) => Release.firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await perform(f.parentId, f.customerId);
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      await trx('service_records').where({ scheduled_service_id: f.parentId })
+        .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', completionSmsStatus: 'failed' }) });
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      // Both read the same (rejected) claim; the second writer's CAS fails.
+      const [a, b] = await Promise.all([facts(f.parentId), facts(f.childId)]);
+      expect([a, b].filter(Boolean)).toHaveLength(1);
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
