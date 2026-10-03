@@ -18,6 +18,11 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 |---|---|---|
 | POST | `/api/admin/auth/change-password` | admin-auth |
 | GET | `/api/admin/auth/me` | admin-auth |
+| GET | `/api/admin/auth/mfa` | admin-auth |
+| POST | `/api/admin/auth/mfa/disable` | admin-auth |
+| POST | `/api/admin/auth/mfa/recovery-codes` | admin-auth |
+| POST | `/api/admin/auth/mfa/totp/confirm` | admin-auth |
+| POST | `/api/admin/auth/mfa/totp/setup` | admin-auth |
 | GET | `/api/admin/call-recordings/blocked` | admin-call-recordings |
 | POST | `/api/admin/call-recordings/calls/:id/commitments` | admin-call-recordings |
 | PATCH | `/api/admin/call-recordings/commitments/:id` | admin-call-recordings |

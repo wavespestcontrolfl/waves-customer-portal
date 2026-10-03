@@ -23,13 +23,16 @@ const router = require('../routes/admin-auth');
 
 describe('Staff auth route rate limits', () => {
   test('uses IP-only buckets for public reset routes and a versioned Staff bucket for change-password', () => {
-    expect(rateLimit).toHaveBeenCalledTimes(3);
-    const [requestOptions, resetOptions, changeOptions] = rateLimit.mock.calls.map(([options]) => options);
+    expect(rateLimit).toHaveBeenCalledTimes(4);
+    const [requestOptions, resetOptions, changeOptions, mfaOptions] = rateLimit.mock.calls.map(([options]) => options);
 
     expect(requestOptions.max).toBe(5);
     expect(resetOptions.max).toBe(10);
     expect(changeOptions.max).toBe(10);
     expect(changeOptions.windowMs).toBe(15 * 60 * 1000);
+    // Two-step setup / recovery codes / turn-off share one per-session bucket.
+    expect(mfaOptions.max).toBe(10);
+    expect(mfaOptions.windowMs).toBe(15 * 60 * 1000);
 
     const publicRequest = {
       ip: '2001:db8:abcd:12::99',
@@ -51,6 +54,7 @@ describe('Staff auth route rate limits', () => {
       },
     };
     expect(changeOptions.keyGenerator(staffRequest)).toBe('tech:tech-1:v7');
+    expect(mfaOptions.keyGenerator(staffRequest)).toBe('tech:tech-1:v7');
   });
 
   test('runs database-backed Staff authentication before the password-attempt limiter', () => {

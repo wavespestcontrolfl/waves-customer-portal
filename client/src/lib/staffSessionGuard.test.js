@@ -29,4 +29,22 @@ describe('installStaffSessionGuard', () => {
     await target.fetch('/api/stripe/terminal/validate-handoff', { method: 'POST', headers: { Authorization: 'Bearer login-a' } });
     expect(onRejected).not.toHaveBeenCalled();
   });
+  it('a 403 MFA_ENROLLMENT_REQUIRED for the current token fires the enrollment hook once; other 403s do not', async () => {
+    const onRejected = vi.fn();
+    const onEnrollmentRequired = vi.fn();
+    const make = (code) => ({ status: 403, clone: () => ({ json: async () => ({ code }) }) });
+    const target = { fetch: vi.fn(async (url) => make(url.endsWith('/held') ? 'MFA_ENROLLMENT_REQUIRED' : 'TECHNICIAN_SCOPE')) };
+    installStaffSessionGuard({ getToken: () => 'login-a', onRejected, onEnrollmentRequired, target });
+
+    await target.fetch('/api/admin/other', { headers: { Authorization: 'Bearer login-a' } });
+    await target.fetch('/api/admin/held', { headers: { Authorization: 'Bearer other' } });
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(onEnrollmentRequired).not.toHaveBeenCalled();
+
+    await target.fetch('/api/admin/held', { headers: { Authorization: 'Bearer login-a' } });
+    await target.fetch('/api/admin/held', { headers: { Authorization: 'Bearer login-a' } });
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(onEnrollmentRequired).toHaveBeenCalledTimes(1);
+    expect(onRejected).not.toHaveBeenCalled();
+  });
 });

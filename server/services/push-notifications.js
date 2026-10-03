@@ -288,11 +288,11 @@ class PushNotificationService {
   }
 
   async sendToAdmins(notification) {
-    const subs = await db('push_subscriptions as ps')
+    const subs = await staffMfaPushFilter(db('push_subscriptions as ps')
       .join('technicians as t', 'ps.admin_user_id', 't.id')
       .where({ 'ps.active': true, 't.active': true })
       .whereRaw('ps.staff_token_version = t.auth_token_version')
-      .whereIn('t.role', ['admin', 'technician'])
+      .whereIn('t.role', ['admin', 'technician']))
       .select('ps.*');
     const results = [];
     for (const sub of subs) {
@@ -314,12 +314,12 @@ class PushNotificationService {
   } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
-    const subs = await db('push_subscriptions as ps')
+    const subs = await staffMfaPushFilter(db('push_subscriptions as ps')
       .join('technicians as t', 'ps.admin_user_id', 't.id')
       .whereIn('ps.admin_user_id', ids)
       .where({ 'ps.active': true, 't.active': true })
       .whereRaw('ps.staff_token_version = t.auth_token_version')
-      .whereIn('t.role', ['admin', 'technician'])
+      .whereIn('t.role', ['admin', 'technician']))
       .select('ps.*');
     if (subs.length && typeof beforeDispatch === 'function' && (await beforeDispatch()) === false) {
       return { ...summarize([], subs.length), superseded: true };
@@ -376,6 +376,19 @@ class PushNotificationService {
       .where({ admin_user_id: adminUserId, active: true })
       .update({ active: false });
   }
+}
+
+// Two-step sign-in (GATE_ADMIN_MFA, read at call time): the same rule
+// adminAuthenticate applies to requests — an enrolled account's device
+// registered by a session that never passed the code gets no staff push, and
+// under GATE_ADMIN_MFA_ENFORCE neither does an admin still owed enrollment.
+// Gate off = the query is unchanged.
+function staffMfaPushFilter(query) {
+  const { adminMfaLive, adminMfaEnforceLive } = require('./staff-mfa');
+  if (!adminMfaLive()) return query;
+  const scoped = query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
+  if (!adminMfaEnforceLive()) return scoped;
+  return scoped.whereRaw("NOT (t.role = 'admin' AND t.mfa_enabled_at IS NULL)");
 }
 
 function summarize(results, subscriptions) {

@@ -84,6 +84,30 @@ describe('staff OAuth state credential binding', () => {
     expect(row.value).not.toContain('password');
   });
 
+  test('records the initiating session\'s two-step proof; the claim re-applies the live two-step rule', async () => {
+    const cleanup = chain({ del: jest.fn(async () => 0) });
+    const insert = jest.fn(async () => 1);
+    db.mockReturnValueOnce(cleanup).mockReturnValueOnce({ insert });
+    await createStaffOAuthState({ prefix: PREFIX, technician: ADMIN, staffToken: { mfa: true }, ttlMs: 600_000 });
+    expect(JSON.parse(insert.mock.calls[0][0].value).staffMfa).toBe(true);
+
+    const saved = process.env.GATE_ADMIN_MFA;
+    process.env.GATE_ADMIN_MFA = 'true';
+    try {
+      // Enrolled account, state started by a password-only session: refused.
+      installClaim({ payload: { staffMfa: false }, technician: { ...ADMIN, mfa_enabled_at: new Date() } });
+      const mutate = jest.fn();
+      await expect(withClaimedStaffOAuthState({ prefix: PREFIX, rawState: STATE, callback: mutate }))
+        .rejects.toMatchObject({ code: 'STAFF_OAUTH_STATE_INVALID' });
+      expect(mutate).not.toHaveBeenCalled();
+      // Started by a two-step session: allowed.
+      installClaim({ payload: { staffMfa: true }, technician: { ...ADMIN, mfa_enabled_at: new Date() } });
+      await expect(withClaimedStaffOAuthState({ prefix: PREFIX, rawState: STATE, callback: async () => 'ok' })).resolves.toBe('ok');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_ADMIN_MFA; else process.env.GATE_ADMIN_MFA = saved;
+    }
+  });
+
   test('claims once, row-locks the technician, revalidates, then mutates credentials', async () => {
     const { returning, techBuilder, trx } = installClaim();
     const mutate = jest.fn(async () => 'connected');
