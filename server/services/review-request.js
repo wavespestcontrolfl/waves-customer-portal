@@ -476,7 +476,7 @@ function nextTouchRunAt({ startedAt, step, previousStep = null, now = new Date()
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
-function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
+function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null, detail = null }) {
   return JSON.stringify({
     reason,
     plannedAt: plannedAt ? new Date(plannedAt).toISOString() : null,
@@ -486,6 +486,9 @@ function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAc
     // A parked series final keeps the enrollment's own reason so redemption
     // re-labels the active sequence honestly (codex #4140 r1).
     ...(enrollmentReason ? { enrollmentReason } : {}),
+    // What a review-ask hold saw (the held draft, the customer's words, the
+    // overdue invoice), for the review page.
+    ...(detail ? { detail } : {}),
   });
 }
 // A send claim (next_run_at NULL on an active row) older than this is not a
@@ -4807,6 +4810,8 @@ const ReviewService = {
         const drafted = techVoice
           ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "sms" }) : null)
           : await Drafter.draftAskBody(draftInput);
+        // A draft that repeats an earlier touch throws HeldTouch: nothing is
+        // sent for this step (the sequence runner records the hold).
         if (drafted) persistedBody = drafted;
       }
       // Analytics provenance (Codex P1, r1): personalized touches must not be
@@ -5717,6 +5722,21 @@ const ReviewService = {
    * { stopped, outstanding }; a thrown failure or stopped:false means the caller
    * keeps the customer on the rate page.
    */
+  /**
+   * How the step runner applies each review-ask hold askHold returns
+   * (review-ask-holds.js), by kind. Called under review-send:<customer>.
+   */
+  _applyAskHold: {
+    drop(seq, held, skipStep) { return skipStep("ask_dropped_payment_hold", held.detail); },
+    async wait(seq, held) {
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        next_run_at: held.retryAt, payment_hold_step: seq.current_step, payment_hold_since: held.heldSince,
+        decision: sequenceDecision({ reason: "payment_hold", nextEvalAt: held.retryAt, detail: held.detail }), updated_at: new Date(),
+      });
+      return { ran: false, deferred: true, reason: "payment_hold", retryAt: held.retryAt };
+    },
+  },
+
   async stopFutureAsks(customerId, { reason = "clicked", lockWaitMs = 2000 } = {}) {
     // The stop runs under the SAME per-customer lock every dispatcher takes
     // around a provider handoff (processScheduled, the sequence step runner,
@@ -6687,21 +6707,36 @@ const ReviewService = {
     // check-in (resolution_check / satisfaction_confirm) is not a review ask and
     // still goes out. Returns a runner result, or null to carry on and send the
     // current step (a check-in).
+    // Skip the current ask without sending: advance exactly as after a send
+    // (same schedule), but no touch is counted. `claimed`: the step's send
+    // claim (next_run_at NULL) is already taken.
+    const skipStep = async (reason, detail = null) => {
+      const step = seq.current_step;
+      const nextStep = step + 1;
+      // The skipped step was the last: the cadence is done, as after a send.
+      if (nextStep >= plan.length) {
+        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+          status: "completed", stop_reason: "completed", current_step: nextStep, next_run_at: null,
+          completed_at: new Date(), decision: sequenceDecision({ reason, detail }), updated_at: new Date(),
+        });
+        return { ran: true, sent: false, stepSkipped: true, completed: true, reason, step };
+      }
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[step] || null });
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        current_step: nextStep,
+        next_run_at,
+        decision: sequenceDecision({ reason, plannedAt: next_run_at, nextEvalAt: next_run_at, detail }),
+        updated_at: new Date(),
+      });
+      // Never `skipped`: that is runExclusive's held-lock shape, and
+      // _runSequenceStep would report this step as a busy lock.
+      return { ran: true, sent: false, stepSkipped: true, reason, step };
+    };
     const handleClick = async () => {
       const disposition = this._clickDisposition(seq, plan);
       if (disposition === "stop") return stop("clicked");
       if (disposition === "proceed") return null;
-      // Skip the current ask without sending: advance exactly as after a send
-      // (same schedule), but no touch is counted.
-      const nextStep = seq.current_step + 1;
-      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
-      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
-        current_step: nextStep,
-        next_run_at,
-        decision: sequenceDecision({ reason: "ask_skipped_review_link_clicked", plannedAt: next_run_at, nextEvalAt: next_run_at }),
-        updated_at: new Date(),
-      });
-      return { ran: true, sent: false, skipped: true, step: seq.current_step };
+      return skipStep("ask_skipped_review_link_clicked");
     };
     // Parking a sequence behind its summary is resumable, so it must never
     // overwrite a stop an operator recorded while this step was running.
@@ -6932,6 +6967,15 @@ const ReviewService = {
         .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
+    // Review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, owner rulings
+    // 2026-10-01), read for an ask after every other check
+    // (review-ask-holds.js askHold decides; this applies it). Every hold is
+    // recorded with its reason (the review page shows it).
+    if (stepIsAsk && require("../config/feature-gates").isEnabled("reviewAskTechVoice")) {
+      const held = await require("./review-ask-holds").askHold(seq, { shiftRetry: stepForSpacing.weekdaysOnly ? shiftToWeekdayMorning : null });
+      if (held) return this._applyAskHold[held.kind].call(this, seq, held, skipStep);
+    }
+
     const step = plan[seq.current_step] || {};
 
     // Final atomic claim right before sending: an admin Stop (or a completing
@@ -6966,6 +7010,9 @@ const ReviewService = {
         manageRetryVia: "sequence",
       });
     } catch (err) {
+      // The drafted touch repeats an earlier one: held, never reworded (owner
+      // ruling 2026-10-01). Nothing was sent; the cadence moves to its next step.
+      if (err?.heldTouch) return skipStep("ask_held_repeat", err.heldTouch);
       // The claim above cleared next_run_at; if the touch throws BEFORE handling
       // its own outcome (e.g. the review_requests insert or short-link fails),
       // restore a retry time so the cron picks the sequence up again instead of
