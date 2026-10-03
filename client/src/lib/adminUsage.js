@@ -122,6 +122,8 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const KNOWN_SUBPAGE_WORDS = new Set([
   'new', 'import', 'map', 'directory', 'kanban', 'search', 'settings',
   'duplicates', 'pest-pressure', 'proposal', 'flags',
+  // /admin/today field workspace subpages (Codex #5573 r11).
+  'tools', 'more', 'estimate', 'protocols', 'documents', 'pay-growth', 'lawn-diagnostic', 'social-post',
 ]);
 
 // The one real underscore-prefixed route family: /admin/_design-system(/flags)

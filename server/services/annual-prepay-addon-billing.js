@@ -538,4 +538,4 @@ async function reconcileCoveredVisitInvoice(ctx) {
   return new CoveredVisitCloseout(ctx).run();
 }
 
-module.exports = { reconcileCoveredVisitInvoice };
+module.exports = { reconcileCoveredVisitInvoice, annualPrepayAddonRows, classifyCoveredVisitInvoice };

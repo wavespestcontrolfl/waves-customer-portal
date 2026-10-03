@@ -73,7 +73,9 @@ describe("App's /admin index and catch-all", () => {
   it("replaces the /admin entry so Back leaves the dashboard (F0008)", () => {
     // Every sibling redirect passes replace; the index one pushed, so
     // /admin → /admin/dashboard → Back → /admin → /admin/dashboard looped.
-    expect(adminRoutes).toContain('<Route index element={<Navigate to="dashboard" replace />} />');
+    // The index route is role-aware (technicians land on /admin/today) but must still replace.
+    expect(adminRoutes).toContain('<Route index element={<AdminIndexRedirect />} />');
+    expect(app).toContain("<Navigate to={role === 'technician' ? 'today' : 'dashboard'} replace />");
     render(<MemoryRouter initialEntries={["/before", "/admin"]} initialIndex={1}>
       <Routes>
         <Route path="/admin">

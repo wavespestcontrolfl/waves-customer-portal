@@ -1114,7 +1114,9 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
       return {
         ok: true,
         status: 200,
-        json: async () => ({ ...pestReportV2, customerName: 'Casey Placeholder', technicianName: 'Adam' }),
+        json: async () => ({
+          ...pestReportV2, customerName: 'Casey Placeholder', customerFirstName: 'Casey', technicianName: 'Adam',
+        }),
       };
     }));
     render(
@@ -1124,6 +1126,24 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     );
     expect(await screen.findByText('How did Adam do today, Casey?')).toBeInTheDocument();
     expect(screen.getByText('Rate today’s visit')).toBeInTheDocument();
+  });
+
+  it('a blank-first-name customer is greeted "there" in the hero and the review ask, never by surname', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...pestReportV2, customerName: 'Example', customerFirstName: null, technicianName: 'Adam',
+      }),
+    })));
+    render(
+      <MemoryRouter initialEntries={[`/report/${CARD_TOKEN}-blank-first`]}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('How did Adam do today?')).toBeInTheDocument();
+    expect(document.querySelector('.sr-title').textContent).toMatch(/^Hi there,/);
+    expect(document.body.textContent).not.toMatch(/Hi Example|, Example\?/);
   });
 
   it('a priced tap whose response carries estimateUrl redirects into the estimate page (click-to-estimate)', async () => {

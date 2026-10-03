@@ -71,6 +71,17 @@ describe('estimate accept — sign-before-pay payloads', () => {
     expect(payload.adminBody).toMatch(/Invoice follow-up needed/);
   });
 
+  // GATE_PAF_PREPAY: the after-first-visit notice names the bound tender.
+  test('buildAcceptNotificationPayload: a prepay charged after the first visit names the card or the bank debit', () => {
+    const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
+    const card = buildAcceptNotificationPayload({ customerName: 'Customer', billingTerm: 'prepay_annual', prepayChargeOutcome: 'after_first_visit', prepayChargeMethodType: 'card' });
+    expect(card.customerBody).toMatch(/charged to your card on file after your first visit/);
+    const bank = buildAcceptNotificationPayload({ customerName: 'Customer', billingTerm: 'prepay_annual', prepayChargeOutcome: 'after_first_visit', prepayChargeMethodType: 'us_bank_account' });
+    expect(bank.customerBody).toMatch(/debited from your saved bank account after your first visit/);
+    expect(bank.customerBody).not.toMatch(/card/);
+    expect(bank.adminBody).toMatch(/saved bank account is debited/);
+  });
+
   test('retry builder: parked and NOT yet signed → sign_agreement', async () => {
     const db = fakeDb({ customer_contracts: null });
     jest.doMock('../models/db', () => db);

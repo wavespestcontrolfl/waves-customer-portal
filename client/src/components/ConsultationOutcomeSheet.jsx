@@ -13,6 +13,7 @@
 // Everything here is internal — quote notes never reach the customer.
 
 import { useEffect, useState } from 'react';
+import { useFieldPortalClass } from './tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../lib/timezone';
 
@@ -289,6 +290,8 @@ export default function ConsultationOutcomeSheet({
   onSaved,
   theme = 'dark',
 }) {
+  // Field-opened: keep the field fonts under the admin shell (Codex #5573 r20).
+  const fieldPortalClass = useFieldPortalClass();
   const c = PALETTES[theme] || PALETTES.dark;
   const st = sheetStyles(c);
   const { loading, error: loadError, row: loadedRow } = useRecordedOutcome(serviceId, request);
@@ -324,6 +327,7 @@ export default function ConsultationOutcomeSheet({
   const ready = !loading && !loadError;
   return createPortal(
     <div
+      className={fieldPortalClass || undefined}
       role="dialog"
       aria-modal="true"
       aria-label="Consultation outcome"
