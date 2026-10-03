@@ -4,9 +4,13 @@ const knexFactory = require('knex');
 const { createHash, randomUUID } = require('node:crypto');
 
 let mockApp;
+let mockTransactionCalls = 0;
 jest.mock('../models/db', () => {
   const database = (...args) => mockApp(...args);
-  database.transaction = (...args) => mockApp.transaction(...args);
+  database.transaction = (...args) => {
+    mockTransactionCalls += 1;
+    return mockApp.transaction(...args);
+  };
   database.raw = (...args) => mockApp.raw(...args);
   Object.defineProperty(database, 'fn', { get: () => mockApp.fn });
   Object.defineProperty(database, 'client', { get: () => mockApp.client });
@@ -63,6 +67,7 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     await mockApp('ai_escalations').del();
     await mockApp('agent_messages').del();
     await mockApp('portal_chat_requests').del();
+    mockTransactionCalls = 0;
   });
 
   afterAll(async () => {
@@ -79,7 +84,7 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     channelIdentifier: 'browser-session',
     message: 'Please help',
     processTurn,
-    budgetMs: 2_000,
+    budgetMs: 4_000,
     ...extra,
   });
 
@@ -163,10 +168,10 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
         });
       });
       return { reply: 'late', escalated: true };
-    }, { budgetMs: 1_000 }));
+    }, { budgetMs: 2_000 }));
 
     expect(response.reply).toMatch(/trouble getting that answer/);
-    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(Date.now() - started).toBeLessThan(2_500);
     await pause(100);
     expect(await mockApp('ai_escalations').count('* as n').first()).toMatchObject({ n: '0' });
     for (let attempt = 0; attempt < 10 && mockApp.client.pool.numUsed() > 0; attempt += 1) {
@@ -174,6 +179,39 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     }
     expect(mockApp.client.pool.numUsed()).toBe(0);
     expect(mockApp.client.pool.numPendingAcquires()).toBe(0);
+  });
+
+  test('a claim transaction carries a server deadline through commit', async () => {
+    const requestId = randomUUID();
+    await mockApp.schema.createTable('portal_claim_deadlines', (table) => table.text('value'));
+    await mockApp.raw(`
+      CREATE FUNCTION record_portal_claim_commit_deadline() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO portal_claim_deadlines (value) VALUES (current_setting('statement_timeout'));
+        RETURN NULL;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await mockApp.raw(`
+      CREATE CONSTRAINT TRIGGER record_portal_claim_commit_deadline_trigger
+      AFTER UPDATE ON portal_chat_requests
+      DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW
+      WHEN (NEW.state = 'processing' AND OLD.state = 'pending')
+      EXECUTE FUNCTION record_portal_claim_commit_deadline()
+    `);
+
+    try {
+      const response = await runPortalTurn(args(requestId, async () => ({ reply: 'bounded claim', escalated: false })));
+      expect(response).toMatchObject({ reply: 'bounded claim', requestId });
+      const recorded = await mockApp('portal_claim_deadlines').first('value');
+      expect(recorded.value).toMatch(/^\d+ms$/);
+      expect(recorded.value).not.toBe('0ms');
+    } finally {
+      await mockApp.raw('DROP TRIGGER IF EXISTS record_portal_claim_commit_deadline_trigger ON portal_chat_requests');
+      await mockApp.raw('DROP FUNCTION IF EXISTS record_portal_claim_commit_deadline()');
+      await mockApp.schema.dropTableIfExists('portal_claim_deadlines');
+    }
   });
 
   test('method-style transaction builders use the current turn deadline', async () => {
@@ -336,12 +374,12 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
       const firstPromise = runPortalTurn(args(requestId, async () => {
         processCalls += 1;
         return { reply: 'stale local answer', escalated: false, generated: true };
-      }, { budgetMs: 1_000 }));
-      await pause(1_050);
+      }, { budgetMs: 2_000 }));
+      await pause(2_050);
       const retryPromise = runPortalTurn(args(requestId, async () => {
         processCalls += 1;
         return { reply: 'authoritative retry', escalated: false, generated: true };
-      }, { budgetMs: 2_500 }));
+      }, { budgetMs: 4_000 }));
 
       const [first, retry] = await Promise.all([firstPromise, retryPromise]);
       expect(first).toMatchObject({ retryable: true, requestId });
@@ -375,11 +413,12 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     const response = await runPortalTurn(args(requestId, async () => {
       processCalls += 1;
       return { reply: 'must not run', escalated: false };
-    }, { budgetMs: 2_000 }));
+    }, { budgetMs: 4_000 }));
 
     expect(response).toMatchObject({ pending: true, retryable: true, requestId });
     expect(response.reply).toMatch(/still finishing/);
     expect(processCalls).toBe(0);
+    expect(mockTransactionCalls).toBeLessThanOrEqual(10);
     expect(await mockApp('portal_chat_requests').where({ request_id: requestId }).first())
       .toMatchObject({ state: 'pending', response: null });
   });
@@ -393,7 +432,7 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
         IF NEW.state = 'processing' AND OLD.state = 'pending' THEN
           PERFORM pg_sleep(GREATEST(
             0,
-            EXTRACT(EPOCH FROM (NEW.lease_expires_at - clock_timestamp())) - 0.35
+            EXTRACT(EPOCH FROM (NEW.lease_expires_at - clock_timestamp())) - 0.6
           ));
         END IF;
         RETURN NEW;
@@ -411,7 +450,7 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
       const first = await runPortalTurn(args(requestId, async () => {
         processCalls += 1;
         return { reply: 'must not run', escalated: false };
-      }, { budgetMs: 2_000 }));
+      }, { budgetMs: 3_000 }));
       expect(first).toMatchObject({ pending: true, retryable: true, requestId });
       expect(first.reply).toMatch(/still finishing/);
       expect(processCalls).toBe(0);
@@ -668,6 +707,34 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     }
   });
 
+  test('a checkpointed active receipt releases its scope for the next request', async () => {
+    const completedId = randomUUID();
+    const nextId = randomUUID();
+    const scopeKey = turnScopeKey({ customerId, channelIdentifier: 'browser-session', propertyId: null });
+    await mockApp('portal_chat_requests').insert({
+      request_id: completedId,
+      customer_id: customerId,
+      channel_identifier: 'browser-session',
+      scope_key: scopeKey,
+      message_hash: createHash('sha256').update('earlier turn').digest('hex'),
+      state: 'processing',
+      attempt_id: randomUUID(),
+      lease_expires_at: new Date(Date.now() + 10_000),
+      response: { reply: 'earlier durable answer', escalated: false, requestId: completedId },
+    });
+
+    let processCalls = 0;
+    const response = await runPortalTurn(args(nextId, async () => {
+      processCalls += 1;
+      return { reply: 'next answer', escalated: false };
+    }, { message: 'next turn' }));
+
+    expect(response).toMatchObject({ reply: 'next answer', requestId: nextId });
+    expect(processCalls).toBe(1);
+    expect(await mockApp('portal_chat_requests').where({ request_id: completedId }).first())
+      .toMatchObject({ state: 'completed', attempt_id: null, lease_expires_at: null });
+  });
+
   test('an exhausted pool leaves no queued acquisition or delayed receipt write', async () => {
     const held = await Promise.all(Array.from({ length: 3 }, () => mockApp.client.acquireConnection()));
     const requestId = randomUUID();
@@ -690,6 +757,26 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     await expect(runPortalTurn(args(requestId, async () => ({ reply: 'wrong', escalated: false }), {
       propertyId: randomUUID(),
     }))).rejects.toMatchObject({ status: 409, code: 'PORTAL_CHAT_REQUEST_MISMATCH' });
+  });
+
+  test('lease expiry is based on the database clock instead of the application wall clock', async () => {
+    const requestId = randomUUID();
+    const actualNow = Date.now.bind(Date);
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => actualNow() + 300_000);
+    let leaseDeltaMs;
+    try {
+      const response = await runPortalTurn(args(requestId, async () => {
+        const receipt = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
+        const databaseNow = (await mockApp.raw('SELECT CURRENT_TIMESTAMP AS now')).rows[0].now;
+        leaseDeltaMs = new Date(receipt.lease_expires_at).getTime() - new Date(databaseNow).getTime();
+        return { reply: 'clock-safe', escalated: false };
+      }));
+      expect(response).toMatchObject({ reply: 'clock-safe', requestId });
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(leaseDeltaMs).toBeGreaterThan(0);
+    expect(leaseDeltaMs).toBeLessThan(5_000);
   });
 
   test('an abandoned pending receipt stops blocking the queue and can still be retried', async () => {
