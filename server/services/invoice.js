@@ -24,7 +24,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
-const { hasAuthoritativeZeroPrice } = require("./billing-lane");
+const { hasAuthoritativeZeroPrice, MEMBERSHIP_DUES_LINE_KEY } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -5791,6 +5791,11 @@ const InvoiceService = {
       // a stale amount would silently win over the freshly locked value.
       // Omitted = the amount is its own authority (operator-typed).
       scheduledPriceBasis = undefined,
+      // ET month key (YYYY-MM) when this mint IS a membership month's dues
+      // (completion of an unpriced plan visit billed at monthly_rate):
+      // stamped on the primary line so monthlyDuesCollected can see the
+      // month is covered — dues are owed once per month, not per visit.
+      membershipDuesMonth = null,
       // skipAccrual (Codex P1, PR #2897 fix round 5): threaded through to
       // create(), which owns the option (see its comment). The backdated
       // backfill closeout mints a quiet REVIEW invoice — for a NET-terms
@@ -5912,6 +5917,14 @@ const InvoiceService = {
               category: sr.service_type,
             },
           ];
+      if (membershipDuesMonth) {
+        const duesLine = lineItems.find((li) => li._kind !== "discount" && Number(li.amount) > 0);
+        if (duesLine) {
+          lineItems = lineItems.map((li) => (
+            li === duesLine ? { ...li, [MEMBERSHIP_DUES_LINE_KEY]: membershipDuesMonth } : li
+          ));
+        }
+      }
       // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
       // GRANTED offer discounts the VISIT's recurring lines only — computed
       // BEFORE extras (setup fees, operator additions) are appended, so the

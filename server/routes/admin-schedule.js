@@ -6148,10 +6148,10 @@ router.get('/', async (req, res, next) => {
       // predict as not-collected (never widen coverage).
       let visitMonthDuesCollected = false;
       if (lane.mode === 'monthly_membership') {
-        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
         if (!autopayActive) {
           try {
-            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`));
+            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`), { excludeScheduledServiceId: s.id });
           } catch { visitMonthDuesCollected = false; }
         }
       }
@@ -6748,10 +6748,10 @@ router.get('/week', async (req, res, next) => {
         // Visit-month dues for the prediction (see day view).
         let visitMonthDuesCollected = false;
         if (lane.mode === 'monthly_membership') {
-          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
           if (!autopayActive) {
             try {
-              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`));
+              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`), { excludeScheduledServiceId: s.id });
             } catch { visitMonthDuesCollected = false; }
           }
         }

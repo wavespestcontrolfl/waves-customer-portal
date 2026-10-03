@@ -888,13 +888,47 @@ function attachedInvoiceAutoChargeLikely({
   return net <= anchor + 0.005;
 }
 
-// Has THIS ET month's membership dues payment been collected (paid or
-// processing)? Mirrors the monthly cron's already-charged check: the
-// metadata.billed_month stamp is authoritative (month-of-obligation
-// attribution — a July decline recovered Aug 1 counts for July, not
-// August); legacy rows without the stamp match on payment month + the
-// canonical "WaveGuard Monthly" description marker.
-async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
+// Line-item key the completion mint stamps on the PRIMARY line of a dues
+// invoice (an unpriced membership plan visit billed at customers.monthly_rate
+// because autopay could not collect): the value is the ET month key
+// (YYYY-MM) of the visit the obligation belongs to. It is the only durable
+// provenance of "this invoice is that month's dues" — the line description
+// is just the service type — so monthlyDuesCollected reads it. Invoices
+// minted before the stamp carry none and are never recognized (a guess from
+// amount + visit shape could silently skip a real bill). Editable line JSON
+// is provenance only: dropping it can only re-bill, never hide a bill.
+const MEMBERSHIP_DUES_LINE_KEY = 'membership_dues_month';
+
+// True when customers.monthly_rate is what put the number on this visit's
+// completion invoice: the same resolver, with and without the rate. A priced
+// visit (own stamp, authoritative $0), a callback, a per-application fee and
+// every explicit non-monthly lane all resolve identically either way, so
+// they are never a dues visit.
+function completionInvoiceIsMembershipDues(args) {
+  return completionInvoiceAmount(args) > 0
+    && completionInvoiceAmount({ ...args, monthlyRate: 0 }) === 0;
+}
+
+// Is THIS ET month's membership dues covered? Mirrors the monthly cron's
+// already-charged check: the metadata.billed_month stamp on a paid /
+// processing payment is authoritative (month-of-obligation attribution — a
+// July decline recovered Aug 1 counts for July, not August); legacy rows
+// without the stamp match on payment month + the canonical "WaveGuard
+// Monthly" description marker.
+//
+// Dues are owed ONCE per month, however many plan visits the month holds:
+// a dues invoice a completion already minted for the month
+// (MEMBERSHIP_DUES_LINE_KEY, keyed on the VISIT's month like the payment
+// stamp) covers every other visit that month while it is live — paid,
+// processing, or still open (an unpaid one is the month's bill; dunning
+// collects it). A void / refunded / canceled one covers nothing. Pass
+// `openInvoiceCovers: false` for a "was it actually paid" indicator.
+// `excludeScheduledServiceId`: the asking visit's OWN dues invoice never
+// covers that visit (completion resume, the visit's own preview/closeout).
+async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
+  excludeScheduledServiceId = null,
+  openInvoiceCovers = true,
+} = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const monthKey = etDateString(now).slice(0, 7);
   const row = await dbConn('payments')
@@ -909,7 +943,20 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
         });
     })
     .first('id');
-  return !!row;
+  if (row) return true;
+  // Lazy, like the status vocabulary below: invoice.js requires this module.
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  const invoiceQuery = dbConn('invoices')
+    .where({ customer_id: customerId })
+    .whereRaw('line_items::jsonb @> ?::jsonb', [JSON.stringify([{ [MEMBERSHIP_DUES_LINE_KEY]: monthKey }])]);
+  if (openInvoiceCovers) invoiceQuery.whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES);
+  else invoiceQuery.whereIn('status', ['paid', 'prepaid', 'processing']);
+  if (excludeScheduledServiceId) {
+    invoiceQuery.where(function otherVisits() {
+      this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
+    });
+  }
+  return !!(await invoiceQuery.first('id'));
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
@@ -1610,6 +1657,8 @@ module.exports = {
   resolveBillingLane,
   membershipDuesCoverVisit,
   completionInvoiceAmount,
+  completionInvoiceIsMembershipDues,
+  MEMBERSHIP_DUES_LINE_KEY,
   predictCompletionBilling,
   monthlyDuesCollected,
   siblingCoverageForSchedule,

@@ -510,7 +510,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   let duesCollected = false;
   if (lane?.mode === 'monthly_membership' && inputs.autopayActive === false && customerId) {
     const visitDay = visit.scheduled_date ? new Date(`${String(visit.scheduled_date).slice(0, 10)}T12:00:00Z`) : now;
-    const duesProbe = await probe('monthly dues collected', unavailable, () => monthlyDuesCollected(knex, customerId, visitDay));
+    const duesProbe = await probe('monthly dues collected', unavailable, () => monthlyDuesCollected(knex, customerId, visitDay, { excludeScheduledServiceId: serviceId }));
     duesCollected = duesProbe.error ? false : Boolean(duesProbe.value);
     inputs.duesLookupFailed = Boolean(duesProbe.error);
   }

@@ -69,7 +69,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -4662,14 +4662,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // membership visit even when autopay has since lapsed — the cron charged
     // the dues on the 1st, so a mid-month card expiry / autopay pause must
     // not mint a full monthly_rate invoice on every remaining plan visit.
-    // Only looked up where membership coverage is still reachable; a lookup
-    // error falls back to the autopay-only decision (never widens coverage).
+    // Dues are owed once per month: a dues invoice an earlier plan visit's
+    // completion already minted for the month (still live) covers this
+    // visit too — monthlyDuesCollected reads it; this visit's own never
+    // counts. Only looked up where membership coverage is still reachable; a
+    // lookup error falls back to the autopay-only decision (never widens
+    // coverage).
     let duesCollectedThisMonth = false;
     if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
       && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
       try {
         duesCollectedThisMonth = await savepointRead(db, (k) => monthlyDuesCollected(
           k, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+          { excludeScheduledServiceId: svc.id },
         ));
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
@@ -10998,6 +11003,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
         })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
           : null;
+        // An unpriced membership plan visit billed at monthly_rate IS that
+        // month's dues: stamp the month on the invoice so the month's other
+        // plan visits see it covered (monthlyDuesCollected). The month is the
+        // visit's own, like the lookup's. A priced / reviewed / callback /
+        // payer / per-application / prepay visit is never dues.
+        const membershipDuesMonth = !reviewedVisitPrice && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
+          && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))
+          && completionInvoiceIsMembershipDues({
+            estimatedPrice: svc.estimated_price,
+            isCallback: svc.is_callback,
+            perApplicationBilling,
+            perApplicationFee: svc.cust_per_application_fee,
+            monthlyRate: svc.cust_monthly_rate,
+            billingMode: svc.cust_billing_mode,
+            primaryLinePrice: svc.primary_line_price,
+          })
+          && Math.round(Number(mintInvoiceAmount) * 100) === Math.round(Number(svc.cust_monthly_rate) * 100)
+          ? serviceDateOnly(svc.scheduled_date).slice(0, 7)
+          : null;
         const mintOptions = {
           // The frozen money on a required resume — the exact number the
           // decision's amount guard just passed (mintInvoiceAmount /
@@ -11087,6 +11111,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // where it bills is the reviewer's call (breadcrumb below).
           skipAccrual: isBackfillCompletion,
         };
+        if (membershipDuesMonth) mintOptions.membershipDuesMonth = membershipDuesMonth;
         // Serialized find-or-create for the live typed mint (pre-push Codex
         // P0, gate-removal rounds 2-4): invoices.scheduled_service_id is
         // NOT unique, and the pre-completion writers (office Charge Now

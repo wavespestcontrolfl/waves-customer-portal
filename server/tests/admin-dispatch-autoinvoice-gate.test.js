@@ -360,4 +360,13 @@ describe('completion route wires dues-collected coverage', () => {
     expect(coverageAt).toBeGreaterThan(lookupAt);
     expect(freezeAt).toBeGreaterThan(coverageAt);
   });
+
+  // B08: dues are owed once per month. The lookup must not count the visit's
+  // own invoice, and the mint must stamp the visit's month on a dues invoice
+  // (the only durable marker monthlyDuesCollected can read).
+  test('the lookup excludes the visit itself and the dues mint stamps the visit month', () => {
+    expect(source).toMatch(/new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),\s*\n\s*\{ excludeScheduledServiceId: svc\.id \},/);
+    expect(source).toMatch(/\? serviceDateOnly\(svc\.scheduled_date\)\.slice\(0, 7\)/);
+    expect(source).toMatch(/if \(membershipDuesMonth\) mintOptions\.membershipDuesMonth = membershipDuesMonth;/);
+  });
 });

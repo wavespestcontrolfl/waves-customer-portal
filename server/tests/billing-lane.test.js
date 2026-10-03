@@ -573,29 +573,42 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
 
   // monthlyDuesCollected against a fake knex: the visit-month key drives the
   // billed_month match, so the "dues payment present" scenario is exercised
-  // end to end through the same helper the completion route now calls.
-  function fakeDb(paymentsRows) {
+  // end to end through the same helper the completion route now calls. The
+  // fake also answers the invoices table (a completion-minted dues invoice
+  // stamped membership_dues_month — B08), interpreting the same where chain.
+  function fakeDb(paymentsRows, invoiceRows = []) {
     return (table) => {
-      expect(table).toBe('payments');
-      const state = { customerId: null, monthKey: null };
+      expect(['payments', 'invoices']).toContain(table);
+      const state = { customerId: null, monthKey: null, dueMonth: null, statusIn: null, statusNotIn: null, excludeId: null };
       const builder = {
         where(arg) {
           if (typeof arg === 'function') arg.call(builder);
-          else state.customerId = arg.customer_id;
+          else if (arg && arg.customer_id !== undefined) state.customerId = arg.customer_id;
           return builder;
         },
-        whereIn() { return builder; },
+        whereIn(col, vals) { if (table === 'invoices') state.statusIn = vals; return builder; },
+        whereNotIn(col, vals) { state.statusNotIn = vals; return builder; },
+        whereNull() { return builder; },
+        orWhereNot(col, id) { state.excludeId = id; return builder; },
         whereRaw(sql, bindings) {
           if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
+          if (sql.includes('line_items') && bindings) state.dueMonth = JSON.parse(bindings[0])[0].membership_dues_month;
           return builder;
         },
         orWhere(fn) { fn.call(builder); return builder; },
         andWhereRaw() { return builder; },
         andWhere() { return builder; },
         async first() {
-          return paymentsRows.find((r) => r.customer_id === state.customerId
-            && ['paid', 'processing'].includes(r.status)
-            && r.metadata?.billed_month === state.monthKey) || undefined;
+          if (table === 'payments') {
+            return paymentsRows.find((r) => r.customer_id === state.customerId
+              && ['paid', 'processing'].includes(r.status)
+              && r.metadata?.billed_month === state.monthKey) || undefined;
+          }
+          return invoiceRows.find((r) => r.customer_id === state.customerId
+            && r.line_items.some((li) => li.membership_dues_month === state.dueMonth)
+            && (!state.statusIn || state.statusIn.includes(r.status))
+            && (!state.statusNotIn || !state.statusNotIn.includes(r.status))
+            && (!state.excludeId || r.scheduled_service_id !== state.excludeId)) || undefined;
         },
       };
       return builder;
@@ -609,6 +622,86 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     await expect(monthlyDuesCollected(fakeDb([]), 42, visitMonth)).resolves.toBe(false);
     // A different month's dues do not cover this visit.
     await expect(monthlyDuesCollected(fakeDb(rows), 42, new Date('2026-09-03T12:00:00Z'))).resolves.toBe(false);
+  });
+
+  // B08: dues are owed once per ET month. A dues invoice a completion already
+  // minted for the month (membership_dues_month on its primary line) covers
+  // the month's other plan visits while it is live.
+  describe('a completion-minted dues invoice covers its month', () => {
+    const duesInvoice = (over = {}) => ({
+      id: 'inv-1', customer_id: 42, status: 'sent', scheduled_service_id: 'visit-1',
+      line_items: [{ description: 'Lawn Care', amount: 49, membership_dues_month: '2026-09' }], ...over,
+    });
+    const sept = new Date('2026-09-17T12:00:00Z');
+
+    test('open or paid dues invoice for the visit month → covered; another month or customer → not', async () => {
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice()]), 42, sept)).resolves.toBe(true);
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice({ status: 'paid' })]), 42, sept)).resolves.toBe(true);
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice()]), 42, new Date('2026-10-01T12:00:00Z'))).resolves.toBe(false);
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice()]), 43, sept)).resolves.toBe(false);
+    });
+
+    test('void / refunded / canceled dues invoice covers nothing', async () => {
+      for (const status of ['void', 'refunded', 'canceled', 'cancelled']) {
+        await expect(monthlyDuesCollected(fakeDb([], [duesInvoice({ status })]), 42, sept)).resolves.toBe(false);
+      }
+    });
+
+    test('an unmarked invoice (minted before the stamp) is never recognized', async () => {
+      const legacy = duesInvoice({ line_items: [{ description: 'Lawn Care', amount: 49 }] });
+      await expect(monthlyDuesCollected(fakeDb([], [legacy]), 42, sept)).resolves.toBe(false);
+    });
+
+    test('the asking visit\'s own dues invoice never covers it; a sibling visit\'s does', async () => {
+      const rows = [duesInvoice()];
+      await expect(monthlyDuesCollected(fakeDb([], rows), 42, sept, { excludeScheduledServiceId: 'visit-1' })).resolves.toBe(false);
+      await expect(monthlyDuesCollected(fakeDb([], rows), 42, sept, { excludeScheduledServiceId: 'visit-2' })).resolves.toBe(true);
+    });
+
+    test('openInvoiceCovers:false (the "dues paid" indicator) counts paid invoices only', async () => {
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice()]), 42, sept, { openInvoiceCovers: false })).resolves.toBe(false);
+      await expect(monthlyDuesCollected(fakeDb([], [duesInvoice({ status: 'paid' })]), 42, sept, { openInvoiceCovers: false })).resolves.toBe(true);
+    });
+
+    test('a cron-collected month still wins without consulting invoices', async () => {
+      const rows = [{ id: 1, customer_id: 42, status: 'paid', metadata: { billed_month: '2026-09' } }];
+      await expect(monthlyDuesCollected(fakeDb(rows, []), 42, sept)).resolves.toBe(true);
+    });
+
+    test('month boundary is ET, not UTC: late Sept 30 ET is September, early Oct 1 ET is October', async () => {
+      const rows = [duesInvoice()];
+      await expect(monthlyDuesCollected(fakeDb([], rows), 42, new Date('2026-10-01T03:30:00Z'))).resolves.toBe(true);
+      await expect(monthlyDuesCollected(fakeDb([], rows), 42, new Date('2026-10-01T04:30:00Z'))).resolves.toBe(false);
+    });
+
+    test('the dead-autopay decision chain: second same-month plan visit is covered, a voided first is not', async () => {
+      const decide = async (invoiceRows) => {
+        const duesCollectedThisMonth = await monthlyDuesCollected(fakeDb([], invoiceRows), 42, sept, { excludeScheduledServiceId: 'visit-2' });
+        return membershipDuesCoverVisit({ ...lapsedMember, duesCollectedThisMonth });
+      };
+      expect(await decide([duesInvoice()])).toBe(true);
+      expect(await decide([duesInvoice({ status: 'void' })])).toBe(false);
+      expect(await decide([])).toBe(false);
+    });
+  });
+});
+
+describe('completionInvoiceIsMembershipDues — monthly_rate is what put the number on the invoice', () => {
+  const { completionInvoiceIsMembershipDues } = require('../services/billing-lane');
+  const unpriced = {
+    estimatedPrice: null, isCallback: false, perApplicationBilling: false, perApplicationFee: null,
+    monthlyRate: 49, billingMode: 'monthly_membership', primaryLinePrice: null,
+  };
+  test('an unpriced membership visit billed at the rate is dues (explicit lane and legacy-null lane)', () => {
+    expect(completionInvoiceIsMembershipDues(unpriced)).toBe(true);
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, billingMode: null })).toBe(true);
+  });
+  test('a visit with its own price, a callback, per-application, or a non-monthly lane is never dues', () => {
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, estimatedPrice: 85 })).toBe(false);
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, isCallback: true })).toBe(false);
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, perApplicationBilling: true, perApplicationFee: 98, billingMode: 'per_application' })).toBe(false);
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, billingMode: 'per_visit' })).toBe(false);
+    expect(completionInvoiceIsMembershipDues({ ...unpriced, monthlyRate: 0 })).toBe(false);
   });
 });
 
