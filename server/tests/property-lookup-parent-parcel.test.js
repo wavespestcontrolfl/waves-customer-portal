@@ -272,10 +272,40 @@ describe('who sees the parent parcel', () => {
     expect(JSON.stringify(split)).not.toMatch(/EXAMPLE-PARCEL/);
   });
 
+  test('the checked marker is stripped with it', () => {
+    const view = route.withoutParentParcelUnlessOptedIn({ propertyRecord: { squareFootage: 0, _parentParcelChecked: true } }, {});
+    expect(view.propertyRecord).toEqual({ squareFootage: 0 });
+  });
+
   test('a record with no parent parcel, or no record, passes through as it is', () => {
     const plain = { propertyRecord: { squareFootage: 2000 } };
     expect(route.withoutParentParcelUnlessOptedIn(plain, {})).toBe(plain);
     const none = { propertyRecord: null };
     expect(route.withoutParentParcelUnlessOptedIn(none, {})).toBe(none);
+  });
+});
+
+describe('cache rows that predate the parent-parcel check', () => {
+  const { _private: route } = require('../routes/property-lookup-v2');
+  const optedIn = { commercialSuiteSizing: true };
+  const noCounty = () => ({ squareFootage: 9000, _source: 'ai' });
+
+  test('gates on, opted in, no county evidence, never checked: the row is re-run once', () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    expect(route.cachedParentParcelUnchecked(noCounty(), optedIn)).toBe(true);
+  });
+
+  test('a checked row, a row with county evidence, an ordinary caller, or either gate off: served from cache as before', () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    expect(route.cachedParentParcelUnchecked({ ...noCounty(), _parentParcelChecked: true }, optedIn)).toBe(false);
+    expect(route.cachedParentParcelUnchecked({ squareFootage: 2000, _source: 'county' }, optedIn)).toBe(false);
+    expect(route.cachedParentParcelUnchecked({ squareFootage: 2000, _parcel: { parcelId: 'EXAMPLE-PARCEL' } }, optedIn)).toBe(false);
+    expect(route.cachedParentParcelUnchecked(noCounty(), {})).toBe(false);
+    expect(route.cachedParentParcelUnchecked(null, optedIn)).toBe(false);
+    delete process.env.GATE_COMMERCIAL_SUITE_SIZING;
+    expect(route.cachedParentParcelUnchecked(noCounty(), optedIn)).toBe(false);
+    process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true';
+    delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY;
+    expect(route.cachedParentParcelUnchecked(noCounty(), optedIn)).toBe(false);
   });
 });

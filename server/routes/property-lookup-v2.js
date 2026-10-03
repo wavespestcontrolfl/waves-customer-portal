@@ -380,8 +380,8 @@ function withoutParentParcelUnlessOptedIn(result, options) {
   // The same record rides the result under two names (propertyRecord and
   // the legacy `rentcast` alias); both are replaced.
   const strip = (record) => {
-    if (!record || typeof record !== 'object' || !('_parentParcel' in record)) return record;
-    const { _parentParcel: _dropped, ...rest } = record;
+    if (!record || typeof record !== 'object' || !('_parentParcel' in record || '_parentParcelChecked' in record)) return record;
+    const { _parentParcel: _dropped, _parentParcelChecked: _marker, ...rest } = record;
     return rest;
   };
   const propertyRecord = strip(result.propertyRecord);
@@ -424,6 +424,23 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
 // of serving unit facts until the 180-day TTL. Pure; cache rows are inputs,
 // never mutated.
 const UNIT_FOLIO_UNAVAILABLE_RETRY_MS = 24 * 60 * 60 * 1000;
+// Both gates of the parent-parcel check (ai-property-lookup.js
+// parentParcelEnabled reads the same two).
+function parentParcelCheckLive() {
+  return lookupBusinessIdentityLive() && commercialSuiteSizingLive();
+}
+
+// A cached row an opted-in caller (admin estimate tool, estimator engine)
+// cannot trust for the parent-parcel context: the gates are on, the roll did
+// not vouch for the address (the only case a parent parcel can exist), and
+// no live lookup has run the check on this row. Rows with county evidence
+// never need it. Ordinary and cache-only callers never re-run for this.
+function cachedParentParcelUnchecked(record, options) {
+  if (options.commercialSuiteSizing !== true || !parentParcelCheckLive() || !record) return false;
+  if (record._parentParcelChecked === true || hasCountyEvidence(record)) return false;
+  return true;
+}
+
 function cachedUnitFolioStale(record, address, now = Date.now()) {
   if (!record) return false;
   const live = typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled();
@@ -467,6 +484,13 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // a known-superseded classification must not reach report/portal
       // pricing either (codex P1).
       logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
+      cached = null;
+    }
+    if (cached && !cacheOnly && cachedParentParcelUnchecked(cached.property_record, options)) {
+      // Cached before the parent-parcel check existed or was switched on:
+      // the opted-in caller re-runs live once, and the save at the end
+      // replaces the row with a checked one.
+      logger.info('[property-lookup] cached row predates the parent-parcel check — treating as a miss');
       cached = null;
     }
     if (cached && cachedUnitFolioStale(cached.property_record, address)) {
@@ -682,6 +706,10 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
     return null;
   });
   if (aiProperty) {
+    // This live lookup ran the parent-parcel check (address-match PR 6),
+    // whatever it found: the marker tells a later cache hit the row is not
+    // one that predates the check (cachedParentParcelUnchecked).
+    if (parentParcelCheckLive()) aiProperty._parentParcelChecked = true;
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
 
@@ -6151,6 +6179,7 @@ module.exports._private = {
   suiteUnitKeyForProfile,
   occupancyOption,
   withoutParentParcelUnlessOptedIn,
+  cachedParentParcelUnchecked,
   businessIdentityBypassed,
   prepareBusinessIdentity,
   cachedAggregateResolvesToOwnUnit,
