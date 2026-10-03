@@ -272,6 +272,10 @@ describe('get_today_eta', () => {
     expect(withVisit).toBe(withoutVisit); // still no oracle
     expect(withVisit).toMatch(/save a follow-up for THIS caller with capture_lead/);
     expect(withVisit).toMatch(/only after capture_lead confirms/);
+    // Benchmark 10-03: told to save a follow-up, the agent asked for name,
+    // address and email first and the call ended unsaved. The number is known.
+    expect(withVisit).toMatch(/in THIS SAME turn/);
+    expect(withVisit).toMatch(/do NOT ask for a name, address or email first/);
     expect(withVisit).toMatch(/Never promise that Waves will contact the account holder/);
     expect(db).not.toHaveBeenCalled();
   });
