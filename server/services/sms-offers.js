@@ -162,14 +162,17 @@ function resolveSlot(pair, sentAt, dayLabel) {
 }
 
 /**
- * Rebuild one phone+kind chain of standing offers (open or superseded; any
+ * Rebuild one phone+kind+line chain of standing offers (open or superseded; any
  * later status, such as accepted, is final and left alone) in send order.
  * Demotes before promoting so the one-open index never sees two open rows.
  * Returns how many previously open rows were demoted and the open row's id.
  */
-async function relinkOfferChain(trx, phone, kind) {
+async function relinkOfferChain(trx, phone, kind, line = null) {
   const chain = await trx('sms_offers')
     .where({ phone_last10: phone, kind })
+    // Per Waves line: a same-kind offer from another line is its own chain
+    // (sms_offers_one_open_per_phone_kind_line).
+    .whereRaw("COALESCE(waves_line, '') = ?", [line || ''])
     .whereIn('status', ['open', 'superseded'])
     .orderBy([{ column: 'sent_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .select('id', 'status', 'sent_at', 'superseded_by', 'closed_at');
@@ -279,7 +282,7 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       // the writes arrive in.
       const [inserted] = await trx('sms_offers').insert({ ...row, status: 'superseded' }).returning('id');
       const id = inserted?.id || inserted;
-      const { demoted, openId } = await relinkOfferChain(trx, row.phone_last10, row.kind);
+      const { demoted, openId } = await relinkOfferChain(trx, row.phone_last10, row.kind, row.waves_line);
       return { recorded: true, id, superseded: demoted, late: openId !== id };
     });
   } catch (err) {
