@@ -405,9 +405,13 @@ async function stopRetry(message, {
       // keeps reporting delivery.
       await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...row, status: row.status || status }, trx);
     }
+    // A replaced-address stop commits with its reservation reopen or not at all: a failed reopen throws
+    // out of the transaction (runDueRetries then reschedules the still-claimed row, and the next claim
+    // stops it again), where a swallowed one would leave the leg delivered or held with no retry left.
+    if (row && reissue) await billingReservation.reopenBillingEmailReservationForReissue(row, trx);
     return row || null;
   };
-  const updated = isSummary ? await db.transaction(settle) : await settle(db);
+  const updated = isSummary || reissue ? await db.transaction(settle) : await settle(db);
   if (updated && terminalBillingRefusal) {
     await billingReservation.resolveBillingEmailReservationRefusal(updated)
       .catch((err) => logger.warn(`[email-provider-retry] billing refusal not reconciled for ${message.id}: ${err.message}`));
@@ -415,10 +419,6 @@ async function stopRetry(message, {
   if (updated && requote) {
     await billingReservation.releaseBillingEmailReservationForRequote(updated)
       .catch((err) => logger.warn(`[email-provider-retry] changed quote not reconciled for ${message.id}: ${err.message}`));
-  }
-  if (updated && reissue) {
-    await billingReservation.reopenBillingEmailReservationForReissue(updated)
-      .catch((err) => logger.warn(`[email-provider-retry] replaced-address stop not reconciled for ${message.id}: ${err.message}`));
   }
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
   return { sent: false, stopped: true, reason };
@@ -476,7 +476,11 @@ async function settleReplacedRecipientRow(database, row, now) {
     })
     .returning('*');
   if (!updated) return null;
-  if (requote) await billingReservation.releaseBillingEmailReservationForRequote(updated, database);
+  // The row's terminalization and its reservation settle commit or fail together: a failed write throws
+  // into the caller's transaction (the correction rolls back; the webhook event is not consumed). Only
+  // "nothing to settle" returns normally, and a release deferred by a busy cron lease is left to
+  // recoverStaleClaims, which finds the stopped row by its re-quote marker.
+  if (requote) await billingReservation.releaseBillingEmailReservationForRequote(updated, database, { propagateErrors: true });
   else if (replay) await billingReservation.reopenBillingEmailReservationForReissue(updated, database);
   return updated;
 }

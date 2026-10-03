@@ -104,6 +104,9 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase.schema.createTable('estimates', (table) => {
       table.uuid('id').primary(); table.string('customer_id');
     });
+    await mockDatabase.schema.createTable('customers', (table) => {
+      table.uuid('id').primary(); table.string('email');
+    });
     await mockDatabase.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable();
       table.timestamp('balance_reminder_sent_at', { useTz: true });
@@ -128,6 +131,7 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase('leads').del();
     await mockDatabase('estimates').del();
     await mockDatabase('scheduled_services').del();
+    await mockDatabase('customers').del();
   });
   afterAll(async () => {
     await mockDatabase?.destroy();
@@ -596,5 +600,88 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
 
     expect(await rowOf(row.id)).toMatchObject({ status: 'failed', provider_retry_next_at: null, sent_at: null, error_message: REASON });
     expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+  });
+
+  // A failed reservation write must fail the whole transaction: force a real SQL error in the settle by hiding
+  // the column it writes inside the enclosing transaction (DDL rolls back with it).
+  const hideColumn = (trx, table, column) => trx.schema.alterTable(table, (t) => t.renameColumn(column, `hidden_${column}`));
+
+  test('a failed reservation reopen rolls the whole correction back: row, schedule, stamp and customer email unchanged', async () => {
+    const customerId = randomUUID();
+    await mockDatabase('customers').insert({ id: customerId, email: OLD });
+    const { row, ledgerId } = await billingReplay(customerId);
+
+    await expect(mockDatabase.transaction(async (trx) => {
+      await hideColumn(trx, 'collections_contact_ledger', 'metadata');
+      await trx('customers').where({ id: customerId }).update({ email: 'corrected@example.com' });
+      await retry.stopRetriesForReplacedEmail(trx, { customerId, oldEmail: OLD });
+    })).rejects.toThrow(/metadata/);
+
+    const untouched = await rowOf(row.id);
+    expect(untouched).toMatchObject({ status: 'failed', error_message: null });
+    expect(untouched.provider_retry_next_at).toBeInstanceOf(Date);
+    expect(untouched.provider_retry_exhausted_at).toBeNull();
+    expect(untouched.categories).not.toContain(STAMP);
+    expect((await mockDatabase('customers').where({ id: customerId }).first()).email).toBe(OLD);
+    expect(await ledgerMetadata(ledgerId)).toMatchObject({ notificationEventKey: expect.any(String) });
+    // The retry the correction was about to retire is still scheduled: a rerun after the fault clears stops it.
+    await expect(correct(customerId)).resolves.toBe(1);
+  });
+
+  test('a failed previsit claim release rolls the correction back; a lease-deferred release still commits', async () => {
+    const customerId = randomUUID();
+    const { row, appointmentId } = await billingReplay(customerId, { previsit: true });
+
+    await expect(mockDatabase.transaction(async (trx) => {
+      await hideColumn(trx, 'scheduled_services', 'balance_reminder_sent_at');
+      await retry.stopRetriesForReplacedEmail(trx, { customerId, oldEmail: OLD });
+    })).rejects.toThrow(/balance_reminder_sent_at/);
+    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', error_message: null });
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeInstanceOf(Date);
+
+    // Lease busy: not a failure. The stop commits and recoverStaleClaims owns the release (covered above).
+    await mockDatabase.transaction(async (holder) => {
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['cron:previsit-balance-reminder']);
+      await expect(correct(customerId)).resolves.toBe(1);
+    });
+    expect((await rowOf(row.id)).error_message).toBe(`${Reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${REASON}`);
+  });
+
+  test('a failed reopen on a late block rolls the event back: the row is not terminalized and the event is not consumed, so a redelivery settles it', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId } = await billingReplay(customerId, { delivered: true, row: acceptedAwaitingVerdict() });
+    await correct(customerId);
+    const ev = blockEvent();
+    const before = await rowOf(row.id);
+
+    await expect(mockDatabase.transaction(async (trx) => {
+      await hideColumn(trx, 'collections_contact_ledger', 'metadata');
+      await handleEmailMessageEvent(ev, before, trx);
+    })).rejects.toThrow(/metadata/);
+
+    // Nothing from the event survived: no recorded event, the row still reads as accepted and stamped.
+    expect(Number((await mockDatabase('email_message_events').count('* as n').first()).n)).toBe(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: 'sent', error_message: null });
+    expect((await rowOf(row.id)).sent_at).toBeInstanceOf(Date);
+    expect(await ledgerMetadata(ledgerId)).toMatchObject({ delivered: true });
+
+    // The same event delivered again (the fault cleared) is processed and settles the row.
+    await webhook(before, ev);
+    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', sent_at: null, error_message: REASON });
+    expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+  });
+
+  test('the legitimate no-ops still commit: a resolved reservation and a delivered row are terminalized or left alone without an error', async () => {
+    const customerId = randomUUID();
+    const resolved = await billingReplay(customerId, { delivered: true, resolved: true, row: acceptedAwaitingVerdict() });
+    const ledgerRow = await mockDatabase('email_messages').where({ id: resolved.row.id }).first();
+    await mockDatabase('email_messages').where({ id: ledgerRow.id }).update({
+      status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: new Date(Date.now() - 1000),
+    });
+
+    await expect(correct(customerId)).resolves.toBe(1);
+
+    expect(await rowOf(resolved.row.id)).toMatchObject({ status: 'failed', error_message: REASON });
+    expect(await ledgerMetadata(resolved.ledgerId)).toMatchObject({ delivered: true, resolved: true });
   });
 });

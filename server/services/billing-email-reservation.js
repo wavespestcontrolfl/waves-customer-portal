@@ -104,7 +104,7 @@ function hasRequoteRefusalEvidence(message) {
 // Stop the frozen snapshot while allowing a fresh rendering to claim both
 // ledgers. Consume the repair marker atomically: repeating an old repair must
 // not release a newer reservation that has already been reclaimed.
-async function releaseBillingEmailReservationForRequote(message, database = db) {
+async function releaseBillingEmailReservationForRequote(message, database = db, { propagateErrors = false } = {}) {
   if (!hasRequoteRefusalEvidence(message)) return false;
   try {
     return await database.transaction(async (trx) => {
@@ -141,17 +141,21 @@ async function releaseBillingEmailReservationForRequote(message, database = db) 
       const claimReleased = await trx('scheduled_services')
         .where({ id: context.appointment_id, customer_id: context.customer_id })
         .update({ balance_reminder_sent_at: null });
-      if (Number(claimReleased) !== 1) throw new Error('pinned previsit claim was not released');
+      if (Number(claimReleased) !== 1) throw Object.assign(new Error('pinned previsit claim was not released'), { reservationNoop: true });
       const retired = await trx('email_messages').where({ id: current.id }).update({
         error_message: String(current.error_message).replace(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
           'Billing email old quote retired: '),
         updated_at: new Date(),
       });
-      if (Number(retired) !== 1) throw new Error('old quote marker was not retired');
+      if (Number(retired) !== 1) throw Object.assign(new Error('old quote marker was not retired'), { reservationNoop: true });
       return true;
     });
   } catch (err) {
     logger.warn(`[billing-email-reservation] changed-quote release failed: ${redactContact(err.message)}`);
+    // A caller that terminalized the row in its own transaction needs a real failure to roll back
+    // with. A refused invariant (a pinned appointment that is gone, a marker already retired) is a
+    // no-op the recovery sweep owns, never a reason to fail the caller.
+    if (propagateErrors && !err.reservationNoop) throw err;
     return false;
   }
 }
@@ -191,6 +195,9 @@ function hasStoppedUnsentEvidence(message) {
 // stamp the acceptance wrote (late-payment-checker stamps `delivered` when
 // SendGrid accepts) belongs to the attempt that was just rejected, so it is
 // cleared with the failed flag; claimVerdict would refuse a delivered leg.
+// Returns false when there is nothing to reopen (not a replay, the attempt is
+// no longer current, the reservation is resolved or gone) and throws when the
+// write itself failed.
 async function reopenBillingEmailReservationForReissue(message, database = db) {
   const context = replayContext(message);
   if (!context || !message?.id) return false;
@@ -217,7 +224,9 @@ async function reopenBillingEmailReservationForReissue(message, database = db) {
     });
   } catch (err) {
     logger.warn(`[billing-email-reservation] reissue reopen failed: ${redactContact(err.message)}`);
-    return false;
+    // Never swallowed: the stop that terminalized the row commits or fails together with this write,
+    // so an error here must reach its transaction. "Nothing to reopen" returns false above instead.
+    throw err;
   }
 }
 
