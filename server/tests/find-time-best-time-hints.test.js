@@ -561,6 +561,20 @@ test('arrival-window mode scores the picked hour with the shared route checker: 
     expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'fixture-service', date: '2026-09-01', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60,
     }));
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({ unit: true }));
+    // A whole visit whose technician cannot do one of its services: no verdict, never a certified fit.
+    const capabilities = require('../services/technician-capabilities');
+    const inactive = jest.spyOn(capabilities, 'inactiveCapabilitiesForServices');
+    const memberServices = [{ service_type: 'Pest Control' }, { service_type: 'Lawn Care' }];
+    checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 9, target: { memberServices } });
+    inactive.mockResolvedValueOnce([{ technician_id: 't1', capability: 'lawn' }]);
+    body = await (await post(req)).json();
+    expect(body.picked).toBeUndefined();
+    expect(inactive).toHaveBeenLastCalledWith(expect.anything(), ['t1'], memberServices);
+    inactive.mockResolvedValueOnce([]);
+    body = await (await post(req)).json();
+    expect(body.picked).toMatchObject({ start: '09:00', fits: true });
+    inactive.mockRestore();
     checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'route_unverified' });
     body = await (await post(req)).json();
     expect(body.picked).toBeUndefined();
