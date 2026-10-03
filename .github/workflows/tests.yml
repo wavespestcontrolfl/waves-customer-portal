@@ -604,7 +604,9 @@ jobs:
         run: |
           mobile=true
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            if files=$(git diff --name-only "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
+            # --no-renames: a rename is listed as its old path AND its new one, so
+            # moving a build input into a skip-safe directory still builds.
+            if files=$(git diff --name-only --no-renames "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
               inputs=$(git grep -hoE '\.\./server/[A-Za-z0-9_./-]+' -- shared client/vite.config.js client/src ':(exclude,glob)client/src/**/*.test.*' | sed -E 's#^(\.\./)+##' | sort -u || true)
               safe='^(server|docs|\.claude|ops|video|wiki)/'
               if printf '%s\n' "$inputs" | grep -qvE '\.json$|^$'; then safe='^(docs|\.claude|ops|video|wiki)/'; fi
