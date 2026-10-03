@@ -228,6 +228,28 @@ describe('analyzePhoto: gate on with a valid month', () => {
     if (_name !== 'empty answer') expect(logger.warn).toHaveBeenCalled();
   });
 
+  test('a stalled watch call aborts at its deadline: the main read still answers, watchSignals []', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    const realTimeout = AbortSignal.timeout;
+    AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
+    try {
+      global.fetch = jest.fn((url, init) => {
+        const text = JSON.parse(init.body).contents[0].parts[1].text;
+        if (!text.includes("This month's watch list")) return Promise.resolve(geminiResponse(SCORES));
+        // Never answers; only the request's own abort signal ends it.
+        expect(init.signal).toBeInstanceOf(AbortSignal);
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason));
+        });
+      });
+      const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+      expect(result.watchSignals).toEqual([]);
+      expect(result.gemini).toMatchObject({ foliage_fullness: SCORES.foliage_fullness });
+    } finally {
+      AbortSignal.timeout = realTimeout;
+    }
+  });
+
   test('no Gemini key: the watch read is [] without a call (the main read is unaffected)', async () => {
     jest.resetModules();
     const key = process.env.GEMINI_API_KEY;

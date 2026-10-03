@@ -456,6 +456,9 @@ async function callGeminiVision(base64Image, mimeType) {
 // (no scores, no prose). Gemini only, no Claude fallback. Any failure is [] and a
 // warn: it can never fail the main read. Known keys on the month's list only.
 const WATCH_READ_MAX_OUTPUT_TOKENS = 512; // a short key list plus Gemini 3.x thinking spend
+// The watch read is optional, so it never holds a finished main read for long:
+// the request aborts at this deadline and the answer is [].
+const WATCH_READ_MAX_MS = 20 * 1000;
 async function readWatchSignals(base64Image, mimeType, month) {
   try {
     if (!GEMINI_KEY) return [];
@@ -463,6 +466,7 @@ async function readWatchSignals(base64Image, mimeType, month) {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(WATCH_READ_MAX_MS),
       body: JSON.stringify({
         contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: watchListPromptBlock(month) }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: WATCH_READ_MAX_OUTPUT_TOKENS },
