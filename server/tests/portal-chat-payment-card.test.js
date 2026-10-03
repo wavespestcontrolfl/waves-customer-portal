@@ -132,6 +132,13 @@ test('a read failure shows nothing, never throws, and still offers Open Billing'
   expect(actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
+test('a cancelled payment read propagates instead of becoming an unavailable card', async () => {
+  const cancelled = Object.assign(new Error('cancelled'), { name: 'AbortError' });
+  listPortalPayments.mockRejectedValue(cancelled);
+
+  await expect(executeToolCall('show_recent_payments', {}, 'cust-1', [], [])).rejects.toBe(cancelled);
+});
+
 test('refuses a model-supplied customer id and a channel without cards', async () => {
   expect(await executeToolCall('show_recent_payments', { customer_id: 'other' }, 'cust-1', [], [])).toEqual({ error: 'Customer scope mismatch' });
   expect((await executeToolCall('show_recent_payments', {}, 'cust-1', [])).shown).toBe(false);
