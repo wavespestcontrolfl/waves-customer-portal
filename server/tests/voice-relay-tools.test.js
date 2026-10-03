@@ -6,8 +6,6 @@
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
-  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
-  nameConflicts: jest.requireActual('../services/lead-from-extraction').nameConflicts,
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../routes/booking', () => ({
@@ -532,9 +530,7 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       surfaceEstimateRequestForCustomer.mockClear();
       const markCaptured = jest.fn();
       const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat' }, { from: '+19415551234', callSid: 'CA-est6', markCaptured });
-      // No card is FILED: the one call is revise-only (stillMissing), which
-      // touches a card only when an earlier capture on this call queued one.
-      expect(surfaceEstimateRequestForCustomer.mock.calls.map((c) => c[2].stillMissing)).toEqual([['last_name', 'email', 'address_line1']]);
+      expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       expect(out).toMatch(/NOT queued yet — still missing: last_name, email, address_line1/);
       expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true })); // call stays open for the retry
       expect(out).toMatch(/If the caller declines to give it[\s\S]*WITHOUT estimate_requested/);
@@ -583,7 +579,7 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
       const first = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', address_line1: '12 Shell Dr', requested_service: 'mosquito', pain_points: 'bites on the lanai' }, ctx);
       expect(first).toMatch(/still missing: email/);
-      expect(surfaceEstimateRequestForCustomer.mock.calls.map((c) => c[2].stillMissing)).toEqual([['email']]); // revise-only, files nothing
+      expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       const second = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, email: 'pat@example.com' }, ctx);
       expect(second).toMatch(/IS on the office queue/);
       // the retry's LEAD WRITE also carries the first capture's identity fields

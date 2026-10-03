@@ -461,20 +461,22 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
 }
 
 /**
- * ⭐ WHAT IS ALREADY ON FILE IS NOT ASKED FOR AGAIN. The matched account's own
- * name, email and service address, for a FULL-tier caller only (a verified
- * call from the account's own customers.phone). The tools fill a missing
- * location or estimate field from it, so "do not ask a known customer for
+ * ⭐ WHAT IS ALREADY ON FILE IS NOT ASKED FOR AGAIN. The service address on
+ * the matched account, for a FULL-tier caller only (a verified call from the
+ * account's own customers.phone). The read-only availability lookups use it
+ * when the caller states no location, so "do not ask a known customer for
  * their address" is something the tools make true rather than a prompt line
  * the next lookup contradicts. A recognised-only (secondary slot) or
- * looked-up caller gets nothing. Fail-soft: a failed read is "not on file".
+ * looked-up caller gets nothing, and so does a soft-deleted account.
+ * Fail-soft: a failed read is "not on file". A written estimate does NOT use
+ * it: where to send one is confirmed on the call (capture_lead).
  */
 async function accountContactFor(ctx = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
   try {
     const db = require('../../models/db');
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
-      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
+      .first('address_line1', 'city', 'zip');
     return row || null;
   } catch (err) {
     logger.warn(`[voice-relay] account contact read failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
@@ -939,20 +941,6 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
-      // An email the caller GAVE but that could not be read is not "no email
-      // given": they asked for the estimate somewhere, so the account's own
-      // address never stands in for it. Remembered for the call until a
-      // readable one arrives.
-      const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || priorEstimateFields.email_unreadable === 'true');
-      // A location component that REPLACES one the caller gave earlier means
-      // a different property: the earlier location goes, whole, and what this
-      // capture did not restate is asked for. A retry that only ADDS a missing
-      // part (the street after the city) still accumulates.
-      const sameText = (x, y) => String(x).trim().toLowerCase() === String(y).trim().toLowerCase();
-      if (['address_line1', 'city', 'zip'].some((k) => nz(extracted[k]) && nz(priorEstimateFields[k]) && !sameText(extracted[k], priorEstimateFields[k]))) {
-        for (const k of ['address_line1', 'city', 'zip']) delete priorEstimateFields[k];
-        if (typeof ctx.clearEstimateFields === 'function') ctx.clearEstimateFields(['address_line1', 'city', 'zip']);
-      }
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -966,58 +954,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
         pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
       };
-      // ⭐ THE CALL REMEMBERS ONLY WHAT THE CALLER SAID. Noted BEFORE any
-      // account default is applied: the store only adds, so a name, email or
-      // address borrowed from the account and kept there would later pass for
-      // something the caller stated — and survive their correction.
-      const statedFields = { ...estimateFields };
-      if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields({ ...statedFields, ...(emailUnreadable && !statedFields.email ? { email_unreadable: 'true' } : {}) });
-      }
-      // A written estimate for a customer already on file needs nothing asked
-      // twice: whatever the caller has not given on this call comes from their
-      // own account (full tier only), read fresh on every capture, so only
-      // what is genuinely absent there is reported missing below.
-      // ONLY in the lane where the office card is the artifact: that card is
-      // rewritten when the caller corrects a default. A capture that opens a
-      // LEAD (a customer still in the lead pipeline, or a different person on
-      // the account's line — the lead writer's own two rules) gets no
-      // defaults: a lead keeps what it is first given, so those callers are
-      // asked, as before.
-      const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
-      const accountRow = estimateRequested ? await accountContactFor(ctx) : null;
-      const account = accountRow && !isLeadStage(accountRow.pipeline_stage) && !nameConflicts(statedFields, accountRow) ? accountRow : null;
-      let locationFromAccount = false;
-      let emailFromAccount = false;
-      if (account) {
-        for (const k of ['first_name', 'last_name']) {
-          if (!estimateFields[k] && nz(account[k])) estimateFields[k] = nz(account[k]);
-        }
-        // ⭐ AN ADDRESS IS ONE THING. A street the caller gave is never
-        // completed with the account's city or ZIP (or the reverse): if any
-        // part of a location was stated on this call, the estimate is for
-        // THAT property and anything absent is asked for. Only a call with no
-        // location at all takes the account's, whole.
-        const LOCATION = ['address_line1', 'city', 'zip'];
-        if (!LOCATION.some((k) => estimateFields[k])) {
-          for (const k of LOCATION) if (nz(account[k])) estimateFields[k] = nz(account[k]);
-          locationFromAccount = true;
-        }
-        if (!estimateFields.email && !emailUnreadable && nz(account.email) && isValidEmail(nz(account.email))) {
-          estimateFields.email = nz(account.email);
-          emailFromAccount = true;
-        }
-      }
+      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
-      // Only what the caller STATED: the lead writer fills empty fields and
-      // never replaces them, so an account default written there could not
-      // be corrected later on the call. The account's own record already
-      // holds those; they count toward a deliverable request and show,
-      // labelled, on the office card.
       for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
-        if (!extracted[k] && statedFields[k]) extracted[k] = statedFields[k];
+        if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
       }
       const estimateMissing = estimateRequested
         ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
@@ -1605,28 +1547,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about — file the estimate-request card, and let the result below tell
       // the model whether the promise may be spoken.
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
-      // An estimate an earlier capture on this call queued was promised aloud
-      // and is still owed, whatever happens to this capture's card write.
-      const priorPromise = typeof ctx.getPromise === 'function' ? ctx.getPromise('send_estimate') : null;
-      const promiseStands = estimateRequested && estimateMissing.length > 0 && Boolean(priorPromise && priorPromise.verdict === true);
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
-        // A card an earlier capture on this call queued (complete then, from
-        // the account's address) must not keep details the caller has since
-        // replaced: revise it, and say what the call still lacks.
-        if (!leadCreated && leadResult && leadResult.customerId) {
-          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
-          if (typeof surfaceEstimateRequestForCustomer === 'function') {
-            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount, stillMissing: estimateMissing });
-          }
-        }
       } else if (estimateRequested) {
         if (leadCreated) {
           estimateQueued = true;
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1635,11 +1564,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
-      // An incomplete correction never withdraws a promise already spoken:
-      // the session's earlier verdict stands.
-      if (!promiseStands) {
-        if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
-      }
+      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',

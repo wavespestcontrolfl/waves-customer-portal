@@ -7,8 +7,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
-  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
-  nameConflicts: jest.requireActual('../services/lead-from-extraction').nameConflicts,
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../routes/booking', () => ({
@@ -55,6 +53,7 @@ describe('availability uses the service address on a full-tier caller\'s account
     expect(out).toMatch(/Open times/);
     expect(out).toMatch(/These times are for the service address on the caller's account/);
     expect(out).not.toMatch(/12 Test Street|34205/); // the agent must not have it to read out
+    expect(customerFilter).toEqual({ id: 'c-1', deleted_at: null }); // a soft-deleted account is "not on file"
   });
 
   test('a location the caller states wins, and the account is not read', async () => {
@@ -85,165 +84,15 @@ describe('availability uses the service address on a full-tier caller\'s account
   });
 });
 
-describe('a written estimate for a customer on file asks for nothing twice', () => {
-  test('full tier: name, email and address come from the account, so the request is deliverable at once', async () => {
+describe('a written estimate is confirmed on the call, never filled from the account', () => {
+  test('full tier: capture_lead does not read the account, and what the caller has not given is reported missing', async () => {
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     const noteEstimateFields = jest.fn();
-    const out = await executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, requested_service: 'Lawn Care Program' },
-      fullTier({ noteEstimateFields, officeOpenNow: () => true }));
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
-    // Account defaults reach the office card only. The lead write gets what the caller stated:
-    // that writer fills empty fields and never replaces them, so a default there could not be corrected.
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: null, email: null, address_line1: null, city: null, zip: null });
-    // The call remembers only what the caller SAID: nothing borrowed is noted.
-    expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ first_name: null, last_name: null, email: null, address_line1: null, requested_service: 'Lawn Care Program' });
-    expect(out).not.toMatch(/still missing/i);
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ locationFromAccount: true, emailFromAccount: true });
-    expect(customerFilter).toEqual({ id: 'c-1', deleted_at: null }); // a soft-deleted account is "not on file"
-  });
-
-  test('what the caller gives on the call wins over the account', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    const noteEstimateFields = jest.fn();
-    await executeTool('capture_lead', { call_summary: 'Estimate to a different email.', estimate_requested: true, email: 'other@example.com' }, fullTier({ noteEstimateFields }));
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ email: 'other@example.com', first_name: 'Dana' });
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: null });
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ locationFromAccount: true, emailFromAccount: false });
-    expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: null });
-  });
-
-  test('a location stated on the call is never completed from the account: a new city alone leaves the street missing', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    const noteEstimateFields = jest.fn();
-    const out = await executeTool('capture_lead', { call_summary: 'Estimate for their rental in Venice.', estimate_requested: true, city: 'Venice' }, fullTier({ noteEstimateFields }));
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ city: 'Venice', address_line1: null, zip: null });
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ city: 'Venice', address_line1: null, zip: null, first_name: 'Dana', email: 'dana@example.com' });
-    expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ city: 'Venice', address_line1: null, zip: null });
-    expect(out).toMatch(/address/i); // still missing — asked for, not borrowed
-    // No new card: the only call is the revise-if-standing one, naming what is missing.
-    expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledTimes(1);
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ stillMissing: ['address_line1'] });
-  });
-
-  test('an account address an earlier capture used is not remembered as stated: a city given later is never mixed with it, on that capture or the next', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    // The call's real store only ADDS non-empty fields (relay-conversation).
-    let bag = {};
-    const ctx = fullTier({ getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
-    await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, ctx);
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ address_line1: null, city: null, zip: null });
-    expect(bag.address_line1).toBeUndefined();
-    await executeTool('capture_lead', { call_summary: 'Actually for the Venice rental.', estimate_requested: true, city: 'Venice' }, ctx);
-    expect(createLeadFromExtraction.mock.calls[1][0]).toMatchObject({ city: 'Venice', address_line1: null });
-    const out = await executeTool('capture_lead', { call_summary: 'Still the Venice rental.', estimate_requested: true }, ctx);
-    expect(createLeadFromExtraction.mock.calls[2][0]).toMatchObject({ city: 'Venice', address_line1: null });
-    expect(bag).toMatchObject({ city: 'Venice' });
-    expect(bag.address_line1).toBeUndefined();
-    expect(out).toMatch(/address/i);
-    // The office card: queued from the account's address (and labelled so),
-    // then revised once the caller named another property.
-    const cards = surfaceEstimateRequestForCustomer.mock.calls;
-    expect(cards[0][1]).toMatchObject({ address_line1: '12 Test Street', city: 'Bradenton' });
-    expect(cards[0][2]).toMatchObject({ locationFromAccount: true });
-    expect(cards[0][2].stillMissing).toBeUndefined();
-    expect(cards[1][1]).toMatchObject({ address_line1: null, city: 'Venice', zip: null });
-    expect(cards[1][2]).toMatchObject({ stillMissing: ['address_line1'] });
-  });
-
-  test('an email the caller gave but that could not be read is asked for again, never replaced by the account email — on that capture or a later one', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    let bag = {};
-    const ctx = fullTier({ getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
-    const first = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true, email: 'dana at work dot' }, ctx);
-    expect(first).toMatch(/still missing: email/);
-    expect(bag.email).toBeUndefined();
-    const second = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true }, ctx);
-    expect(second).toMatch(/still missing: email/);
-    expect(surfaceEstimateRequestForCustomer.mock.calls.every((c) => Array.isArray(c[2].stillMissing))).toBe(true); // nothing filed
-    const third = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true, email: 'dana@work.example.com' }, ctx);
-    expect(third).toMatch(/IS on the office queue/);
-    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ email: 'dana@work.example.com' });
-  });
-
-  test('an unreadable email given AFTER a capture that used the account email takes it back: email is missing and the standing card is revised', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    let bag = {};
-    const notePromise = jest.fn();
-    const ctx = fullTier({ notePromise, getPromise: () => (notePromise.mock.calls.length ? { verdict: notePromise.mock.calls.at(-1)[1] } : null), getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
-    const first = await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, ctx);
-    expect(first).toMatch(/IS on the office queue/);
-    expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true, expect.anything());
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ email: 'dana@example.com' });
-    expect(bag.email).toBeUndefined(); // borrowed, never remembered as stated
-    const second = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true, email: 'dana at work dot' }, ctx);
-    expect(second).toMatch(/still missing: email/);
-    expect(surfaceEstimateRequestForCustomer.mock.calls[1][1]).toMatchObject({ email: null });
-    // The address is still the account's, and the revise says so.
-    expect(surfaceEstimateRequestForCustomer.mock.calls[1][2]).toMatchObject({ stillMissing: ['email'], locationFromAccount: true, emailFromAccount: false });
-    // The promise already spoken stays owed: the revised card keeps it, so no false verdict overwrites it.
-    expect(notePromise).toHaveBeenCalledTimes(1);
-    const third = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true }, ctx);
-    expect(third).toMatch(/still missing: email/); // the account email does not come back
-  });
-
-  test('a location part that replaces an earlier one is a different property: the earlier location goes whole, and a part that only adds still accumulates', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    let bag = {};
-    const notePromise = jest.fn();
-    const promises = new Map();
-    const ctx = fullTier({
-      getEstimateFields: () => ({ ...bag }),
-      noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
-      clearEstimateFields: (keys) => { for (const k of keys) delete bag[k]; },
-      getPromise: (k) => promises.get(k) || null,
-      notePromise: (k, verdict) => { notePromise(k, verdict); promises.set(k, { verdict }); },
-    });
-    await executeTool('capture_lead', { call_summary: 'Estimate for the rental.', estimate_requested: true, address_line1: '9 Rental Rd', city: 'Venice', zip: '34285' }, ctx);
-    expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true);
-    // A new street and city, no ZIP: the old ZIP must not complete them.
-    await executeTool('capture_lead', { call_summary: 'Actually the Sarasota house.', estimate_requested: true, address_line1: '4 Other Ave', city: 'Sarasota' }, ctx);
-    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ address_line1: '4 Other Ave', city: 'Sarasota', zip: null });
-    expect(bag.zip).toBeUndefined();
-    // Adding the missing part accumulates; restating the same street is not a change.
-    await executeTool('capture_lead', { call_summary: 'Actually the Sarasota house.', estimate_requested: true, address_line1: '4 other ave', zip: '34231' }, ctx);
-    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ address_line1: '4 other ave', city: 'Sarasota', zip: '34231' });
-  });
-
-  test('a promise already spoken stays owed when a later correction is incomplete, even if the card write fails', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    const notePromise = jest.fn();
-    const ctx = fullTier({ sessionKey: 'sk-1', notePromise, getPromise: () => ({ verdict: true }) });
-    surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false });
-    const out = await executeTool('capture_lead', { call_summary: 'For the Venice rental.', estimate_requested: true, city: 'Venice' }, ctx);
-    expect(out).toMatch(/still missing: address_line1/);
-    expect(notePromise).not.toHaveBeenCalled();
-    // The card write carries the session's claim nonce, so it is fenced against a takeover.
-    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ callSid: 'CA-acct-1', sessionKey: 'sk-1' });
-  });
-
-  test('a capture that opens a LEAD gets no account defaults: a customer still in the lead pipeline, or a different person on the line, is asked', async () => {
-    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', customerId: 'c-1', created: true });
-    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => ({ ...ACCOUNT, pipeline_stage: 'estimate_sent' }) }) }) }));
-    const lead = await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, fullTier());
-    expect(lead).toMatch(/still missing: first_name, last_name, email, address_line1/);
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: null, address_line1: null, quote_promised: false });
-
-    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => ({ ...ACCOUNT, pipeline_stage: 'active_customer' }) }) }) }));
-    const other = await executeTool('capture_lead', { call_summary: 'Their tenant wants an estimate.', estimate_requested: true, first_name: 'Robin' }, fullTier());
-    expect(other).toMatch(/still missing: last_name, email, address_line1/);
-  });
-
-  test('a recognised-only caller gets nothing filled, and an ordinary capture never reads the account', async () => {
-    const relayAlert = require('../services/voice-agent/relay-alert');
-    const bell = jest.spyOn(relayAlert, 'alertOfficeContactFollowUp').mockResolvedValue(true);
-    const noteEstimateFields = jest.fn();
-    await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, fullTier({ customerTier: 'redacted', noteEstimateFields }));
-    expect(noteEstimateFields).toHaveBeenCalledWith(expect.objectContaining({ first_name: null, email: null, address_line1: null }));
-    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
-    customerReads = 0;
-    await executeTool('capture_lead', { call_summary: 'Just a note.' }, fullTier());
+    const out = await executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, requested_service: 'Lawn Care Program' }, fullTier({ noteEstimateFields }));
     expect(customerReads).toBe(0);
-    bell.mockRestore();
+    expect(noteEstimateFields).toHaveBeenCalledWith(expect.objectContaining({ first_name: null, email: null, address_line1: null }));
+    expect(out).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
   });
 });
 
@@ -252,6 +101,7 @@ describe('the exception lives at system priority, only when the caller-context l
     const { buildBasePrompt } = require('../services/voice-agent/relay-conversation');
     expect(buildBasePrompt(true)).toMatch(/is the exception to gathering a name, address and\s+email/);
     expect(buildBasePrompt(true)).toMatch(/start of the call or partway through/);
+    expect(buildBasePrompt(true)).toMatch(/written estimate is the one case where you\s+still confirm the email and service address/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });
