@@ -101,7 +101,36 @@ async function correctInvoiceAddress(trx, invoiceId, input) {
   return { invoice, before, after };
 }
 
+/**
+ * correctInvoiceAddress plus its critical before/after audit row in ONE
+ * transaction — the single writer behind PUT /api/admin/invoices/:id/receipt-address
+ * and the Intelligence Bar's correct_invoice_address, so a correction can
+ * never land without its audit row. `conn` is the knex handle; `actor` is
+ * { actorId, ip, userAgent, via? } (via marks a non-route surface). Resolves
+ * the correction, or null for an unknown invoice.
+ */
+async function correctInvoiceAddressAudited(conn, invoiceId, input, { actorId = null, ip = null, userAgent = null, via = null } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  return conn.transaction(async (trx) => {
+    const corrected = await correctInvoiceAddress(trx, invoiceId, input);
+    if (!corrected) return null;
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'invoice.address.correct',
+      resource_type: 'invoice',
+      resource_id: corrected.invoice.id,
+      metadata: { customerId: corrected.invoice.customer_id, before: corrected.before, after: corrected.after, ...(via ? { via } : {}) },
+      ip_address: ip,
+      user_agent: userAgent,
+      critical: true,
+      trx,
+    });
+    return corrected;
+  });
+}
+
 module.exports = {
   invoiceAddressSnapshot, invoiceCustomerAddress, freezeCustomerInvoiceAddresses,
-  normalizeInvoiceAddressInput, getInvoiceDisplayedAddress, correctInvoiceAddress, correctedInvoiceAddress,
+  normalizeInvoiceAddressInput, getInvoiceDisplayedAddress, correctInvoiceAddress, correctInvoiceAddressAudited, correctedInvoiceAddress,
 };

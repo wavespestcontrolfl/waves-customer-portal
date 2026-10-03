@@ -55,6 +55,10 @@ const { executionOutcome } = require('./outcomes');
 //     message, irreversible; Codex r5)
 //   - every external_action: send_sms, reply_via_sms, send_email_reply,
 //     review requests and replies, block_sender, outside-service writes
+//   - remove_saved_payment_method (Stripe detach, optional Auto Pay-off,
+//     customer emails) and correct_invoice_address (rewrites the address a
+//     customer-facing receipt prints; money-domain document) — both always
+//     carded, owner 2026-10-03
 const OWNER_DIRECT_TOOL_NAMES = new Set([
   'update_lead_contact',
   'update_lead_status',
