@@ -16,6 +16,13 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// The shared resend writer runs on the REAL queue below; only its senders are stubbed.
+const mockSendReceiptEmail = jest.fn();
+jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
+const mockSendReceiptSms = jest.fn();
+jest.mock('../services/invoice', () => ({ sendReceipt: (...a) => mockSendReceiptSms(...a) }));
+jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => ({ closed: false, reason: 'gate_off' })) }));
+
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const jobsMigration = require('../models/migrations/20260530000001_payment_plans_and_receipt_delivery_jobs');
@@ -50,7 +57,10 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
-    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id'); });
+    await mockPg.schema.createTable('invoices', (t) => {
+      t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id');
+      t.string('status'); t.uuid('customer_id'); t.string('invoice_number'); t.text('receipt_memo');
+    });
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -316,5 +326,75 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(operatorHeld)).toEqual({ inFlight: true, byOperator: true });
     const drainHeld = await seedJob({ status: 'running', locked_at: new Date(), locked_by: 'host:123' });
     expect(await claimReceiptJobForOperatorSend(drainHeld)).toEqual({ inFlight: true, byOperator: false });
+  });
+
+  describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
+    test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
+      const invoiceId = await seedJob({ status: 'retry_scheduled' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, emailResult: { ok: false, error: 'timeout' }, holdForReconciliation: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', locked_by: null, locked_at: null, email_result: { ok: false, error: 'timeout' }, last_error: expect.stringMatching(/held for reconciliation/) });
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+    });
+
+    test('a job another path enqueued during the claim is held too; a row the claim created alone still goes away', async () => {
+      const taken = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(taken);
+      await enqueueReceiptDelivery({ invoiceId: taken, source: 'ib_closeout_repair' });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
+      expect(await job(taken)).toMatchObject({ status: 'failed', source: 'ib_closeout_repair' });
+      const alone = randomUUID();
+      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(alone), { emailDelivered: false, holdForReconciliation: true });
+      expect(await job(alone)).toBeUndefined();
+    });
+
+    test('a delivered email still completes the job — hold only applies to an undelivered one', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true }, holdForReconciliation: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
+    });
+
+    describe('through sendInvoiceReceipt (the Invoices route and the IB tool share it)', () => {
+      const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+      async function paidInvoiceWithQueuedJob() {
+        const id = await seedJob();
+        await mockPg('invoices').insert({ id, status: 'paid', customer_id: randomUUID(), invoice_number: 'WPC-2026-0900', receipt_sent_at: new Date('2026-10-02T18:14:00Z') });
+        return id;
+      }
+      beforeEach(() => { mockSendReceiptEmail.mockReset(); mockSendReceiptSms.mockReset(); });
+
+      test('tool (holdUnknownOutcome): an email timeout parks the queued automatic job so the worker cannot email again', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockRejectedValue(new Error('timeout of 10000ms exceeded'));
+        const out = await sendInvoiceReceipt(id, { via: 'email', holdUnknownOutcome: true });
+        expect(out.body).toMatchObject({ ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' } });
+        expect(await job(id)).toMatchObject({ status: 'failed', last_error: expect.stringMatching(/held for reconciliation/) });
+        expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(id);
+      });
+
+      test('route default: the same timeout hands the job back as it always did', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockRejectedValue(new Error('timeout of 10000ms exceeded'));
+        await sendInvoiceReceipt(id, { via: 'email' });
+        expect(await job(id)).toMatchObject({ status: 'queued', locked_by: null });
+      });
+
+      test('tool: a definite (non-timeout) failure still hands the job back — nothing is unknown', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
+        await sendInvoiceReceipt(id, { via: 'email', holdUnknownOutcome: true });
+        expect(await job(id)).toMatchObject({ status: 'queued' });
+      });
+
+      test('tool: a text timeout with the email not delivered also holds the job', async () => {
+        const id = await paidInvoiceWithQueuedJob();
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
+        mockSendReceiptSms.mockRejectedValue(new Error('ETIMEDOUT'));
+        await sendInvoiceReceipt(id, { via: 'both', holdUnknownOutcome: true });
+        expect(await job(id)).toMatchObject({ status: 'failed' });
+      });
+    });
   });
 });

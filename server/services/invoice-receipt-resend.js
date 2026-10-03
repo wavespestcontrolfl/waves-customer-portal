@@ -10,11 +10,21 @@
  * `via`: 'email' | 'sms' | 'both' (default 'both'); `memo` ≤400 chars.
  * `sawUnsent` (optional): the receipt state the caller's own card showed;
  * defaults to the live row's, as the route has always derived it.
+ * `holdUnknownOutcome` (the IB tool; the route leaves it off): when a leg's
+ * provider outcome is unknown and nothing was recorded delivered, the claimed
+ * automatic receipt job is parked for reconciliation instead of handed back to
+ * the drain, which would send again (see releaseOperatorReceiptClaim).
+ * Besides `{status, body}` the result carries `closeout`: what the visit
+ * closeout ahead of the legs reported (never part of the route's body).
  */
 const db = require('../models/db');
 const logger = require('./logger');
 
-async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent } = {}) {
+// A provider that never answered: the leg may or may not have gone out.
+const UNKNOWN_OUTCOME_RE = /timed?[ -]?out|ETIMEDOUT|ESOCKET|ECONNRESET|socket hang up/i;
+const isUnknownOutcome = (error) => UNKNOWN_OUTCOME_RE.test(String(error || ''));
+
+async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent, holdUnknownOutcome = false } = {}) {
   const id = invoiceId;
   if (!['email', 'sms', 'both'].includes(via)) {
     return { status: 400, body: { error: "via must be 'email', 'sms', or 'both'" } };
@@ -55,6 +65,7 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
 
   let emailResult = { ok: false, skipped: true };
   let smsResult = { ok: false, skipped: true };
+  let closeout = null;
 
   try {
     // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
@@ -64,7 +75,7 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     // email-only resend retries too; a completed visit refuses quietly.
     {
       const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-      await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
+      closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
     }
 
     if (via === 'email' || via === 'both') {
@@ -95,7 +106,12 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
       });
     }
   } finally {
-    await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult });
+    const holdForReconciliation = holdUnknownOutcome && emailResult.ok !== true
+      && [emailResult, smsResult].some((leg) => leg.ok === false && isUnknownOutcome(leg.error));
+    await releaseOperatorReceiptClaim(claim, {
+      emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult,
+      ...(holdForReconciliation ? { holdForReconciliation } : {}),
+    });
   }
 
   if (emailResult.ok || smsResult.ok) {
@@ -117,7 +133,8 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
       sms: smsResult,
       invoice: updated,
     },
+    closeout,
   };
 }
 
-module.exports = { sendInvoiceReceipt };
+module.exports = { sendInvoiceReceipt, isUnknownOutcome };

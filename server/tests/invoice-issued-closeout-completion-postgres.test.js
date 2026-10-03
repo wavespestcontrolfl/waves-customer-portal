@@ -68,11 +68,14 @@ describe('source contracts', () => {
     expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,3200}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
     expect(source).toMatch(/if \(err && err\.code === 'issued_invoice_not_reusable'\) \{\s*\n\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
   });
-  test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+  test('the operator\'s resend-receipt writer is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
+    // The route and the IB resend_receipt tool share this one writer.
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    expect(route).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,600}await sendInvoiceReceipt\(req\.params\.id/);
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice-receipt-resend.js'), 'utf8');
     // After the receipt-job claim (a queued receipt cannot deliver during the
     // closeout), before either leg.
-    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: !invoice\.receipt_sent_at \}\)[\s\S]{0,2000}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
+    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: sawUnsent \?\? !invoice\.receipt_sent_at \}\)[\s\S]{0,2000}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');

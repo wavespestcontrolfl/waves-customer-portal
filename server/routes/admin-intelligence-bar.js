@@ -821,6 +821,7 @@ const PINNED_DISPLAY_BUILDERS = {
       send_by: preview.channels,
       to: preview.recipients,
       ...(preview.memo ? { memo: preview.memo } : {}),
+      ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
     }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts

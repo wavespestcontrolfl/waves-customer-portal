@@ -15,6 +15,11 @@
  *                 the preview, then hands its `_version` to the executor), then
  *                 calls the shared writer and reports each channel honestly.
  *
+ * The shared writer first runs the visit closeout (GATE_INVOICE_ISSUED_CLOSES_VISIT,
+ * the Invoices button's own behavior): with the gate on, a linked live visit is
+ * completed even if both legs then fail. The card names that visit (the closeout
+ * service's own would-close check), it is pinned, and the result reports the outcome.
+ *
  * Recipients come from the closeout-repair receipt resolvers
  * (receiptRecipients, resend mode: the manual send's own email resolver, so the
  * card never names a different inbox than the send). A provider timeout is
@@ -28,7 +33,8 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { receiptRecipients, receiptRecipientsKey, maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
+const { sendInvoiceReceipt, isUnknownOutcome } = require('../invoice-receipt-resend');
+const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
 const { expectedEmailSkip } = require('../receipt-delivery-queue');
 
 const VIA_LABEL = { email: 'email only', sms: 'text only', both: 'email and text' };
@@ -105,6 +111,12 @@ async function buildPlan(input) {
   }
 
   const { invoice } = who;
+  let closeout;
+  try {
+    closeout = await issuedCloseoutTarget(invoice, { trigger: 'paid' });
+  } catch {
+    return { error: 'A receipt cannot be sent: the linked visit\'s closeout could not be checked.', code: 'resend_blocked', invoice_id: target.id };
+  }
   const sentAt = invoice.receipt_sent_at ? new Date(invoice.receipt_sent_at) : null;
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name');
   return {
@@ -122,12 +134,17 @@ async function buildPlan(input) {
     channels: VIA_LABEL[via],
     recipients: reach(who, via),
     ...(memo ? { memo } : {}),
+    ...(closeout ? {
+      visit_closeout: `Also completes the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}${closeout.resuming ? ' (finishing a closeout already started)' : ''}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`,
+    } : {}),
     _version: {
       invoice_id: invoice.id,
       via,
       amount: who.amount,
       recipients_key: receiptRecipientsKey(who),
       memo,
+      // The linked visit the closeout would complete (null = none).
+      closeout_visit: closeout?.visitId || null,
       // The instant the card showed (null = unsent): a stamp since is drift.
       receipt_state: sentAt ? `sent:${sentAt.getTime()}` : 'unsent',
     },
@@ -146,15 +163,13 @@ const SMS_REASONS = {
   'already-sent': 'already sent',
 };
 const EXPECTED_SMS_SKIPS = new Set(['channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', 'payer_billed', 'no-phone']);
-// The provider never answered: the receipt may or may not have gone out.
-const TIMEOUT_RE = /time[d ]?-?out|ETIMEDOUT|ESOCKET|ECONNRESET|socket hang up/i;
 
 function channelOutcome(requested, result, { reasons = {}, isExpectedSkip }) {
   if (!requested) return { status: 'not_requested' };
   if (result?.ok) return { status: 'sent' };
   const raw = String(result?.error || 'not sent').slice(0, 160);
-  if (TIMEOUT_RE.test(raw)) {
-    return { status: 'unknown', detail: 'the provider did not answer — the receipt may or may not have gone out; check before sending again, it is not retried' };
+  if (isUnknownOutcome(raw)) {
+    return { status: 'unknown', detail: 'the provider did not answer — the receipt may or may not have gone out; it is not retried, and a queued automatic receipt is held so it cannot send it again; check before sending again' };
   }
   return { status: 'not_sent', detail: reasons[raw] || raw, expected: isExpectedSkip(raw) };
 }
@@ -169,8 +184,10 @@ async function commit(input, actionContext) {
     return { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
-  const { status, body } = await sendInvoiceReceipt(version.invoice_id, {
+  const { status, body, closeout } = await sendInvoiceReceipt(version.invoice_id, {
     memo: version.memo, via: version.via, actorTechnicianId: actionContext?.technicianId || null,
+    // An unknown provider outcome parks a claimed automatic job instead of re-queuing it.
+    holdUnknownOutcome: true,
     // The receipt state the card showed (the writer's claim refuses a stamp that landed since).
     sawUnsent: version.receipt_state === 'unsent',
   });
@@ -181,19 +198,29 @@ async function commit(input, actionContext) {
   const text = channelOutcome(version.via !== 'email', body.sms, { reasons: SMS_REASONS, isExpectedSkip: (raw) => EXPECTED_SMS_SKIPS.has(raw) });
   const legs = [email, text].filter((leg) => leg.status !== 'not_requested');
   const delivered = legs.some((leg) => leg.status === 'sent');
-  const clean = legs.every((leg) => leg.status === 'sent' || (leg.status === 'not_sent' && leg.expected));
+  // The visit closeout that ran ahead of the legs: reported when the card named one or it ran.
+  const visitCloseout = version.closeout_visit || closeout?.closed
+    ? (closeout?.closed
+      ? { status: 'completed', visit_id: closeout.visitId }
+      : { status: 'not_completed', visit_id: version.closeout_visit, detail: String(closeout?.reason || 'not completed') })
+    : null;
+  const clean = legs.every((leg) => leg.status === 'sent' || (leg.status === 'not_sent' && leg.expected))
+    && visitCloseout?.status !== 'not_completed';
   logger.info(`[intelligence-bar:resend-receipt] ${version.invoice_id}: email ${email.status}, text ${text.status}`);
   const result = {
     invoice_id: version.invoice_id,
     invoice_number: plan.invoice_number,
     email,
     text,
+    ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     note: delivered
       ? (clean ? 'The receipt was sent.' : 'Part of the receipt did not go out — see email and text. It is NOT re-sent automatically.')
       : 'The receipt was not sent — see email and text. It is NOT retried automatically.',
   };
   if (delivered) return clean ? { success: true, ...result } : { partial: true, ...result };
   if (legs.some((leg) => leg.status === 'unknown')) return { outcome_unknown: true, error: 'The receipt outcome is unknown — check before sending again.', ...result };
+  // The closeout is a committed effect of its own: a visit completed with no receipt out is partial, not failed.
+  if (visitCloseout?.status === 'completed') return { partial: true, ...result, note: 'The receipt was not sent, but the linked visit was completed — see email, text and visit_closeout. It is NOT retried automatically.' };
   return { error: 'No receipt was sent.', failed: true, ...result };
 }
 

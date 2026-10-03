@@ -25,7 +25,7 @@ const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
 const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+const { sendInvoiceReceipt, isUnknownOutcome } = require('../services/invoice-receipt-resend');
 
 const ID = 'bbbbbbbb-2222-4222-8222-222222222222';
 let invoice;
@@ -92,4 +92,45 @@ test('a thrown email send is a failed leg, not a thrown call', async () => {
   const out = await sendInvoiceReceipt(ID, { via: 'email' });
   expect(out.body.email).toEqual({ ok: false, error: 'provider down' });
   expect(out.body.sms).toEqual({ ok: false, skipped: true });
+});
+
+test('the closeout outcome rides beside the body, never inside it (the route answers with the body only)', async () => {
+  closeOutVisitForIssuedInvoice.mockResolvedValueOnce({ closed: true, visitId: 'visit-1' });
+  const out = await sendInvoiceReceipt(ID, { via: 'email' });
+  expect(out.closeout).toEqual({ closed: true, visitId: 'visit-1' });
+  expect(Object.keys(out.body).sort()).toEqual(['email', 'invoice', 'ok', 'sms']);
+});
+
+describe('holdUnknownOutcome — only the tool opts in; the route keeps handing the job back', () => {
+  const unknownEmail = () => sendReceiptEmail.mockRejectedValueOnce(new Error('timeout of 10000ms exceeded'));
+
+  test('what counts as an unknown outcome', () => {
+    for (const e of ['timeout of 10000ms exceeded', 'ETIMEDOUT', 'socket hang up', 'Request timed out', 'ECONNRESET']) expect(isUnknownOutcome(e)).toBe(true);
+    for (const e of ['PDF generation failed', 'no-phone', undefined, '']) expect(isUnknownOutcome(e)).toBe(false);
+  });
+
+  test('default (the route): the claim is released with no hold flag at all', async () => {
+    unknownEmail();
+    await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(releaseOperatorReceiptClaim.mock.calls[0][1]).not.toHaveProperty('holdForReconciliation');
+  });
+
+  test('opt-in: an unknown email or text outcome with the email undelivered holds the job', async () => {
+    unknownEmail();
+    await sendInvoiceReceipt(ID, { via: 'email', holdUnknownOutcome: true });
+    expect(releaseOperatorReceiptClaim).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ holdForReconciliation: true }));
+    sendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'PDF generation failed' });
+    InvoiceService.sendReceipt.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    await sendInvoiceReceipt(ID, { via: 'both', holdUnknownOutcome: true });
+    expect(releaseOperatorReceiptClaim).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ holdForReconciliation: true }));
+  });
+
+  test('opt-in but nothing unknown, or the email was delivered: no hold', async () => {
+    sendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'PDF generation failed' });
+    await sendInvoiceReceipt(ID, { via: 'email', holdUnknownOutcome: true });
+    expect(releaseOperatorReceiptClaim.mock.calls[0][1]).not.toHaveProperty('holdForReconciliation');
+    InvoiceService.sendReceipt.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    await sendInvoiceReceipt(ID, { via: 'both', holdUnknownOutcome: true });
+    expect(releaseOperatorReceiptClaim.mock.calls[1][1]).not.toHaveProperty('holdForReconciliation');
+  });
 });

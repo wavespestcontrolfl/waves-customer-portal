@@ -23,7 +23,11 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
   expectedEmailSkip: jest.requireActual('../services/receipt-delivery-queue').expectedEmailSkip,
 }));
-jest.mock('../services/invoice-receipt-resend', () => ({ sendInvoiceReceipt: jest.fn() }));
+jest.mock('../services/invoice-receipt-resend', () => ({
+  sendInvoiceReceipt: jest.fn(),
+  isUnknownOutcome: jest.requireActual('../services/invoice-receipt-resend').isUnknownOutcome,
+}));
+jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
 jest.mock('../services/customer-credit', () => ({ customerAutoApplyEnabled: jest.fn(async () => true), getBalance: jest.fn(async () => 25) }));
 
@@ -32,6 +36,7 @@ const Invoice = require('../services/invoice');
 const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
 const { receiptEmailOptOutState } = require('../services/receipt-delivery-queue');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -72,7 +77,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation(fakeDb({}));
   resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Pat@Example.com' }, customer: CUSTOMER });
-  sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } } });
+  issuedCloseoutTarget.mockResolvedValue(null);
+  sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null });
 });
 
 test('registered as an admin-only carded write with a uuid selector and the customer-contact label', () => {
@@ -173,7 +179,10 @@ describe('plain refusals — nothing previewed, nothing sent', () => {
 test('confirmed: sends through the shared writer with the pinned channels, memo and unsent state, and says so per channel', async () => {
   const result = await confirm({ via: 'both', memo: '  Thanks for your business  ' });
   expect(sendInvoiceReceipt).toHaveBeenCalledTimes(1);
-  expect(sendInvoiceReceipt).toHaveBeenCalledWith(INV, { memo: 'Thanks for your business', via: 'both', actorTechnicianId: 'admin-1', sawUnsent: true });
+  // An unknown provider outcome must park a claimed automatic job, not re-queue it.
+  expect(sendInvoiceReceipt).toHaveBeenCalledWith(INV, { memo: 'Thanks for your business', via: 'both', actorTechnicianId: 'admin-1', sawUnsent: true, holdUnknownOutcome: true });
+  // No linked visit to close: the card and result say nothing about one.
+  expect(result.visit_closeout).toBeUndefined();
   expect(result).toEqual(expect.objectContaining({ success: true, email: { status: 'sent' }, text: { status: 'sent' } }));
   expect(executionOutcome(result)).toBe('completed');
 });
@@ -275,6 +284,77 @@ describe('honest per-channel results', () => {
     sendInvoiceReceipt.mockRejectedValue(new Error('connection lost'));
     const out = await confirm({});
     expect(out).toEqual(expect.objectContaining({ outcome_unknown: true, code: 'execution_interrupted' }));
+  });
+});
+
+describe('the visit closeout the shared writer runs ahead of the legs', () => {
+  const VISIT = { visitId: '00000000-0000-0000-0000-00000000f0a1', serviceType: 'Pest Control', date: '2026-09-30', resuming: false };
+
+  test('gate off or nothing to close: the card says nothing extra and the pin carries no visit', async () => {
+    const preview = await run({});
+    expect(preview.visit_closeout).toBeUndefined();
+    expect(preview._version.closeout_visit).toBeNull();
+    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { trigger: 'paid' });
+  });
+
+  test('a visit the closeout would complete is named on the card, shown in the contract, and pinned', async () => {
+    issuedCloseoutTarget.mockResolvedValue(VISIT);
+    const preview = await run({});
+    expect(preview.visit_closeout).toBe('Also completes the linked visit — Pest Control on 2026-09-30: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge');
+    expect(preview._version.closeout_visit).toBe(VISIT.visitId);
+    const contract = buildContract({ toolName: 'resend_receipt', params: { invoice_id: INV }, preview });
+    expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/Also completes the linked visit — Pest Control on 2026-09-30/);
+    issuedCloseoutTarget.mockResolvedValue({ ...VISIT, resuming: true });
+    expect((await run({})).visit_closeout).toMatch(/finishing a closeout already started/);
+  });
+
+  test('drift: the visit appearing, changing or disappearing after the card refuses and sends nothing', async () => {
+    const appeared = async (before, after) => {
+      issuedCloseoutTarget.mockResolvedValue(before);
+      const preview = await run({});
+      issuedCloseoutTarget.mockResolvedValue(after);
+      return run({ confirmed: true, _verified_receipt_version: preview._version }, { technicianId: 'admin-1' });
+    };
+    expect((await appeared(null, VISIT)).preview_changed).toBe(true);
+    expect((await appeared(VISIT, { ...VISIT, visitId: '00000000-0000-0000-0000-00000000f0a2' })).preview_changed).toBe(true);
+    expect((await appeared(VISIT, null)).preview_changed).toBe(true);
+    expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+  });
+
+  test('the closeout probe failing blocks the card (fail closed)', async () => {
+    issuedCloseoutTarget.mockRejectedValue(new Error('profile read failed'));
+    const out = await run({});
+    expect(out.error).toMatch(/closeout could not be checked/);
+    expect(out.preview).toBeUndefined();
+  });
+
+  test('the result reports the closeout outcome, including a visit completed while no receipt went out', async () => {
+    issuedCloseoutTarget.mockResolvedValue(VISIT);
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    const ok = await confirm({});
+    expect(ok).toEqual(expect.objectContaining({ success: true, visit_closeout: { status: 'completed', visit_id: VISIT.visitId } }));
+
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, error: 'no-phone' } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    const none = await confirm({});
+    expect(none.partial).toBe(true);
+    expect(none.failed).toBeUndefined();
+    expect(none.visit_closeout).toEqual({ status: 'completed', visit_id: VISIT.visitId });
+    expect(none.note).toMatch(/linked visit was completed/);
+    expect(executionOutcome(none)).toBe('partially_completed');
+
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: false, reason: 'visit_in_future', visitId: VISIT.visitId } });
+    const refused = await confirm({});
+    expect(refused.partial).toBe(true);
+    expect(refused.visit_closeout).toEqual({ status: 'not_completed', visit_id: VISIT.visitId, detail: 'visit_in_future' });
+  });
+
+  test('an unknown outcome with a completed visit stays outcome-unknown and still reports the visit', async () => {
+    issuedCloseoutTarget.mockResolvedValue(VISIT);
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' }, sms: { ok: false, skipped: true } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    const out = await confirm({ via: 'email' });
+    expect(out.outcome_unknown).toBe(true);
+    expect(out.visit_closeout.status).toBe('completed');
+    expect(out.email.detail).toMatch(/held so it cannot send it again/);
   });
 });
 

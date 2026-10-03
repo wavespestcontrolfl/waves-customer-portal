@@ -553,9 +553,24 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 // it was — it still owes the email — and a row the claim itself created is
 // removed, or queued if an enqueue took it over. Scoped to this claim's
 // token; a failure logs and leaves the row to recoverStaleLocks.
-async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null } = {}) {
+// holdForReconciliation (the IB resend_receipt tool, when a leg's provider
+// outcome is unknown): nothing was recorded as delivered, but a leg may have
+// gone out, so the job is NOT handed back to the drain — it is parked as
+// 'failed' (the status the drain and the claim never pick up; closeout status
+// reads it as a failed delivery) for a person to reconcile. Default off: the
+// Invoices route hands the job back as it always did.
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false } = {}) {
   if (!claim?.id) return;
   const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
+  const heldForReconciliation = {
+    status: 'failed',
+    sms_result: smsResult,
+    email_result: emailResult,
+    last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
+    locked_at: null,
+    locked_by: null,
+    updated_at: db.fn.now(),
+  };
   try {
     // Anything delivered stamps the invoice first (the caller's own stamp may
     // have failed) — before a job is handed back, so its text leg skips. If
@@ -576,11 +591,14 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
       });
     } else if (!claim.prior) {
       // A row the claim created goes away — unless an enqueue took it over
-      // meanwhile (source no longer 'operator_send'): that job is now due.
+      // meanwhile (source no longer 'operator_send'): that job is now due
+      // (or held, when the outcome of this send is unknown).
       const removed = await mine().where({ source: 'operator_send' }).del();
       if (!removed) {
-        await mine().update({ status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() });
+        await mine().update(holdForReconciliation ? heldForReconciliation : { status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() });
       }
+    } else if (holdForReconciliation) {
+      await mine().update(heldForReconciliation);
     } else {
       await mine().update({
         status: claim.prior.status,
