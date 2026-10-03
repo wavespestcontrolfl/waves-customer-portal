@@ -18,7 +18,6 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   applyVerifiedOverrides: jest.fn((record) => record),
   saveLookup: jest.fn(async () => {}),
   attachCommercialSuiteSizeToCachedLookup: jest.fn(async () => {}),
-  attachBusinessIdentityToCachedLookup: jest.fn(async () => {}),
   addressKey: jest.fn((address) => ({ hash: `hash:${String(address).length}` })),
 }));
 jest.mock('../services/property-lookup/fema-nfhl', () => ({ lookupFloodZoneByPoint: jest.fn(async () => null) }));
@@ -41,7 +40,7 @@ jest.mock('../services/commercial-suite-size', () => {
 
 const { performPropertyLookup, _private } = require('../routes/property-lookup-v2');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
-const { saveLookup, attachBusinessIdentityToCachedLookup } = require('../services/property-lookup/lookup-cache');
+const { saveLookup } = require('../services/property-lookup/lookup-cache');
 
 const ADDRESS = '100 Example Plaza Dr, Examplecity, FL 00000';
 const savedFetch = global.fetch;
@@ -309,74 +308,94 @@ describe('gate on', () => {
   });
 });
 
-describe('the cache', () => {
+describe('nothing from Places is stored', () => {
   beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
 
-  test('a fresh lookup stamps the identity on the record saveLookup serializes', async () => {
-    await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+  test('a fresh lookup saves a record with no identity on it', async () => {
+    const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+    expect(result.enriched.serviceScopeDecision).toBe('scope_unresolved');
     expect(saveLookup).toHaveBeenCalledTimes(1);
     const [, saved] = saveLookup.mock.calls[0];
-    expect(saved.propertyRecord._businessIdentity).toMatchObject({
-      source: 'google_places', tenantsAtNumber: 1, matched: expect.objectContaining({ placeId: 'places/EXAMPLE1' }),
-    });
-    expect(Date.parse(saved.propertyRecord._businessIdentity.fetchedAt)).not.toBeNaN();
+    expect(saved.propertyRecord).not.toHaveProperty('_businessIdentity');
+    expect(JSON.stringify(saved.propertyRecord)).not.toMatch(/Example Nail Bar|nail_salon/);
   });
 
   describe('a cache hit', () => {
     const { buildResultFromCachedLookup } = _private;
     const row = (record) => ({ property_record: record, ai_analysis: null, lat: 27.4, lng: -82.5 });
-    const stamp = (ageMs) => ({
-      source: 'google_places', fetchedAt: new Date(Date.now() - ageMs).toISOString(), radiusM: 60,
-      matched: { placeId: 'places/EXAMPLE1', name: 'Example Nail Bar', primaryType: 'nail_salon', type: 'salon_spa', subpremise: null },
-      matchedCount: 1, ambiguous: false, tenantsAtNumber: 1, neighbors: 3,
-    });
 
-    test('reuses a fresh stamp with zero network', async () => {
-      const result = await buildResultFromCachedLookup(ADDRESS, row({ ...noCountyRecord(), _businessIdentity: stamp(1000) }), null, Date.now(), { commercialSuiteSizing: true });
-      expect(placesFetch).not.toHaveBeenCalled();
-      expect(result.enriched.serviceScopeDecision).toBe('scope_unresolved');
-    });
-
-    test('re-asks Places for a stamp older than 30 days and persists the new answer', async () => {
-      const old = stamp(31 * 24 * 60 * 60 * 1000);
-      const record = { ...noCountyRecord(), _businessIdentity: old };
+    test('asks Places again every time and leaves the cached record untouched', async () => {
+      const record = noCountyRecord();
+      const first = await buildResultFromCachedLookup(ADDRESS, row(record), null, Date.now(), { commercialSuiteSizing: true });
       await buildResultFromCachedLookup(ADDRESS, row(record), null, Date.now(), { commercialSuiteSizing: true });
-      expect(placesFetch).toHaveBeenCalledTimes(1);
-      expect(attachBusinessIdentityToCachedLookup).toHaveBeenCalledTimes(1);
-      expect(record._businessIdentity.fetchedAt).not.toBe(old.fetchedAt);
+      expect(placesFetch).toHaveBeenCalledTimes(2);
+      expect(first.enriched.serviceScopeDecision).toBe('scope_unresolved');
+      expect(record).not.toHaveProperty('_businessIdentity');
     });
 
-    test('a row with no stamp is asked once and backfilled', async () => {
-      await buildResultFromCachedLookup(ADDRESS, row(noCountyRecord()), null, Date.now(), { commercialSuiteSizing: true });
+    test('an identity left on an old cached record is never read', async () => {
+      placesReply = () => ({ ok: true, status: 200, json: async () => ({ places: [] }) });
+      const leftover = {
+        source: 'google_places', fetchedAt: new Date().toISOString(), radiusM: 60,
+        matched: { placeId: 'places/EXAMPLE1', name: 'Example Nail Bar', primaryType: 'nail_salon', type: 'salon_spa', subpremise: null },
+        matchedCount: 1, ambiguous: false, tenantsAtNumber: 1, neighbors: 3,
+      };
+      const result = await buildResultFromCachedLookup(ADDRESS, row({ ...noCountyRecord(), _businessIdentity: leftover }), null, Date.now(), { commercialSuiteSizing: true });
       expect(placesFetch).toHaveBeenCalledTimes(1);
-      expect(attachBusinessIdentityToCachedLookup).toHaveBeenCalledWith(ADDRESS, expect.objectContaining({ source: 'google_places' }));
+      for (const key of NEW_KEYS) expect(result.enriched).not.toHaveProperty(key);
     });
 
-    test('persist:false never writes the backfill, and cacheOnly never asks', async () => {
-      await buildResultFromCachedLookup(ADDRESS, row(noCountyRecord()), null, Date.now(), { commercialSuiteSizing: true, persist: false });
-      expect(attachBusinessIdentityToCachedLookup).not.toHaveBeenCalled();
-      placesFetch.mockClear();
+    test('cacheOnly never asks', async () => {
       await buildResultFromCachedLookup(ADDRESS, row(noCountyRecord()), null, Date.now(), { commercialSuiteSizing: true, cacheOnly: true });
       expect(placesFetch).not.toHaveBeenCalled();
     });
 
-    test('the CSR\'s occupancy answer re-runs the decision on the cached identity', async () => {
-      const record = { ...noCountyRecord(), _businessIdentity: stamp(1000) };
-      const asked = await buildResultFromCachedLookup(ADDRESS, row(record), null, Date.now(), { commercialSuiteSizing: true });
-      expect(asked.enriched.serviceScopeDecision).toBe('scope_unresolved');
-      const answered = await buildResultFromCachedLookup(ADDRESS, row({ ...noCountyRecord(), _businessIdentity: stamp(1000) }), null, Date.now(), {
+    test('the CSR\'s occupancy answer decides the scope', async () => {
+      const answered = await buildResultFromCachedLookup(ADDRESS, row(noCountyRecord()), null, Date.now(), {
         commercialSuiteSizing: true, occupancyAnswer: 'suite',
       });
       expect(answered.enriched.serviceScopeDecision).toBe('commercial_suite');
       expect(answered.enriched.homeSqFt).toBe(1200);
-      expect(placesFetch).not.toHaveBeenCalled();
     });
 
-    test('a stamp on a residential county record is ignored', async () => {
-      const result = await buildResultFromCachedLookup(ADDRESS, row({ ...residentialCountyRecord(), _businessIdentity: stamp(1000) }), null, Date.now(), { commercialSuiteSizing: true });
+    test('a residential county record is never asked about', async () => {
+      const result = await buildResultFromCachedLookup(ADDRESS, row(residentialCountyRecord()), null, Date.now(), { commercialSuiteSizing: true });
+      expect(placesFetch).not.toHaveBeenCalled();
       expect(result.enriched.category).toBe('RESIDENTIAL');
       for (const key of NEW_KEYS) expect(result.enriched).not.toHaveProperty(key);
     });
+  });
+});
+
+describe('the lookup time budget', () => {
+  const { prepareBusinessIdentity } = _private;
+  const input = (budgetMs) => ({
+    record: noCountyRecord(), aiAnalysis: null, address: ADDRESS, lat: 27.4, lng: -82.5, options: { commercialSuiteSizing: true }, budgetMs,
+  });
+  beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
+
+  test('with too little of the lookup budget left the leg is skipped, not started', async () => {
+    expect(await prepareBusinessIdentity(input(0))).toBeNull();
+    expect(await prepareBusinessIdentity(input(299))).toBeNull();
+    expect(placesFetch).not.toHaveBeenCalled();
+  });
+
+  test('a short remaining budget caps the request; it never waits past it', async () => {
+    placesReply = () => new Promise(() => {});
+    global.fetch = jest.fn((url, init) => new Promise((resolve, reject) => {
+      placesFetch(String(url), init);
+      init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }));
+    const started = Date.now();
+    expect(await prepareBusinessIdentity(input(350))).toBeNull();
+    expect(placesFetch).toHaveBeenCalledTimes(1);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test('no deadline (accuracy mode) or plenty of budget asks as usual', async () => {
+    expect(await prepareBusinessIdentity(input(null))).toMatchObject({ source: 'google_places' });
+    expect(await prepareBusinessIdentity(input(30000))).toMatchObject({ source: 'google_places' });
+    expect(placesFetch).toHaveBeenCalledTimes(2);
   });
 });
 

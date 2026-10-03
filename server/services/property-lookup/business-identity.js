@@ -20,6 +20,10 @@
  * Privacy: the Places request carries only coordinates and a field mask with
  * no reviews, phone numbers or hours (cost tier + privacy). Nothing here logs
  * a business name or an address — counts and elapsed time only.
+ *
+ * Storage: the Places API policies allow storing a place ID and nothing else,
+ * so the identity lives for ONE request. It is never stamped on the cached
+ * property record; a cache hit asks Places again.
  */
 
 const logger = require('../logger');
@@ -38,9 +42,8 @@ const PLACES_FIELD_MASK = [
 const SEARCH_RADIUS_M = 60;
 const MAX_RESULT_COUNT = 20;
 const DEFAULT_TIMEOUT_MS = 2500;
-// A stamp on the cached property_record is reused for this long, like the
-// DBPR-sourced suite-size stamp (property-lookup-v2.js).
-const IDENTITY_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
+// Below this much time there is no point starting the request.
+const MIN_TIMEOUT_MS = 300;
 
 function timeoutMsFromEnv() {
   const n = Number(process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS);
@@ -278,13 +281,6 @@ function buildBusinessIdentity({ places, address, now = new Date() }) {
   };
 }
 
-/** True while a stamped identity is young enough to reuse with no network. */
-function businessIdentityIsFresh(stamp, now = Date.now()) {
-  if (!stamp || typeof stamp !== 'object') return false;
-  const at = Date.parse(stamp.fetchedAt);
-  return Number.isFinite(at) && (now - at) < IDENTITY_FRESH_MS;
-}
-
 // The request inputs, or null when there is nothing usable to ask with.
 function placesRequestInputs({ address, lat, lng }) {
   const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
@@ -310,6 +306,10 @@ async function fetchPlacesNearby({ key, latN, lngN, timeoutMs, fetchImpl, starte
       },
       body: JSON.stringify({
         maxResultCount: MAX_RESULT_COUNT,
+        // The default ranking is popularity: in a plaza with more than 20
+        // places the business at the point could be cut for busier ones
+        // farther away. Nearest first keeps the address's own tenants.
+        rankPreference: 'DISTANCE',
         locationRestriction: {
           circle: { center: { latitude: latN, longitude: lngN }, radius: SEARCH_RADIUS_M },
         },
@@ -362,7 +362,6 @@ async function identifyBusinessAtAddress({ address, lat, lng, timeoutMs, fetchIm
 module.exports = {
   identifyBusinessAtAddress,
   buildBusinessIdentity,
-  businessIdentityIsFresh,
   businessTypeFor,
   typedStreetParts,
   PLACES_SEARCH_NEARBY_URL,
@@ -370,7 +369,7 @@ module.exports = {
   SEARCH_RADIUS_M,
   MAX_RESULT_COUNT,
   DEFAULT_TIMEOUT_MS,
-  IDENTITY_FRESH_MS,
+  MIN_TIMEOUT_MS,
   TYPE_TO_SUBTYPE,
   SUBTYPE_GENERIC,
 };

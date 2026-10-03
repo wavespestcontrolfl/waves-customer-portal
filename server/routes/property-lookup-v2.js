@@ -27,7 +27,8 @@ const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-
 const { commercialSuiteSizingLive, lookupBusinessIdentityLive } = require('../config/feature-gates');
 const {
   identifyBusinessAtAddress,
-  businessIdentityIsFresh,
+  DEFAULT_TIMEOUT_MS: BUSINESS_IDENTITY_TIMEOUT_MS,
+  MIN_TIMEOUT_MS: BUSINESS_IDENTITY_MIN_TIMEOUT_MS,
 } = require('../services/property-lookup/business-identity');
 const {
   SCOPE: BUSINESS_SCOPE,
@@ -41,7 +42,6 @@ const {
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
   attachCommercialSuiteSizeToCachedLookup,
-  attachBusinessIdentityToCachedLookup,
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
@@ -252,24 +252,20 @@ function businessIdentityKeySuffix(options) {
 // GATE_LOOKUP_BUSINESS_IDENTITY — which operating business is at this
 // address (Google Places). Runs only for the opted-in admin lookup / engine
 // (options.commercialSuiteSizing) with the gate live, and only for a
-// COMMERCIAL lookup or one with no county record. A fresh stamp on the
-// record (`_businessIdentity`, 30 days) is reused with zero network; a
-// fetched answer is stamped on the record so the cache row carries it
-// (`attachToCache` persists it onto an already-cached row). Fail-open: any
-// miss is null and the lookup proceeds exactly as before. Never throws.
-async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, attachToCache = null }) {
+// COMMERCIAL lookup or one with no county record. The answer lives for this
+// request only: the Places API policies allow storing a place ID and nothing
+// else, so it is never stamped on the record or the cache row and a cache
+// hit asks again. `budgetMs` is the time the lookup can still spare (null =
+// no deadline); with too little left the leg is skipped. Fail-open: any miss
+// is null and the lookup proceeds exactly as before. Never throws.
+async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, budgetMs = null }) {
   if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return null;
   try {
     const eligible = detectCategory(record, aiAnalysis) === 'COMMERCIAL' || !hasCountyEvidence(record);
-    if (!eligible) return null;
-    if (businessIdentityIsFresh(record?._businessIdentity)) return record._businessIdentity;
-    if (options.cacheOnly === true) return null;
-    const identity = await identifyBusinessAtAddress({ address, lat, lng });
-    if (identity && record) {
-      record._businessIdentity = identity;
-      if (attachToCache && options.persist !== false) await attachToCache(address, identity);
-    }
-    return identity;
+    if (!eligible || options.cacheOnly === true) return null;
+    if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return null;
+    const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, BUSINESS_IDENTITY_TIMEOUT_MS);
+    return await identifyBusinessAtAddress({ address, lat, lng, timeoutMs });
   } catch (err) {
     logger.warn('[property-lookup] business identity leg failed', { reason: err?.name || 'error' });
     return null;
@@ -1020,8 +1016,12 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
+  // Accuracy-mode lookups have no deadline (like every other leg there); the
+  // rest keep the response margin, so this leg never spends it.
   const businessIdentity = await prepareBusinessIdentity({
     record: result.propertyRecord, aiAnalysis: result.aiAnalysis, address, lat, lng, options,
+    budgetMs: options.prioritizeAccuracy
+      ? null : Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs),
   });
   result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address, profileBuildOptions(options, businessIdentity));
   // Commercial suite sizing (owner ruling 2026-09-25,
@@ -1153,7 +1153,6 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
   const businessIdentity = await prepareBusinessIdentity({
     record, aiAnalysis, address, lat, lng, options,
-    attachToCache: attachBusinessIdentityToCachedLookup,
   });
   const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address, profileBuildOptions(options, businessIdentity));
   // If the cached property_record already carries a resolved suite size
@@ -6022,6 +6021,7 @@ module.exports._private = {
   buildResultFromCachedLookup,
   suiteUnitKeyForProfile,
   occupancyOption,
+  prepareBusinessIdentity,
   cachedAggregateResolvesToOwnUnit,
   cachedUnitFolioStale,
   subdivisionMedianEstimate,

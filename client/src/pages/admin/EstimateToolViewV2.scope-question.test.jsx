@@ -12,7 +12,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 
@@ -126,7 +126,9 @@ describe("scope question", { timeout: 20000 }, () => {
   it("unresolved: the identified business, the question and both answers show; Generate is disabled with the question as its reason", async () => {
     await lookUp();
     const prompt = screen.getByRole("region", { name: "Scope question" });
-    expect(prompt).toHaveTextContent("Google lists Example Nail Bar, a salon or spa, at this address.");
+    expect(prompt).toHaveTextContent("Example Nail Bar, a salon or spa, is listed at this address.");
+    // The Places result carries its required source attribution.
+    expect(within(prompt).getByText("Google Maps", { exact: true })).toBeInTheDocument();
     expect(prompt).toHaveTextContent(QUESTION);
     expect(screen.getByRole("button", { name: "Just their space" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "The whole building" })).toBeEnabled();
@@ -152,6 +154,9 @@ describe("scope question", { timeout: 20000 }, () => {
     fireEvent.click(generate);
     await waitFor(() => expect(calcBodies()).toHaveLength(1));
     expect(calcBodies()[0].profile).toMatchObject({ serviceScopeDecision: "commercial_suite", occupancyAnswer: "suite" });
+    // The listed name stays on the screen: it is not sent on to pricing (or saved).
+    expect(calcBodies()[0].profile.businessIdentity).toMatchObject({ name: null, type: "salon_spa" });
+    expect(JSON.stringify(calcBodies()[0])).not.toContain("Example Nail Bar");
     // Still shows why, and which answer stands.
     expect(screen.getByRole("button", { name: "Just their space" })).toHaveAttribute("aria-pressed", "true");
   });
@@ -179,6 +184,34 @@ describe("scope question", { timeout: 20000 }, () => {
     fireEvent.click(screen.getByRole("button", { name: "Property Lookup", exact: true }));
     await waitFor(() => expect(lookupBodies()).toHaveLength(3));
     expect(lookupBodies()[2].occupancy).toBe("suite");
+  });
+
+  it("a scope the lookup decided by itself still shows both buttons, and staff can change a suite to the whole building", async () => {
+    // Several tenants at the number: the server answers commercial_suite with no question.
+    lookupReply = (body) => (body.occupancy
+      ? answeredProfile(body.occupancy)
+      : { ...answeredProfile("suite"), occupancyAnswer: null });
+    await lookUp();
+    expect(screen.queryByText(QUESTION)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Just their space" })).toHaveAttribute("aria-pressed", "true");
+    const building = screen.getByRole("button", { name: "The whole building" });
+    expect(building).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(building);
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    expect(lookupBodies()[1]).toMatchObject({ address: ADDRESS, occupancy: "building" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "true"));
+  });
+
+  it("Clear All forgets the answer: the same address typed again is asked again", async () => {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Clear All" }));
+    fireEvent.change(screen.getByLabelText("Service address"), { target: { value: ADDRESS } });
+    fireEvent.click(screen.getByRole("button", { name: "Property Lookup", exact: true }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(3));
+    expect(lookupBodies()[2]).not.toHaveProperty("occupancy");
+    expect(await screen.findByText(QUESTION)).toBeInTheDocument();
   });
 
   it("a server 409 COMMERCIAL_SCOPE_UNRESOLVED shows the same prompt and blocks the buttons", async () => {

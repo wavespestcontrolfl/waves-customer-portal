@@ -106,6 +106,14 @@ describe('applyBusinessClassification', () => {
     })).toMatchObject({ category: 'COMMERCIAL', flipped: true });
   });
 
+  test('every residential whole structure the lookup recognizes blocks the flip, whatever the pricing normalizer calls it', () => {
+    for (const recordPricingType of ['mobile_home', 'manufactured_home', 'villa', 'triplex', 'quadplex', 'townhouse', 'Mobile Home']) {
+      expect(applyBusinessClassification({
+        identity: matched(), baseCategory: 'RESIDENTIAL', baseSubtype: null, recordPricingType,
+      })).toMatchObject({ category: 'RESIDENTIAL', flipped: false });
+    }
+  });
+
   test('an already-commercial lookup keeps its category; only a generic subtype is refined', () => {
     expect(applyBusinessClassification({ identity: matched(), baseCategory: 'COMMERCIAL', baseSubtype: 'office_retail' }))
       .toEqual({ category: 'COMMERCIAL', subtype: 'salon_spa', flipped: false, refined: true });

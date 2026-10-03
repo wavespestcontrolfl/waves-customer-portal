@@ -122,8 +122,15 @@ const RESIDENTIAL_PRICING_TYPES = new Set([
   'single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper',
 ]);
 
+// The other residential whole structures the lookup recognizes but the
+// pricing normalizer passes through under their own name (the unit-scope
+// model's whole-structure vocabulary): a mobile or manufactured home, a
+// villa, a triplex or a quadplex is a residence too.
+const RESIDENTIAL_STRUCTURE_RE = /single_?family|duplex|triplex|quadplex|townhou|town_?home|villa|mobile_?home|manufactured/;
+
 function recordBlocksCommercialFlip(recordPricingType) {
-  return RESIDENTIAL_PRICING_TYPES.has(recordPricingType);
+  const type = String(recordPricingType || '').toLowerCase().replace(/[\s-]+/g, '_');
+  return RESIDENTIAL_PRICING_TYPES.has(type) || RESIDENTIAL_STRUCTURE_RE.test(type);
 }
 
 /**

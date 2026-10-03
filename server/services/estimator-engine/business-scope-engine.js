@@ -38,13 +38,17 @@ function lookupBusinessScope(enriched, parcelOk) {
 
 // The call itself says the caller LIVES at the service address: the
 // extraction's own property-role fields (service_address_is_primary_residence
-// true, or occupancy owner_occupied — "we live here"). A relationship like
-// owner or tenant says nothing about living there (a business owner is an
-// owner), so it never counts.
+// true, or occupancy owner_occupied — "we live here" — or seasonal — "our
+// winter place", a home that is not the caller's main one, so the primary
+// residence field is false for it). A relationship like owner or tenant says
+// nothing about living there (a business owner is an owner), so it never
+// counts.
+const LIVES_THERE_OCCUPANCIES = new Set(['owner_occupied', 'seasonal']);
+
 function callerLivesAtAddress(extraction) {
   const property = extraction?.property || {};
   return property.service_address_is_primary_residence === true
-    || property.service_address_occupancy === 'owner_occupied';
+    || LIVES_THERE_OCCUPANCIES.has(property.service_address_occupancy);
 }
 
 /**

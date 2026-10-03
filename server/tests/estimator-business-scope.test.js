@@ -174,6 +174,9 @@ describe('pure helpers', () => {
   test('"lives there" is the extraction\'s own property-role fields, never a relationship', () => {
     expect(callerLivesAtAddress({ property: { service_address_is_primary_residence: true } })).toBe(true);
     expect(callerLivesAtAddress({ property: { service_address_occupancy: 'owner_occupied' } })).toBe(true);
+    // "Our winter place": a home, though not the caller's main one.
+    expect(callerLivesAtAddress({ property: { service_address_occupancy: 'seasonal', service_address_is_primary_residence: false } })).toBe(true);
+    expect(callerLivesAtAddress({ property: { service_address_occupancy: 'commercial' } })).toBe(false);
     expect(callerLivesAtAddress({ property: { service_address_occupancy: 'rental_investment' } })).toBe(false);
     expect(callerLivesAtAddress({ caller: { relationship_to_property: 'owner' } })).toBe(false);
     expect(callerLivesAtAddress(null)).toBe(false);

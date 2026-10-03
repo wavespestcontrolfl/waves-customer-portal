@@ -447,6 +447,10 @@ function buildTurfRequestProfile(baseProfile, form) {
   const dims = formDimensions(form);
   const profile = {
     ...baseProfile,
+    // The listed business name is shown on this screen only. Google's Places
+    // policies allow storing a place ID and nothing else, so the name never
+    // rides into the pricing call or the saved estimate.
+    ...(baseProfile.businessIdentity ? { businessIdentity: { ...baseProfile.businessIdentity, name: null } } : {}),
     homeSqFt: dims.homeSqFt,
     lotSqFt: dims.lotSqFt,
     stories: dims.stories,
@@ -2172,6 +2176,7 @@ export default function EstimateToolViewV2({
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
+    occupancyRef.current = { address: "", answer: "" };
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -3112,6 +3117,7 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(anchorId);
     lookupAbortRef.current?.abort();
     lookupSeqRef.current += 1;
+    occupancyRef.current = { address: "", answer: "" };
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -4366,6 +4372,7 @@ export default function EstimateToolViewV2({
 
   function nextEstimate() {
     if (dirty && !window.confirm("Start another estimate with unsaved changes?")) return;
+    occupancyRef.current = { address: "", answer: "" };
     onStartNew?.();
     // A fresh estimate is OUTSIDE any group build: a stale anchor would make
     // the next unrelated save carry groupWithEstimateId and 400 on the
@@ -5104,6 +5111,9 @@ export default function EstimateToolViewV2({
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
                     setScopeConflict("");
+                    // The scope answer belongs to the estimate it was given
+                    // for: the same address typed again is asked again.
+                    occupancyRef.current = { address: "", answer: "" };
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
                     // The customer linkage survives Clear All (customerId is

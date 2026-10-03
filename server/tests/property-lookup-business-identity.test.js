@@ -11,12 +11,10 @@ const logger = require('../services/logger');
 const {
   identifyBusinessAtAddress,
   buildBusinessIdentity,
-  businessIdentityIsFresh,
   businessTypeFor,
   typedStreetParts,
   PLACES_SEARCH_NEARBY_URL,
   PLACES_FIELD_MASK,
-  IDENTITY_FRESH_MS,
 } = require('../services/property-lookup/business-identity');
 const { defaultSuiteSizeBasis } = require('../services/commercial-suite-size/type-defaults');
 
@@ -63,6 +61,8 @@ describe('request shape', () => {
     expect(init.headers['X-Goog-FieldMask']).toBe(PLACES_FIELD_MASK);
     expect(JSON.parse(init.body)).toEqual({
       maxResultCount: 20,
+      // Nearest first: popularity (the default) can cut the address's own tenant in a dense plaza.
+      rankPreference: 'DISTANCE',
       locationRestriction: { circle: { center: { latitude: 27.4, longitude: -82.5 }, radius: 60 } },
     });
   });
@@ -329,16 +329,5 @@ describe('typedStreetParts', () => {
     expect(typedStreetParts('100 Example Plaza Dr Ste 3, Examplecity, FL 00000').key)
       .toBe(typedStreetParts(ADDRESS).key);
     expect(typedStreetParts('no number here')).toBeNull();
-  });
-});
-
-describe('freshness', () => {
-  test('a stamp is fresh for 30 days, then stale; no stamp or a bad date is not fresh', () => {
-    const now = Date.now();
-    expect(businessIdentityIsFresh({ fetchedAt: new Date(now - 1000).toISOString() }, now)).toBe(true);
-    expect(businessIdentityIsFresh({ fetchedAt: new Date(now - IDENTITY_FRESH_MS - 1000).toISOString() }, now)).toBe(false);
-    expect(businessIdentityIsFresh({ fetchedAt: 'not a date' }, now)).toBe(false);
-    expect(businessIdentityIsFresh(null, now)).toBe(false);
-    expect(IDENTITY_FRESH_MS).toBe(30 * 24 * 60 * 60 * 1000);
   });
 });
