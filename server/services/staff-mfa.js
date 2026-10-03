@@ -259,52 +259,54 @@ async function recordFailure(conn, technicianId) {
 }
 
 // Checks an authenticator code OR a recovery code against the ACTIVE factor.
-// Replay protection: a TOTP code is accepted only for a time step later than
-// the last accepted one, claimed with one conditional UPDATE so two
-// concurrent requests with the same code cannot both pass. A recovery code is
-// consumed the same way (used_at IS NULL in the WHERE).
+// The whole check runs in one transaction holding the factor row FOR UPDATE:
+// concurrent attempts for one account are serialized, so the lockout is read,
+// the code judged, the code consumed and a failure counted as one step, and
+// no parallel burst can guess past the fifth wrong code. Replay protection: a
+// TOTP code is accepted only for a time step later than the last accepted
+// one; a recovery code only while its used_at is NULL.
 // Returns { ok: true, method } or { ok: false, reason: invalid|locked|unavailable }.
 async function verifySecondFactor(technicianId, code, { conn = db, nowMs = Date.now() } = {}) {
-  const row = await conn('staff_mfa_totp').where({ technician_id: technicianId }).first();
-  if (!row || !row.secret_enc) return { ok: false, reason: 'unavailable' };
-  if (row.locked_until && new Date(row.locked_until) > new Date(nowMs)) return lockedResult(new Date(row.locked_until));
+  return conn.transaction(async (trx) => {
+    const row = await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
+    if (!row || !row.secret_enc) return { ok: false, reason: 'unavailable' };
+    if (row.locked_until && new Date(row.locked_until) > new Date(nowMs)) return lockedResult(new Date(row.locked_until));
 
-  const totp = normalizeTotpCode(code);
-  if (totp) {
-    let secret;
-    try {
-      secret = await decryptSecret(conn, row.secret_enc);
-    } catch {
-      return { ok: false, reason: 'unavailable' };
+    const totp = normalizeTotpCode(code);
+    if (totp) {
+      let secret;
+      try {
+        secret = await decryptSecret(trx, row.secret_enc);
+      } catch {
+        return { ok: false, reason: 'unavailable' };
+      }
+      if (!secret) return { ok: false, reason: 'unavailable' };
+      const step = matchTotpStep(secret, totp, nowMs);
+      const lastStep = row.last_used_step == null ? null : Number(row.last_used_step);
+      if (step !== null && (lastStep === null || step > lastStep)) {
+        await trx('staff_mfa_totp')
+          .where({ technician_id: technicianId })
+          .update({ last_used_step: step, failed_attempts: 0, locked_until: null, updated_at: trx.fn.now() });
+        return { ok: true, method: 'totp' };
+      }
+      return recordFailure(trx, technicianId);
     }
-    if (!secret) return { ok: false, reason: 'unavailable' };
-    const step = matchTotpStep(secret, totp, nowMs);
-    if (step !== null) {
-      const claimed = await conn('staff_mfa_totp')
-        .where({ technician_id: technicianId })
-        .where(function laterStep() {
-          this.whereNull('last_used_step').orWhere('last_used_step', '<', step);
-        })
-        .update({ last_used_step: step, failed_attempts: 0, locked_until: null, updated_at: conn.fn.now() });
-      if (claimed === 1) return { ok: true, method: 'totp' };
-    }
-    return recordFailure(conn, technicianId);
-  }
 
-  const recovery = normalizeRecoveryCode(code);
-  if (recovery) {
-    const used = await conn('staff_mfa_recovery_codes')
-      .where({ technician_id: technicianId, code_hash: hashRecoveryCode(recovery) })
-      .whereNull('used_at')
-      .update({ used_at: conn.fn.now() });
-    if (used === 1) {
-      await conn('staff_mfa_totp')
-        .where({ technician_id: technicianId })
-        .update({ failed_attempts: 0, locked_until: null, updated_at: conn.fn.now() });
-      return { ok: true, method: 'recovery' };
+    const recovery = normalizeRecoveryCode(code);
+    if (recovery) {
+      const used = await trx('staff_mfa_recovery_codes')
+        .where({ technician_id: technicianId, code_hash: hashRecoveryCode(recovery) })
+        .whereNull('used_at')
+        .update({ used_at: trx.fn.now() });
+      if (used === 1) {
+        await trx('staff_mfa_totp')
+          .where({ technician_id: technicianId })
+          .update({ failed_attempts: 0, locked_until: null, updated_at: trx.fn.now() });
+        return { ok: true, method: 'recovery' };
+      }
     }
-  }
-  return recordFailure(conn, technicianId);
+    return recordFailure(trx, technicianId);
+  });
 }
 
 // ── enrollment ──────────────────────────────────────────────────────────────

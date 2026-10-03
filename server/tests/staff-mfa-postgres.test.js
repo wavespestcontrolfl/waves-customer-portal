@@ -193,4 +193,18 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(err.message).toMatch(/^staff MFA setup failed: database error/);
     expect(`${err.message}\n${err.stack}`).not.toContain(process.env.STAFF_MFA_KEY);
   });
+  test('a parallel burst of wrong codes cannot get past the lockout', async () => {
+    const { secret } = await enroll();
+    const right = codeFor(secret, 1);
+    const wrong = right === '000000' ? '111111' : '000000';
+    const results = await Promise.all([
+      ...Array.from({ length: 8 }, () => staffMfa.verifySecondFactor(techId, wrong)),
+      staffMfa.verifySecondFactor(techId, 'BBBB-BBBB-BBBB-BBBB'),
+    ]);
+    expect(results.every((r) => !r.ok)).toBe(true);
+    expect(results.filter((r) => r.reason === 'invalid')).toHaveLength(4);
+    expect(results.filter((r) => r.reason === 'locked')).toHaveLength(5);
+    // Locked: even the right code is refused, and nothing reset the lock.
+    expect((await staffMfa.verifySecondFactor(techId, right)).reason).toBe('locked');
+  });
 });
