@@ -371,21 +371,35 @@ function bellKey({ escalation, conversation, newEmail }) {
 // What the durable hand-off row says. A confirmed email change keeps both
 // addresses on it, so the request survives a bell that did not ring. They
 // are not put in `reason`, which is logged.
-function escalationSummary(reason, customer, { newEmail, emailReadBack }) {
-  const lines = emailChangeLines(customer, { newEmail, emailReadBack });
+function escalationSummary(reason, customer, { newEmail, emailReadBack, alsoAsked }) {
+  const lines = emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked });
   return lines ? `${reason}. ${lines.join('. ')}` : reason;
 }
 // The two addresses of an email change, for the saved row and the bell's
 // full text: confirmed (`newEmail`), or read back by the chat and answered by
 // a message nobody judged (`emailReadBack`, a keyword hand-off).
-function emailChangeLines(customer, { newEmail, emailReadBack }) {
+// `alsoAsked`: a second need the model handed off in the same reply as the
+// confirmed change ({ topic, reason } of its escalate call), so one hand-off
+// carries both.
+function emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked }) {
   if (!newEmail && !emailReadBack) return null;
   return [
     `Email on file: ${String(customer?.email || '').trim() || 'none'}`,
     newEmail
       ? `New email, confirmed by the customer in portal chat: ${newEmail}`
       : `New email the chat had just read back, not yet confirmed (the message below is the customer's answer): ${emailReadBack}`,
+    ...(alsoAsked ? [`The customer also asked about ${TOPIC_WORDING[alsoAsked.topic] || 'something else'}: ${alsoAsked.reason}`] : []),
   ];
+}
+// The escalate call the model made beside a confirmed email change, when it
+// is about something other than that change, as options for the one hand-off.
+function alsoAskedBeside(toolUses) {
+  const input = toolUses.find((t) => t.name === 'escalate')?.input;
+  if (!input || input.topic === 'account_change') return {};
+  return {
+    alsoAsked: { topic: input.topic, reason: String(input.reason || '').trim() || 'no detail given' },
+    gap: input.not_supported === true,
+  };
 }
 
 const TOPIC_WORDING = {
@@ -607,8 +621,10 @@ class WavesAssistant {
         // The email-change check passed: the confirmed address goes to the
         // team, and the turn ends with the hand-off reply.
         if (result.confirmed_email) {
+          // An escalate call in the same reply never runs after this return:
+          // its request rides on this hand-off instead.
           const escResult = await this.escalate(conversation, message, 'Customer confirmed a new email address in portal chat',
-            { topic: 'account_change', newEmail: result.confirmed_email });
+            { topic: 'account_change', newEmail: result.confirmed_email, ...alsoAskedBeside(toolUses) });
           return handOffReply(escResult, lane);
         }
       }
@@ -772,7 +788,7 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack } = {}) {
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -787,7 +803,7 @@ class WavesAssistant {
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
       reason: this.savedReason(customerMessage, { newEmail, topic, channel: conversation.channel }),
-      summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
+      summary: escalationSummary(reason, customer, { newEmail, emailReadBack, alsoAsked }),
       customer_message: customerMessage,
       ai_draft_response: null,
       priority,
@@ -819,7 +835,7 @@ class WavesAssistant {
     // sent, so SMS keeps its wording.)
     const isPortal = portalSelfServe(conversation.channel);
     const teamNotified = isPortal
-      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack });
+      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked });
 
     const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim(), newEmail });
 
@@ -857,7 +873,7 @@ class WavesAssistant {
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, alsoAsked }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -867,7 +883,7 @@ class WavesAssistant {
       const wording = newEmail
         ? { area: 'Customers', action: require('../admin-alert-names').fitAction('Customers', name, [(who) => `Change ${who}'s email`]), why: `${name} confirmed a new email address in portal chat`, doneWhen: 'email_changed' }
         : { area: 'Comms', action: 'Reply to a portal chat request', why: `${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, doneWhen: 'customer_answered' };
-      const emailDetail = emailChangeLines(customer, { newEmail, emailReadBack });
+      const emailDetail = emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked });
       const result = await raiseAdminAlert('alert', {
         area: wording.area,
         action: wording.action,

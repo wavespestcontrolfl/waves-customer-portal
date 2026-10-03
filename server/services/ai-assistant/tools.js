@@ -717,7 +717,12 @@ const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
 // no domain holds and no longer token continues with (a comma, a slash, a
 // full stop that ends the sentence). "a@b.com_x.net" is a longer token.
 const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[,;:!?)\\]>"/]|\\.(?![A-Za-z0-9]))`, 'g');
-const EMAIL_MAX_CHARS = 254;
+// What the account can hold: customers.email is varchar(150).
+const EMAIL_MAX_CHARS = 150;
+const EMAIL_TOO_LONG = {
+  sent: false,
+  instruction: 'This address is longer than the account can hold. Do not read it back. Use the escalate tool with topic account_change so the team follows up.',
+};
 // Messages of the chat read for the check, newest first.
 const EMAIL_CHANGE_MESSAGES = 40;
 const EMAIL_HAND_OFF = {
@@ -804,7 +809,8 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   if (!customerId || !conversationId) return EMAIL_HAND_OFF;
   // Taken as given: no character is stripped or corrected.
   const asked = String(input.new_email || '').trim();
-  if (asked.length > EMAIL_MAX_CHARS || !EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
+  if (!EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
+  if (asked.length > EMAIL_MAX_CHARS) return EMAIL_TOO_LONG;
   let rows;
   let customer;
   try {

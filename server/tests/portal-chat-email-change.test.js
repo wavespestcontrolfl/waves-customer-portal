@@ -227,6 +227,35 @@ test('the lane\'s fallback hand-off is saved as an account change, and only unde
   expect(db.__bindings[1]).toContain('schedule_change');
 });
 
+test('a second need handed off beside the confirmed change rides on the same bell and saved row', async () => {
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'wants mosquito service quoted', topic: 'add_service' } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: NEW, customer_confirmed: true } },
+  ] });
+
+  await say(afterReadBack('Yes, and can you quote the mosquito add-on'));
+
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  const detail = NotificationService.notifyAdmin.mock.calls[0][3].detail;
+  expect(detail).toMatch(new RegExp(`confirmed by the customer in portal chat: ${NEW.replace(/\./g, '\\.')}\nThe customer also asked about adding a service: wants mosquito service quoted\n\nCustomer's message:`));
+  expect(db.__bindings[0].some((value) => String(value).includes('The customer also asked about adding a service: wants mosquito service quoted'))).toBe(true);
+});
+
+test('an address longer than the account can hold is handed off, never read back', async () => {
+  const long = `${'a'.repeat(140)}@example.com`;
+  chat = [{ role: 'user', content: `Change it to ${long}` }];
+
+  const result = await executeToolCall('request_email_change', { new_email: long, customer_confirmed: false }, 'cust-1', [], null,
+    { emailChange: true, conversationId: 'conv-1', customerMessage: chat[0].content });
+  const fits = await executeToolCall('request_email_change', { new_email: long.slice(2), customer_confirmed: false }, 'cust-1', [], null,
+    { emailChange: true, conversationId: 'conv-1', customerMessage: `Change it to ${long.slice(2)}` });
+
+  expect(long.length).toBe(152);
+  expect(result).toEqual(expect.objectContaining({ sent: false, instruction: expect.stringMatching(/longer than the account can hold/) }));
+  expect(result).not.toHaveProperty('read_back');
+  expect(fits.read_back).toBe(long.slice(2));
+});
+
 test('a confirmed change and an escalate call in one reply ring one bell, the one with the address', async () => {
   mockCreate.mockResolvedValueOnce({ content: [
     { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'email change', topic: 'account_change' } },
@@ -237,6 +266,8 @@ test('a confirmed change and an escalate call in one reply ring one bell, the on
 
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/New email, confirmed/);
+  // An escalate call about the email change itself adds no second line.
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).not.toMatch(/also asked/);
 });
 
 test('when the bell does not ring the customer is not told the team has it', async () => {
