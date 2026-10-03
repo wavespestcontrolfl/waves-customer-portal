@@ -1380,8 +1380,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     // factsDb's chain is not awaitable as a list; sms_log gets one that is.
     // The tech is on site, so the window is the 30 days before that arrival.
     const onSite = { status: 'on_site', arrived_at: '2026-09-04T13:00:00Z' };
-    const smsReads = { count: 0, until: null };
-    beforeEach(() => { smsReads.count = 0; smsReads.until = null; });
+    const smsReads = { count: 0, until: null, grouped: [] };
+    beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.grouped = []; });
     const withTexts = (row, texts) => {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
       return Object.assign((table) => {
@@ -1390,6 +1390,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         for (const m of ['whereRaw', 'select', 'orderBy']) chain[m] = () => chain;
         let size = Infinity; let before = Infinity; let after = -Infinity;
         chain.where = (...args) => {
+          // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
+          if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
           if (args[0] === 'created_at' && args[1] === '<') { before = new Date(args[2]).getTime(); smsReads.until = new Date(args[2]); }
           if (args[0] === 'created_at' && args[1] === '>') after = new Date(args[2]).getTime();
           return chain;
@@ -1447,6 +1449,32 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       // Finished with no arrival stamp: the nominal start.
       await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'completed' }, texts), deps);
       expect(smsReads.until.toISOString()).toBe('2026-09-04T13:00:00.000Z');
+    });
+
+    test('recruiting rows are excluded by the shared sms_log predicate (Codex r4)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      await jobCard.loadJobCardFacts('svc1', withTexts(onSite, []), deps);
+      expect(smsReads.grouped).toContain('recruitingSmsLogFilter');
+      // The real predicate drops job_* rows and keeps the rest.
+      const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+      const sql = excludeRecruitingSmsLog(require('knex')({ client: 'pg' })('sms_log')).toString();
+      expect(sql).toContain('"message_type" is null or "sms_log"."message_type" not like');
+      expect(sql).toContain('job');
+    });
+
+    test('an unreadable visit history makes the texts unavailable, never the 30-day fallback (Codex r4)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const base = withTexts(onSite, [{ created_at: '2026-09-02T15:00:00Z', message_body: 'Old and already handled', message_type: 'sms' }]);
+      const failing = Object.assign((table) => {
+        if (table !== 'service_records as sr') return base(table);
+        const chain = base(table);
+        chain.first = () => Promise.reject(new Error('down'));
+        return chain;
+      }, { raw: base.raw });
+      const out = await jobCard.loadJobCardFacts('svc1', failing, deps);
+      expect(out.facts.lastVisit).toEqual({ unavailable: true });
+      expect(out.notes.customerTexts).toBeNull();
+      expect(smsReads.count).toBe(0);
     });
 
     test('readiness builds never read texts or photos (Codex r1)', async () => {

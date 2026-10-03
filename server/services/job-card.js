@@ -46,6 +46,7 @@ const {
 const { stampedDivergesSql } = require('./stamped-address');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isSmsReaction } = require('./sms-intent');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 const { parsePackSize } = require('./product-costing');
 const { getAreaRainfall } = require('./lawn-water-area');
@@ -341,7 +342,8 @@ function textsCutoff(svc, visitStart, today = etDateString()) {
 // The customer's own recent texts — since the last visit (else the last 30 days),
 // up to the technician's arrival (textsCutoff). Inbound only; a
 // tapback quotes a Waves text and is never their words; an unresolved
-// review-ask reservation is not a delivered message. null = unreadable
+// review-ask reservation is not a delivered message; recruiting rows are
+// owner-only. null = unreadable
 // (the card says so), never an empty history.
 const TEXTS_FALLBACK_DAYS = 30;
 const TEXTS_MAX = 3;
@@ -357,7 +359,9 @@ async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
     const kept = [];
     let before = until;
     for (;;) {
-      const rows = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: customerId }))
+      // The customer timeline's own exclusions: recruiting rows (an applicant
+      // who is also a customer; owner-only) and unresolved send reservations.
+      const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: customerId })))
         .where('direction', 'inbound')
         .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
         .where('created_at', '>', since)
@@ -558,7 +562,11 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
   const [calls, rain7d, texts, prepPhotos] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
-    customerContext ? loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, textsCutoff(svc, visitStart)) : Promise.resolve(undefined),
+    // An unreadable visit history gives no "since": the texts read as
+    // unavailable too, never the first-visit 30-day window.
+    customerContext
+      ? (lastVisit?.unavailable ? Promise.resolve(null) : loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, textsCutoff(svc, visitStart)))
+      : Promise.resolve(undefined),
     customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
