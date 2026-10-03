@@ -2198,6 +2198,9 @@ class SmartRebooker {
         void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
           snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+          // The old slot rides along so a move off today/tomorrow stays a
+          // today/tomorrow change on the Today page (Codex #5783 P2).
+          previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
         });
       } else if (committedTechId) {
         const priorDay = service.scheduled_date instanceof Date
