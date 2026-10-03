@@ -7,18 +7,18 @@
 // is the whole ILIKE result.
 let mockRow = null;
 let mockRows = null;
+// product_aliases rows joined to their active product.
+let mockAliasRows = null;
 const VERIFIED = '2026-07-01T00:00:00Z';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => ({
-    whereILike: () => ({
-      orderBy: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])),
-    }),
-  }));
+  const fn = jest.fn((table) => (String(table).startsWith('product_aliases')
+    ? { join: () => ({ where: () => ({ whereILike: () => ({ select: () => Promise.resolve(mockAliasRows || []) }) }) }) }
+    : { whereILike: () => ({ orderBy: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])) }) }));
   return fn;
 });
 
-beforeEach(() => { mockRows = null; });
+beforeEach(() => { mockRows = null; mockAliasRows = null; });
 
 const { executeTechTool } = require('../services/intelligence-bar/tech-tools');
 
@@ -202,7 +202,7 @@ describe('get_product_info product match', () => {
     }];
     const result = await ask('Acelepryn Xtra');
     expect(result.rate_note).toBeUndefined();
-    expect(result.label_rate_per_1000).toEqual({ unit: 'fl_oz per 1,000 sq ft', default: '0.46', min: '0.23', max: '0.92' });
+    expect(result.label_rate_per_1000).toMatchObject({ unit: 'fl_oz per 1,000 sq ft', default: '0.46', min: '0.23', max: '0.92' });
   });
 
   test('for a technician, an mL per-1,000 rate is withheld and the rate note stands', async () => {
@@ -255,5 +255,48 @@ describe('get_product_info product match', () => {
     const result = await ask('Sample Mix');
     expect(result.candidates).toHaveLength(8);
     expect(result.more_matches).toBe(23);
+  });
+
+  test('a retired name kept as an alias resolves to its active product', async () => {
+    mockRows = [{ id: 'old', name: 'Demand CS Insecticide', active: false }];
+    mockAliasRows = [{ id: 'keep', alias_name: 'Demand CS  insecticide', name: 'Demand CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED }];
+    const result = await ask('Demand CS Insecticide');
+    expect(result.name).toBe('Demand CS');
+    expect(result.error).toBeUndefined();
+  });
+
+  test('an alias that only contains the asked name is not a match; one naming two products asks', async () => {
+    mockRows = [{ id: 'old', name: 'Demand', active: false }];
+    mockAliasRows = [{ id: 'keep', alias_name: 'Demand CS 8 oz bottle', name: 'Demand CS', active: true }];
+    expect((await ask('Demand')).error).toMatch(/not in the active product catalog/);
+    mockAliasRows = [
+      { id: 'a', alias_name: 'Demand', name: 'Demand CS', active: true },
+      { id: 'b', alias_name: 'demand', name: 'Demand G', active: true },
+    ];
+    const result = await ask('Demand');
+    expect(result.ambiguous).toBe(true);
+    expect(result.candidates).toEqual(['Demand CS', 'Demand G']);
+  });
+
+  test('the per-1,000 rate carries the yearly cap and the label words that qualify the range', async () => {
+    mockRows = [{
+      name: 'Bifen XTS', active: true, label_verified_at: VERIFIED, rate_unit: 'fl_oz',
+      min_label_rate_per_1000: '0.07', max_label_rate_per_1000: '0.30', max_annual_per_1000: '0.60',
+      label_source_note: 'General lawn band 0.07-0.15 fl oz/1,000 sq ft; up to 0.30 for listed pests.',
+    }];
+    const rate = (await ask('Bifen XTS')).label_rate_per_1000;
+    expect(rate.max_per_year).toBe('0.60');
+    expect(rate.label_notes).toEqual(['General lawn band 0.07-0.15 fl oz/1,000 sq ft; up to 0.30 for listed pests.']);
+    expect(rate.conditions).toMatch(/only to the pests or sites named in label_notes/);
+  });
+
+  test('for a technician, a label note carrying an mL figure is left out', async () => {
+    mockRows = [{
+      name: 'Sample Turf', active: true, label_verified_at: VERIFIED, rate_unit: 'fl_oz',
+      default_rate_per_1000: '1', label_source_note: 'Mix 30 mL per gallon for spot use.',
+    }];
+    const result = await ask('Sample Turf');
+    expect(result.label_rate_per_1000.label_notes).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
   });
 });

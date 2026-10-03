@@ -15,6 +15,7 @@ const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
+const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
 
 const TECH_TOOLS = [
   {
@@ -427,19 +428,23 @@ const isMlUnit = (unit) => normalizeInventoryUnit(baseQuantityUnit(unit)) === 'm
 // a guess.
 const MAX_PRODUCT_CANDIDATES = 8;
 
-function pickProduct(rows, productName) {
+function pickProduct(rows, productName, aliasProducts = []) {
   const target = String(productName || '').trim().toLowerCase();
   const active = rows.filter((row) => row.active !== false);
   const exact = active.find((row) => String(row.name || '').trim().toLowerCase() === target);
   if (exact) return { product: exact };
-  if (active.length === 1) return { product: active[0] };
-  if (active.length > 1) {
+  // A retired name kept as an alias ("Demand CS Insecticide") resolves to
+  // its active keeper before any name-fragment guess or retired fallback.
+  if (aliasProducts.length === 1) return { product: aliasProducts[0] };
+  const pool = aliasProducts.length > 1 ? aliasProducts : active;
+  if (pool.length === 1) return { product: pool[0] };
+  if (pool.length > 1) {
     return {
       result: {
         ambiguous: true,
         message: `Several products match "${productName}". Ask which one before giving any rate or mix.`,
-        candidates: active.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
-        more_matches: active.length > MAX_PRODUCT_CANDIDATES ? active.length - MAX_PRODUCT_CANDIDATES : undefined,
+        candidates: pool.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+        more_matches: pool.length > MAX_PRODUCT_CANDIDATES ? pool.length - MAX_PRODUCT_CANDIDATES : undefined,
       },
     };
   }
@@ -454,7 +459,25 @@ function pickProduct(rows, productName) {
   return { result: { error: `Product "${productName}" not found` } };
 }
 
+// Active products an alias names exactly (product_aliases, the same table
+// and normalisation the purchase matcher reads), one row per product.
+async function activeProductsForAlias(productName) {
+  const wanted = normalizeForMatch(productName);
+  if (!wanted) return [];
+  const rows = await db('product_aliases as pa')
+    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true)
+    .whereILike('pa.alias_name', `%${productName}%`)
+    .select('pa.alias_name', 'pc.*');
+  const byId = new Map();
+  for (const row of rows || []) {
+    if (normalizeForMatch(row.alias_name) === wanted && !byId.has(row.id)) byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
 const isPresent = (value) => value != null && value !== '';
+const ML_TEXT = /\b(ml|millilit(er|re)s?)\b/i;
 
 // Many turf products keep their label rate only in the per-1,000 sq ft
 // columns (default_rate stays null), so those count as a rate on file — but
@@ -474,10 +497,24 @@ function perThousandRate(product, { forTech, hasDefaultRate }) {
     && !(forTech && isMlUnit(product.rate_unit));
   const out = {};
   if (usable) {
-    out.label_rate_per_1000 = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
+    const rate = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
     for (const [key, value] of Object.entries(fields)) {
-      if (isPresent(value)) out.label_rate_per_1000[key] = value;
+      if (isPresent(value)) rate[key] = value;
     }
+    // The yearly cap travels with the per-application range: two
+    // applications at `max` can exceed it (Celsius WG 0.113 vs 0.17).
+    if (isPresent(product.max_annual_per_1000)) rate.max_per_year = product.max_annual_per_1000;
+    // min-max is the label's whole envelope; the top of it can be legal only
+    // for listed pests or sites (Bifen XTS). The label's own words say which,
+    // so they travel with the range. A tech never reads an mL figure, so a
+    // note carrying one is left out for them.
+    const notes = [product.rate_notes, product.label_source_note]
+      .filter(isPresent)
+      .map((note) => (typeof note === 'string' ? note : JSON.stringify(note)))
+      .filter((note) => !(forTech && ML_TEXT.test(note)));
+    if (notes.length) rate.label_notes = notes;
+    rate.conditions = 'min and max are the whole label range. A rate above default may apply only to the pests or sites named in label_notes: state that condition with the rate, or send the tech to the label.';
+    out.label_rate_per_1000 = rate;
   }
   if (!hasDefaultRate && !usable) out.rate_note = 'No rate on file. Check the current label before mixing.';
   return out;
@@ -489,7 +526,7 @@ async function getProductInfo(productName, { forTech = false } = {}) {
   const rows = await db('products_catalog')
     .whereILike('name', `%${productName}%`)
     .orderBy('name');
-  const { product, result } = pickProduct(rows || [], productName);
+  const { product, result } = pickProduct(rows || [], productName, await activeProductsForAlias(productName));
   if (!product) return result;
 
   // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
