@@ -427,21 +427,34 @@ async function stopRetry(message, {
 
 const EMAIL_REPLACED_REASON = 'Customer email was corrected; retry to the replaced address stopped.';
 
-// The customer's mail to an address the office replaced: rows naming the
-// customer in recipient_id, plus rows that name nobody (or the lead itself)
-// but are linked to the customer's leads or estimates. A row that names ANOTHER
-// customer is never theirs, whatever it links to. Visit summaries keep their
-// own re-authorization fence (summaryRetryAuthorized refuses a recipient that
-// is no longer current).
+// OWNERSHIP, the complete predicate: a row at the replaced address is the
+// customer's when ANY of these holds, and never when its recipient_id names
+// another customer.
+//   1. recipient_id is this customer's id (customer-typed rows, and the
+//      executor's lead-typed estimate rows that carry the customer id);
+//   2. the row is lead-typed (recipient_type 'lead') and recipient_id is one of
+//      this customer's leads (leads.customer_id), whatever lead_id says: rows
+//      written before the lead/estimate linkage migration, or when the link
+//      lookup failed open, have a null lead_id;
+//   3. the row names nobody (recipient_id NULL), or the lead itself
+//      (recipient_id = lead_id), and its lead_id / estimate_id is one of this
+//      customer's leads or estimates.
+// A row whose recipient_id is another customer's is matched by none of them,
+// whatever it links to. Visit summaries are excluded: they keep their own
+// re-authorization fence (summaryRetryAuthorized refuses a recipient that is
+// no longer current).
 function mailToReplacedAddress(database, customerId, replaced) {
+  const customersLeads = () => database('leads').where({ customer_id: customerId });
   return database('email_messages')
     .whereRaw('LOWER(TRIM(recipient_email_snapshot)) = ?', [replaced])
     .where((owner) => owner
       .where('recipient_id', String(customerId))
+      .orWhere((leadTyped) => leadTyped.where('recipient_type', 'lead')
+        .whereIn('recipient_id', customersLeads().select(database.raw('id::text'))))
       .orWhere((linked) => linked
         .where((unowned) => unowned.whereNull('recipient_id').orWhereRaw('recipient_id = lead_id::text'))
         .where((links) => links
-          .whereIn('lead_id', database('leads').where({ customer_id: customerId }).select('id'))
+          .whereIn('lead_id', customersLeads().select('id'))
           .orWhereIn('estimate_id', database('estimates').where({ customer_id: customerId }).select('id')))))
     .where((template) => template.whereNull('template_key').orWhereNot('template_key', 'service.visit_summary'));
 }
@@ -486,20 +499,37 @@ async function settleReplacedRecipientRow(database, row, now) {
   return updated;
 }
 
-// A row is UNSETTLED when the correction's stamp is on it, it is failed, and
-// the settle has not yet written its terminal marker (provider_retry_exhausted_at,
-// which settleReplacedRecipientRow always sets). Visit summaries and
-// sender-rendered notices have their own settlement and never count, or the
-// sweep would reselect them forever. The one definition, as a row test and as
-// the query the recovery sweep runs.
+// SETTLED, the complete predicate: a row is SETTLED when its error_message is
+// exactly one of the three strings only the replaced-recipient settle writes:
+//   EMAIL_REPLACED_REASON                         (non-billing and billing-replay rows),
+//   BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX + it     (a previsit reminder, awaiting its release),
+//   BILLING_EMAIL_REQUOTE_RETIRED_PREFIX + it     (the same, once its release rewrote the prefix).
+// settleReplacedRecipientRow and the claim-time stop (stopRetry, the same reason)
+// are the only writers. Retry exhaustion (provider_retry_exhausted_at) is NOT
+// evidence: a final-attempt block writes it too, and a block event overwrites
+// error_message with the provider's reason, which correctly makes the row
+// unsettled again (settling it twice is a no-op behind the unsent-evidence
+// guards). UNSETTLED = failed, carrying the correction's stamp, not settled.
+// Visit summaries and sender-rendered notices have their own settlement and
+// never count, or the sweep would reselect them forever. The one definition, as
+// a row test and as the query the recovery sweep runs.
+function replacedRecipientSettledMessages() {
+  return [
+    EMAIL_REPLACED_REASON,
+    `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}`,
+    `${billingReservation.BILLING_EMAIL_REQUOTE_RETIRED_PREFIX}${EMAIL_REPLACED_REASON}`,
+  ];
+}
+
 function isUnsettledReplacedRecipient(row) {
-  return row?.status === 'failed' && !row.provider_retry_exhausted_at
+  return row?.status === 'failed' && !replacedRecipientSettledMessages().includes(row.error_message)
     && row.template_key !== 'service.visit_summary' && !isSenderRenderedEmail(row)
     && asArray(row.categories).includes(REPLACED_RECIPIENT_CATEGORY);
 }
 
 function unsettledReplacedRecipientRows(query) {
-  return query.where({ status: 'failed' }).whereNull('provider_retry_exhausted_at')
+  return query.where({ status: 'failed' })
+    .where((message) => message.whereNull('error_message').orWhereNotIn('error_message', replacedRecipientSettledMessages()))
     .whereRaw("jsonb_exists(COALESCE(categories, '[]'::jsonb), ?)", [REPLACED_RECIPIENT_CATEGORY])
     .where((template) => template.whereNull('template_key')
       .orWhereNotIn('template_key', ['service.visit_summary', ...SENDER_RENDERED_TEMPLATES]));

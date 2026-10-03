@@ -9,6 +9,7 @@ const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing')
 const DunningKeys = require('./customer-dunning/constants');
 const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
 const BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX = 'Billing email re-quote required: ';
+const BILLING_EMAIL_REQUOTE_RETIRED_PREFIX = 'Billing email old quote retired: ';
 const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
   invoice_followup_sequence: 'invoice_followups',
 });
@@ -144,7 +145,7 @@ async function releaseBillingEmailReservationForRequote(message, database = db, 
       if (Number(claimReleased) !== 1) throw Object.assign(new Error('pinned previsit claim was not released'), { reservationNoop: true });
       const retired = await trx('email_messages').where({ id: current.id }).update({
         error_message: String(current.error_message).replace(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
-          'Billing email old quote retired: '),
+          BILLING_EMAIL_REQUOTE_RETIRED_PREFIX),
         updated_at: new Date(),
       });
       if (Number(retired) !== 1) throw Object.assign(new Error('old quote marker was not retired'), { reservationNoop: true });
@@ -466,6 +467,7 @@ async function repairAcceptedBillingEmailReservations(rows, database = db, optio
 module.exports = {
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX,
   BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
+  BILLING_EMAIL_REQUOTE_RETIRED_PREFIX,
   hasAcceptedEvidence,
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,

@@ -891,6 +891,10 @@ describe('stopRetriesForReplacedEmail', () => {
     expect(chain.whereIn).toHaveBeenCalledWith('lead_id', expect.anything());
     expect(chain.orWhereIn).toHaveBeenCalledWith('estimate_id', expect.anything());
     expect(chain.orWhereIn).not.toHaveBeenCalledWith('lead_id', expect.anything());
+    // A lead-typed row whose recipient is one of the customer's leads is theirs even with a null lead_id.
+    expect(chain.where).toHaveBeenCalledWith('recipient_type', 'lead');
+    expect(chain.whereIn).toHaveBeenCalledWith('recipient_id', expect.anything());
+    expect(db.raw).toHaveBeenCalledWith('id::text');
   });
 
   test('stamps every row still awaiting a provider verdict so a later block event cannot re-arm the replaced address', async () => {

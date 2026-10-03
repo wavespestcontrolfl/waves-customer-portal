@@ -223,6 +223,34 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     }
   });
 
+  test('a lead-typed row naming one of the customer\'s leads is theirs even without lead_id; another customer\'s lead or id never is', async () => {
+    const customerId = randomUUID();
+    const otherCustomerId = randomUUID();
+    const myLead = randomUUID();
+    const theirLead = randomUUID();
+    const estimateId = randomUUID();
+    await mockDatabase('leads').insert([{ id: myLead, customer_id: customerId }, { id: theirLead, customer_id: otherCustomerId }]);
+    await mockDatabase('estimates').insert({ id: estimateId, customer_id: customerId });
+    // Written before the linkage migration (or the link lookup failed open): no lead_id at all.
+    const leadTypedNoLink = scheduled(null, { recipient_type: 'lead', recipient_id: myLead, lead_id: null });
+    const others = [
+      scheduled(null, { recipient_type: 'lead', recipient_id: theirLead, lead_id: null }),
+      scheduled(null, { recipient_type: 'lead', recipient_id: theirLead, lead_id: myLead, estimate_id: estimateId }),
+      scheduled(null, { recipient_type: 'lead', recipient_id: otherCustomerId, lead_id: myLead, estimate_id: estimateId }),
+      // The lead id on a customer-typed row is not lead ownership.
+      scheduled(null, { recipient_type: 'customer', recipient_id: myLead, lead_id: null }),
+    ];
+    await mockDatabase('email_messages').insert([leadTypedNoLink, ...others]);
+
+    await expect(correct(customerId)).resolves.toBe(1);
+
+    expect(await rowOf(leadTypedNoLink.id)).toMatchObject({ status: 'failed', error_message: REASON, provider_retry_next_at: null });
+    for (const row of others) {
+      expect(await rowOf(row.id)).toMatchObject({ status: 'failed', error_message: null });
+      expect(await categoriesOf(row.id)).not.toContain(STAMP);
+    }
+  });
+
   test('a visit summary keeps its own fence; a request already at the provider is left to its worker; an unsent claim is stopped', async () => {
     const customerId = randomUUID();
     const token = () => randomUUID();
@@ -735,6 +763,53 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
 
     expect(await snapshot(untouchedIds)).toEqual(before);
     expect(JSON.stringify(await rowOf(genuine.id))).toBe(settledOnce);
+  });
+
+  // The final attempt: the block verdict was read before the correction and lands after it, and as the last
+  // retry slot its update writes provider_retry_exhausted_at: ordinary exhaustion, not a replaced-address settle.
+  const finalAttempt = () => ({ ...acceptedAwaitingVerdict(), provider_retry_count: retry.MAX_RETRIES });
+
+  test('a final-attempt block read before the correction still settles: exhaustion is not proof of a replaced-address settle', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId } = await billingReplay(customerId, { delivered: true, row: finalAttempt() });
+    const staleRead = await rowOf(row.id);
+    await correct(customerId);
+
+    await webhook(staleRead);
+
+    const settled = await rowOf(row.id);
+    expect(settled).toMatchObject({ status: 'failed', sent_at: null, error_message: REASON });
+    expect(settled.provider_retry_exhausted_at).toBeInstanceOf(Date);
+    const metadata = await ledgerMetadata(ledgerId);
+    expect(metadata.delivered).toBeUndefined();
+    expect(claimVerdict({ id: ledgerId, metadata, reused: true })).toEqual({ allowed: true, reopen: true });
+  });
+
+  test('a final-attempt late block whose settle fails is recovered by the sweep even though the webhook wrote the exhaustion marker', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId, appointmentId } = await billingReplay(customerId, { previsit: true, row: finalAttempt() });
+    const staleRead = await rowOf(row.id);
+    await correct(customerId);
+    await failLedgerWrites();
+    await webhook(staleRead);
+    const unsettled = await rowOf(row.id);
+    expect(unsettled.provider_retry_exhausted_at).toBeInstanceOf(Date);
+    expect(unsettled.error_message).not.toContain(REASON);
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeInstanceOf(Date);
+    await allowLedgerWrites();
+
+    await expect(retry.recoverStaleClaims()).resolves.toBeGreaterThanOrEqual(1);
+
+    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', sent_at: null, error_message: 'Billing email old quote retired: ' + REASON });
+    expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeNull();
+    // A delivered final-attempt row is still never reopened.
+    const delivered = await billingReplay(customerId, { delivered: true, row: { ...finalAttempt(), delivered_at: new Date() } });
+    const staleDelivered = await rowOf(delivered.row.id);
+    await correct(customerId);
+    await webhook(staleDelivered);
+    expect(await ledgerMetadata(delivered.ledgerId)).toMatchObject({ delivered: true });
+    expect((await ledgerMetadata(delivered.ledgerId)).send_failed).toBeUndefined();
   });
 
   test('the legitimate no-ops still commit: a resolved reservation and a delivered row are terminalized or left alone without an error', async () => {
