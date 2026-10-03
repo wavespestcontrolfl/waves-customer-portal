@@ -13,7 +13,8 @@ import {
 } from '../schedule/PromiseCheck';
 import { Chip, ChoiceSection } from './FastCompleteParts';
 import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
-import { Button, Field, Input, Textarea, cn } from '../ui';
+import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
+import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -86,8 +87,16 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 // again each time the manager closes. Their captions go to the report
 // writer, so the report waits for the first read (`loaded`); a failed read
 // counts as no photos, never a hold.
-export function useVisitPhotos({ serviceId, request, version }) {
-  const [state, setState] = useState({ photos: [], loaded: false });
+// With the photos in the note's box (`keepOnFailure`), a failed read is no
+// confirmed answer: `failed` holds the report until a read lands, the first
+// read too (codex local r2 and the pre-push P1 after it on #5624: a photo
+// the manager added, or one already on the visit, must reach the report),
+// and the photos last read stay on screen, so a dropped connection never
+// empties the box under an open description (codex local r1). The sheet
+// mounts once per visit, so the photos kept are always this visit's. `update` applies a change the server already took (a
+// description saved, a photo removed) to the photos at once (pre-push P1).
+export function useVisitPhotos({ serviceId, request, version, keepOnFailure = false }) {
+  const [state, setState] = useState({ photos: [], loaded: false, failed: false, read: false });
   // Only the latest read may land: a read still in flight when the manager
   // closes must not overwrite the refreshed one.
   const readSequence = useRef(0);
@@ -98,13 +107,26 @@ export function useVisitPhotos({ serviceId, request, version }) {
     setState((prev) => (prev.loaded ? { ...prev, loaded: false } : prev));
     request(`/tech/services/${serviceId}/photos`)
       .then((data) => {
-        if (sequence === readSequence.current) setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true });
+        if (sequence !== readSequence.current) return;
+        // A reply with no photo list (an unreadable body answers {}) is no
+        // answer either, in the note's box (codex local r4 on #5624).
+        if (keepOnFailure && !Array.isArray(data?.photos)) {
+          setState((prev) => ({ ...prev, loaded: true, failed: true }));
+          return;
+        }
+        setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true, failed: false, read: true });
       })
       // The photo manager reports its own errors.
-      .catch(() => { if (sequence === readSequence.current) setState({ photos: [], loaded: true }); });
+      .catch(() => {
+        if (sequence !== readSequence.current) return;
+        setState((prev) => (keepOnFailure
+          ? { ...prev, loaded: true, failed: true }
+          : { photos: [], loaded: true, failed: false, read: prev.read }));
+      });
     return () => { readSequence.current += 1; };
-  }, [request, serviceId, version]);
-  return state;
+  }, [request, serviceId, version, keepOnFailure]);
+  const update = useCallback((change) => setState((prev) => ({ ...prev, photos: change(prev.photos) })), []);
+  return { ...state, update };
 }
 
 // What the writer is told about the photos, as the full form sends it: the
@@ -141,6 +163,113 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
         {count ? 'Add or view photos' : 'Add photos'}
       </Button>
     </section>
+  );
+}
+
+// Photos in the note's box (GATE_NOTE_BOX_PHOTOS, owner "ok go" 2026-10-02
+// on the Fast Complete mockup v8, call 10): the visit's photos sit in the
+// note's box, each with its description, through the office form's own
+// NoteBoxPhotos. These photos are already staged on the visit (the photo
+// manager adds them), so a description is saved and a photo removed on the
+// server (PATCH / DELETE /tech/services/:id/photos/:photoId) and then read
+// again; a removal asks first, as the file is deleted for good. `onHold`
+// tells the sheet what holds the report meanwhile: an open description, a
+// change being saved, or a removal waiting for its answer.
+const NOTE_PHOTO_PALETTE = {
+  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#ef4444', onDanger: '#fff',
+};
+const NOTE_PHOTO_ERRORS = {
+  photo_caption_banned_copy: 'That description has wording we can’t put on a customer’s report. Describe the photo in other words.',
+  visit_completed: 'This visit is completed; its photos are on the report.',
+  photo_not_found: 'That photo is no longer on this visit.',
+};
+
+export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, readFailed, onAdd, onUpdate, onChanged, onRetry, onHold }) {
+  const [describing, setDescribing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(null);
+  const [error, setError] = useState('');
+  const hold = (saving && 'Saving the photo change…')
+    || (describing && 'Save or cancel the photo description first.')
+    || (removing && 'Remove the photo or keep it first.')
+    || '';
+  useEffect(() => { onHold(hold); }, [hold, onHold]);
+  useEffect(() => () => onHold(''), [onHold]);
+  // One change at a time; true once the server took it, and then applied
+  // to the photos at once (`applied`, from the server's answer). Either way
+  // the box reads the visit's photos again, so it shows what the visit holds.
+  const change = async (photo, options, applied) => {
+    if (!photo?.id) return false;
+    setSaving(true);
+    setError('');
+    try {
+      const answer = await request(`/tech/services/${serviceId}/photos/${photo.id}`, options);
+      onUpdate((list) => applied(list, answer));
+      return true;
+    } catch (err) {
+      setError(NOTE_PHOTO_ERRORS[err?.code] || 'Couldn’t save the photo change. Try again.');
+      return false;
+    } finally {
+      setSaving(false);
+      onChanged();
+    }
+  };
+  return (
+    <>
+      <NoteBoxPhotos
+        photos={photos}
+        disabled={disabled || saving || !!removing}
+        palette={NOTE_PHOTO_PALETTE}
+        dictationServiceId={serviceId}
+        // The photo manager covers the sheet: it never opens over a
+        // description, whose mic may be recording (codex local r2).
+        addLockedWhileEditing
+        onAdd={onAdd}
+        onEditingChange={setDescribing}
+        onCaption={(index, caption) => {
+          const photo = photos[index];
+          return change(photo, { method: 'PATCH', body: JSON.stringify({ caption }) }, (list, answer) => list.map((each) => (
+            each.id === photo?.id
+              ? { ...each, caption: answer?.photo && 'caption' in answer.photo ? answer.photo.caption : caption }
+              : each
+          )));
+        }}
+        onRemove={(index) => { setError(''); setRemoving(photos[index] || null); }}
+      />
+      {(removing || error || readFailed) && (
+        <div className="tech-note-photo-after">
+          {readFailed && (
+            <div className="tech-note-photo-confirm">
+              <ActionFeedback error className="tech-visit-feedback">Couldn’t read the visit’s photos. Check the connection.</ActionFeedback>
+              <div className="tech-note-photo-confirm-actions">
+                <Button type="button" variant="secondary" className="tech-visit-action" onClick={onRetry} disabled={disabled}>Read the photos again</Button>
+              </div>
+            </div>
+          )}
+          {removing && (
+            <div className="tech-note-photo-confirm" role="group" aria-label="Remove photo">
+              <p className="tech-visit-muted">Remove this photo? It’s deleted from the visit for good.</p>
+              <div className="tech-note-photo-confirm-actions">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="tech-visit-action"
+                  onClick={() => {
+                    const photo = removing;
+                    setRemoving(null);
+                    change(photo, { method: 'DELETE' }, (list) => list.filter((each) => each.id !== photo.id));
+                  }}
+                >
+                  Remove photo
+                </Button>
+                <Button type="button" variant="secondary" className="tech-visit-action" onClick={() => setRemoving(null)}>Keep</Button>
+              </div>
+            </div>
+          )}
+          {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
+        </div>
+      )}
+    </>
   );
 }
 
