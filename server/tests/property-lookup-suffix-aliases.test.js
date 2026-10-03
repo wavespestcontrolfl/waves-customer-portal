@@ -47,10 +47,7 @@ describe('normalizeCountyStreetLine: WY → WAY', () => {
   });
 
   test('manatee candidates for a typed "Wy" address carry the roll spelling', () => {
-    expect(_private.manateeAddressSearchCandidates('100 Example Creek Wy, Parrish, FL 34219')).toEqual([
-      '100 EXAMPLE CREEK WAY',
-      '100 EXAMPLE CREEK',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('100 Example Creek Wy, Parrish, FL 34219')).toEqual(['100 EXAMPLE CREEK WAY', '100 EXAMPLE CREEK WY', '100 EXAMPLE CREEK']);
   });
 
   test('the audit finds a typed "Wy" street on a roll that spells WAY', async () => {

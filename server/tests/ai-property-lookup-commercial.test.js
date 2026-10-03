@@ -190,46 +190,22 @@ describe('Manatee PAO property lookup facts', () => {
   });
 
   test('builds PAO address candidates with normalized suffixes and directions', () => {
-    expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East, Bradenton, FL 34211')).toEqual([
-      '8920 49TH AVE E',
-      '8920 49TH',
-    ]);
-    expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East Bradenton FL 34211')).toEqual([
-      '8920 49TH AVE E',
-      '8920 49TH',
-    ]);
-    expect(_private.manateeAddressSearchCandidates('123 St George Drive, Bradenton, FL 34211')).toEqual([
-      '123 ST GEORGE DR',
-      '123 ST GEORGE',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East, Bradenton, FL 34211')).toEqual(['8920 49TH AVE E', '8920 49TH AVENUE EAST', '8920 49TH']);
+    expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East Bradenton FL 34211')).toEqual(['8920 49TH AVE E', '8920 49TH AVENUE EAST', '8920 49TH']);
+    expect(_private.manateeAddressSearchCandidates('123 St George Drive, Bradenton, FL 34211')).toEqual(['123 ST GEORGE DR', '123 ST GEORGE DRIVE', '123 ST GEORGE']);
     // Google abbreviates Loop as "Lp"; the roll spells LOOP (live miss:
     // Skipping Stone read as street-not-found).
-    expect(_private.manateeAddressSearchCandidates('14384 Skipping Stone Lp, Parrish, FL 34219')).toEqual([
-      '14384 SKIPPING STONE LOOP',
-      '14384 SKIPPING STONE',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('14384 Skipping Stone Lp, Parrish, FL 34219')).toEqual(['14384 SKIPPING STONE LOOP', '14384 SKIPPING STONE LP', '14384 SKIPPING STONE']);
     // New suffix words canonicalize ONLY at the terminal position — inside a
     // street name they must survive untouched or the outbound query key
     // can't match the roll (codex P2).
-    expect(_private.manateeAddressSearchCandidates('123 Glen Oaks Drive, Bradenton, FL 34211')).toEqual([
-      '123 GLEN OAKS DR',
-      '123 GLEN OAKS',
-    ]);
-    expect(_private.manateeAddressSearchCandidates('123 Cove Point Road, Bradenton, FL 34211')).toEqual([
-      '123 COVE POINT RD',
-      '123 COVE POINT',
-    ]);
-    expect(_private.manateeAddressSearchCandidates('123 Summer Glen, Bradenton, FL 34211')).toEqual([
-      '123 SUMMER GLN',
-      '123 SUMMER',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('123 Glen Oaks Drive, Bradenton, FL 34211')).toEqual(['123 GLEN OAKS DR', '123 GLEN OAKS DRIVE', '123 GLEN OAKS']);
+    expect(_private.manateeAddressSearchCandidates('123 Cove Point Road, Bradenton, FL 34211')).toEqual(['123 COVE POINT RD', '123 COVE POINT ROAD', '123 COVE POINT']);
+    expect(_private.manateeAddressSearchCandidates('123 Summer Glen, Bradenton, FL 34211')).toEqual(['123 SUMMER GLN', '123 SUMMER GLEN', '123 SUMMER']);
     // A spelled-out post-direction before a directional city alias stays on
     // the street: "45th Street West, Bradenton" — not a street in the
     // "WEST BRADENTON" CDP (codex P2).
-    expect(_private.manateeAddressSearchCandidates('4506 45th Street West Bradenton FL 34209')).toEqual([
-      '4506 45TH ST W',
-      '4506 45TH',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('4506 45th Street West Bradenton FL 34209')).toEqual(['4506 45TH ST W', '4506 45TH STREET WEST', '4506 45TH']);
     // A directional city alias after a NON-suffix token still strips whole.
     expect(_private.manateeAddressSearchCandidates('6510 3rd Ave W West Bradenton FL 34209')).toEqual([
       '6510 3RD AVE W',

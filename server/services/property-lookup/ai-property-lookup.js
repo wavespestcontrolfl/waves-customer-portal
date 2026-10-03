@@ -2733,11 +2733,23 @@ function routeSearchCandidates(street) {
   return tail ? [...routes.map((r) => `${r} ${tail}`), ...routes] : routes;
 }
 
+// Every spelling a parcel search should try for one street: the canonical
+// key and its other spellings (routes, "Avenue C", a name-only suffix
+// "W LK" → "W LAKE"), then the street EXACTLY as typed (cleaned, never
+// canonicalized). The typed form guarantees a normalization change can
+// never make a previously searchable spelling unreachable — Charlotte
+// matches candidates by exact equality (pre-push audit, 10-02).
+function streetSpellingCandidates(address, street) {
+  const typed = stripCountyLocationSuffix(String(address || '').split(',')[0]
+    .toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim());
+  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), typed];
+}
+
 function manateeAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street, ...routeSearchCandidates(street)];
+  const candidates = streetSpellingCandidates(address, street);
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 
@@ -2752,7 +2764,7 @@ function countyAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street, ...routeSearchCandidates(street)];
+  const candidates = streetSpellingCandidates(address, street);
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 

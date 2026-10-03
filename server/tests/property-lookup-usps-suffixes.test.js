@@ -140,7 +140,7 @@ describe('normalizeCountyStreetLine: suffix words inside a name are never touche
   });
 
   test('a lone suffix word is not wiped from a bare-direction street', () => {
-    expect(_private.manateeAddressSearchCandidates('100 W Lake')).toEqual(['100 W LK']);
+    expect(_private.manateeAddressSearchCandidates('100 W Lake')).toEqual(['100 W LK', '100 W LAKE']);
   });
 });
 
@@ -166,10 +166,7 @@ describe('normalizeCountyStreetLine: routes and numbered streets are unaffected'
 
 describe('county search candidates and the audit with USPS suffixes', () => {
   test('manatee candidates for a typed variant carry the key and the stripped street', () => {
-    expect(_private.manateeAddressSearchCandidates('100 Example Lake, Parrish, FL 34219')).toEqual([
-      '100 EXAMPLE LK',
-      '100 EXAMPLE',
-    ]);
+    expect(_private.manateeAddressSearchCandidates('100 Example Lake, Parrish, FL 34219')).toEqual(['100 EXAMPLE LK', '100 EXAMPLE LAKE', '100 EXAMPLE']);
   });
 
   test('a typed abbreviation finds a roll that spells the suffix out', async () => {
