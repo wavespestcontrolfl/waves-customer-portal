@@ -656,7 +656,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   // internally, so it reports suspected per-leg timeouts through this
   // out-param (observational only — feeds the finalize stamp below).
   const lookupDiag = {};
-  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag, { prioritizeAccuracy: options.prioritizeAccuracy }).catch((err) => {
+  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag, { prioritizeAccuracy: options.prioritizeAccuracy, ...(options.commercialSuiteSizing === true ? { commercialSuiteSizing: true } : {}) }).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });

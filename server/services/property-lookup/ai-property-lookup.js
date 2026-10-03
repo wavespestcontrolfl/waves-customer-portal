@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { condoUnitFolioLive, lookupBusinessIdentityLive } = require('../../config/feature-gates');
+const { condoUnitFolioLive, lookupBusinessIdentityLive, commercialSuiteSizingLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 const { routeSpellingVariants, terminalSuffixVariant } = require('./route-spellings');
 const { USPS_STREET_SUFFIXES, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
@@ -1995,12 +1995,18 @@ const PARENT_PARCEL_MIN_EDGE_M = 5;
 const PARENT_PARCEL_DOR_MIN = 11;
 const PARENT_PARCEL_DOR_MAX = 27;
 
+// Both gates, like the business-identity leg that reads the context
+// (GATE_LOOKUP_BUSINESS_IDENTITY needs GATE_COMMERCIAL_SUITE_SIZING).
 function parentParcelEnabled() {
-  return typeof lookupBusinessIdentityLive === 'function' && lookupBusinessIdentityLive() === true;
+  return typeof lookupBusinessIdentityLive === 'function' && lookupBusinessIdentityLive() === true
+    && typeof commercialSuiteSizingLive === 'function' && commercialSuiteSizingLive() === true;
 }
 
-function parentParcelContext(parcel, { address, gisPrecision, point }) {
-  if (!parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
+// `optIn`: the caller's own commercial-suite-sizing opt-in (the admin estimate
+// tool's lookup and the estimator engine). Public and ordinary lookups never
+// pass it, so they keep nothing and behave exactly as before.
+function parentParcelContext(parcel, { address, gisPrecision, point, optIn = false }) {
+  if (optIn !== true || !parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
   if (TYPED_DWELLING_UNIT_RE.test(String(address || ''))) return null;
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
   if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
@@ -2285,7 +2291,7 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
 // out-param; no network. Returns the surviving parcel (possibly a unit parcel
 // resolved out of an aggregate), the park marker when one survives, and
 // dropReason (null when the parcel was kept or there was none to judge).
-function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null, point = null }) {
+function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null, point = null, parentParcelOptIn = false }) {
   let parcel = inputParcel;
   let parkParcelSignal = null;
   let parentParcel = null;
@@ -2358,7 +2364,7 @@ function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecisio
     logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
     // The parcel's facts are dropped; which commercial parcel the point
     // sits in may still be kept as context (parentParcelContext).
-    parentParcel = parentParcelContext(parcel, { address, gisPrecision, point });
+    parentParcel = parentParcelContext(parcel, { address, gisPrecision, point, optIn: parentParcelOptIn });
     parcel = null;
     dropReason = 'situs_house_number_mismatch';
   } else if (parcel && gisPrecision === 'interpolated'
@@ -2435,6 +2441,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     }
     const guarded = applyGisParcelGuards(parcel, {
       searchAddress, address, gisPrecision, diag, point: { lat: geoContext.lat, lng: geoContext.lng },
+      parentParcelOptIn: options.commercialSuiteSizing === true,
     });
     parcel = guarded.parcel;
     parkParcelSignal = guarded.parkParcelSignal;
@@ -2537,6 +2544,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
         'county_gis',
       );
       contextOnly._parentParcel = parentParcel;
+      // Every provider failing is an outage or a miss, not an answer: the
+      // lookup must stay retryable, so this record is never cached
+      // (lookup-cache.js saveLookup).
+      contextOnly._contextOnly = true;
       return contextOnly;
     }
     if (!parkParcelSignal) return null;

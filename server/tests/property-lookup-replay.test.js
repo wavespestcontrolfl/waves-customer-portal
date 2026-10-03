@@ -509,10 +509,13 @@ describe('summary and TSV', () => {
 
 describe('guard gates at startup', () => {
   test('names and on/off only, on exactly when the reader is (=== "true")', () => {
-    expect(replay.formatGuardGates({})).toBe('GATE_CONDO_UNIT_FOLIO=off');
-    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'true', DATABASE_PUBLIC_URL: 'postgres://secret' })).toBe('GATE_CONDO_UNIT_FOLIO=on');
+    expect(replay.formatGuardGates({})).toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'true', DATABASE_PUBLIC_URL: 'postgres://secret' })).toBe('GATE_CONDO_UNIT_FOLIO=on GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
+    // The parent-parcel gates (address-match PR 6) are reported the same way.
+    expect(replay.formatGuardGates({ GATE_LOOKUP_BUSINESS_IDENTITY: 'true', GATE_COMMERCIAL_SUITE_SIZING: 'true' }))
+      .toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=on GATE_COMMERCIAL_SUITE_SIZING=on');
     // feature-gates condoUnitFolioLive() is strict: 'TRUE' / '1' read OFF
-    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'TRUE' })).toBe('GATE_CONDO_UNIT_FOLIO=off');
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'TRUE' })).toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
   });
 
   test('main prints the gate line and writes lat/lng to the TSV, without touching the network', async () => {

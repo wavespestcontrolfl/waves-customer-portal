@@ -8,6 +8,12 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+jest.mock('../models/db', () => {
+  const db = jest.fn(() => { throw new Error('no database in this suite'); });
+  db.raw = jest.fn(() => { throw new Error('no database in this suite'); });
+  db.fn = { now: jest.fn() };
+  return db;
+});
 jest.mock('../services/property-lookup/county-parcel-gis', () => {
   const actual = jest.requireActual('../services/property-lookup/county-parcel-gis');
   return { ...actual, lookupCountyParcelByPoint: jest.fn() };
@@ -43,10 +49,11 @@ const plazaParcel = (over = {}) => ({
 
 const TYPED = '100 Example Plaza Dr, Examplecity, FL 00000';
 const guard = (parcel, over = {}) => applyGisParcelGuards(parcel, {
-  searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG }, ...over,
+  searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG }, parentParcelOptIn: true, ...over,
 });
 
-afterEach(() => { delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY; });
+beforeEach(() => { process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true'; });
+afterEach(() => { delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY; delete process.env.GATE_COMMERCIAL_SUITE_SIZING; });
 
 describe('pointToPolygonEdgeMeters', () => {
   test('the center of a ~111 m square is ~55 m (north-south) or ~49 m (east-west) from the line: the nearer one wins', () => {
@@ -102,6 +109,18 @@ describe('the situs guard and the parent parcel', () => {
         expect(parentParcel).not.toHaveProperty(key);
       }
       expect(JSON.stringify(parentParcel)).not.toMatch(/600000|50000/);
+    });
+
+    test('a caller that did not opt in to suite sizing (public and ordinary lookups) keeps nothing', () => {
+      expect(guard(plazaParcel(), { parentParcelOptIn: false }).parentParcel).toBeNull();
+      expect(applyGisParcelGuards(plazaParcel(), {
+        searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG },
+      }).parentParcel).toBeNull();
+    });
+
+    test('the suite-sizing gate off keeps nothing, even opted in', () => {
+      delete process.env.GATE_COMMERCIAL_SUITE_SIZING;
+      expect(guard(plazaParcel()).parentParcel).toBeNull();
     });
 
     test('an interpolated point is a guess along the street: nothing kept', () => {
@@ -170,8 +189,10 @@ describe('the whole lookup when every fact provider fails', () => {
   test('gate on: a facts-free record carries the parent parcel, and does not read as county evidence', async () => {
     process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
-    const record = await lookupPropertyFromAITrio(TYPED, geo);
+    const record = await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true });
     expect(record).not.toBeNull();
+    // Never cached: a failed lookup with a note attached stays retryable.
+    expect(record._contextOnly).toBe(true);
     expect(record._parentParcel).toMatchObject({ parcelId: 'EXAMPLE-PARCEL', situsAddress: '900 Example Rd' });
     expect(record.squareFootage || 0).toBe(0);
     expect(record.lotSize || 0).toBe(0);
@@ -179,8 +200,28 @@ describe('the whole lookup when every fact provider fails', () => {
     expect(hasCountyEvidence(record)).toBe(false);
   });
 
-  test('gate off: no record at all, as before', async () => {
+  test('gate on but the caller did not opt in: no record at all, as before', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
     expect(await lookupPropertyFromAITrio(TYPED, geo)).toBeNull();
+  });
+
+  test('saveLookup never caches a context-only record', async () => {
+    const cache = require('../services/property-lookup/lookup-cache');
+    const db = require('../models/db');
+    const result = (propertyRecord) => ({
+      propertyRecord, satellite: { lat: LAT, lng: LNG }, aiAnalysis: {}, enriched: {}, meta: {},
+    });
+    await cache.saveLookup(TYPED, result({ _contextOnly: true, _parentParcel: { parcelId: 'EXAMPLE-PARCEL' } }));
+    expect(db).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
+    // Control: an ordinary record does reach the database.
+    await cache.saveLookup(TYPED, result({ squareFootage: 2000, _source: 'county' }));
+    expect(db.mock.calls.length + db.raw.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  test('gate off: no record at all, as before', async () => {
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
+    expect(await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true })).toBeNull();
   });
 });

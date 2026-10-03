@@ -121,7 +121,7 @@ const PAYLOAD_SLACK_SECONDS = 5;
 // Gates the replayed parcel guards read at call time (feature-gates.js
 // condoUnitFolioLive: on only when exactly 'true'). A new gate a guard starts
 // reading belongs here so a run without it is visible.
-const GUARD_GATES = ['GATE_CONDO_UNIT_FOLIO'];
+const GUARD_GATES = ['GATE_CONDO_UNIT_FOLIO', 'GATE_LOOKUP_BUSINESS_IDENTITY', 'GATE_COMMERCIAL_SUITE_SIZING'];
 
 class UsageError extends Error {}
 
@@ -410,6 +410,10 @@ async function pointStep(address, geo, countyHint, deps) {
     address,
     gisPrecision: deps.parcelGisPrecision(geo),
     diag: null,
+    // The parent-parcel decision (GATE_LOOKUP_BUSINESS_IDENTITY) needs the
+    // point; the replay measures the opted-in (admin / engine) lookup.
+    point: { lat: geo.lat, lng: geo.lng },
+    parentParcelOptIn: true,
   });
   // A kept parcel may be a unit parcel resolved out of an aggregate; a dropped
   // one is reported as the parcel the point found.
@@ -417,6 +421,7 @@ async function pointStep(address, geo, countyHint, deps) {
   return {
     status: guarded.parcel ? 'kept' : 'dropped',
     ...(guarded.parcel ? {} : { dropReason: guarded.dropReason || 'unknown' }),
+    ...(guarded.parentParcel ? { parentParcel: true } : {}),
     parcelId: shown.parcelId || null,
     situs: shown.situsAddress || null,
     county: shown.county || null,
