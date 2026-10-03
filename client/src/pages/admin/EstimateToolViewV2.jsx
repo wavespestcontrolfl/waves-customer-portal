@@ -47,6 +47,7 @@ import {
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
+import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
 
@@ -583,6 +584,20 @@ function linesPricedOnGuessedHomeSize(result) {
 // structure takes it out of unit scope (codex r5 P2 #4862).
 function isUnitScopedForm(form) {
   return !!form?._unitLookup && /^condo/i.test(String(form?.propertyType || ""));
+}
+
+// The server refuses to price a business-identified address whose scope
+// question is still open (409 COMMERCIAL_SCOPE_UNRESOLVED, carrying the
+// question in metadata). Returns the question, or null for any other failure.
+async function scopeUnresolvedQuestion(response) {
+  if (response?.status !== 409) return null;
+  try {
+    const data = await response.clone().json();
+    return data?.code === "COMMERCIAL_SCOPE_UNRESOLVED"
+      ? (data.metadata?.question || SCOPE_QUESTION) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
@@ -2594,6 +2609,20 @@ export default function EstimateToolViewV2({
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   const [lookupMeta, setLookupMeta] = useState(null);
+  // Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): the
+  // CSR's answer for ONE address, re-sent on every lookup of it; a server 409
+  // can raise the question on its own.
+  const occupancyRef = useRef({ address: "", answer: "" });
+  const [scopeConflict, setScopeConflict] = useState("");
+  const scopeUnresolved = enrichedProfile?.serviceScopeDecision === "scope_unresolved"
+    && !enrichedProfile?.occupancyAnswer;
+  const scopeQuestion = scopeUnresolved
+    ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION) : scopeConflict;
+  // A server-raised question belongs to the lookup it came from: a cleared
+  // or re-addressed lookup (no profile) drops it.
+  useEffect(() => {
+    if (!enrichedProfile) setScopeConflict("");
+  }, [enrichedProfile]);
   const [verifySaveState, setVerifySaveState] = useState({});
   const verificationVersionRef = useRef(0);
 
@@ -3138,8 +3167,17 @@ export default function EstimateToolViewV2({
     });
   }
 
-  async function doLookup({ refresh = false } = {}) {
+  // The CSR's answer to the scope question: remembered for this address and
+  // sent with the re-run lookup, which returns the decided scope.
+  function answerScope(answer) {
+    occupancyRef.current = { address: form.address.trim(), answer };
+    void doLookup({ occupancy: answer });
+  }
+
+  async function doLookup({ refresh = false, occupancy } = {}) {
     const address = form.address.trim();
+    if (occupancy) occupancyRef.current = { address, answer: occupancy };
+    const occupancyAnswer = occupancyRef.current.address === address ? occupancyRef.current.answer : "";
     // Read at click time: a deep link seeds form.customerId with no chip.
     const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
     if (!address) {
@@ -3189,6 +3227,8 @@ export default function EstimateToolViewV2({
           ...((["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
             || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || "")))
             ? { wholeProperty: true } : {}),
+          // The scope answer (server field `occupancy`), only once given.
+          ...(occupancyAnswer ? { occupancy: occupancyAnswer } : {}),
         }),
         signal: lookupController.signal,
       });
@@ -3210,6 +3250,7 @@ export default function EstimateToolViewV2({
       const ep = scopeUnitParcelProfile(data.enriched);
       if (!ep) throw new Error("Property details were not returned. Try refreshing the records.");
       setEnrichedProfile(ep);
+      setScopeConflict("");
       setLookupMeta({
         address,
         matchedAddress: (data.propertyRecord || data.rentcast)?.formattedAddress || null,
@@ -3503,6 +3544,8 @@ export default function EstimateToolViewV2({
   async function doGenerate(overrides = {}) {
     if (editEstimateId && !editMode) return null;
     if (generating) return null;
+    // An open scope question blocks pricing (the server refuses it too).
+    if (scopeQuestion) return null;
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
     // this generate discard its result (it was priced from pre-edit inputs).
@@ -4037,13 +4080,19 @@ export default function EstimateToolViewV2({
         headers: authHeaders,
         body: JSON.stringify({ profile, selectedServices, options }),
       });
-      if (!r.ok)
+      if (!r.ok) {
+        const openQuestion = await scopeUnresolvedQuestion(r);
+        if (openQuestion) {
+          setScopeConflict(openQuestion);
+          return null;
+        }
         throw new Error(
           await summarizeEstimateResponseFailure(
             r,
             "Estimate calculation failed",
           ),
         );
+      }
       const result = await r.json();
       if (result.error) {
         alert(result.error);
@@ -4215,10 +4264,13 @@ export default function EstimateToolViewV2({
           headers: authHeaders,
           body: JSON.stringify({ ...payload, dryRun: true }),
         });
-        if (!pf.ok)
+        if (!pf.ok) {
+          const openQuestion = await scopeUnresolvedQuestion(pf);
+          if (openQuestion) setScopeConflict(openQuestion);
           throw new Error(
             await summarizeEstimateResponseFailure(pf, "Save failed"),
           );
+        }
         const preflight = await pf.json();
         const preNotice = serverRecomputeNotice(preflight, monthlyTotal, onetimeTotal);
         if (preNotice) {
@@ -4241,10 +4293,13 @@ export default function EstimateToolViewV2({
           body: JSON.stringify(payload),
         },
       );
-      if (!r.ok)
+      if (!r.ok) {
+        const openQuestion = await scopeUnresolvedQuestion(r);
+        if (openQuestion) setScopeConflict(openQuestion);
         throw new Error(
           await summarizeEstimateResponseFailure(r, "Save failed"),
         );
+      }
       const d = await r.json();
       const id = d.id || d.estimateId;
       const viewUrl = estimatePreviewUrlFromSave(d);
@@ -5048,6 +5103,7 @@ export default function EstimateToolViewV2({
                     }));
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
+                    setScopeConflict("");
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
                     // The customer linkage survives Clear All (customerId is
@@ -5078,6 +5134,13 @@ export default function EstimateToolViewV2({
                   verification={verifySaveState}
                 />
               )}
+              <ScopeQuestionPrompt
+                profile={enrichedProfile}
+                question={scopeQuestion}
+                answer={occupancyRef.current.address === form.address.trim() ? occupancyRef.current.answer : ""}
+                busy={lookupStatus.type === "loading"}
+                onAnswer={answerScope}
+              />
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
@@ -7462,7 +7525,8 @@ export default function EstimateToolViewV2({
               {" "}
               <Button
                 onClick={() => doGenerate()}
-                disabled={generateBusy}
+                disabled={generateBusy || !!scopeQuestion}
+                title={scopeQuestion || undefined}
                 loading={generating}
                 variant="primary"
                 size="md"
@@ -7474,9 +7538,9 @@ export default function EstimateToolViewV2({
                   variant="secondary"
                   size="md"
                   loading={saving}
-                  disabled={generateBusy || saving}
+                  disabled={generateBusy || saving || !!scopeQuestion}
                   onClick={() => doSave()}
-                  title="Update the existing estimate — the customer's link shows the new quote without a resend"
+                  title={scopeQuestion || "Update the existing estimate — the customer's link shows the new quote without a resend"}
                 >
                   {editMode?.status === "sent" || editMode?.status === "viewed" ? "Save changes" : "Save draft"}
                 </Button>
@@ -7497,7 +7561,8 @@ export default function EstimateToolViewV2({
               <Button
                 variant="secondary"
                 size="md"
-                disabled={generateBusy || !savedId}
+                disabled={generateBusy || !savedId || !!scopeQuestion}
+                title={scopeQuestion || undefined}
                 onClick={(event) => { event.currentTarget.focus(); void reviewAndSend(); }}
               >
                 Review and send
