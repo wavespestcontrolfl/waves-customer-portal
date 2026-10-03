@@ -4,7 +4,8 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
-const { SHOT_CAP: LAWN_SHOT_LIST_CAP } = require('../lawn-photo-shots');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
+const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2602,6 +2603,11 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
     .filter(Boolean);
 }
 
+// Read at call time; a partial feature-gates mock (or a missing export) means off.
+function lawnReportPhotoSetLive() {
+  return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -2806,6 +2812,10 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
+  // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the swipe strip
+  // for a labeled grid, so the same rule: a PDF cached before a flip is never
+  // served after it, and the stamp rides only while the gate is live.
+  if (lawnReportPhotoSetLive()) irrigationStamp += ':photoset=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3350,6 +3360,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     observations: photo.observations || '',
     takenAt: photo.taken_at || photo.created_at || null,
   })));
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list
+  // (the marker stored beside its photos; a visit without it keeps the strip)
+  // shows its photos as a labeled set in shot order. Built from the same
+  // signed URLs as `photos` above, so it is minted fresh on every view and
+  // never stored. No gate, no marker or no resolvable photo = no key at all.
+  const photoSet = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos)
+    ? buildLawnPhotoSet(latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order })))
+    : [];
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
   // the property-scoped history row selectPriorVisit chose; confidence is read
@@ -3727,6 +3745,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     initialScores: initialScore,
     trend,
     photos,
+    ...(photoSet.length ? { photoSet } : {}),
     beforeAfter,
     recommendations: parseJsonObject(assessment.recommendations),
     observations: singleVoiceObservation(assessment.observations),

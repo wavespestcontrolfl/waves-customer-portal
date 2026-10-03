@@ -487,16 +487,44 @@ function SliderArrow({ dir, onClick, disabled }) {
   );
 }
 
-export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false }) {
+// GATE_LAWN_REPORT_PHOTO_SET (P23): the visit's photos as a labeled grid in
+// shot order, every photo on screen at once (the strip below shows one at a
+// time). The server sends the fixed customer label with each photo; nothing
+// here writes words about a photo. Tap a photo to open it full size.
+function LawnPhotoSetGrid({ set, print }) {
+  return (
+    <div data-testid="lawn-photo-set" style={{ display: 'grid', gridTemplateColumns: set.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
+      {set.map((p, i) => {
+        const img = (
+          <img
+            src={p.url}
+            alt={p.label || 'Lawn photo'}
+            style={{ width: '100%', height: 150, objectFit: 'cover', borderRadius: 10, border: `1px solid ${BORDER}`, display: 'block' }}
+          />
+        );
+        return (
+          <figure key={i} style={{ margin: 0 }}>
+            {print ? img : <a href={p.url} target="_blank" rel="noopener noreferrer" style={{ display: 'block' }}>{img}</a>}
+            {p.label ? <figcaption style={{ fontSize: 14, color: MUTED, marginTop: 5 }}>{p.label}</figcaption> : null}
+          </figure>
+        );
+      })}
+    </div>
+  );
+}
+
+export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false, photoSet = null }) {
   const print = usePrint();
   // The browser print pass (Report Tools "Print", Cmd+P) over the live page
   // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
   const printRequested = usePrintRequested();
   const printOpen = print || printRequested;
-  const pics = (photos || []).filter((p) => p && p.url);
+  const set = (Array.isArray(photoSet) ? photoSet : []).filter((p) => p && p.url);
+  // A photo set replaces the strip; without one the strip below is unchanged.
+  const pics = set.length ? [] : (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
   const [idx, setIdx] = useState(0);
-  if (!pics.length && !summary) return null;
+  if (!pics.length && !set.length && !summary) return null;
   const multi = pics.length > 1;
   const go = (d) => {
     const el = scroller.current;
@@ -511,6 +539,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
   return (
     <Frame>
       {!embedded && <CardTitle>Lawn photos</CardTitle>}
+      {set.length ? <LawnPhotoSetGrid set={set} print={print} /> : null}
       {pics.length && print ? (
         /* Static grid for PDF/print — no slider/arrows. */
         <div style={{ display: 'grid', gridTemplateColumns: pics.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>

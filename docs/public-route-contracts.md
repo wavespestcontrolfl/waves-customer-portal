@@ -2371,6 +2371,21 @@ cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
 off the payload and the signature are byte-identical to before.
 
+`GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
+list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
+without that marker is untouched), the service-report payload gains
+`reportV2.photoSet` and `lawnAssessment.photoSet`: `[{ url, shot, label }]`, the
+visit's customer-visible photos in shot order (the order of
+`shared/lawn-photo-shots.json`, then the technician's order inside a shot, an
+untagged photo last). `label` is the fixed customer wording (the `reportLabel`
+values listed above, or "Lawn photo" for an untagged photo); `shot` is the shot
+key or `null`. Each `url` is a signed link built on every view (the same
+24-hour link as `photos`); nothing stores it, and the key is absent when the
+photo read fails or no photo has a link. The web report and the PDF show the set
+as a labeled grid in place of the swipe strip. The lawn PDF cache signature
+gains `:photoset=1` while the gate is live. With the gate off, or on a visit
+without the marker, the payload and the signature are byte-identical to before.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
