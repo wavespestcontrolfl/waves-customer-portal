@@ -243,7 +243,13 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
     return { sent: !!result?.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] email failed for customer ${customer.id} (${err?.name || 'Error'})`);
-    return { sent: false, attempted };
+    // The library's own definite-non-send classification (unconfigured, or a
+    // provider status that conclusively rejects the payload) rides along: a
+    // caller that keeps send-once claims can tell a certain non-send from an
+    // ambiguous one. Absent = ambiguous.
+    let definiteNonSend = false;
+    try { definiteNonSend = err?.code === 'SENDGRID_NOT_CONFIGURED' || require('./sendgrid-mail').isDefiniteRejection(err); } catch { /* ambiguous */ }
+    return { sent: false, attempted, ...(definiteNonSend ? { definiteNonSend: true } : {}) };
   }
 }
 

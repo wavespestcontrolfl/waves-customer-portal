@@ -33,7 +33,7 @@ const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require(
 const { sendTemplate } = require('../services/email-template-library');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { previewPriceChange, createAndSendBatch, sendNoticeSms } = require('../services/price-change-notices');
+const { previewPriceChange, createAndSendBatch, sendNoticeSms, sendNoticeEmail } = require('../services/price-change-notices');
 
 let customerRows;
 let noticeInserts;
@@ -480,5 +480,30 @@ describe('sendNoticeSms delivery evidence', () => {
     const res = await sendNoticeSms({ ...args, sendOptions: { metadata: { rate_review_letter: true } } });
     expect(res).toEqual({ sent: false, attempted: false, blockedCode: 'NOTICE_REPOINTED' });
     expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata).toMatchObject({ original_message_type: 'price_change_notice', rate_review_letter: true });
+  });
+});
+
+describe('sendNoticeEmail definite-non-send classification', () => {
+  const args = { customer: CUSTOMER, idempotencyKeyBase: 'k', vars: {} };
+  beforeEach(() => {
+    getInvoiceEmailRecipients.mockReturnValue([{ email: 'pat@example.com', name: 'Pat' }]);
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsQuery();
+      throw new Error(`unexpected table ${table}`);
+    });
+  });
+  it.each([
+    ['unconfigured sender', Object.assign(new Error('not configured'), { code: 'SENDGRID_NOT_CONFIGURED' })],
+    ['a provider status that conclusively rejects the payload', Object.assign(new Error('bad request'), { status: 400 })],
+  ])('%s: a certain non-send', async (_label, err) => {
+    sendTemplate.mockRejectedValue(err);
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+  });
+  it.each([
+    ['a 5xx the provider may have processed', Object.assign(new Error('boom'), { status: 502 })],
+    ['a network failure', new Error('socket hang up')],
+  ])('%s: stays ambiguous', async (_label, err) => {
+    sendTemplate.mockRejectedValue(err);
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true });
   });
 });
