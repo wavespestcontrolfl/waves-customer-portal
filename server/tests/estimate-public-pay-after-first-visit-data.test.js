@@ -125,9 +125,9 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
   });
 
-  async function policyFor(policy) {
+  async function policyFor(policy, rowOverrides = {}) {
     RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue(policy);
-    const row = estimateRow({ id: 'est-paf-1', token: 'payafterfirsttoken' });
+    const row = estimateRow({ id: 'est-paf-1', token: 'payafterfirsttoken', ...rowOverrides });
     dbRows = { estimates: row };
     return withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/${row.token}/data`);
@@ -226,6 +226,28 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     } finally {
       delete gates.autoApplyAccountCredit;
       delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+    }
+  });
+
+  // PR-E (GATE_PAF_PREPAY): the after-visit prepay flag follows the accept's
+  // own predicate, which never applies to a termite annual sign-before-pay
+  // plan (that accept parks for signature; GitHub Codex #5595 r1).
+  test('PR-E: prepayAfterFirstVisit for an in-lane prepay, never a termite sign-before-pay plan', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+    process.env.GATE_PAF_PREPAY = 'true';
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      expect((await policyFor(CAPTURE)).prepayAfterFirstVisit).toBe(true);
+      const parked = await policyFor(CAPTURE, { annual_plan_activation_status: 'awaiting_signature' });
+      expect(parked).not.toHaveProperty('prepayAfterFirstVisit');
+      delete process.env.GATE_PAF_PREPAY;
+      expect(await policyFor(CAPTURE)).not.toHaveProperty('prepayAfterFirstVisit');
+    } finally {
+      delete gates.autoApplyAccountCredit;
+      delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+      delete process.env.GATE_PAF_PREPAY;
     }
   });
 

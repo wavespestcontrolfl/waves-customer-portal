@@ -161,6 +161,9 @@ export default function PaymentPreferenceButtons({
   // a BANK account, is charged directly with no save step, so the copy must
   // stay tender-neutral and not instruct a card save (Codex #3492 r10).
   prepayCardCapture = false,
+  // GATE_PAF_PREPAY (server /data recurringCardPolicy.prepayAfterFirstVisit):
+  // the in-lane prepay is charged AFTER the first visit, not at approval.
+  prepayAfterFirstVisit = false,
   // GATE_PAF_EXISTING_CUSTOMERS: the ONE payment-timing answer for this
   // selection (lib/paymentTiming.js resolvePaymentTiming), null outside the
   // existing-customer cohort. Every timing sentence below reads it, never a
@@ -460,7 +463,9 @@ export default function PaymentPreferenceButtons({
                 ))}
                 {prepayInLane ? (
                   <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
-                    One payment covers the year — charged when you approve.
+                    {prepayAfterFirstVisit
+                      ? 'One payment covers the year — charged after your first visit.'
+                      : 'One payment covers the year — charged when you approve.'}
                   </div>
                 ) : null}
               </div>
@@ -478,9 +483,13 @@ export default function PaymentPreferenceButtons({
                 // Tender-accurate in-lane copy (Codex #3492 r10): a card
                 // capture instructs the save step; an auto-satisfy accept
                 // charges the SAVED method (card or bank) with no save step.
-                const inLaneNote = prepayCardCapture
-                  ? 'Save your card at checkout; the 12-month total is charged when you confirm.'
-                  : 'Your saved payment method on file is charged the 12-month total when you confirm.';
+                const inLaneNote = prepayAfterFirstVisit
+                  ? (prepayCardCapture
+                    ? 'Save your card at checkout; the 12-month total is charged after your first visit.'
+                    : 'Your saved payment method on file is charged the 12-month total after your first visit.')
+                  : prepayCardCapture
+                    ? 'Save your card at checkout; the 12-month total is charged when you confirm.'
+                    : 'Your saved payment method on file is charged the 12-month total when you confirm.';
                 return waivableSetupFee
                   ? `Approve the year up front — setup fee waived.${prepayInLane ? ` ${inLaneNote}` : ''}`
                   : prepayInLane
