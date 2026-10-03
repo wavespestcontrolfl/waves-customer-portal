@@ -239,14 +239,6 @@ describe('dunning spacing replay event reduction', () => {
 });
 
 describe('lastOverdueReminderWithin7d', () => {
-  test('requireDelivered (an enforcing caller) passes over an ambiguous row to a provider-accepted one; the shadow default still counts it', async () => {
-    const ambiguous = row({ id: 'amb', occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString(), metadata: {} });
-    const delivered = row({ id: 'del', occurred_at: new Date(NOW.getTime() - 2 * HOUR_MS).toISOString(), metadata: { delivered: true } });
-    expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database: fakeDatabase([ambiguous, delivered]) })).toEqual(ambiguous);
-    expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database: fakeDatabase([ambiguous, delivered]), requireDelivered: true })).toEqual(delivered);
-    expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database: fakeDatabase([ambiguous]), requireDelivered: true })).toBeNull();
-  });
-
   test('a row 6d23h ago is held', async () => {
     const held = row({ occurred_at: new Date(NOW.getTime() - (6 * 24 + 23) * HOUR_MS).toISOString() });
     const database = fakeDatabase([held]);

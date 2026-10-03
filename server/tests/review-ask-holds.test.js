@@ -93,8 +93,8 @@ describe('paymentHold', () => {
     mockLastReminder.mockResolvedValueOnce({ occurred_at: new Date(now.getTime() - 4 * 86400000) });
     expect(await Holds.paymentHold('c-1', { now })).toBeNull();
     expect(mockLastReminder.mock.calls[0][0]).toBe('c-1');
-    // only reminders a provider accepted, never the shadow rule's ambiguous rows
-    expect(mockLastReminder.mock.calls[0][1]).toMatchObject({ requireDelivered: true });
+    // the dunning rule's own count (any reminder not a confirmed failure)
+    expect(mockLastReminder.mock.calls[0][1]).not.toHaveProperty('requireDelivered');
   });
 
   test('a failed read holds (no evidence is never a clear)', async () => {

@@ -52,8 +52,14 @@ async function paymentHold(customerId, { now = new Date() } = {}) {
     // A bill dropped because its payer could not be resolved, or one beyond
     // the read's cap, may be theirs and overdue.
     if (incomplete) return { reason: 'payment_lookup_unavailable' };
+    // Every reminder row that is not a confirmed failure counts, the dunning
+    // rule's own doctrine (over-report, never under-report): several rails
+    // record before the send and never stamp a delivery, so requiring one
+    // would miss real reminders. A row whose send never happened costs one
+    // review ask delayed at most 3 days; a missed reminder sends an ask
+    // right after a payment reminder, which the hold exists to prevent.
     const { lastOverdueReminderWithin7d } = require('./collections/dunning-spacing');
-    const last = await lastOverdueReminderWithin7d(customerId, { now, database: db, requireDelivered: true });
+    const last = await lastOverdueReminderWithin7d(customerId, { now, database: db });
     if (last && now.getTime() - new Date(last.occurred_at).getTime() < PAYMENT_TEXT_HOLD_MS) {
       return { reason: 'payment_reminder_recent', at: new Date(last.occurred_at), until: new Date(new Date(last.occurred_at).getTime() + PAYMENT_TEXT_HOLD_MS) };
     }
