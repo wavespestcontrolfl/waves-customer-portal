@@ -1411,15 +1411,14 @@ async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
 async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, strict = false } = {}) {
   try {
     if (!sid) return [];
+    // The failure is kept by sid FIRST, whether or not sms_log has the row (the
+    // callback can beat the log's insert, and its own status UPDATE can fail): the
+    // delivery stamp and the nightly apply read this, so an undelivered text is
+    // never stamped delivered. Idempotent.
+    await dbh('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
+      .onConflict('twilio_sid').ignore();
     const log = await dbh('sms_log').where({ twilio_sid: sid }).first();
-    if (!log || !log.customer_id) {
-      // The callback beat the sender's own sms_log insert (or this is not a text we
-      // logged): keep the failure by sid so the delivery stamp and the nightly apply
-      // still see it. Idempotent; harmless for a sid no rate review notice ever names.
-      await dbh('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
-        .onConflict('twilio_sid').ignore();
-      return [];
-    }
+    if (!log || !log.customer_id) return [];
     const alerts = [];
     await dbh.transaction(async (trx) => {
       for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {

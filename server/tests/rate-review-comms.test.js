@@ -1095,6 +1095,20 @@ describe('customer surfaces', () => {
       expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'undelivered' });
     });
 
+    test('the failure is kept by sid even when sms_log HAS the row but its status bookkeeping failed (still "sent"): the stamp does not count the text delivered', async () => {
+      mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'sent', message_type: 'price_change_notice' }];
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      smsLeg.mockImplementation(async () => {
+        // the notice is still 'sending' (no claim key matches): the sid record is what survives
+        expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh: mockDb })).toEqual([]);
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, failed: 1 });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'failed' });
+    });
+
     test('a failed text reconciliation is re-thrown in strict mode (the status webhook then answers non-2xx) and swallowed otherwise', async () => {
       mockDb.reset(book());
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
