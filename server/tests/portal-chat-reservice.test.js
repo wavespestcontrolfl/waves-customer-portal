@@ -78,6 +78,9 @@ test('a lane the page would book: a booking button the server built, and the mod
   expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs_1' }]);
   expect(result.offered).toBe(true);
   expect(result.instruction).toMatch(/rodents, termites, mosquitoes/);
+  // The page computes open times on its own load; the offer never promises one.
+  expect(result.instruction).toMatch(/Do not say whether times are open or promise a time/);
+  expect(result.instruction).not.toMatch(/pick a time/);
   expect(JSON.stringify(result)).not.toMatch(/tok_rs_1/);
 });
 
@@ -101,6 +104,7 @@ test.each([
   ['the address review read fails', () => mockPage.reserviceLocationReviewRequired.mockRejectedValue(new Error('db down'))],
   ['the customer has no token', () => { tokenRow = { reservice_token: null }; }],
   ['the token fails the link shape', () => { tokenRow = { reservice_token: '../admin' }; }],
+  ['the token read fails', () => { tokenRow = Promise.reject(new Error('db down')); tokenRow.catch(() => {}); }],
 ])('%s: no button and no free offer', async (_label, arrange) => {
   arrange();
 

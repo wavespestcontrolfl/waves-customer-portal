@@ -525,7 +525,10 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
   const refusal = reportRefusal(customerWords, line);
   if (refusal) return refusal;
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token');
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
+    logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
+    return null;
+  });
   const token = String(customer?.reservice_token || '');
   if (!/^[A-Za-z0-9_-]+$/.test(token)) return RESERVICE_HAND_OFF;
   // The /reservice page's own verdict for this token (its customer load, lane
@@ -549,7 +552,7 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
     offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button to book it is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to pick a time. Do not state or promise a time yourself. The free visit covers ${line === 'pest' ? 'general pest control' : 'lawn care'} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${line === 'pest' ? 'general pest control' : 'lawn care'} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
   };
 }
 
