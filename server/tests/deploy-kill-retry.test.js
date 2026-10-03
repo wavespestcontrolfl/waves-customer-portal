@@ -18,11 +18,21 @@ jest.mock('../models/db', () => jest.fn(() => {
   };
   return b;
 }));
+// The retry lock. Default: the lock is free and the body runs at once.
+// mockBeforeBody stands in for the time spent waiting for the lock.
+let mockBeforeBody = null;
+jest.mock('../utils/cron-lock', () => ({
+  DEAD_RUN_ERROR: jest.requireActual('../utils/cron-lock').DEAD_RUN_ERROR,
+  runExclusive: jest.fn(async (_name, fn) => {
+    if (mockBeforeBody) mockBeforeBody();
+    return fn();
+  }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
 const { isScheduledTick } = require('../utils/scheduled-cron');
-const { DEAD_RUN_ERROR } = require('../utils/cron-lock');
+const { DEAD_RUN_ERROR, runExclusive } = require('../utils/cron-lock');
 const {
   registerDeployKillRetry,
   retryDeployKilledJobs,
@@ -48,6 +58,7 @@ describe('retryDeployKilledJobs', () => {
     mockHealthRows = [];
     mockHealthReadFails = false;
     mockQueries.length = 0;
+    mockBeforeBody = null;
   });
 
   test('re-runs a registered killed job as scheduled work; an unregistered one never runs', async () => {
@@ -60,6 +71,29 @@ describe('retryDeployKilledJobs', () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(ranAsTick).toBe(true);
     expect(mockQueries[0].where).toEqual({ last_status: 'failed', last_error: DEAD_RUN_ERROR });
+    expect(runExclusive).toHaveBeenCalledWith('deploy-kill-retry:property-enrich-backfill', expect.any(Function), { recordHealth: false });
+  });
+
+  test('a second instance that gets the retry lock after the first finished does not run the job again', async () => {
+    const run = jest.fn();
+    registerDeployKillRetry('property-enrich-backfill', run);
+    mockHealthRows = [killedRow('property-enrich-backfill')];
+    // Both instances read the killed row. This one then waits for the lock
+    // while the other instance retries the job to success.
+    mockBeforeBody = () => { mockHealthRows = [killedRow('property-enrich-backfill', { last_status: 'success', last_error: null })]; };
+
+    expect(await retryDeployKilledJobs({ now: NOW })).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  test('no run while another instance holds the retry lock', async () => {
+    const run = jest.fn();
+    registerDeployKillRetry('property-enrich-backfill', run);
+    mockHealthRows = [killedRow('property-enrich-backfill')];
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+
+    expect(await retryDeployKilledJobs({ now: NOW })).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
   });
 
   test('the row is the request: a pass that could not read it retries on the next pass', async () => {
@@ -129,9 +163,9 @@ describe('retryDeployKilledJobs', () => {
     registerDeployKillRetry('good', good);
     mockHealthRows = [killedRow('throws'), killedRow('good')];
 
-    expect(await retryDeployKilledJobs({ now: NOW })).toEqual(['throws', 'good']);
+    expect(await retryDeployKilledJobs({ now: NOW })).toEqual(['good']);
     expect(good).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('throws: retry failed: boom'));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('throws: retry failed, left for the next pass (boom)'));
   });
 
   test('an empty registry reads nothing', async () => {

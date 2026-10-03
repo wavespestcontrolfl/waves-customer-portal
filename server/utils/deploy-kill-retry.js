@@ -21,9 +21,12 @@
 // row leaves that state when the retry starts (running), ends (success, or
 // failed with its own error), or the next cron tick runs.
 //
-// Two instances may both see the row; the job's own runExclusive lock lets
-// one run and the other skip. The retry calls the job's own entry point:
-// same gates, same advisory lock, same job_health record as the cron tick.
+// Two instances may both see the row. Each retry runs under its own advisory
+// lock (`deploy-kill-retry:<job>`, held for the whole run), and every check
+// is made again under that lock. An instance that gets the lock after the
+// other finished reads a row that is no longer "killed" and does nothing, so
+// the job never replays back to back. The retry calls the job's own entry
+// point: same gates, same job lock, same job_health record as the cron tick.
 //
 // Two bounds keep a deploy storm from looping:
 // - the killed run must have started within RETRY_MAX_AGE_MS, so a stale row
@@ -34,7 +37,7 @@
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { runAsScheduledTick } = require('./scheduled-cron');
-const { DEAD_RUN_ERROR } = require('./cron-lock');
+const { runExclusive, DEAD_RUN_ERROR } = require('./cron-lock');
 
 const RETRY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const RETRY_MAX_CONSECUTIVE_FAILURES = 4;
@@ -51,48 +54,57 @@ function registerDeployKillRetry(jobName, run, { shouldRetry } = {}) {
   registry.set(jobName, { run, shouldRetry });
 }
 
+async function readKilledRows() {
+  // Every dead-run row, filtered to the registry by the caller: the set is a
+  // handful of rows, and the query keeps the settle sweep's own shape.
+  return db('job_health')
+    .where({ last_status: 'failed', last_error: DEAD_RUN_ERROR })
+    .select('job_name', 'last_started_at', 'consecutive_failures');
+}
+
+function withinBounds(row, now) {
+  const startedAtMs = row.last_started_at ? new Date(row.last_started_at).getTime() : NaN;
+  if (!Number.isFinite(startedAtMs) || now - startedAtMs > RETRY_MAX_AGE_MS) return false;
+  const failures = Number(row.consecutive_failures);
+  return Number.isFinite(failures) && failures <= RETRY_MAX_CONSECUTIVE_FAILURES;
+}
+
+// Runs under the retry lock. Reads the row again: the first read was only a
+// cheap filter, and another instance may have retried the job since.
+async function retryUnderLock(jobName, entry, now) {
+  const row = (await readKilledRows()).find((r) => r.job_name === jobName);
+  if (!row || !withinBounds(row, now)) return false;
+  if (entry.shouldRetry && !(await entry.shouldRetry(row))) return false;
+  logger.warn(`[deploy-kill-retry] ${jobName}: re-running after a deploy killed it mid-run`);
+  await entry.run();
+  return true;
+}
+
 async function retryDeployKilledJobs({ now = Date.now() } = {}) {
   if (!registry.size) return [];
   let rows;
   try {
-    // Every dead-run row, filtered to the registry below: the set is a
-    // handful of rows, and the query keeps the settle sweep's own shape.
-    rows = await db('job_health')
-      .where({ last_status: 'failed', last_error: DEAD_RUN_ERROR })
-      .select('job_name', 'last_started_at', 'consecutive_failures');
+    rows = await readKilledRows();
   } catch (err) {
     logger.warn(`[deploy-kill-retry] job_health unreadable, retry left for the next pass (${err.message})`);
     return [];
   }
-  const runs = [];
   const retried = [];
-  for (const row of rows || []) {
+  await Promise.all((rows || []).map(async (row) => {
     const jobName = row.job_name;
     const entry = registry.get(jobName);
-    if (!entry) continue;
-    const startedAtMs = row.last_started_at ? new Date(row.last_started_at).getTime() : NaN;
-    if (!Number.isFinite(startedAtMs) || now - startedAtMs > RETRY_MAX_AGE_MS) continue;
-    const failures = Number(row.consecutive_failures);
-    if (!Number.isFinite(failures) || failures > RETRY_MAX_CONSECUTIVE_FAILURES) continue;
-    if (entry.shouldRetry) {
-      let ok;
-      try {
-        ok = await entry.shouldRetry(row);
-      } catch (err) {
-        logger.warn(`[deploy-kill-retry] ${jobName}: retry check failed, left for the next pass (${err.message})`);
-        continue;
-      }
-      if (!ok) continue;
+    if (!entry || !withinBounds(row, now)) return;
+    try {
+      const ran = await runAsScheduledTick(() => runExclusive(
+        `deploy-kill-retry:${jobName}`,
+        () => retryUnderLock(jobName, entry, now),
+        { recordHealth: false },
+      ));
+      if (ran === true) retried.push(jobName);
+    } catch (err) {
+      logger.error(`[deploy-kill-retry] ${jobName}: retry failed, left for the next pass (${err.message})`);
     }
-    logger.warn(`[deploy-kill-retry] ${jobName}: re-running after a deploy killed it mid-run`);
-    retried.push(jobName);
-    runs.push(
-      Promise.resolve()
-        .then(() => runAsScheduledTick(entry.run))
-        .catch((err) => logger.error(`[deploy-kill-retry] ${jobName}: retry failed: ${err.message}`)),
-    );
-  }
-  await Promise.all(runs);
+  }));
   return retried;
 }
 
