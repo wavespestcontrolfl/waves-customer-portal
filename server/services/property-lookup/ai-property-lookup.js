@@ -2427,16 +2427,37 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       return value;
     });
   };
+  // No usable geocode point: the check cannot apply to this address at all,
+  // which is a definitive outcome too.
+  if (diag && !gisPrecision) diag.parentParcelCheckRan = true;
   if (gisPrecision) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
     // County roll layer first: fresher than the annual FDOR statewide roll (new
     // plats appear sooner) and it carries the land-use description that splits
     // paired villas / condos from detached homes. FDOR statewide is the
     // fallback, within whatever county budget remains.
-    parcel = await diagTimedLeg('county_gis', gisTimeoutMs, lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
+    // Whether the point lookup gave a definitive answer (a parcel, or a clean
+    // "none here"). A leg that threw, ran out its timeout, or was skipped for
+    // budget is NOT an answer — the parent-parcel check did not run, and the
+    // cached row must stay re-checkable (property-lookup-v2.js).
+    let pointLookupFailed = false;
+    const pointLeg = (timeoutMs, promise) => {
+      const legT0 = Date.now();
+      return promise
+        .catch(() => { pointLookupFailed = true; return null; })
+        .then((value) => {
+          if (value === null && Number(timeoutMs) > 0 && Date.now() - legT0 >= Number(timeoutMs) - 250) pointLookupFailed = true;
+          return value;
+        });
+    };
+    // The county layer reports its own swallowed query errors here.
+    const pointDiag = { errors: [] };
+    parcel = await diagTimedLeg('county_gis', gisTimeoutMs, pointLeg(gisTimeoutMs, lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
       county: geoContext.county,
       timeoutMs: gisTimeoutMs,
-    }).catch(() => null));
+      diag: pointDiag,
+    })));
+    if (pointDiag.errors.length) pointLookupFailed = true;
     // The county roll answered for this point (condo unit folio: only then is
     // "no stacked building here" a definitive, cacheable outcome — a failed or
     // timed-out leg also reads null and must stay retryable).
@@ -2444,10 +2465,14 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     if (!parcel) {
       const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
-          .catch(() => null));
+        // A county-layer failure stays a failure unless the statewide layer
+        // actually finds the parcel (checked below).
+        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, pointLeg(fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })));
+      } else {
+        pointLookupFailed = true;
       }
     }
+    if (diag) diag.parentParcelCheckRan = Boolean(parcel) || !pointLookupFailed;
     const guarded = applyGisParcelGuards(parcel, {
       searchAddress, address, gisPrecision, diag, point: { lat: geoContext.lat, lng: geoContext.lng },
     });

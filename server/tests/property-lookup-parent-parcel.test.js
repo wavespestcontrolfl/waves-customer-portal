@@ -214,6 +214,24 @@ describe('the whole lookup when every fact provider fails', () => {
     expect(hasCountyEvidence(record)).toBe(false);
   });
 
+  test('the lookup reports whether the point lookup gave a definitive answer', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    // A parcel was examined.
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
+    const examined = {};
+    await lookupPropertyFromAITrio(TYPED, geo, examined, { commercialSuiteSizing: true });
+    expect(examined.parentParcelCheckRan).toBe(true);
+    // The county layer threw and the statewide fallback (fetch) is down too: no parcel was examined.
+    lookupCountyParcelByPoint.mockRejectedValue(new Error('gis down'));
+    const failed = {};
+    await lookupPropertyFromAITrio(TYPED, geo, failed, { commercialSuiteSizing: true });
+    expect(failed.parentParcelCheckRan).toBe(false);
+    // No usable geocode point: the check cannot apply, which is definitive.
+    const noPoint = {};
+    await lookupPropertyFromAITrio(TYPED, { county: 'Examplecounty' }, noPoint, { commercialSuiteSizing: true });
+    expect(noPoint.parentParcelCheckRan).toBe(true);
+  });
+
   test('gate on but the caller did not opt in: no record at all, as before', async () => {
     process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());

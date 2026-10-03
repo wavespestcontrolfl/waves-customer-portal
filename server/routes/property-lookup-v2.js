@@ -706,10 +706,12 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
     return null;
   });
   if (aiProperty) {
-    // This live lookup ran the parent-parcel check (address-match PR 6),
-    // whatever it found: the marker tells a later cache hit the row is not
-    // one that predates the check (cachedParentParcelUnchecked).
-    if (parentParcelCheckLive()) aiProperty._parentParcelChecked = true;
+    // This live lookup ran the parent-parcel check (address-match PR 6) to a
+    // definitive answer, whatever it found: the marker tells a later cache
+    // hit the row is not one that predates the check
+    // (cachedParentParcelUnchecked). A point lookup that timed out or failed
+    // examined no parcel, so it leaves no marker and the row is retried.
+    if (parentParcelCheckLive() && lookupDiag.parentParcelCheckRan === true) aiProperty._parentParcelChecked = true;
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
 
