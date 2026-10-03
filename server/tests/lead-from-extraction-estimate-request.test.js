@@ -6,7 +6,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/voice-agent/relay-context', () => ({ claimOwnedElsewhere: jest.fn() }));
 
+const db = require('../models/db');
 const { notifyAdmin } = require('../services/notification-service');
 const { surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
 
@@ -50,4 +52,77 @@ test('no customer ⇒ no card; a thrown notify is non-blocking', async () => {
   expect(notifyAdmin).not.toHaveBeenCalled();
   notifyAdmin.mockRejectedValue(new Error('boom'));
   expect(await surfaceEstimateRequestForCustomer('c-1', {}, {})).toEqual({ persisted: false, suppressed: false });
+});
+
+test('details the caller CONFIRMED from the account are labelled as that, never as given on the call (#5803 follow-up)', async () => {
+  notifyAdmin.mockResolvedValue({ id: 'n-9' });
+  await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: '12 Shell Dr', city: 'Venice', zip: '34285' }, { callSid: 'CA9', accountDetailsConfirmed: ['name', 'email', 'address'] });
+  const [, , body, opts] = notifyAdmin.mock.calls[0];
+  expect(body).toContain('Email on the account (the caller confirmed it on the call): pat@example.com');
+  expect(body).toContain('Service address on the account (the caller confirmed it on the call): 12 Shell Dr, Venice, 34285');
+  expect(body).not.toMatch(/given on the call/);
+  expect(opts.metadata.details_from_account).toEqual(['name', 'email', 'address']);
+});
+
+describe('a later capture on the same call rewrites the card', () => {
+  const { claimOwnedElsewhere } = require('../services/voice-agent/relay-context');
+  const standingCard = (row) => db.mockReturnValue({ where: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(row) });
+  const optsOf = () => notifyAdmin.mock.calls[notifyAdmin.mock.calls.length - 1][3];
+  const trx = Object.assign(jest.fn(), { marker: 'trx' });
+  beforeEach(() => { db.transaction = jest.fn(async (cb) => cb(trx)); });
+
+  test('it refreshes in place, and rings again only when what the office acts on changed', async () => {
+    notifyAdmin.mockResolvedValue({ id: 'n-1' });
+    await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: '9 Rental Rd', city: 'Venice', zip: '34285', requested_service: 'mosquito' }, { callSid: 'CA1', phone: '+19415551234' });
+    const { refreshOnDedupe, ringOnRefresh } = optsOf();
+    expect(refreshOnDedupe).toBe(true);
+    const same = { email: 'pat@example.com', address_line1: '9 Rental Rd', city: 'Venice', zip: '34285', requested_service: 'mosquito', phone: '+19415551234', still_missing: [] };
+    expect(ringOnRefresh({ done_at: null }, same)).toBe(false); // e.g. only the summary grew
+    expect(ringOnRefresh({ done_at: null }, { ...same, address_line1: '12 Test Street' })).toBe(true);
+    expect(ringOnRefresh({ done_at: null }, { ...same, requested_service: 'termite' })).toBe(true);
+    expect(ringOnRefresh({ done_at: null }, { ...same, phone: '+19415550000' })).toBe(true);
+    expect(ringOnRefresh({ done_at: null }, { ...same, still_missing: ['address_line1'] })).toBe(true);
+    // The same details again are not new work, even on a card marked done; a change on one rings (and reopens it).
+    expect(ringOnRefresh({ done_at: '2026-10-03T12:00:00Z' }, same)).toBe(false);
+    expect(ringOnRefresh({ done_at: '2026-10-03T12:00:00Z' }, { ...same, email: 'old@example.com' })).toBe(true);
+  });
+
+  test('a correction that leaves the request incomplete revises the standing card and says what to confirm; with no card standing it files nothing', async () => {
+    standingCard({ id: 'n-1' });
+    notifyAdmin.mockResolvedValue({ id: 'n-1', deduped: true, refreshed: true });
+    await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: null, city: 'Venice', zip: null }, { callSid: 'CA1', stillMissing: ['address_line1'] });
+    const body = notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('still missing: street address');
+    expect(body).toContain('Location given on the call: Venice');
+    expect(body).not.toMatch(/Service address/);
+    expect(optsOf().metadata).toMatchObject({ address_line1: null, city: 'Venice', still_missing: ['address_line1'], quote_promised: true });
+
+    notifyAdmin.mockClear();
+    standingCard(undefined);
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', city: 'Venice' }, { callSid: 'CA1', stillMissing: ['email', 'address_line1'] })).toEqual({ persisted: false, suppressed: false });
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat' }, { stillMissing: ['address_line1'] })).toEqual({ persisted: false, suppressed: false });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the write is fenced to the session that owns the call: a superseded socket writes nothing', async () => {
+    claimOwnedElsewhere.mockResolvedValue(false);
+    notifyAdmin.mockResolvedValue({ id: 'n-1' });
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat' }, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: true, suppressed: false });
+    expect(claimOwnedElsewhere).toHaveBeenCalledWith(trx, 'CA1', 'sk-1');
+    expect(notifyAdmin.mock.calls[0][3].trx).toBe(trx);
+
+    notifyAdmin.mockClear();
+    claimOwnedElsewhere.mockResolvedValue(true);
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'stale@example.com' }, { callSid: 'CA1', sessionKey: 'sk-old' })).toEqual({ persisted: false, suppressed: false, superseded: true });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+
+    // A failed write inside the fence is not persisted, never throws, and logs the code only:
+    // a failed UPDATE's message can carry the caller's name, email and address as bindings.
+    const logger = require('../services/logger');
+    claimOwnedElsewhere.mockResolvedValue(false);
+    notifyAdmin.mockRejectedValue(Object.assign(new Error('update "notifications" set "body" = pat@example.com, 12 Shell Dr'), { code: '23505' }));
+    expect(await surfaceEstimateRequestForCustomer('c-1', { email: 'pat@example.com' }, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: false, suppressed: false });
+    expect(logger.error.mock.calls.map((c) => c[0]).join(' ')).toMatch(/FAILED for customer c-1: 23505/);
+    expect(logger.error.mock.calls.map((c) => c[0]).join(' ')).not.toMatch(/pat@example\.com|12 Shell Dr/);
+  });
 });

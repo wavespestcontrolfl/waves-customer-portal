@@ -773,9 +773,13 @@ function contextPromptAddendum() {
     '  email: those are already on their account. Do not ask for them unless a tool needs one',
     '  or its result says one is missing. Open times for such a customer need no address: call',
     '  get_availability or find_slots without one and the tool uses the property on their',
-    '  account; pass an address only when they say the visit is for a different property. A',
-    '  written estimate does need the full name, email and service address it should go to:',
-    '  confirm those, and only those, when you get there.',
+    '  account; pass an address only when they say the visit is for a different property. For a',
+    '  written estimate, call capture_lead with estimate_requested first, with what they have',
+    '  told you. Its result says what is missing. ONLY when that result offers it, ask the one',
+    '  question "Should it go to the email and service address on your account?" — on a yes call',
+    '  capture_lead again with use_account_details true; on a no, ask for the ones they want.',
+    '  When the result does not offer it, ask for what is missing. Never read the account\'s',
+    '  details aloud.',
     '- "When is my tech coming?" is get_today_eta. Give the window it returns, and say the',
     '  technician is on the way ONLY when the tool says so. Never invent a tighter ETA, never',
     '  promise a minute-by-minute arrival.',
@@ -2791,6 +2795,7 @@ class RelayConversation {
       markOwnerAlerted: () => { this._ownerAlerted = true; },
       // Promises the tools confirmed to the caller (capture_lead: a queued
       // estimate). Recorded as owed commitments at close.
+      getPromise: (kind) => { const p = this._promises.get(String(kind || '')); return p ? { ...p } : null; },
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
       // ── PR 2A transfer ─────────────────────────────────────────────────
