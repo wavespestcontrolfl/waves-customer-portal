@@ -1256,13 +1256,16 @@ function awaitingInstallationRows(conn) {
 // and after the charge — a declined charge sends the plan's pay link, never
 // a second bill for the visit. A plan cancelled before installation (term
 // neither payment_pending nor active) covers nothing: that visit bills
-// normally. By the same plan-scoped installation rule as the anchor.
-function installationVisitOfDeferredPlan(conn, visitId) {
-  return whereInstallationVisitForPlan(
+// normally. By the same plan-scoped installation rule as the anchor, and
+// bound to the ONE installation visit (see the body).
+async function installationVisitOfDeferredPlan(conn, visitId) {
+  // The deferred plan(s) this visit matches by the plan-scoped rule.
+  const plans = await whereInstallationVisitForPlan(
     conn('scheduled_services as ss')
       .join('annual_prepay_terms as apt', 'apt.customer_id', 'ss.customer_id')
       .join('estimates as e', 'e.id', 'apt.source_estimate_id')
       .where('ss.id', visitId)
+      .whereNotIn('ss.status', DEAD_VISIT_STATUSES)
       .where('e.annual_plan_activation_status', 'activated')
       .whereRaw("e.annual_plan_signature_charge ->> 'deferred_at' IS NOT NULL")
       .whereNull('apt.renewed_from_term_id')
@@ -1274,7 +1277,27 @@ function installationVisitOfDeferredPlan(conn, visitId) {
       termId: conn.raw('??', ['apt.id']),
       floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
     },
-  ).first('ss.id');
+  ).select(
+    'apt.id', 'apt.customer_id', 'apt.source_estimate_id', 'apt.term_start', 'apt.created_at',
+    'apt.installation_anchor_visit_id', 'e.property_id as estimate_property_id',
+  );
+  for (const term of plans) {
+    // ONE visit only — the installation itself, never a later bait/station
+    // job that merely matches the plan (pre-push audit P0). Once the anchor
+    // has recorded the installation, it is exactly that visit.
+    if (term.installation_anchor_visit_id) {
+      if (String(term.installation_anchor_visit_id) === String(visitId)) return true;
+      continue;
+    }
+    // Not anchored yet (the anchor runs in the next daily sweep, after the
+    // visit completes): the plan's EARLIEST live installation visit.
+    const first = await whereInstallationVisitForPlan(
+      conn('scheduled_services as ss').whereNotIn('ss.status', DEAD_VISIT_STATUSES),
+      installationPlanFor(term, { property_id: term.estimate_property_id }),
+    ).orderBy('ss.scheduled_date', 'asc').orderBy('ss.id', 'asc').first('ss.id');
+    if (first && String(first.id) === String(visitId)) return true;
+  }
+  return false;
 }
 
 // The service-type half of the installation rule, for a caller holding the

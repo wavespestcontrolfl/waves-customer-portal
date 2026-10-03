@@ -454,6 +454,30 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await covers(db, visit, { throwOnError: true })).toBe(true);
     });
 
+    test('only the installation itself: a later bait/station job of the same plan bills normally, before and after the anchor', async () => {
+      const { atSigning, sweep, db } = load();
+      await atSigning();
+      const install = await addInstall(db);
+      const later = await addInstall(db, { scheduled_date: dayOffset(30), status: 'confirmed', service_type: 'Termite Bait Station Cartridge Replacement' });
+
+      expect(await ruleCovers(db, install)).toBe(true);
+      expect(await ruleCovers(db, later)).toBe(false);
+
+      await sweep(); // anchors the term to the installation and charges the plan
+      expect((await db('annual_prepay_terms').where({ id: ids.termId }).first()).installation_anchor_visit_id).toBe(install.id);
+      expect(await ruleCovers(db, install)).toBe(true);
+      expect(await ruleCovers(db, later)).toBe(false);
+    });
+
+    test('a cancelled earlier booking does not take the installation\'s place', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      await addInstall(db, { scheduled_date: dayOffset(-1), status: 'cancelled' });
+      const install = await addInstall(db);
+
+      expect(await ruleCovers(db, install)).toBe(true);
+    });
+
     test('another visit of the same customer is not covered by it', async () => {
       const { atSigning, db } = load();
       await atSigning();
