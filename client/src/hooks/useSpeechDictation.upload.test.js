@@ -271,6 +271,28 @@ describe("useSpeechDictation upload fallback", () => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
     });
 
+    it("takes the hidden-page guard off once the clip stops, and on unmount", async () => {
+      // pagehide is the guard's own listener (visibilitychange is shared with speech mode)
+      const added = vi.spyOn(window, "addEventListener");
+      const removed = vi.spyOn(window, "removeEventListener");
+      const count = (spy) => spy.mock.calls.filter(([type]) => type === "pagehide").length;
+      const { result, unmount } = renderHook(() => useSpeechDictation(null, { clipHandler: vi.fn(async () => {}) }));
+      // the guard is on by the time recording is reported: no gap to miss a lock in
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      expect(count(added)).toBe(1);
+      expect(count(removed)).toBe(0);
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+      expect(count(removed)).toBe(1);
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      unmount();
+      expect(count(added)).toBe(2);
+      expect(count(removed)).toBe(2);
+      added.mockRestore(); removed.mockRestore();
+    });
+
     it("stops recording on pagehide", async () => {
       const clipHandler = vi.fn(async () => {});
       const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));

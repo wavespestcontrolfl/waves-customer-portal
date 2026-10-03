@@ -66,6 +66,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [uploadAvailable, setUploadAvailable] = useState(false);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
+  // Removes the clip's hidden-page guard (set while a clip records).
+  const unguardRef = useRef(null);
   // True from the first tap until getUserMedia settles: a second tap in that
   // window must not open a second stream nobody can stop. The ref answers
   // that tap synchronously; `starting` shows the same window to the caller.
@@ -212,13 +214,6 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       doneStarting();
       return;
     }
-    if (clipMode && typeof document !== "undefined" && document.visibilityState === "hidden") {
-      // Hidden while the permission prompt was open (locked phone, another
-      // tab): a clip never starts behind a page the tech is not looking at.
-      stream.getTracks().forEach((t) => t.stop());
-      doneStarting();
-      return;
-    }
     const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     const mimeType = preferred.find(
       (t) => typeof window.MediaRecorder.isTypeSupported === "function" && window.MediaRecorder.isTypeSupported(t),
@@ -234,6 +229,39 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(`Dictation error: ${e?.message || "recorder unavailable"}`);
       return;
     }
+    // Clip mode: a recording never runs behind a hidden or closing page (a
+    // locked phone, another tab), where it would capture whatever is said next.
+    // The guard is attached here, in the same synchronous step as the hidden
+    // check and rec.start(), so no visibility change can fall between them;
+    // it comes off when the recorder stops. Stopping hands over what was recorded.
+    const stopRecording = () => {
+      try {
+        if (rec.state !== "inactive") rec.stop();
+      } catch {
+        /* already stopped */
+      }
+    };
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") stopRecording();
+    };
+    const guarded = clipMode && typeof document !== "undefined";
+    const unguard = () => {
+      if (!guarded) return;
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pagehide", stopRecording);
+      unguardRef.current = null;
+    };
+    if (guarded) {
+      if (document.visibilityState === "hidden") {
+        // Hidden while the permission prompt was open: the clip never starts.
+        stream.getTracks().forEach((t) => t.stop());
+        doneStarting();
+        return;
+      }
+      document.addEventListener("visibilitychange", onHidden);
+      window.addEventListener("pagehide", stopRecording);
+      unguardRef.current = unguard;
+    }
     const chunks = [];
     const startedAt = Date.now();
     // onerror is followed by onstop in the MediaRecorder state machine — a
@@ -243,6 +271,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       if (ev.data && ev.data.size) chunks.push(ev.data);
     };
     rec.onstop = () => {
+      unguard();
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
@@ -252,6 +281,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
     rec.onerror = () => {
       recordingFailed = true;
+      unguard();
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
@@ -262,6 +292,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     } catch (e) {
       // start() can throw synchronously (state / device errors): release the
       // mic and reset so the next tap starts clean.
+      unguard();
       stream.getTracks().forEach((t) => t.stop());
       doneStarting();
       alert(`Dictation error: ${e?.message || "could not start recording"}`);
@@ -458,29 +489,6 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
   }, [listening]);
 
-  // Clip mode: a recording never keeps running behind a hidden or closing page
-  // (a locked phone, another tab), where it would capture whatever is said next.
-  // Stopping ends the clip there and hands over what was recorded.
-  useEffect(() => {
-    if (!clipMode || !listening || typeof document === "undefined") return undefined;
-    const stopRecording = () => {
-      try {
-        recorderRef.current?.stop();
-      } catch {
-        /* already stopped */
-      }
-    };
-    const onHidden = () => {
-      if (document.visibilityState === "hidden") stopRecording();
-    };
-    document.addEventListener("visibilitychange", onHidden);
-    window.addEventListener("pagehide", stopRecording);
-    return () => {
-      document.removeEventListener("visibilitychange", onHidden);
-      window.removeEventListener("pagehide", stopRecording);
-    };
-  }, [clipMode, listening]);
-
   // Stop an in-progress session if the consumer unmounts (e.g. the completion
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
@@ -505,6 +513,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       const recorder = recorderRef.current;
       if (recorder) {
         // Abandon, don't upload: the field is gone.
+        unguardRef.current?.();
         recorder.ondataavailable = null;
         recorder.onstop = null;
         recorder.onerror = null;
