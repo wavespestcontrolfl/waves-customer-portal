@@ -48,6 +48,12 @@ const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetim
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
+// Auto-dispatch moves many visits in one nightly run. With this gate on, its
+// cards are still written one per visit, but their per-visit pushes are held
+// and the run sends ONE push per tech instead (owner ruling 2026-10-03: "yes
+// once is fine"). Read at call time; unset = one push per visit, as before.
+const SUMMARY_GATE = 'GATE_AUTO_DISPATCH_PUSH_SUMMARY';
+const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -173,7 +179,7 @@ async function describeActor(actor, conn) {
   // (sms-scheduling-act.js).
   if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms' || label === 'sms_offer_ai') return 'by the customer by text';
   if (label.startsWith('customer')) return 'by the customer online';
-  if (label === 'auto_dispatch') return 'by auto-dispatch';
+  if (label === 'auto_dispatch') return AUTO_DISPATCH_ACTOR_TEXT;
   if (label.startsWith('rain')) return 'by the rain-out sweep';
   return 'by the office';
 }
@@ -209,6 +215,12 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
   const service = visit.service_type || 'Service';
   const lines = [];
   let headline;
+  // formatWhen / dateOnly read a missing previous slot as null. Any kind may
+  // carry it: a move that also changes the tech arrives as an assignment
+  // pair, and the old day is what makes it a today/tomorrow change for the
+  // tech who loses it (Codex #5783 P2).
+  const prior = previous || {};
+  const previousDate = dateOnly(prior.date);
   if (kind === 'assigned') {
     headline = 'New visit on your route';
     lines.push(`${service} · ${when}`);
@@ -222,7 +234,7 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
     lines.push(`Reassigned ${actorText}`);
   } else if (kind === 'rescheduled') {
     headline = 'Visit moved';
-    const before = previous ? formatWhen(previous.date, previous.windowStart, previous.windowEnd) : null;
+    const before = formatWhen(prior.date, prior.windowStart, prior.windowEnd);
     lines.push(service);
     if (before) lines.push(`Was ${before}`);
     lines.push(`Now ${when}`);
@@ -241,6 +253,11 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
       customer_name: who,
       service_type: visit.service_type || null,
       when,
+      // ISO days beside the display text: the Today page keeps a change that
+      // touches today or tomorrow as its own card and folds the rest into one
+      // summary (routes/tech-notifications.js /schedule-changes).
+      date: dateOnly(visit.scheduled_date),
+      previous_date: previousDate,
       previous_when: kind === 'rescheduled' && previous
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
@@ -458,6 +475,13 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
   }
 }
 
+// Auto-dispatch cards whose push deliver() held, by tech, until the run's
+// summary push claims them. In-process on purpose: a run and every move it
+// makes (rebooker → afterCommit → the per-visit queues) happen in one app
+// instance, and this names exactly the cards that run wrote — a time window
+// would count a back-to-back manual run's cards too (pre-push audit P1).
+const heldAutoDispatchCards = new Map();
+
 // Every card in the batch is persisted BEFORE any push is awaited: a push
 // can wait seconds per subscription, and two rapid reassignments (A→B,
 // B→C) must never let B's stale "new visit" land after its "moved off".
@@ -473,7 +497,16 @@ async function deliver(notices) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
-  for (const n of written) await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  for (const n of written) {
+    // An auto-dispatch card's push is held for the run's one summary push.
+    if (n.actorText === AUTO_DISPATCH_ACTOR_TEXT && gateEnvValue(SUMMARY_GATE)) {
+      const key = String(n.technicianId);
+      if (!heldAutoDispatchCards.has(key)) heldAutoDispatchCards.set(key, new Set());
+      heldAutoDispatchCards.get(key).add(n.cardId || `${n.visitId}:${n.kind}`);
+      continue;
+    }
+    await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  }
   return { written: written.length, dropped };
 }
 
@@ -559,15 +592,15 @@ function afterCommit(trx, fn, visitId) {
  * new holder hears it arrived. Post-commit, best-effort. No-op when nothing
  * changed.
  */
-function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, trx = null } = {}) {
+function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, previous = null, trx = null } = {}) {
   const from = fromTechId || null;
   const to = toTechId || null;
   if (!visitId || from === to) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
     const notices = [];
-    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot }));
-    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot }));
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot, previous }));
+    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot, previous }));
     await deliver(notices);
   }, visitId);
 }
@@ -597,6 +630,55 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
     if (!recipient) return;
     await runNotice({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot, previousStatus });
   }, visitId);
+}
+
+/**
+ * After an auto-dispatch run: ONE push per tech whose card push it held —
+ * "Auto-dispatch moved 12 visits" — in place of the per-visit pushes. The
+ * cards are written post-commit on the per-visit queues, so those drain
+ * first; the count is the cards the tech will actually see. Best-effort;
+ * never throws.
+ */
+async function pushAutoDispatchSummary({ runId } = {}) {
+  try {
+    for (let i = 0; i < 5 && visitQueues.size; i += 1) {
+      await Promise.allSettled([...visitQueues.values()]);
+    }
+    // Taken before the gate check: a gate turned off mid-run discards this
+    // run's held cards instead of leaving them for the next run's count.
+    const held = [...heldAutoDispatchCards.entries()];
+    heldAutoDispatchCards.clear();
+    if (!enabled() || !gateEnvValue(SUMMARY_GATE)) return { pushed: 0 };
+    const PushService = require('./push-notifications');
+    let pushed = 0;
+    for (const [technicianId, cards] of held) {
+      const n = cards.size;
+      try {
+        await PushService.sendToAdminUser(technicianId, {
+          title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
+          body: '',
+          url: '/admin/today',
+          tag: `auto-dispatch-${runId || 'run'}`,
+          priority: 'high',
+        });
+        pushed += 1;
+      } catch (err) {
+        logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
+      }
+    }
+    return { pushed };
+  } catch (err) {
+    logger.warn(`[tech-visit-notifications] auto-dispatch summary failed (${errorTag(err)})`);
+    return { pushed: 0 };
+  }
+}
+
+// A run starts from an empty batch: cards held by an earlier run that died
+// before its summary (completeRun threw) are never counted as this run's
+// (Codex #5783 P2). Runs are serialized (runExclusive), so nothing in flight
+// belongs to another run.
+function discardHeldAutoDispatchCards() {
+  heldAutoDispatchCards.clear();
 }
 
 // Follow-through shares the staff notification and push paths. Its live
@@ -674,5 +756,8 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
+  pushAutoDispatchSummary,
+  discardHeldAutoDispatchCards,
+  SUMMARY_GATE,
+  _test: { heldAutoDispatchCards, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };
