@@ -1395,6 +1395,27 @@ export function buildPhotoRecoveryOutcome({
   };
 }
 
+export function buildPhotoReconcileFailureOutcome(draft, errorCode) {
+  const handedOff = errorCode === "photo_reconciliation_handed_off";
+  const result = {
+    ...draft.pendingPhotoCompletion,
+    completionPhotoUpload: { failed: 0, reconcileOwed: true, handedOff },
+  };
+  return {
+    draft: {
+      ...draft,
+      servicePhotos: [],
+      reconcileOwed: true,
+      reconciliationHandedOff: handedOff,
+      pendingPhotoCompletion: result,
+    },
+    result,
+    message: handedOff
+      ? "Report repair was handed to the office. You can dismiss this recovery on this device."
+      : "Photos uploaded, but the report could not be updated yet. Retry when connected.",
+  };
+}
+
 // Whether the success overlay should auto-dismiss, and after how long. A
 // required follow-up suggestion keeps it open so the tech can act on the
 // CTA — it dismisses via the Done button. Keep the panel open when a pest
@@ -17868,9 +17889,11 @@ export function CompletionPanel({
   }
 
   async function retryCompletionPhotos() {
-    if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean)) return;
+    if ([
+      photoRetryLockRef.current,
+      ![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean),
+    ].some(Boolean)) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
@@ -17896,7 +17919,10 @@ export function CompletionPanel({
           reconciliationNeeded = true;
         } catch (error) {
           failedPhotos.push(photo);
-          if (error?.code === "visit_identity_changed" || Number(error?.status) === 403) {
+          if ([
+            error?.code === "visit_identity_changed",
+            Number(error?.status) === 403,
+          ].some(Boolean)) {
             retryPermanentlyBlocked = true;
             failedPhotos.push(...photos.slice(index + 1));
             break;
@@ -17912,16 +17938,18 @@ export function CompletionPanel({
         try {
           await adminFetch(`/tech/services/${service.id}/photos/reconcile`, {
             method: "POST",
-            body: JSON.stringify({ abandonMissingPhotos: draft.abandonMissingPhotos === true }),
+            body: JSON.stringify({
+              abandonMissingPhotos: draft.abandonMissingPhotos === true,
+              expectedVisit: draft.pendingPhotoCompletion?.servicePhotoVisit,
+            }),
           });
-        } catch {
-          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
-            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
-          draftSnapshotRef.current = owed;
-          await saveDraftSnapshot(owed);
+        } catch (error) {
+          const outcome = buildPhotoReconcileFailureOutcome(draft, error?.code);
+          draftSnapshotRef.current = outcome.draft;
+          await saveDraftSnapshot(outcome.draft);
           if (!completionPanelClosedRef.current) {
-            setCompletionResult(owed.pendingPhotoCompletion);
-            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+            setCompletionResult(outcome.result);
+            setPhotoRetryError(outcome.message);
           }
           return;
         }
@@ -17962,7 +17990,7 @@ export function CompletionPanel({
   function discardRetainedCompletionPhotos() {
     if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (draft?.reconcileOwed) {
+    if (draft?.reconcileOwed && !draft?.reconciliationHandedOff) {
       const result = {
         ...draft.pendingPhotoCompletion,
         completionPhotoUpload: { failed: 0, reconcileOwed: true },
@@ -17996,7 +18024,7 @@ export function CompletionPanel({
     setPhotoRetryError("");
     setCompletionResult((current) => current ? {
       ...current,
-      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false },
+      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false, handedOff: false },
     } : current);
   }
 
@@ -19658,17 +19686,20 @@ export function CompletionPanel({
     </div>
   );
   const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoReconcileHandedOff = completionResult?.completionPhotoUpload?.handedOff === true;
   const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
     <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
       color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
       <p style={{ margin: "0 0 12px" }}>
-        {photoReconcileOwed
+        {photoReconcileHandedOff
+          ? "The visit is saved. Report repair was handed to the office because your access changed."
+          : photoReconcileOwed
           ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
           : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      {!photoRetryConflict && (
+      {!photoRetryConflict && !photoReconcileHandedOff && (
         <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
           style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
           {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
@@ -19678,6 +19709,12 @@ export function CompletionPanel({
         <button type="button" onClick={discardRetainedCompletionPhotos} disabled={photoRetrying}
           style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
           Discard retained photos
+        </button>
+      )}
+      {photoReconcileHandedOff && (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Dismiss local recovery
         </button>
       )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>

@@ -430,6 +430,65 @@ describe('completion photos in an unsubmitted draft', () => {
     view.unmount();
   });
 
+  it('dismisses local recovery after inaccessible report repair is handed to the office', async () => {
+    const servicePhotoVisit = {
+      customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
+      catalogServiceId: 'catalog-pest', serviceType: service.serviceType,
+      scheduledDate: service.scheduledDate, status: 'on_site', revision: 'completion-visit-revision',
+    };
+    const draft = {
+      serviceId: service.id,
+      draftId: 'handoff-reconcile',
+      savedAt: '2099-01-01T12:04:00Z',
+      generationPhotoCount: 0,
+      servicePhotos: [],
+      reconcileOwed: true,
+      abandonMissingPhotos: true,
+      pendingPhotoCompletion: {
+        serviceRecordId: 'record-1', servicePhotoVisit,
+        completionPhotoUpload: { failed: 0, reconcileOwed: true },
+      },
+    };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    localStorage.setItem(completionResumeOwedKey(service.id), '1');
+    await putCompletionDraft(service.id, draft);
+    const originalFetch = fetch.getMockImplementation();
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        const response = {
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: async () => ({
+            error: 'Report repair was handed to the office after visit access changed.',
+            code: 'photo_reconciliation_handed_off',
+          }),
+          text: async () => 'Report repair handed off',
+        };
+        response.clone = () => response;
+        return response;
+      }
+      return originalFetch(url, options);
+    });
+
+    const first = await mount(vi.fn());
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true, expectedVisit: servicePhotoVisit });
+    expect(await screen.findByRole('button', { name: 'Dismiss local recovery' })).toBeTruthy();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ reconciliationHandedOff: true });
+
+    first.unmount();
+    fetch.mockRejectedValue(new Error('offline'));
+    const reopened = await mount(vi.fn());
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Dismiss local recovery' })));
+    expect(completionResumeOwed(service.id)).toBe(false);
+    await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
+    reopened.unmount();
+  });
+
   it('keeps the autosaved photo revision when closeout reports failed uploads, so a lost IndexedDB write still reopens recovery (Codex r-63b2098 P1)', async () => {
     const draft = { serviceId: service.id, draftId: 'draft-one', savedAt: '2020-01-01T12:00:00Z',
       notes: 'Exterior inspected', generationPhotoCount: 1, servicePhotos: photos, sendSms: false };

@@ -45,7 +45,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockEnqueue = jest.fn();
 jest.mock('../services/service-report/pdf-queue', () => ({ enqueuePdfRenderJob: (...a) => mockEnqueue(...a) }));
 const mockAlert = jest.fn();
-jest.mock('../services/dispatch-alerts', () => ({ createAlertOnce: (...a) => mockAlert(...a) }));
+const mockResolveAlert = jest.fn();
+jest.mock('../services/dispatch-alerts', () => ({
+  createAlertOnce: (...a) => mockAlert(...a),
+  resolveAlert: (...a) => mockResolveAlert(...a),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -110,6 +114,36 @@ describe('POST /:id/photos/reconcile', () => {
     await withServer(async (baseUrl) => {
       expect((await reconcile(baseUrl, 'other')).status).toBe(403);
       expect((await reconcile(baseUrl, 'admin')).status).toBe(200);
+    });
+  });
+
+  test('a prior completion owner can hand inaccessible reconciliation to the office with its receipt', async () => {
+    const receipt = {
+      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
+      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'receipt-revision',
+    };
+    tables.scheduled_services[0].technician_id = 'tech-2';
+    tables.service_records = [{
+      id: 'rec-1', scheduled_service_id: 'svc-1', technician_id: 'tech-1',
+      structured_notes: { servicePhotoVisit: receipt },
+    }];
+    await withServer(async (baseUrl) => {
+      const handedOff = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: true, expectedVisit: receipt });
+      expect(handedOff.status).toBe(409);
+      expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
+      expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'service_photo_reconciliation_required', jobId: 'svc-1',
+        payload: expect.objectContaining({ source: 'photo_recovery_access_lost', serviceRecordId: 'rec-1' }),
+      }));
+      expect(updates).toHaveLength(0);
+
+      const denied = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: true,
+        expectedVisit: { ...receipt, technicianId: 'tech-other', revision: 'wrong' },
+      });
+      expect(denied.status).toBe(403);
+      expect(mockAlert).toHaveBeenCalledTimes(1);
     });
   });
 

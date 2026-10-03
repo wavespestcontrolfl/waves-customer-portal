@@ -35,6 +35,8 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   let validatePhotoChain;
   const customerId = randomUUID();
   const adminId = randomUUID();
+  const technicianId = randomUUID();
+  const replacementTechnicianId = randomUUID();
   const recordId = randomUUID();
   const completedVisitId = randomUUID();
   const stagedVisitId = randomUUID();
@@ -49,23 +51,30 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     validatePhotoChain = require('../services/service-report/photo-chain').validatePhotoChain;
     visitDate = require('../utils/datetime-et').etDateString();
     await db.transaction(async trx => {
-      await trx('technicians').insert({ id: adminId, name: 'QA photo recovery admin',
-        email: `qa-photo-admin-${adminId}@example.invalid`, role: 'admin', active: true,
-        employment_status: 'active', auth_token_version: 1, must_change_password: false });
+      await trx('technicians').insert([
+        { id: adminId, name: 'QA photo recovery admin', email: `qa-photo-admin-${adminId}@example.invalid`, role: 'admin', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+        { id: technicianId, name: 'QA original photo technician', email: `qa-photo-tech-${technicianId}@example.invalid`, role: 'technician', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+        { id: replacementTechnicianId, name: 'QA replacement photo technician', email: `qa-photo-tech-${replacementTechnicianId}@example.invalid`, role: 'technician', active: true,
+          employment_status: 'active', auth_token_version: 1, must_change_password: false },
+      ]);
       await trx('customers').insert({ id: customerId, first_name: 'QA', phone: '+19415550100', email: `qa-photo-${customerId}@example.invalid` });
       await trx('scheduled_services').insert([
-        { id: completedVisitId, customer_id: customerId, scheduled_date: visitDate, service_type: 'QA completed photo guard', status: 'on_site' },
-        { id: stagedVisitId, customer_id: customerId, scheduled_date: visitDate, service_type: 'QA staged photo guard', status: 'on_site' },
+        { id: completedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA completed photo guard', status: 'on_site' },
+        { id: stagedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA staged photo guard', status: 'on_site' },
       ]);
       await trx('service_records').insert({ id: recordId, customer_id: customerId,
-        scheduled_service_id: completedVisitId, service_date: visitDate, service_type: 'QA photo integrity' });
+        scheduled_service_id: completedVisitId, technician_id: technicianId,
+        service_date: visitDate, service_type: 'QA photo integrity' });
     });
   }, 30000);
   beforeEach(async () => {
     await db('service_photos').where({ service_record_id: recordId }).del();
+    await db('dispatch_alerts').where({ job_id: completedVisitId }).del();
     await db('scheduled_service_photo_staging').whereIn('scheduled_service_id', [completedVisitId, stagedVisitId]).del();
-    await db('scheduled_services').where({ id: completedVisitId }).update({ scheduled_date: visitDate, status: 'on_site' });
-    await db('scheduled_services').where({ id: stagedVisitId }).update({ scheduled_date: visitDate, status: 'on_site' });
+    await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
+    await db('scheduled_services').where({ id: stagedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
     mockObjects.clear();
     mockExpectedUploads = 1;
     mockUploadCount = 0;
@@ -74,10 +83,11 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   afterAll(async () => {
     if (!db) return;
     try {
+      await db('dispatch_alerts').where({ job_id: completedVisitId }).del();
       await db('service_records').where({ id: recordId, customer_id: customerId }).del();
       await db('scheduled_services').whereIn('id', [completedVisitId, stagedVisitId]).del();
       await db('customers').where({ id: customerId, email: `qa-photo-${customerId}@example.invalid` }).del();
-      await db('technicians').where({ id: adminId }).del();
+      await db('technicians').whereIn('id', [adminId, technicianId, replacementTechnicianId]).del();
       expect(await db('service_records').where({ id: recordId })).toHaveLength(0);
       expect(await db('customers').where({ id: customerId })).toHaveLength(0);
     } finally { await db.destroy(); }
@@ -171,15 +181,18 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     const committed = await upload(input);
     const committedHash = createHash('sha256').update(input.buffer).digest('hex');
     const missingHash = createHash('sha256').update('missing device photo').digest('hex');
+    const scheduled = await db('scheduled_services').where({ id: completedVisitId }).first();
+    const expectedVisit = require('../services/service-photos').servicePhotoVisitSnapshot(scheduled);
     await db('service_records').where({ id: recordId }).update({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: {
         photoSummary: null,
         photoSummaryPendingRecovery: 'Summary described both submitted photos.',
       } }),
-      structured_notes: JSON.stringify({ completionPhotos: {
-        uploaded: 1, failed: 1, expectedImageHashes: [committedHash, missingHash],
-      } }),
+      structured_notes: JSON.stringify({
+        servicePhotoVisit: expectedVisit,
+        completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: [committedHash, missingHash] },
+      }),
       pdf_storage_key: 'reports/stale-before-recovery.pdf',
     });
 
@@ -193,20 +206,32 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
     const server = app.listen(0);
     const base = `http://127.0.0.1:${server.address().port}`;
-    const token = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
-    const reconcile = (abandonMissingPhotos) => fetch(`${base}/api/tech/services/${completedVisitId}/photos/reconcile`, {
+    const adminToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
+    const technicianToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId }, config.jwt.secret);
+    const reconcile = (token, abandonMissingPhotos) => fetch(`${base}/api/tech/services/${completedVisitId}/photos/reconcile`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ abandonMissingPhotos }),
+      body: JSON.stringify({ abandonMissingPhotos, expectedVisit }),
     });
     try {
-      expect((await reconcile(false)).status).toBe(409);
-      const discarded = await reconcile(true);
+      expect((await reconcile(technicianToken, false)).status).toBe(409);
+      await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: replacementTechnicianId });
+      const handedOff = await reconcile(technicianToken, true);
+      expect(handedOff.status).toBe(409);
+      expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
+      expect(await db('dispatch_alerts').where({
+        type: 'service_photo_reconciliation_required', job_id: completedVisitId, resolved_at: null,
+      })).toHaveLength(1);
+
+      const discarded = await reconcile(adminToken, true);
       expect(discarded.status).toBe(200);
       expect((await discarded.json()).photoSummary).toMatchObject({ abandoned: true, restored: false });
+      expect(await db('dispatch_alerts').where({
+        type: 'service_photo_reconciliation_required', job_id: completedVisitId, resolved_at: null,
+      })).toHaveLength(0);
       // A reopen after a lost response is idempotent and still reconciles the
       // already committed gallery without reviving the discarded narrative.
-      expect((await reconcile(true)).status).toBe(200);
+      expect((await reconcile(adminToken, true)).status).toBe(200);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

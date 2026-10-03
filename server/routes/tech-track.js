@@ -328,6 +328,7 @@ const {
   updateStagedServicePhotoCaption,
   deleteStagedServicePhoto,
   uploadServicePhotoForVisit,
+  parseExpectedServicePhotoVisit,
   servicePhotoVisitSnapshot,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
@@ -867,6 +868,35 @@ function parseJsonColumn(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+const PHOTO_RECONCILIATION_HANDOFF = 'service_photo_reconciliation_required';
+const VISIT_RECEIPT_FIELDS = [
+  'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
+  'scheduledDate', 'status', 'revision',
+];
+function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId) {
+  if (rawExpectedVisit == null || rawExpectedVisit === '') {
+    return String(record?.technician_id || '') === String(actorId || '');
+  }
+  let expectedVisit = null;
+  try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
+  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
+  return !!expectedVisit
+    && String(expectedVisit.technicianId || '') === String(actorId || '')
+    && VISIT_RECEIPT_FIELDS.every((field) => String(expectedVisit[field] ?? '') === String(storedVisit?.[field] ?? ''));
+}
+
+async function resolvePhotoReconciliationHandoffs(serviceId, actorId) {
+  const rows = await db('dispatch_alerts').where({
+    type: PHOTO_RECONCILIATION_HANDOFF,
+    job_id: serviceId,
+    resolved_at: null,
+  }).select('id');
+  const { resolveAlert } = require('../services/dispatch-alerts');
+  for (const row of rows) {
+    await resolveAlert({ id: row.id, resolvedBy: actorId, auto: true });
+  }
+}
+
 // Step 1 of the reconcile contract above: restore the parked photo-summary
 // narrative once every closeout photo has landed. Returns { photoSummary }
 // on success (a no-op shape when nothing was pending) or { error: { status,
@@ -1023,13 +1053,39 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    let record = null;
     if (!technicianVisitRowInScope(req, svc)) {
+      if (req.body?.abandonMissingPhotos === true) {
+        record = await db('service_records')
+          .where({ scheduled_service_id: svc.id })
+          .orderBy('created_at', 'desc')
+          .first('id', 'technician_id', 'structured_notes');
+        if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId)) {
+          const { createAlertOnce } = require('../services/dispatch-alerts');
+          await createAlertOnce({
+            type: PHOTO_RECONCILIATION_HANDOFF,
+            severity: 'warn',
+            techId: svc.technician_id || null,
+            jobId: svc.id,
+            payload: {
+              source: 'photo_recovery_access_lost',
+              serviceRecordId: record.id,
+              message: 'Recovered photos need an office report reconciliation after technician access changed.',
+            },
+            existingPayloadSource: 'photo_recovery_access_lost',
+          });
+          return res.status(409).json({
+            error: 'Report repair was handed to the office after visit access changed.',
+            code: 'photo_reconciliation_handed_off',
+          });
+        }
+      }
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    const record = await db('service_records')
+    record = await db('service_records')
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
-      .first('id', 'service_line', 'service_data', 'structured_notes');
+      .first('id', 'technician_id', 'service_line', 'service_data', 'structured_notes');
     if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
 
     const summary = await reconcilePhotoSummary(record, {
@@ -1041,6 +1097,7 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     if (pdfResult.error) return res.status(pdfResult.error.status).json(pdfResult.error.body);
 
     const treeShrub = await reconcileTreeShrubAssessment(svc, record);
+    await resolvePhotoReconciliationHandoffs(svc.id, req.technicianId);
 
     logger.info(
       `[tech-track] photo recovery reconciled service=${svc.id} record=${record.id} ` +
