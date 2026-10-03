@@ -18036,15 +18036,10 @@ const CallRecordingProcessor = {
                       try {
                         const reuseStart = String(existing.window_start).slice(0, 5);
                         const reuseEnd = followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes);
-                        const stillFree = !!reuseEnd && await trx.transaction(async (probeSp) => {
-                          const clash = await require('./scheduling/occupancy').findConflictingVisits({
-                            db: probeSp, date: dayRow.day, windowStart: reuseStart, windowEnd: reuseEnd,
-                            technicianId: reuseTechId, excludeServiceIds: [existing.id],
-                          });
-                          if (clash.length) return false;
-                          const toMin = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0); };
-                          return !(await require('./tech-out-auto-move').blockedBySchedule(reuseTechId, dayRow.day, toMin(reuseStart), toMin(reuseEnd), probeSp));
-                        });
+                        const stillFree = !!reuseEnd && await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                          conn: probeSp, technicianId: reuseTechId, date: dayRow.day, windowStart: reuseStart, windowEnd: reuseEnd,
+                          excludeServiceIds: [existing.id],
+                        }));
                         if (!stillFree) {
                           logger.info(`[call-proc] picked technician ${reuseTechId} no longer free for reused booking ${maskSid(callSid)}; leaving it unassigned`);
                           reuseTechId = null;
@@ -18521,8 +18516,22 @@ const CallRecordingProcessor = {
                 // technician's day, and read again. Still a clash, or nobody
                 // free: the visit is saved unassigned and the tech-blind read
                 // flags it for the office. try-locks never wait, so the extra
-                // rung cannot deadlock; each step keeps its own savepoint.
-                if (bookingTechnicianPicked && bookingTechnicianId && bookingTimeConflicts.length) {
+                // rung cannot deadlock; each step keeps its own savepoint. The
+                // fenced read does not model schedule blocks, so a block that
+                // landed on the picked technician since the pick is read here
+                // too and takes the same path.
+                let pickedTechnicianBlocked = false;
+                if (bookingTechnicianPicked && bookingTechnicianId && !bookingTimeConflicts.length) {
+                  try {
+                    pickedTechnicianBlocked = !(await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                      conn: probeSp, technicianId: bookingTechnicianId, date: scheduledDate,
+                      windowStart: windowStart || '09:00', windowEnd: windowEnd || '10:00', excludeCustomerId: customerId,
+                    })));
+                  } catch (freeErr) {
+                    logger.warn(`[call-proc] picked-technician recheck failed for ${maskSid(callSid)} (pick kept): ${freeErr.message}`);
+                  }
+                }
+                if (bookingTechnicianPicked && bookingTechnicianId && (bookingTimeConflicts.length || pickedTechnicianBlocked)) {
                   let nextTechnician = null;
                   try {
                     const repick = await pickBookingTechnician();

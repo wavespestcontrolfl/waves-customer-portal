@@ -46,6 +46,25 @@ function pickTechnicianActive() {
   return techScopedConfirmActive();
 }
 
+/**
+ * The ONE "is this technician free at this time" answer: the save probe scoped
+ * to the technician, plus their schedule blocks. The pick asks it for every
+ * candidate; a caller that picked BEFORE taking its locks asks it again under
+ * them for the technician it is about to save.
+ */
+async function technicianFreeAt({
+  conn = defaultDb, technicianId, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
+  excludeCustomerId = null, excludeServiceIds = [],
+}) {
+  const clash = await findConflictingVisits({
+    db: conn, date, windowStart, windowEnd, technicianId, excludeCustomerId, excludeServiceIds,
+  });
+  if (clash.length) return false;
+  const startMin = toMinutes(windowStart);
+  const endMin = toMinutes(windowEnd) ?? (startMin + durationMinutes);
+  return !(await require('../tech-out-auto-move').blockedBySchedule(technicianId, date, startMin, endMin, conn));
+}
+
 /** The technician on the customer's most recent completed visit, or null. */
 async function lastTechnicianFor(conn, customerId) {
   if (!customerId) return null;
@@ -151,18 +170,11 @@ async function pickTechnicianForVisit({
   // and no tech_schedule_blocks row over the window. The probe does not model
   // blocks; find-time does, but a blocked technician with no route estimate
   // would otherwise still win the availability-only fallback.
-  const { blockedBySchedule } = require('../tech-out-auto-move');
-  const startMin = toMinutes(windowStart);
-  const endMin = toMinutes(windowEnd) ?? (startMin + durationMinutes);
   const free = [];
   for (const tech of techs) {
-    const clash = await findConflictingVisits({
-      db: conn, date, windowStart, windowEnd, technicianId: tech.id,
-      excludeCustomerId, excludeServiceIds,
-    });
-    if (clash.length) continue;
-    if (await blockedBySchedule(tech.id, date, startMin, endMin, conn)) continue;
-    free.push(tech);
+    if (await technicianFreeAt({
+      conn, technicianId: tech.id, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
+    })) free.push(tech);
   }
   if (!free.length) return { active: true, technician: null, reason: 'none_free' };
 
@@ -196,6 +208,7 @@ async function pickTechnicianForVisit({
 module.exports = {
   pickTechnicianForVisit,
   pickTechnicianActive,
+  technicianFreeAt,
   TIE_MINUTES,
   _internals: { rankCandidates, detourByTechnician, lastTechnicianFor },
 };
