@@ -119,7 +119,9 @@ const TOOLS = [
     description:
       'Look up the soonest open appointment windows near a service location. Use ' +
       'this when the caller asks when you can come out and has not named a ' +
-      'specific day. Requires the service address or at least the city/ZIP. ' +
+      'specific day. Requires the service address or at least the city/ZIP — ' +
+      'except for a caller a KNOWN CALLER block says is already a customer: call ' +
+      'it with NO address and it uses the property on their account. ' +
       'READ-ONLY: this does NOT book anything — it only returns times you can ' +
       'offer; a team member confirms the appointment.',
     input_schema: {
@@ -138,7 +140,9 @@ const TOOLS = [
       'Find open appointment windows matching a natural-language time request ' +
       '(e.g. "next Thursday morning", "sometime next week after lunch", "a week ' +
       'from Friday"). Use this when the caller names a preferred day or timeframe. ' +
-      'Requires the service address or at least the city/ZIP. READ-ONLY: returns ' +
+      'Requires the service address or at least the city/ZIP — except for a caller ' +
+      'a KNOWN CALLER block says is already a customer: call it with NO address and ' +
+      'it uses the property on their account. READ-ONLY: returns ' +
       'times to offer; it does NOT book anything.',
     input_schema: {
       type: 'object',
@@ -481,10 +485,17 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
  *   { kind: 'account', … }     → build times at the account's pin
  *   { kind: 'other_property' } → the caller named a DIFFERENT property: no
  *                                times; the request goes to a person
+ *   { kind: 'which_property' } → a city or ZIP alone, the account's own: it
+ *                                does not say WHICH property there (a rental
+ *                                in the same town), so no times until the
+ *                                agent calls again with no address (the
+ *                                account's) or the other property's street
  * The address is never returned — the agent must not have it to recite.
  */
 async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
+  // The scheduling kill switch answers before any account read or geocode.
+  if (!require('../../config/feature-gates').isEnabled('selfBooking')) return null;
   try {
     const db = require('../../models/db');
     const customer = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
@@ -501,9 +512,11 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
     const zip5 = (v) => (String(v || '').match(/\d{5}/) || [null])[0];
     const sameCity = !stated.city || (text(customer.city) && text(customer.city).toLowerCase() === stated.city.toLowerCase());
     const sameZip = !stated.zip || (zip5(customer.zip) && zip5(customer.zip) === zip5(stated.zip));
-    const sameStreet = !stated.street
-      || require('../../routes/booking')._internals.addressMatchesCustomer(customer, stated.street, stated.zip);
-    return sameStreet && sameCity && sameZip ? account : { kind: 'other_property' };
+    if (!(sameCity && sameZip)) return { kind: 'other_property' };
+    // Only a STREET proves it is the account's property.
+    if (!stated.street) return { kind: 'which_property' };
+    return require('../../routes/booking')._internals.addressMatchesCustomer(customer, stated.street, stated.zip)
+      ? account : { kind: 'other_property' };
   } catch (err) {
     // Fail to the ordinary path: its offers are not account offers, and
     // request_booking refuses to book those for this caller.
@@ -515,9 +528,26 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
 // The address itself is never put in the result — the agent must not recite it.
 const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account. If the caller says the '
   + 'visit is for a different property, call this tool again with that property\'s address.';
-const OTHER_PROPERTY_TEXT = 'That is not the service address on this caller\'s account, so do NOT offer any times. '
-  + 'Capture the lead (capture_lead) with that property\'s address and their preferred day and time, and tell the '
-  + 'caller a Waves team member will call to confirm a time. Do not say anything is booked.';
+// "will call you back" is wording the close's commitment extractor records as
+// an owed callback (call-commitments RELAY_PROMISE_PATTERNS): a lifecycle
+// customer gets no lead, so that commitment is what the office works from.
+const OTHER_PROPERTY_TEXT = 'That is not the service address on this caller\'s account, so do NOT offer any times and do '
+  + 'NOT place a booking request. Capture the lead (capture_lead) with that property\'s address and their preferred '
+  + 'day and time, and tell the caller a Waves team member will call you back to confirm a time. Do not say '
+  + 'anything is booked.';
+const WHICH_PROPERTY_TEXT = 'A city or ZIP alone does not say which property the visit is for, so no times were looked '
+  + 'up. If the visit is for the service address on this caller\'s account, call this tool again with NO address. If '
+  + 'it is for a different property, call it again with that property\'s street address.';
+
+/** The tool text for a known caller whose location is not the account's, else null. */
+function knownCallerRefusal(account, ctx = {}) {
+  if (!account || account.kind === 'account') return null;
+  if (account.kind === 'which_property') return WHICH_PROPERTY_TEXT;
+  // Times already offered for the account's property are no longer this
+  // visit's: without this an earlier slot_ref would still book it there.
+  if (typeof ctx.revokeAccountSlots === 'function') ctx.revokeAccountSlots();
+  return OTHER_PROPERTY_TEXT;
+}
 
 async function resolveAvailability({ address_line1, city, zip, when, account = null }) {
   const { isEnabled } = require('../../config/feature-gates');
@@ -1666,7 +1696,8 @@ async function executeTool(name, input = {}, ctx = {}) {
 
     if (name === 'get_availability') {
       const account = await knownCallerAvailabilityLocation(input, ctx);
-      if (account && account.kind === 'other_property') return OTHER_PROPERTY_TEXT;
+      const refusal = knownCallerRefusal(account, ctx);
+      if (refusal) return refusal;
       const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
@@ -1674,7 +1705,8 @@ async function executeTool(name, input = {}, ctx = {}) {
     if (name === 'find_slots') {
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
       const account = await knownCallerAvailabilityLocation(input, ctx);
-      if (account && account.kind === 'other_property') return OTHER_PROPERTY_TEXT;
+      const refusal = knownCallerRefusal(account, ctx);
+      if (refusal) return refusal;
       const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }

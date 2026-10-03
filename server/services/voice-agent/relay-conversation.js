@@ -2725,6 +2725,19 @@ class RelayConversation {
         return ref;
       },
       resolveSlotRef: (ref) => this._slotRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      // The caller said the visit is for a DIFFERENT property: times already
+      // offered for the account's own are no longer bookable for it. The refs
+      // stay (a stale ref still resolves, to a refusal) and lose their account
+      // stamp, which request_booking's fence requires; the registry is what a
+      // reconnect carries, so the revocation survives one.
+      revokeAccountSlots: () => {
+        for (const [ref, slot] of this._slotRefs) {
+          if (slot && slot.accountCustomerId) {
+            const { accountCustomerId, ...rest } = slot; // eslint-disable-line no-unused-vars
+            this._slotRefs.set(ref, rest);
+          }
+        }
+      },
       bookingRequested: () => this._bookingRequested,
       markBookingRequested: () => { this._bookingRequested = true; },
       leadId: () => this._leadId,

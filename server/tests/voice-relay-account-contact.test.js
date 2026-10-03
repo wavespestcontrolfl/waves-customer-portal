@@ -74,8 +74,7 @@ describe('a known customer\'s open times are for the property on their account',
   test.each([
     [{ address_line1: '12 Test St', zip: '34205' }],
     [{ address_line1: '12 test street', city: 'bradenton' }],
-    [{ city: 'Bradenton' }],
-    [{ zip: '34205-1234' }],
+    [{ address_line1: '12 Test Street' }],
   ])('the caller restating their own address %j is still the account\'s property', async (stated) => {
     const out = await executeTool('find_slots', { when: 'next week', ...stated }, fullTier());
     expect(builtAt()).toEqual(ACCOUNT_PIN);
@@ -84,6 +83,7 @@ describe('a known customer\'s open times are for the property on their account',
 
   test.each([
     [{ address_line1: '9 Rental Road', city: 'Venice', zip: '34285' }],
+    [{ address_line1: '9 Rental Road', city: 'Bradenton', zip: '34205' }],
     [{ address_line1: '12 Test Street', city: 'Venice' }],
     [{ city: 'Venice' }],
     [{ zip: '34285' }],
@@ -91,10 +91,46 @@ describe('a known customer\'s open times are for the property on their account',
     for (const name of ['get_availability', 'find_slots']) {
       const out = await executeTool(name, { when: 'next week', ...stated }, fullTier());
       expect(out).toMatch(/not the service address on this caller's account, so do NOT offer any times/);
-      expect(out).toMatch(/capture_lead[\s\S]*a Waves team member will call to confirm/);
+      expect(out).toMatch(/capture_lead[\s\S]*a Waves team member will call you back to confirm/);
     }
     expect(booking.buildBookingAvailability).not.toHaveBeenCalled();
     expect(booking.resolveBookingCoords).not.toHaveBeenCalled();
+  });
+
+  test.each([[{ city: 'Bradenton' }], [{ zip: '34205-1234' }], [{ city: 'bradenton', zip: '34205' }]])('the account\'s own city or ZIP alone %j does not say WHICH property: no times, and the agent is told how to say which', async (stated) => {
+    const rememberSlot = jest.fn();
+    const out = await executeTool('find_slots', { when: 'next week', ...stated }, fullTier({ rememberSlot }));
+    expect(out).toMatch(/does not say which property[\s\S]*call this tool again with NO address[\s\S]*that property's street address/);
+    expect(booking.buildBookingAvailability).not.toHaveBeenCalled();
+    expect(rememberSlot).not.toHaveBeenCalled(); // a rental in the same town never gets an account-stamped offer
+  });
+
+  test('naming a different property revokes times already offered for the account\'s: the old slot_ref no longer books', async () => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const ctx = new RelayConversation({ send: jest.fn() })._buildToolCtx();
+    const ref = ctx.rememberSlot(SLOTS[0], { ...ACCOUNT_PIN, duration: 60, accountCustomerId: 'c-1' });
+    const stated = ctx.rememberSlot(SLOTS[1], { lat: 27.1, lng: -82.4, duration: 60 });
+    expect(ctx.resolveSlotRef(ref).accountCustomerId).toBe('c-1');
+    const out = await executeTool('find_slots', { when: 'next week', address_line1: '9 Rental Road', city: 'Venice' }, fullTier({ revokeAccountSlots: ctx.revokeAccountSlots }));
+    expect(out).toMatch(/do NOT offer any times and do\s+NOT place a booking request/);
+    expect(out).toMatch(/will call you back to confirm a time/); // wording the close records as an owed callback
+    expect(ctx.resolveSlotRef(ref)).toMatchObject({ date: SLOTS[0].date, lat: ACCOUNT_PIN.lat });
+    expect(ctx.resolveSlotRef(ref).accountCustomerId).toBeUndefined(); // request_booking's fence refuses it
+    expect(ctx.resolveSlotRef(stated)).toBeTruthy();
+  });
+
+  test('the scheduling kill switch answers before any account read', async () => {
+    isEnabled.mockReturnValue(false);
+    expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Live scheduling is not available/);
+    expect(customerReads).toBe(0);
+    expect(resolveAccountBookingLocation).not.toHaveBeenCalled();
+  });
+
+  test('the tool descriptions carry the known-customer exception the prompt states', () => {
+    const { TOOLS } = require('../services/voice-agent/relay-tools');
+    for (const name of ['get_availability', 'find_slots']) {
+      expect(TOOLS.find((t) => t.name === name).description).toMatch(/already a customer: call\s+it with NO address and\s+it uses the property on their account/);
+    }
   });
 
   test.each(['count_failed', 'multi_property', 'unresolved_property', 'no_location'])('an account whose property a person must sort out (%s) keeps the ordinary path, and its offers are not account offers', async (status) => {

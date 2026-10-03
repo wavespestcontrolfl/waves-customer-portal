@@ -709,7 +709,8 @@ async function requestBookingText(input = {}, ctx = {}) {
     return 'That time was looked up for an address given on the call, not the service address on this '
       + 'account, so nothing was booked. Call find_slots again WITHOUT an address — it uses the property on '
       + 'the account — and offer those times. If the visit is for a different property, capture the lead '
-      + 'with that address and their preferred time; a Waves team member will call to confirm.';
+      + 'with that address and their preferred time, and tell the caller a Waves team member will call you '
+      + 'back to confirm.';
   }
   // Never trust the model's memory of a slot: re-check the offered slot
   // through the same availability engine, right now, at the account's address.
