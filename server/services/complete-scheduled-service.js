@@ -2675,6 +2675,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfill = false,             // backdated quiet completion of a stale past-dated visit — see backfillCompletionPlan
 
       lawnAssessmentId = null,
+      // Lawn Fast Complete (GATE_LAWN_FAST_COMPLETE): present only on the quick
+      // sheet's submit. Its presence asks for the lawn-fast preflight below
+      // (gate, eligible visit, confirmed assessment); nothing else in the
+      // completion changes and the block itself is not stored.
+      lawnFast = null,
       lawnProtocolCompletion = null,
       propertyServiceArea = null,
       treeShrubCompletion = null,
@@ -4435,6 +4440,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
         );
         return ({ status: structuredObservationError.status, body: structuredObservationError.body });
       }
+      // Lawn Fast Complete: the quick sheet's own preflight runs first, so its
+      // refusals (disabled / not eligible / assessment required) are the ones the
+      // sheet's failure handling reads. The advisory photo floor never refuses.
+      if (lawnFast !== null && lawnFast !== undefined) {
+        const lawnFastBlock = await require('./lawn-fast-complete').preflightLawnFastCompletion({
+          knex: db,
+          svc,
+          lawnAssessmentId,
+          isIncompleteVisit,
+          expectedVisit,
+          lawnFast,
+        });
+        if (lawnFastBlock) {
+          await CompletionAttempts.markCompletionAttemptFailed(
+            completionAttempt,
+            new Error(lawnFastBlock.payload.code || 'lawn_fast_completion_blocked'),
+            db,
+          );
+          return ({ status: lawnFastBlock.status, body: lawnFastBlock.payload });
+        }
+      }
       // The lawn assessment confirmation is a FORM gate; an invoice-issued
       // closeout has no form behind it and renders no report (pre-push P1).
       if (canLinkLawnAssessmentRecord && !issuedInvoiceCloseout) {
@@ -5726,7 +5752,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const snapshotCustomerRow = await trx('customers')
             .where({ id: svc.customer_id })
             .forShare()
-            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', ...(billingModeColumnsExist ? ['billing_mode'] : []));
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
@@ -5754,6 +5780,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (expectedVisit && lockedSvcRow
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
+          }
+          // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
+          if (lawnFast != null && !isIncompleteVisit) {
+            await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
           }
           // The trace the report flow judged (Codex #5538): a trace saved or
           // replaced since from another tab or device would publish a map the
@@ -7964,6 +7994,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
             code: 'visit_identity_changed',
+            ...(err.reason ? { reason: err.reason } : {}),
+          } });
+        }
+        if (err && err.code === 'lawn_fast_visit_type_unavailable') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 503, body: {
+            error: 'Could not verify the visit type for this service. Try again in a moment.',
+            code: 'lawn_fast_visit_type_unavailable',
           } });
         }
         if (err && err.code === 'trace_changed') {
