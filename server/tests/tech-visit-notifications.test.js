@@ -415,6 +415,20 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockWriteCard.mock.calls[0][1].payload).toMatchObject({ date: '2026-09-10', previous_date: '2026-09-09' });
   });
 
+  test('a move that also changes the tech keeps the old day on BOTH cards (a move off today is still a today change)', async () => {
+    prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
+    notices.notifyAssignmentChange({
+      visitId: 'visit-1', fromTechId: 'tech-1', toTechId: ADAM_ID, actorId: 'auto_dispatch',
+      snapshot: { date: '2026-09-10' }, previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    await Promise.all([...notices._test.visitQueues.values()]);
+    expect(mockWriteCard.mock.calls.map(([, row]) => [row.type, row.payload.date, row.payload.previous_date])).toEqual([
+      ['visit_unassigned', '2026-09-10', '2026-09-09'],
+      ['visit_assigned', '2026-09-10', '2026-09-09'],
+    ]);
+  });
+
   test('gate on: an auto-dispatch move still writes its card but holds its own push; any other mover still pushes', async () => {
     await move('auto_dispatch');
     expect(mockWriteCard).toHaveBeenCalledTimes(1);

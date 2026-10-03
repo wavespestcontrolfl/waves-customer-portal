@@ -213,7 +213,12 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
   const service = visit.service_type || 'Service';
   const lines = [];
   let headline;
-  let previousDate = null;
+  // formatWhen / dateOnly read a missing previous slot as null. Any kind may
+  // carry it: a move that also changes the tech arrives as an assignment
+  // pair, and the old day is what makes it a today/tomorrow change for the
+  // tech who loses it (Codex #5783 P2).
+  const prior = previous || {};
+  const previousDate = dateOnly(prior.date);
   if (kind === 'assigned') {
     headline = 'New visit on your route';
     lines.push(`${service} · ${when}`);
@@ -227,10 +232,7 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
     lines.push(`Reassigned ${actorText}`);
   } else if (kind === 'rescheduled') {
     headline = 'Visit moved';
-    // formatWhen / dateOnly read a missing previous slot as null.
-    const prior = previous || {};
     const before = formatWhen(prior.date, prior.windowStart, prior.windowEnd);
-    previousDate = dateOnly(prior.date);
     lines.push(service);
     if (before) lines.push(`Was ${before}`);
     lines.push(`Now ${when}`);
@@ -588,15 +590,15 @@ function afterCommit(trx, fn, visitId) {
  * new holder hears it arrived. Post-commit, best-effort. No-op when nothing
  * changed.
  */
-function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, trx = null } = {}) {
+function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, previous = null, trx = null } = {}) {
   const from = fromTechId || null;
   const to = toTechId || null;
   if (!visitId || from === to) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
     const notices = [];
-    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot }));
-    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot }));
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot, previous }));
+    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot, previous }));
     await deliver(notices);
   }, visitId);
 }
