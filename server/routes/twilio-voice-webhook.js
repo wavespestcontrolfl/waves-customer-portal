@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { ringTargetForLine } = require('../services/tech-line');
 const twilio = require('twilio');
@@ -3551,7 +3552,10 @@ router.post('/call-status', async (req, res) => {
         const status = nextCallStatus(existing.status, CallStatus);
         const incomingDuration = parseInt(CallDuration || 0) || 0;
         const eventMs = Date.parse(req.body.Timestamp || '');
-        const callEndedAt = Number.isFinite(eventMs) && eventMs <= Date.now() && eventMs >= new Date(existing.created_at).getTime()
+        // Not before the call began: callStartedAt, because a row inserted
+        // after the call was over has a created_at later than its real end.
+        const callBeganMs = callStartedAt(existing)?.getTime();
+        const callEndedAt = Number.isFinite(eventMs) && eventMs <= Date.now() && eventMs >= callBeganMs
           ? new Date(eventMs).toISOString() : null;
         // On a row that is already terminal the duration never decreases: a
         // retried "completed" or a late leg callback can carry

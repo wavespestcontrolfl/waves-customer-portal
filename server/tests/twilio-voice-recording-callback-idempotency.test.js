@@ -867,6 +867,15 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     await event('completed', new Date(hungUpAt.getTime() + 60 * 1000).toUTCString());
     expect(tables.call_log[0].metadata.ended_at).toBe(first);
   });
+
+  test('a row inserted after the call was over still takes an end time earlier than its created_at', async () => {
+    const createdAt = new Date(Date.now() - 60 * 1000);
+    const hungUpAt = new Date(createdAt.getTime() - 20 * 1000);
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'inbound', status: 'completed', duration_seconds: 120,
+      created_at: createdAt, metadata: { source: 'status_callback', inserted_on_status: 'completed' } });
+    await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '120', Direction: 'inbound', From: '+15555550100', To: '+15555550101', Timestamp: hungUpAt.toUTCString() });
+    expect(tables.call_log[0].metadata.ended_at).toBe(new Date(Math.floor(hungUpAt.getTime() / 1000) * 1000).toISOString());
+  });
 });
 
 describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {

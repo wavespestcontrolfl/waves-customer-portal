@@ -289,6 +289,10 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     // is the staff cell rather than the prospect.
     await seedCall({ direction: 'outbound', source: 'collections_voice' });
     await seedCall({ direction: 'outbound', source: 'lead-webhook-auto-bridge' });
+    // A call that was over before the text, on a row inserted after it
+    // (a status-callback fallback): its created_at is not the call's start.
+    await seedCall({ duration: 600, metadata: { source: 'status_callback', inserted_on_status: 'completed' } });
+    await seedCall({ duration: 600, metadata: { source: 'twilio_recording_status_recovered' } });
     // A sandbox test call is never customer contact.
     await seedCall({ source: 'voice_relay_sandbox' });
     // A real conversation with someone else.
