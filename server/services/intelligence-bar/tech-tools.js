@@ -456,7 +456,10 @@ function pickProduct(rows, productName) {
 const isPresent = (value) => value != null && value !== '';
 
 // Many turf products keep their label rate only in the per-1,000 sq ft
-// columns (default_rate stays null), so those count as a rate on file. Only
+// columns (default_rate stays null), so those count as a rate on file — but
+// only once the label is verified (label_verified_at, the same contract the
+// job card holds): some rows carry an operating assumption, not a label rate.
+// Only
 // when neither form exists does the answer carry rate_note, so a blank never
 // invites a number from memory. A tech never gets an mL figure.
 function perThousandRate(product, { forTech, hasDefaultRate }) {
@@ -465,7 +468,9 @@ function perThousandRate(product, { forTech, hasDefaultRate }) {
     min: product.min_label_rate_per_1000,
     max: product.max_label_rate_per_1000,
   };
-  const usable = Object.values(fields).some(isPresent) && !(forTech && isMlUnit(product.rate_unit));
+  const usable = Boolean(product.label_verified_at)
+    && Object.values(fields).some(isPresent)
+    && !(forTech && isMlUnit(product.rate_unit));
   const out = {};
   if (usable) {
     out.label_rate_per_1000 = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
@@ -515,11 +520,12 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     sds_url: product.sds_url || undefined,
   };
 
-  // For a technician, a label rate the catalog keeps in mL is left out, so
-  // the tech is sent to the label (owner ruling: nothing a tech reads is in
-  // mL; the completion forms leave the same rates blank). Every other rate,
-  // and every rate for an admin workflow, reads as stored.
-  const mlLabelRate = forTech && isMlUnit(product.default_unit);
+  // For a technician, a label rate is left out when the catalog keeps it in
+  // mL (owner ruling: nothing a tech reads is in mL; the completion forms
+  // leave the same rates blank) or when the label is not verified (the job
+  // card's contract), so the tech is sent to the label. Every rate for an
+  // admin workflow reads as stored.
+  const withheldRate = forTech && (isMlUnit(product.default_unit) || !product.label_verified_at);
 
   return {
     name: product.name,
@@ -528,9 +534,9 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     moa_group: product.moa_group,
     formulation: product.formulation,
     container_size: product.container_size,
-    default_rate: mlLabelRate ? null : product.default_rate,
-    default_unit: mlLabelRate ? null : product.default_unit,
-    ...perThousandRate(product, { forTech, hasDefaultRate: !mlLabelRate && isPresent(product.default_rate) }),
+    default_rate: withheldRate ? null : product.default_rate,
+    default_unit: withheldRate ? null : product.default_unit,
+    ...perThousandRate(product, { forTech, hasDefaultRate: !withheldRate && isPresent(product.default_rate) }),
     sku: product.sku,
     safety,
   };

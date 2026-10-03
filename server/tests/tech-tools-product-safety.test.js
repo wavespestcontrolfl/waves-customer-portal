@@ -7,6 +7,7 @@
 // is the whole ILIKE result.
 let mockRow = null;
 let mockRows = null;
+const VERIFIED = '2026-07-01T00:00:00Z';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => ({
@@ -123,7 +124,7 @@ describe('get_product_info label rate', () => {
   });
 
   test('for a technician, any other label rate reads exactly as the catalog states it', async () => {
-    mockRow = { name: 'Sample CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' };
+    mockRow = { name: 'Sample CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED };
     const result = await asTech();
     expect(result.default_rate).toBe('0.2-0.8');
     expect(result.default_unit).toBe('fl_oz/gal');
@@ -157,7 +158,7 @@ describe('get_product_info product match', () => {
 
   test('an exact name wins over other active matches', async () => {
     mockRows = [
-      { name: 'Alpine WSG', active: true, default_rate: '10-30', default_unit: 'g/gal' },
+      { name: 'Alpine WSG', active: true, default_rate: '10-30', default_unit: 'g/gal', label_verified_at: VERIFIED },
       { name: 'Alpine WSG Insecticide Kit', active: true },
     ];
     const result = await ask('alpine wsg');
@@ -190,13 +191,13 @@ describe('get_product_info product match', () => {
   test('a product with no rate carries a rate note; one with a rate does not', async () => {
     mockRows = [{ name: 'Atticus Talak 7.9 F', active: true, default_rate: null }];
     expect((await ask('Talak')).rate_note).toBe('No rate on file. Check the current label before mixing.');
-    mockRows = [{ name: 'Sample CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' }];
+    mockRows = [{ name: 'Sample CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED }];
     expect((await ask('Sample CS')).rate_note).toBeUndefined();
   });
 
   test('a per-1,000 label rate counts as a rate on file and is returned with its basis', async () => {
     mockRows = [{
-      name: 'Acelepryn Xtra', active: true, default_rate: null,
+      name: 'Acelepryn Xtra', active: true, default_rate: null, label_verified_at: VERIFIED,
       default_rate_per_1000: '0.46', min_label_rate_per_1000: '0.23', max_label_rate_per_1000: '0.92', rate_unit: 'fl_oz',
     }];
     const result = await ask('Acelepryn Xtra');
@@ -205,10 +206,31 @@ describe('get_product_info product match', () => {
   });
 
   test('for a technician, an mL per-1,000 rate is withheld and the rate note stands', async () => {
-    mockRows = [{ name: 'Sample Liquid', active: true, default_rate: null, default_rate_per_1000: '30', rate_unit: 'ml' }];
+    mockRows = [{ name: 'Sample Liquid', active: true, default_rate: null, default_rate_per_1000: '30', rate_unit: 'ml', label_verified_at: VERIFIED }];
     const result = await ask('Sample Liquid');
     expect(result.label_rate_per_1000).toBeUndefined();
     expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
     expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
+  });
+
+  test('an unverified label withholds every rate from a technician and sends them to the label', async () => {
+    mockRows = [{
+      name: 'Velista', active: true, default_rate: '0.5', default_unit: 'oz',
+      default_rate_per_1000: '0.5', rate_unit: 'oz', label_verified_at: null,
+    }];
+    const result = await ask('Velista');
+    expect(result.default_rate).toBeNull();
+    expect(result.label_rate_per_1000).toBeUndefined();
+    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
+  });
+
+  test('an admin workflow keeps an unverified catalog rate as stored but gets no per-1,000 label rate', async () => {
+    mockRows = [{
+      name: 'Velista', active: true, default_rate: '0.5', default_unit: 'oz',
+      default_rate_per_1000: '0.5', rate_unit: 'oz', label_verified_at: null,
+    }];
+    const result = await executeTechTool('get_product_info', { product_name: 'Velista' }, {});
+    expect(result.default_rate).toBe('0.5');
+    expect(result.label_rate_per_1000).toBeUndefined();
   });
 });
