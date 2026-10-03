@@ -316,7 +316,7 @@ it('reads the visit again before Retry and keeps the file when its property chan
   });
 });
 
-it('allows Retry after the same visit completes and reconciles before clearing the file', async () => {
+it('recovers a completed upload receipt and retries reconciliation after a later visit edit', async () => {
   let liveVisit = VISIT;
   let uploads = 0;
   let reconciles = 0;
@@ -324,6 +324,7 @@ it('allows Retry after the same visit completes and reconciles before clearing t
     if (url.endsWith('/photo-marks')) return response({ supported: false });
     if (url.endsWith('/photos/reconcile')) {
       reconciles += 1;
+      if (reconciles === 1) return response({ error: 'Reconciliation unavailable' }, { ok: false, status: 503 });
       return response({ ok: true });
     }
     if (options?.method === 'POST') {
@@ -334,7 +335,7 @@ it('allows Retry after the same visit completes and reconciles before clearing t
     return response({ photos: [], visit: liveVisit });
   }));
 
-  render(<TechServicePhotosModal serviceId={VISIT_ID} onClose={vi.fn()} />);
+  const first = render(<TechServicePhotosModal serviceId={VISIT_ID} onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
   fireEvent.change(screen.getByLabelText('Choose service photo'), {
     target: { files: [new File(['completed-photo'], 'completed.jpg', { type: 'image/jpeg' })] },
@@ -343,9 +344,18 @@ it('allows Retry after the same visit completes and reconciles before clearing t
   liveVisit = { ...VISIT, status: 'completed' };
   fireEvent.click(screen.getByRole('button', { name: 'Retry upload', exact: true }));
 
+  await screen.findByText(/Reconciliation unavailable/);
+  expect(await getServicePhotoDraft(VISIT_ID, TECH_ID)).toMatchObject({
+    stage: 'reconciliation_failed', uploadReceipt: { photo: { id: 'photo-completed' }, reconcileRequired: true },
+  });
+  first.unmount();
+  liveVisit = { ...liveVisit, propertyId: 'property-now-edited', revision: 'new-revision' };
+  render(<TechServicePhotosModal serviceId={VISIT_ID} onClose={vi.fn()} />);
+  await screen.findByText('Recovered a photo saved on this device.');
+  fireEvent.click(screen.getByRole('button', { name: 'Retry upload', exact: true }));
   expect(await screen.findByText('Photo uploaded')).toBeInTheDocument();
   expect(uploads).toBe(2);
-  expect(reconciles).toBe(1);
+  expect(reconciles).toBe(2);
   await waitFor(() => expect(getServicePhotoDraft(VISIT_ID, TECH_ID)).resolves.toBeNull());
 });
 

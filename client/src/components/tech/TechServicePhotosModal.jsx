@@ -224,7 +224,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     setRestoredPending(false);
     try {
       ensureCurrentDeviceIdentity(deviceScope);
-      if (verifyFresh) {
+      if (verifyFresh && !photo.uploadReceipt?.photo?.id) {
         let current;
         try {
           current = await getServicePhotos(serviceId, deviceIdentity.token);
@@ -252,7 +252,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       // before reading the bearer token so an old technician's recovered File
       // is never sent under the next login.
       ensureCurrentDeviceIdentity(deviceScope);
-      const data = await postServicePhoto(photo, serviceId, deviceIdentity.token);
+      const data = await postServicePhoto(photo, serviceId, deviceIdentity.token, deviceScope);
       // Record the acknowledgement before clearing the recovery row. If the
       // app dies between those operations, restore silently clears the
       // confirmed row instead of presenting a duplicate Retry action.
