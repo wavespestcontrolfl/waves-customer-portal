@@ -8,8 +8,8 @@ describe('the exception lives at system priority, only when the caller-context l
     expect(buildBasePrompt(true)).toMatch(/is the exception to gathering a name, address and\s+email/);
     expect(buildBasePrompt(true)).toMatch(/start of the call or partway through/);
     // The two tools that need those details are named, so the rule and the tools agree.
-    expect(buildBasePrompt(true)).toMatch(/checking open times needs the\s+service address or ZIP/);
-    expect(buildBasePrompt(true)).toMatch(/written estimate needs the full name, email\s+and service address/);
+    expect(buildBasePrompt(true)).toMatch(/checking open times needs the\s+service address, or at least the city or ZIP/); // a city alone is enough for the tools
+    expect(buildBasePrompt(true)).toMatch(/written estimate\s+needs the full name, email and service address/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });
