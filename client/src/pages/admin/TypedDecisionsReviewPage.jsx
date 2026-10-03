@@ -79,6 +79,19 @@ function SubjectText({ subject }) {
       </div>
     );
   }
+  if (subject.type === "scheduled_services") {
+    // A visit's facts as the models read them (visit_access): saved
+    // preferences, notes, customer texts and the last technician note, with
+    // access details withheld. Not the customer's own words alone.
+    return (
+      <div className="min-w-0 space-y-1">
+        <div className="text-12 font-medium uppercase text-ink-secondary">
+          Visit facts the models read{subject.at ? ` · visit ${subject.at}` : ""}
+        </div>
+        <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{subject.text}</div>
+      </div>
+    );
+  }
   return (
     <div className="min-w-0 space-y-2">
       {subject.previousText && (

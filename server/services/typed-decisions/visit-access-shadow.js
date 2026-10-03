@@ -26,9 +26,9 @@
  * written, as every inbound customer text already is by the SMS shadow
  * (sms-shadow.js; owner ruling 2026-10-01, texts may go to these providers).
  *
- * property_preferences is the primary home's row, so a visit stamped at
- * another address (stamped-address.js) is left out: its pets, codes and
- * notes would be another property's.
+ * property_preferences, the texts and the visit history are keyed on the
+ * customer, so only an account proven to have one premises is judged
+ * (singlePremises); a multi-property account is left out.
  *
  * The state is a function of the visit and of facts dated before it, never of
  * "now": texts stop at the visit's own start (stateCutoff) and history counts
@@ -49,8 +49,8 @@ const MAX_ASKED_VISITS = 80;
 const WORKERS = 2;
 const MAX_TEXTS = 8;
 const TEXT_CHARS = 260;
-const NOTE_CHARS = 600;
-const NOTES_TEXT_CHARS = 1500;
+// Per note line; the lines together are bounded by their count.
+const NOTE_CHARS = 400;
 // The comms window's recurring cap (completion-comms-context RECURRING_CAP_DAYS).
 const WINDOW_CAP_DAYS = 120;
 const DEFAULT_START = '08:00';
@@ -180,34 +180,62 @@ function labelledAccessField(label, value) {
   return String(value || '').trim() ? `${label}: ${accessMarker(String(value))}` : null;
 }
 
-/**
- * The state one visit is judged on, with the two baselines production holds.
- * Returns null when the visit, its customer or its date cannot be read.
- * Throws on a database error (callers count it as a failed visit).
- *
- * @returns {Promise<null | { state: object, baselines: object, subjectHash: string }>}
- */
-async function buildVisitAccessState(svc, dbh) {
-  const day = dayString(svc && svc.scheduled_date);
-  if (!svc || !svc.id || !svc.customer_id || !day) return null;
-  if (require('../stamped-address').stampedAddressDiverges(svc)) return null;
-  const { detectServiceLine } = require('../service-report/service-line-configs');
-  const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
-  const { isSmsReaction } = require('../sms-intent');
-  const serviceLine = detectServiceLine(svc.service_type) || null;
-  const cutoff = stateCutoff(svc);
+// property_preferences, the customer's texts and the visit history are all
+// keyed on the customer, not the property. So a visit is judged only when the
+// account is PROVEN to have one premises, the primary one
+// (visit-property-scope.js customerHasOnlyPrimaryPremises, unresolved links
+// failing the proof): then every saved fact, text and past visit is about the
+// property this visit is at. A multi-property account is left out.
+async function singlePremises(svc, dbh) {
+  const linkage = require('../estimate-property-linkage');
+  const { customerHasOnlyPrimaryPremises } = require('../service-report/visit-property-scope');
+  const primary = linkage.normalizedStampedStreet(svc.customer_address_line1, svc.customer_address_line2, svc.customer_city, svc.customer_zip);
+  if (!primary || linkage.scopeKeyLacksLocality(primary)) return false;
+  return customerHasOnlyPrimaryPremises(dbh, svc.customer_id, { has_multi_home: svc.has_multi_home }, primary, { unresolvedFails: true });
+}
 
+// What is saved for the property: the structured facts, the two baselines
+// production holds, and the note lines. The lines are in priority order and
+// each is capped, so together they always fit: nothing is cut off the end.
+async function loadSavedFacts(svc, dbh, day) {
   const prefs = await dbh('property_preferences').where({ customer_id: svc.customer_id }).first(
     'pet_count', 'pet_details', 'pets_secured_plan', 'contact_preference', 'away_mode_until', 'side_gate_access',
     'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
     'access_notes', 'parking_notes', 'special_instructions', 'chemical_sensitivities', 'chemical_sensitivity_details',
-  ) || null;
+  ) || {};
+  const hasCodes = Boolean(prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code);
+  const petCount = Number.isInteger(prefs.pet_count) ? prefs.pet_count : 0;
+  const notes = [
+    labelled('Visit note', svc.notes, NOTE_CHARS),
+    prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
+    labelledAccessField('Access notes', prefs.access_notes),
+    labelledAccessField('Side gate', prefs.side_gate_access),
+    labelled('Special instructions', prefs.special_instructions, NOTE_CHARS),
+    labelled('Pets', prefs.pet_details, NOTE_CHARS),
+    labelled('Pets secured plan', prefs.pets_secured_plan, NOTE_CHARS),
+    labelled('Parking', prefs.parking_notes, NOTE_CHARS),
+  ].filter(Boolean).join('\n');
+  return {
+    structured: {
+      pet_count: petCount,
+      has_codes: hasCodes,
+      contact_preference: prefs.contact_preference || null,
+      away_mode: Boolean(prefs.away_mode_until && dayString(prefs.away_mode_until) >= day),
+      side_gate: Boolean(String(prefs.side_gate_access || '').trim()),
+      chemical_sensitivity: Boolean(prefs.chemical_sensitivities),
+    },
+    notes: notes || null,
+    baselines: { dog_on_property: { rules: petCount > 0 }, needs_code_key_or_person: { rules: hasCodes } },
+  };
+}
 
-  // Completed visits on days BEFORE this one. scheduled_services is the
-  // history (a completed recurring visit can have no service_records row, as
-  // completion-comms-context reads it): the count, and the newest on this
-  // visit's own service line, where the texts' window starts. service_records
-  // supplies only the last technician note on that line.
+// Completed visits on days BEFORE this one. scheduled_services is the history
+// (a completed recurring visit can have no service_records row, as
+// completion-comms-context reads it): the count, and the day of the newest on
+// this visit's own service line, where the texts' window starts.
+// service_records supplies only the last technician note on that line.
+async function loadHistory(svc, dbh, day, serviceLine) {
+  const { detectServiceLine } = require('../service-report/service-line-configs');
   const completed = await dbh('scheduled_services')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .whereNot({ id: svc.id })
@@ -215,28 +243,31 @@ async function buildVisitAccessState(svc, dbh) {
     .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
     .limit(200)
     .select('service_type', 'scheduled_date');
-  const lastCompleted = completed.find((r) => detectServiceLine(r.service_type) === serviceLine) || null;
+  const lastCompleted = completed.find((r) => detectServiceLine(r.service_type) === serviceLine);
   const records = await dbh('service_records')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .where('service_date', '<', day)
     .orderBy('service_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc')
     .limit(100)
     .select('service_type', 'service_line', 'service_date', 'technician_notes');
-  const lastLine = records.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine) || null;
+  const lastRecord = records.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine);
+  const days = [lastCompleted && dayString(lastCompleted.scheduled_date), lastRecord && dayString(lastRecord.service_date)].filter(Boolean).sort();
+  return {
+    count: completed.length,
+    lastDay: days.pop() || null,
+    lastNote: lastRecord ? (compact(redactForState(lastRecord.technician_notes), NOTE_CHARS) || null) : null,
+  };
+}
 
-  const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
-  // Eastern midnight of the last same-line visit's day (the later of the two
-  // sources), never UTC midnight.
-  const lastDay = [lastCompleted && dayString(lastCompleted.scheduled_date), lastLine && dayString(lastLine.service_date)].filter(Boolean).sort().pop() || null;
-  const lastLineDay = lastDay ? require('../../utils/datetime-et').parseETDateTime(`${lastDay}T00:00`) : null;
-  const floor = lastLineDay && lastLineDay > capFloor ? lastLineDay : capFloor;
-  // Both directions are read, but only the customer's own texts enter the
-  // state: a Waves text is there solely so a reply to an access question
-  // ("What is your gate password?" / "sesame") is withheld with it.
-  // The read starts a reply-window BEFORE the evidence floor, so an access
-  // question sent just before it still withholds its reply; those earlier
-  // rows are context only.
-  const TEXT_READ_LIMIT = 120;
+// The customer's own texts between `floor` and `cutoff`, newest first, each
+// through the withholding rules. Both directions are read, from a
+// reply-window before the floor, but only the customer's texts inside the
+// window enter the state: the rest is there solely so a reply to an access
+// question ("What is your gate password?" / "sesame") is withheld with it.
+const TEXT_READ_LIMIT = 120;
+async function loadCustomerTexts(svc, dbh, floor, cutoff) {
+  const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+  const { isSmsReaction } = require('../sms-intent');
   const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
     .whereIn('direction', ['inbound', 'outbound'])
     .where('created_at', '>=', new Date(floor.getTime() - ACCESS_REPLY_MS))
@@ -244,11 +275,11 @@ async function buildVisitAccessState(svc, dbh) {
     .orderBy('created_at', 'desc')
     .limit(TEXT_READ_LIMIT)
     .select('created_at', 'direction', 'message_body', 'message_type');
-  // Oldest first, so a text that follows an access-bearing one is seen as such.
   // A truncated read hides what came before its oldest row: fail closed and
   // withhold a full reply-window from there.
   let withholdUntil = texts.length >= TEXT_READ_LIMIT ? new Date(texts[texts.length - 1].created_at).getTime() + ACCESS_REPLY_MS : 0;
-  const recentTexts = texts
+  // Oldest first, so a text that follows an access-bearing one is seen as such.
+  const lines = texts
     .filter((row) => row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body))
     .reverse()
     .map((row) => {
@@ -258,55 +289,57 @@ async function buildVisitAccessState(svc, dbh) {
         if (access) withholdUntil = Math.max(withholdUntil, at + ACCESS_REPLY_MS);
         return null;
       }
-      const evidence = at >= floor.getTime();
-      if (access) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return evidence ? redactForState(row.message_body) : null; }
-      if (at <= withholdUntil) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return evidence ? FOLLOW_UP_MARKER : null; }
-      return evidence ? compact(redactForState(row.message_body), TEXT_CHARS) : null;
+      const held = access || at <= withholdUntil;
+      if (held) withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS);
+      if (at < floor.getTime()) return null;
+      if (access) return redactForState(row.message_body);
+      return held ? FOLLOW_UP_MARKER : compact(redactForState(row.message_body), TEXT_CHARS);
     })
     .filter(Boolean)
     .reverse()
     .slice(0, MAX_TEXTS);
+  return lines.length ? lines.map((line) => `- ${line}`).join('\n') : null;
+}
 
-  const hasCodes = Boolean(prefs && (prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code));
-  const petCount = Number.isInteger(prefs && prefs.pet_count) ? prefs.pet_count : 0;
-  const notes = [
-    labelledAccessField('Access notes', prefs && prefs.access_notes),
-    labelled('Parking', prefs && prefs.parking_notes, NOTE_CHARS),
-    labelled('Special instructions', prefs && prefs.special_instructions, NOTE_CHARS),
-    labelled('Pets', prefs && prefs.pet_details, NOTE_CHARS),
-    labelled('Pets secured plan', prefs && prefs.pets_secured_plan, NOTE_CHARS),
-    labelledAccessField('Side gate', prefs && prefs.side_gate_access),
-    prefs && prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
-    labelled('Visit note', svc.notes, NOTE_CHARS),
-  ].filter(Boolean).join('\n').slice(0, NOTES_TEXT_CHARS);
-
+/**
+ * The state one visit is judged on, with the two baselines production holds.
+ * Returns null when the visit, its customer or its date cannot be read, or
+ * the account is not proven single-premises. Throws on a database error
+ * (callers count it as a failed visit).
+ *
+ * @returns {Promise<null | { state: object, baselines: object, subjectHash: string }>}
+ */
+async function buildVisitAccessState(svc, dbh) {
+  const day = dayString(svc && svc.scheduled_date);
+  if (!svc || !svc.id || !svc.customer_id || !day) return null;
+  if (!(await singlePremises(svc, dbh))) return null;
+  const { detectServiceLine } = require('../service-report/service-line-configs');
+  const { parseETDateTime } = require('../../utils/datetime-et');
+  const serviceLine = detectServiceLine(svc.service_type) || null;
+  const cutoff = stateCutoff(svc);
+  const saved = await loadSavedFacts(svc, dbh, day);
+  const history = await loadHistory(svc, dbh, day, serviceLine);
+  // The texts' window: from Eastern midnight of the last same-line visit's
+  // day (never UTC midnight), capped, up to this visit's start.
+  const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
+  const lastStart = history.lastDay ? parseETDateTime(`${history.lastDay}T00:00`) : null;
+  const floor = lastStart && lastStart > capFloor ? lastStart : capFloor;
   const state = {
     service_line: serviceLine,
-    visit_count: completed.length,
-    structured: {
-      pet_count: petCount,
-      has_codes: hasCodes,
-      contact_preference: (prefs && prefs.contact_preference) || null,
-      away_mode: Boolean(prefs && prefs.away_mode_until && dayString(prefs.away_mode_until) >= day),
-      side_gate: Boolean(prefs && String(prefs.side_gate_access || '').trim()),
-      chemical_sensitivity: Boolean(prefs && prefs.chemical_sensitivities),
-    },
-    notes_text: notes || null,
-    recent_texts: recentTexts.length ? recentTexts.map((line) => `- ${line}`).join('\n') : null,
-    last_tech_notes: lastLine ? (compact(redactForState(lastLine.technician_notes), NOTE_CHARS) || null) : null,
+    visit_count: history.count,
+    structured: saved.structured,
+    notes_text: saved.notes,
+    recent_texts: await loadCustomerTexts(svc, dbh, floor, cutoff),
+    last_tech_notes: history.lastNote,
   };
-  return {
-    state,
-    baselines: { dog_on_property: { rules: petCount > 0 }, needs_code_key_or_person: { rules: hasCodes } },
-    subjectHash: visitAccessSubjectHash(state),
-  };
+  return { state, baselines: saved.baselines, subjectHash: visitAccessSubjectHash(state) };
 }
 
 const VISIT_COLUMNS = [
   's.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes',
-  // stampedAddressDiverges' row keys.
-  's.service_address_line1', 's.service_address_zip', 's.service_address_city',
-  'c.address_line1 as customer_address_line1', 'c.zip as customer_zip', 'c.city as customer_city',
+  // The primary address and the multi-home flag singlePremises reads.
+  'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city',
+  'c.has_multi_home',
 ];
 
 // One visit: ask every live provider that has not already answered THIS
@@ -402,11 +435,15 @@ async function shadowVisit(svc, { dbh, providers, out }) {
       if (row.label_status !== 'unreviewed' || row.sampled_for === 'heldout') continue;
       const others = persisted.filter((other) => other.question_id === row.question_id && other.provider !== row.provider).map(parsed);
       const cohort = sampleFor(parsed(row), built.baselines[row.question_id], () => stableDraw(row), others);
-      if (cohort === row.sampled_for) continue;
+      // A re-answer (the row held an older state before this pass) is new
+      // evidence: its age restarts, so the daily review item's window, which
+      // reads created_at, sees a visit that moved out and came back.
+      const reanswered = asked.has(row.provider) && existing.some((old) => old.provider === row.provider && old.question_id === row.question_id && old.subject_hash !== built.subjectHash);
+      if (cohort === row.sampled_for && !reanswered) continue;
       try {
         await dbh(TABLE).where({ id: row.id, subject_hash: built.subjectHash, label_status: 'unreviewed' })
           .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
-          .update({ sampled_for: cohort });
+          .update({ sampled_for: cohort, ...(reanswered ? { created_at: dbh.fn.now() } : {}) });
       } catch (err) {
         logger.warn(`[typed-decisions] visit access (${row.provider}) cohort refresh failed: ${err.message}`);
       }

@@ -118,13 +118,19 @@ describe('visit access shadow: rules that need no database', () => {
   });
   const rows = (visitId) => database('decision_reviews').where({ subject_id: visitId }).orderBy(['provider', 'question_id']);
   const sweep = () => access.runVisitAccessSweep({ dbh: database, now: NOW });
+  // The visit row as the sweep reads it (joined to its customer).
+  const build = async (visitId) => access.buildVisitAccessState(await database('scheduled_services as s').join('customers as c', 's.customer_id', 'c.id').where('s.id', visitId)
+    .first('s.*', 'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city', 'c.has_multi_home'), database);
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
-    await database.raw(`CREATE TABLE ??.customers (id uuid PRIMARY KEY, deleted_at timestamptz, address_line1 text, zip text, city text)`, [schema]);
+    await database.raw(`CREATE TABLE ??.customers (id uuid PRIMARY KEY, deleted_at timestamptz, address_line1 text, address_line2 text, zip text, city text, has_multi_home boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, service_type varchar(200),
-      scheduled_date date, window_start time, status text, notes text, service_address_line1 text, service_address_zip text, service_address_city text)`, [schema]);
+      scheduled_date date, window_start time, status text, notes text, service_address_line1 text, service_address_line2 text, service_address_zip text, service_address_city text,
+      property_id uuid, source_estimate_id uuid)`, [schema]);
+    await database.raw(`CREATE TABLE ??.customer_properties (id uuid PRIMARY KEY, customer_id uuid, address_line1 text, address_line2 text, city text, zip text)`, [schema]);
+    await database.raw(`CREATE TABLE ??.estimates (id uuid PRIMARY KEY, address text)`, [schema]);
     await database.raw(`CREATE TABLE ??.property_preferences (customer_id uuid PRIMARY KEY, pet_count integer, pet_details text,
       pets_secured_plan text, contact_preference text, away_mode_until date, side_gate_access varchar(200), neighborhood_gate_code varchar(50),
       property_gate_code varchar(50), garage_code varchar(50), lockbox_code varchar(50), access_notes text, parking_notes text, special_instructions text,
@@ -152,7 +158,7 @@ describe('visit access shadow: rules that need no database', () => {
     gates(true);
     mockAsk.mockReset();
     mockAsk.mockResolvedValue(reply());
-    for (const t of ['decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services']) await database(t).del();
+    for (const t of ['decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties']) await database(t).del();
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -195,7 +201,7 @@ describe('visit access shadow: rules that need no database', () => {
     await text('Morning of the last pest visit', '2026-07-06T13:00:00Z');
     const visitId = await visit({ notes: 'Customer asked for the lanai too' });
 
-    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    const built = await build(visitId);
     expect(JSON.stringify(built.state)).not.toMatch(/latch sticks/);
     expect(built.state).toMatchObject({
       service_line: 'pest', visit_count: 2,
@@ -222,7 +228,7 @@ describe('visit access shadow: rules that need no database', () => {
     await text('We are away the last week of August', '2026-08-20T15:00:00Z');
     await text('The baby sleeps until ten', '2026-09-15T15:00:00Z');
     const visitId = await visit();
-    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    const built = await build(visitId);
     expect(built.state.visit_count).toBe(1);
     expect(built.state.recent_texts).toContain('The baby sleeps until ten');
     expect(built.state.recent_texts).not.toContain('away the last week');
@@ -235,7 +241,7 @@ describe('visit access shadow: rules that need no database', () => {
     await text('Your visit is set for Tuesday', '2026-10-01T15:00:00Z', { direction: 'outbound', status: 'delivered' });
     await text('Great, the cat stays inside', '2026-10-01T15:05:00Z');
     const visitId = await visit();
-    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    const built = await build(visitId);
     expect(built.state.recent_texts).not.toMatch(/sesame|password|Your visit is set/);
     expect(built.state.recent_texts).toContain('[follow-up to an access detail withheld]');
     expect(built.state.recent_texts).toContain('Great, the cat stays inside');
@@ -248,7 +254,7 @@ describe('visit access shadow: rules that need no database', () => {
     await text('sesame', '2026-09-01T12:00:00Z');
     await text('See you then', '2026-09-03T12:00:00Z');
     const visitId = await visit();
-    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    const built = await build(visitId);
     expect(built.state.recent_texts).not.toContain('sesame');
     expect(built.state.recent_texts).toContain('See you then');
   });
@@ -256,7 +262,7 @@ describe('visit access shadow: rules that need no database', () => {
   test('the access fields never leave as written, whatever they say', async () => {
     await database('property_preferences').insert({ customer_id: customerId, access_notes: 'sesame', side_gate_access: 'bluebird' });
     const visitId = await visit();
-    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    const built = await build(visitId);
     expect(JSON.stringify(built.state)).not.toMatch(/sesame|bluebird/);
     expect(built.state.notes_text).toBe('Access notes: [access detail withheld]\nSide gate: [access detail withheld]');
     expect(built.state.structured.side_gate).toBe(true);
@@ -326,14 +332,48 @@ describe('visit access shadow: rules that need no database', () => {
     expect(agreed[0].sampled_for).not.toBe('disagreement');
   });
 
-  test('a visit stamped at another address is left out: the saved pets and codes are the primary home\'s', async () => {
+  test('a multi-property account is left out: saved facts, texts and history are keyed on the customer', async () => {
     await database('property_preferences').insert({ customer_id: customerId, pet_count: 3, garage_code: '1188' });
-    const rental = await visit({ service_address_line1: '77 Sample Rd', service_address_zip: '34201', service_address_city: 'Bradenton' });
-    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200' });
-    expect(await sweep()).toMatchObject({ considered: 2, asked: 1, skipped: 1 });
-    expect(await rows(rental)).toHaveLength(0);
+    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200', service_address_city: 'Bradenton' });
+    expect(await sweep()).toMatchObject({ considered: 1, asked: 1, skipped: 0 });
     expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
-    expect(await access.liveVisitAccess(rental, database)).toBeNull();
+    // A second premises appears three ways: a stamp, a property link with no stamp, the flag.
+    const rental = await visit({ service_address_line1: '77 Sample Rd', service_address_zip: '34201', service_address_city: 'Bradenton' });
+    expect(await build(rental)).toBeNull();
+    expect(await build(home)).toBeNull();
+    expect(await access.liveVisitAccess(home, database)).toBeNull();
+    await database('scheduled_services').where({ id: rental }).del();
+    const propertyId = randomUUID();
+    await database('customer_properties').insert({ id: propertyId, customer_id: customerId, address_line1: '9 Other Way', city: 'Sarasota', zip: '34230' });
+    const linked = await visit({ property_id: propertyId });
+    expect(await build(linked)).toBeNull();
+    await database('customer_properties').del();
+    await database('scheduled_services').where({ id: linked }).del();
+    expect(await build(home)).not.toBeNull();
+    await database('customers').where({ id: customerId }).update({ has_multi_home: true });
+    expect(await build(home)).toBeNull();
+    await database('customers').where({ id: customerId }).update({ has_multi_home: false });
+  });
+
+  test('long preference notes never push out the visit note or the sensitivity', async () => {
+    const long = 'Please be careful around the flower beds. '.repeat(40);
+    await database('property_preferences').insert({ customer_id: customerId, parking_notes: long, special_instructions: long, pet_details: long, pets_secured_plan: long,
+      chemical_sensitivities: true, chemical_sensitivity_details: 'Asthma in the home' });
+    const built = await build(await visit({ notes: 'Customer wants a knock first' }));
+    expect(built.state.notes_text).toContain('Visit note: Customer wants a knock first');
+    expect(built.state.notes_text).toContain('Chemical sensitivity: Asthma in the home');
+    expect(built.state.notes_text).toContain('Parking: Please be careful');
+  });
+
+  test('a re-answered visit restarts its review age', async () => {
+    const visitId = await visit();
+    await sweep();
+    await database('decision_reviews').where({ subject_id: visitId }).update({ created_at: new Date('2026-09-01T12:00:00Z') });
+    expect(await sweep()).toMatchObject({ unchanged: 1 });
+    expect(new Date((await rows(visitId))[0].created_at).toISOString()).toBe('2026-09-01T12:00:00.000Z');
+    await text('The baby naps at noon now', '2026-10-05T13:45:00Z');
+    await sweep();
+    for (const row of await rows(visitId)) expect(new Date(row.created_at).getTime()).toBeGreaterThan(new Date('2026-10-01T00:00:00Z').getTime());
   });
 
   test('only upcoming statuses are read, and an answered visit never uses up the pass', async () => {
