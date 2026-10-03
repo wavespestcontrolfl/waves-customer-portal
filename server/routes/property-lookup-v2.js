@@ -11,6 +11,7 @@
  *   ANTHROPIC_API_KEY
  */
 
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
@@ -198,10 +199,10 @@ function isTimeoutFailure(err, timeout) {
 // suites mock the lookup-cache module without this export, and a stamp must
 // never break (or mask) a lookup (codex r37 P1 — the unguarded call threw
 // 'markLookupAttempt is not a function' inside the error path).
-async function stampLookupAttempt(address, status, reason = null) {
+async function stampLookupAttempt(address, status, reason = null, attemptId) {
   if (typeof markLookupAttempt !== 'function') return;
   try {
-    await markLookupAttempt(address, status, reason);
+    await markLookupAttempt(address, status, reason, attemptId);
   } catch { /* fail-open */ }
 }
 
@@ -258,12 +259,16 @@ async function performPropertyLookup(address, options = {}) {
       return shared;
     }
   }
+  // One id per attempt, shared by every stamp this attempt writes and by the
+  // payload saveLookup stores, so a replay can tell whether the stored payload
+  // belongs to the attempt a row's status describes.
+  const attemptId = crypto.randomUUID();
   const run = (async () => {
     try {
-      return await performPropertyLookupCore(address, options);
+      return await performPropertyLookupCore(address, options, attemptId);
     } catch (err) {
       if (options.persist !== false) {
-        await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200));
+        await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200), attemptId);
       }
       throw err;
     }
@@ -323,7 +328,7 @@ function cachedUnitFolioStale(record, address, now = Date.now()) {
   return !Number.isFinite(checkedAt) || now - checkedAt >= UNIT_FOLIO_UNAVAILABLE_RETRY_MS;
 }
 
-async function performPropertyLookupCore(address, options = {}) {
+async function performPropertyLookupCore(address, options = {}, attemptId) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
   // replay/diagnostic callers (estimator-replay) — skips the cache-hit
@@ -499,7 +504,7 @@ async function performPropertyLookupCore(address, options = {}) {
       // A cache hit is an ATTEMPT — the lifecycle contract is "every
       // attempt stamps the row", and counting only live lookups
       // undercounts served traffic (codex r36 P1). Respects persist:false.
-      if (persist) await stampLookupAttempt(address, 'cache_hit');
+      if (persist) await stampLookupAttempt(address, 'cache_hit', null, attemptId);
       return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0, options);
     }
   }
@@ -514,7 +519,7 @@ async function performPropertyLookupCore(address, options = {}) {
   // Attempt stamp BEFORE geocoding (owner ruling 2026-08-11): a lookup that
   // dies before saveLookup must still leave a countable row. Fail-open
   // inside markLookupAttempt; skipped in write-nothing mode.
-  if (persist) await stampLookupAttempt(address, 'pending');
+  if (persist) await stampLookupAttempt(address, 'pending', null, attemptId);
 
   const result = {
     address: String(address).trim(),
@@ -999,7 +1004,7 @@ async function performPropertyLookupCore(address, options = {}) {
   result.meta.lookupMs = Date.now() - t0;
 
   // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
-  if (persist) await saveLookup(address, result);
+  if (persist) await saveLookup(address, result, attemptId);
 
   // Finalize the attempt stamp with WHY this lookup resolved or didn't —
   // "no parcel" used to bucket incomplete addresses, geocode failures, new
@@ -1054,7 +1059,7 @@ async function performPropertyLookupCore(address, options = {}) {
     } else {
       reason = result.errors.map((e) => e.source).join(',') || null;
     }
-    await stampLookupAttempt(address, status, reason);
+    await stampLookupAttempt(address, status, reason, attemptId);
   }
 
   return result;

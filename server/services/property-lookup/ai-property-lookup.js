@@ -1134,6 +1134,16 @@ function buildCadastralRecord(parcel, address) {
 // house-number match (an interpolated point can land on a neighbor, and a
 // wrong parcel at county weight is far worse than the address search).
 // Centroid/approximate results stay excluded.
+// The county retrieval budget, and the most a point query can get out of it
+// at the start of a lookup — shared with the replay harness so it waits
+// exactly as long as the live call would.
+function countyPropertyTimeoutMs() {
+  return positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+}
+function livePointQueryBudgetMs() {
+  return Math.min(parcelGisTimeoutMs(), countyPropertyTimeoutMs());
+}
+
 function parcelGisPrecision(geoContext) {
   if (!geoContext
       || geoContext.partialMatch
@@ -2223,6 +2233,100 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   return sawDisagreement;
 }
 
+// The guards applied to a point-in-parcel GIS hit before the parcel is allowed
+// to key the by-parcel county record. Pulled out of lookupPropertyFromAITrio
+// unchanged so the address-match replay harness
+// (scripts/property-lookup-replay.js) runs the SAME decisions the live lookup
+// does — a harness that copied them would stop measuring the code once a later
+// PR edits a guard. Pure apart from log lines and the optional diag.unitFolio
+// out-param; no network. Returns the surviving parcel (possibly a unit parcel
+// resolved out of an aggregate), the park marker when one survives, and
+// dropReason (null when the parcel was kept or there was none to judge).
+function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null }) {
+  let parcel = inputParcel;
+  let parkParcelSignal = null;
+  let dropReason = null;
+  if (parcel && isMobileHomeParkParcel(parcel)) {
+    // Land-lease mobile-home park master parcel: the polygon genuinely
+    // contains the rooftop, but every parcel-level dimension (and the
+    // commercial-band DOR 28 code) describes the PARK, not the home.
+    // Checked BEFORE the situs guards — a blank park situs fails the
+    // mismatch guard open, and a home at the park's own situs line would
+    // pass it outright; both must still drop the parcel. Only the marker
+    // survives, so the panel explains the missing dimensions instead of
+    // "not found on the roll". An interpolated point is a guess along the
+    // street — it proves the neighborhood, not the parcel (same rule as
+    // the interpolated positive-situs guard), so it drops the parcel
+    // WITHOUT keeping the marker: a false HIGH park flag on a non-park
+    // neighbor is worse than a plain miss.
+    if (gisPrecision !== 'interpolated') {
+      parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
+    }
+    logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts', {
+      markerKept: Boolean(parkParcelSignal),
+    });
+    parcel = null;
+    dropReason = 'mobile_home_park';
+  } else if (parcel && parcel.aggregated === true) {
+    const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
+    const unitMatch = verdict === 'drop' && condoUnitFolioEnabled()
+      ? aggregateUnitDesignatorMatch(parcel, searchAddress, address)
+      : null;
+    if (unitMatch) {
+      // A typed Apt/Unit in a stacked condo building: the unit's OWN roll
+      // row, when exactly one matches, replaces both the association sums
+      // and the address-search guess (unit-scope ruling #8). Anything
+      // short of a unique attested match degrades to the address search as
+      // before — never the building's figures for one unit — and the
+      // outcome rides diag so the route can flag an ambiguous match.
+      if (diag) diag.unitFolio = { status: unitMatch.status, candidates: unitMatch.candidates };
+      logger.info('[county-property] association aggregate unit designator match', {
+        status: unitMatch.status,
+        candidates: unitMatch.candidates ?? null,
+        associationUnits: parcel.residentialUnits ?? null,
+      });
+      parcel = unitMatch.status === 'resolved' ? unitParcelFromAggregateRow(parcel, unitMatch.row) : null;
+      if (!parcel) dropReason = `aggregate_unit_${unitMatch.status}`;
+    } else if (verdict === 'drop') {
+      logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
+      parcel = null;
+      dropReason = 'aggregate_situs_drop';
+    } else if (verdict === 'unit') {
+      // The typed number is ONE home in a stacked association (own street
+      // number, shared polygon): resolve its own unit row — by-parcel PAO
+      // detail, a residential cadastral record, no association land — and
+      // keep the association totals as context. A missing row (defensive)
+      // degrades to the address search rather than pricing the HOA.
+      const unitParcel = resolveAggregateUnitParcel(parcel, searchAddress, address);
+      logger.info('[county-property] association aggregate resolved to the typed house number\'s own unit parcel', {
+        resolved: Boolean(unitParcel),
+        associationUnits: parcel.residentialUnits ?? null,
+      });
+      parcel = unitParcel;
+      if (!parcel) dropReason = 'aggregate_unit_row_missing';
+    }
+  } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
+    // The rooftop point landed inside a parcel whose situs is a different
+    // building (multi-building complex master parcel). Drop the GIS match
+    // entirely — by-parcel detail, the cadastral record, and parcel meta
+    // would all describe the wrong building — and let the typed-address
+    // search below decide. No address values in the log (PII rule).
+    logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
+    parcel = null;
+    dropReason = 'situs_house_number_mismatch';
+  } else if (parcel && gisPrecision === 'interpolated'
+      && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
+    // An interpolated point is a guess along the street — keep the parcel
+    // only when its situs POSITIVELY confirms the typed house number. A
+    // blank/range situs (vacant developer lot, master parcel) proves
+    // nothing about which lot the guess landed on.
+    logger.warn('[county-property] interpolated-geocode GIS parcel lacks a confirming situs house number — degrading to address search');
+    parcel = null;
+    dropReason = 'interpolated_unconfirmed';
+  }
+  return { parcel, parkParcelSignal, dropReason };
+}
+
 // Optional `diag` out-param: when supplied, the trio records which AI legs
 // LOOK timed out — each leg consumes its own timeout internally and
 // resolves null, so a null that took (about) the leg's full configured
@@ -2234,7 +2338,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
   const searchAddress = canonicalLookupAddress(address, geoContext);
-  const countyTimeoutMs = positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const countyTimeoutMs = countyPropertyTimeoutMs();
   const t0 = Date.now();
   // Interactive estimating gives each county retrieval its own attempt.
   // A slow GIS request must not consume the address-search fallback window.
@@ -2281,78 +2385,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
           .catch(() => null));
       }
     }
-    if (parcel && isMobileHomeParkParcel(parcel)) {
-      // Land-lease mobile-home park master parcel: the polygon genuinely
-      // contains the rooftop, but every parcel-level dimension (and the
-      // commercial-band DOR 28 code) describes the PARK, not the home.
-      // Checked BEFORE the situs guards — a blank park situs fails the
-      // mismatch guard open, and a home at the park's own situs line would
-      // pass it outright; both must still drop the parcel. Only the marker
-      // survives, so the panel explains the missing dimensions instead of
-      // "not found on the roll". An interpolated point is a guess along the
-      // street — it proves the neighborhood, not the parcel (same rule as
-      // the interpolated positive-situs guard), so it drops the parcel
-      // WITHOUT keeping the marker: a false HIGH park flag on a non-park
-      // neighbor is worse than a plain miss.
-      if (gisPrecision !== 'interpolated') {
-        parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
-      }
-      logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts', {
-        markerKept: Boolean(parkParcelSignal),
-      });
-      parcel = null;
-    } else if (parcel && parcel.aggregated === true) {
-      const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
-      const unitMatch = verdict === 'drop' && condoUnitFolioEnabled()
-        ? aggregateUnitDesignatorMatch(parcel, searchAddress, address)
-        : null;
-      if (unitMatch) {
-        // A typed Apt/Unit in a stacked condo building: the unit's OWN roll
-        // row, when exactly one matches, replaces both the association sums
-        // and the address-search guess (unit-scope ruling #8). Anything
-        // short of a unique attested match degrades to the address search as
-        // before — never the building's figures for one unit — and the
-        // outcome rides diag so the route can flag an ambiguous match.
-        if (diag) diag.unitFolio = { status: unitMatch.status, candidates: unitMatch.candidates };
-        logger.info('[county-property] association aggregate unit designator match', {
-          status: unitMatch.status,
-          candidates: unitMatch.candidates ?? null,
-          associationUnits: parcel.residentialUnits ?? null,
-        });
-        parcel = unitMatch.status === 'resolved' ? unitParcelFromAggregateRow(parcel, unitMatch.row) : null;
-      } else if (verdict === 'drop') {
-        logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
-        parcel = null;
-      } else if (verdict === 'unit') {
-        // The typed number is ONE home in a stacked association (own street
-        // number, shared polygon): resolve its own unit row — by-parcel PAO
-        // detail, a residential cadastral record, no association land — and
-        // keep the association totals as context. A missing row (defensive)
-        // degrades to the address search rather than pricing the HOA.
-        const unitParcel = resolveAggregateUnitParcel(parcel, searchAddress, address);
-        logger.info('[county-property] association aggregate resolved to the typed house number\'s own unit parcel', {
-          resolved: Boolean(unitParcel),
-          associationUnits: parcel.residentialUnits ?? null,
-        });
-        parcel = unitParcel;
-      }
-    } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
-      // The rooftop point landed inside a parcel whose situs is a different
-      // building (multi-building complex master parcel). Drop the GIS match
-      // entirely — by-parcel detail, the cadastral record, and parcel meta
-      // would all describe the wrong building — and let the typed-address
-      // search below decide. No address values in the log (PII rule).
-      logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
-      parcel = null;
-    } else if (parcel && gisPrecision === 'interpolated'
-        && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
-      // An interpolated point is a guess along the street — keep the parcel
-      // only when its situs POSITIVELY confirms the typed house number. A
-      // blank/range situs (vacant developer lot, master parcel) proves
-      // nothing about which lot the guess landed on.
-      logger.warn('[county-property] interpolated-geocode GIS parcel lacks a confirming situs house number — degrading to address search');
-      parcel = null;
-    }
+    const guarded = applyGisParcelGuards(parcel, { searchAddress, address, gisPrecision, diag });
+    parcel = guarded.parcel;
+    parkParcelSignal = guarded.parkParcelSignal;
   }
 
   // County record: keyed by parcel ID when GIS matched, else (or on a
@@ -5682,6 +5717,8 @@ module.exports = {
   // areas) must treat an at-cap lot as unusable for geometry math.
   COUNTY_LOT_SQFT_MAX: LOT_SQFT_MAX,
   auditAddressHouseNumber,
+  // Exported for the read-only replay harness (scripts/property-lookup-replay.js).
+  normalizeCountyStreetLine,
   hasCountyEvidence,
   hasCountyPricingCore,
   hasUnconfirmedCountyEvidence,
@@ -5740,6 +5777,8 @@ module.exports = {
     parcelGisPrecision,
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
+    applyGisParcelGuards,
+    livePointQueryBudgetMs,
     addressHasSubpremise,
     FL_FLOOR_RE,
     normalizeCountyStreetLine,

@@ -129,7 +129,7 @@ jobs:
         working-directory: server
         env:
           LOOKUP_REFRESH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/property-lookup-refresh-claim-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/property-lookup-refresh-claim-postgres.test.js tests/property-lookup-attempt-provenance-postgres.test.js
       - name: Same-stop regroup sweep tests
         working-directory: server
         env:
