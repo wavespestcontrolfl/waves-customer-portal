@@ -5,9 +5,15 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { etDateString } = require('../utils/datetime-et');
+const { fetchPropertyForecast, etDayWindow } = require('../services/service-report/application-conditions');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// The dashboard weather tile is company-wide, not a property: the place it
+// reports on is named here and handed to the forecast module explicitly
+// (SW Florida, Fort Myers area).
+const DASHBOARD_WEATHER_LOCATION = Object.freeze({ latitude: 26.64, longitude: -81.87 });
 
 /* ── 1. GET /inbox — last 20 inbound SMS with customer context ──
  * Reads unified `messages` since PR 2. Channel filter keeps the dashboard
@@ -252,26 +258,27 @@ router.get('/weather', async (req, res, next) => {
       }
     } catch {}
 
-    // Strategy 2: Open-Meteo API (free, no key)
+    // Strategy 2: Open-Meteo via the shared property-forecast module. The
+    // dashboard tile is company-wide, so it names its place explicitly (SW
+    // Florida / Fort Myers area) rather than reading a property.
     try {
-      // SW Florida coordinates (Fort Myers area)
-      const lat = 26.64;
-      const lon = -81.87;
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,relative_humidity_2m_max,wind_speed_10m_max,precipitation_sum&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&start_date=${date}&end_date=${date}&timezone=America/New_York`;
-      const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) {
-        const data = await resp.json();
-        const d = data.daily;
-        if (d && d.time && d.time.length > 0) {
-          const temp = d.temperature_2m_max[0];
-          const humidity = d.relative_humidity_2m_max?.[0];
-          const wind = d.wind_speed_10m_max[0];
-          const rain = d.precipitation_sum[0];
-          if (rain > 0.5) alerts.push({ level: 'red', text: `Rain: ${rain}"` });
-          if (wind > 15) alerts.push({ level: 'amber', text: `Wind: ${wind} mph` });
-          if (temp > 95) alerts.push({ level: 'amber', text: `Heat: ${temp}°F` });
-          return res.json({ source: 'open-meteo', date, temp, humidity, windSpeed: wind, rainfall: rain, alerts });
-        }
+      const dayWindow = etDayWindow(date);
+      const forecast = dayWindow
+        ? await fetchPropertyForecast({ ...DASHBOARD_WEATHER_LOCATION, ...dayWindow, timeoutMs: 5000 })
+        : null;
+      if (forecast && forecast.status === 'ok' && forecast.hourly.length > 0) {
+        const maxOf = (key) => {
+          const values = forecast.hourly.map((h) => h[key]).filter((v) => v != null);
+          return values.length ? Math.max(...values) : null;
+        };
+        const temp = maxOf('temperature_f');
+        const humidity = maxOf('humidity_pct');
+        const wind = maxOf('wind_mph');
+        const rain = forecast.precipitationInTotal;
+        if (rain > 0.5) alerts.push({ level: 'red', text: `Rain: ${rain}"` });
+        if (wind > 15) alerts.push({ level: 'amber', text: `Wind: ${wind} mph` });
+        if (temp > 95) alerts.push({ level: 'amber', text: `Heat: ${temp}°F` });
+        return res.json({ source: 'open-meteo', date, temp, humidity: humidity ?? undefined, windSpeed: wind, rainfall: rain, alerts });
       }
     } catch {}
 

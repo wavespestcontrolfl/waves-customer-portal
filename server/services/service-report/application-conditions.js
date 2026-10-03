@@ -1,4 +1,5 @@
 const logger = require('../logger');
+const { parseETDateTime, etDateString, addETDays } = require('../../utils/datetime-et');
 
 function finiteNumber(value) {
   if (value == null || value === '') return null;
@@ -59,59 +60,330 @@ function normalizeFawnConditions(snapshot = {}, { capturedAt = new Date() } = {}
   return hasUsefulConditionValue(conditions) ? conditions : null;
 }
 
-async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
-  const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : 27.40;
-  const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : -82.40;
+// ── Property forecast (P29) ─────────────────────────────────────────────────────
+// ONE Open-Meteo forecast client + cache for "what is the weather at this
+// property". Callers pass the property's coordinates and a time window and get
+// hourly precipitation (INCHES — quantitative, never only a probability),
+// temperature and humidity back, with the source and the fetch time. Wind and
+// the provider's rain probability ride along for callers that already judge on
+// them (tech spray check, dispatch board). Every failure is a typed
+// `{ status: 'unavailable', reason }` result — the function never throws and
+// never outlives the caller's own `timeoutMs` (default 3.5 s), so a forecast
+// outage cannot break or block any caller.
+//
+// Cache: keyed on the property coordinates rounded to 3 decimals (~110 m)
+// plus the fetch shape. Open-Meteo's own cells are ~3 km (HRRR/NBM), so this is
+// finer than the provider's data: properties that share a model cell may share
+// a result only when they are within ~110 m of each other, and two properties a
+// block apart never read each other's rain. The coordinates sent to the
+// provider are the rounded ones, so a cached result is a pure function of its
+// key. TTL 10 min; entries hold only the normalized hourly rows (not the raw
+// payload) and the map is capped.
+//
+// MRMS radar rain is NOT part of this module: the observed-rain engine
+// (fetchServiceWeekWeather / mrms-qpe) keeps its own mode-scoped cache and
+// behavior untouched.
+
+// The point tech-tools, the dispatch board header and a property-less
+// fetchOpenMeteoConditions have always used (Lakewood Ranch service area).
+// Callers with no property pass it EXPLICITLY, so which place a tile reports on
+// is visible at the call site rather than defaulted inside the module.
+const SERVICE_AREA_DEFAULT_LOCATION = Object.freeze({ latitude: 27.40, longitude: -82.40 });
+
+const FORECAST_TIMEOUT_MS = 3500;
+const FORECAST_CACHE_TTL_MS = 10 * 60 * 1000;
+const FORECAST_CACHE_MAX = 300;
+const FORECAST_KEY_DECIMALS = 3;
+const FORECAST_MAX_WINDOW_MS = 16 * 24 * 60 * 60 * 1000; // Open-Meteo's own horizon
+const _forecastCache = new Map();
+
+function forecastUnavailable(reason, extra = {}) {
+  return {
+    status: 'unavailable',
+    reason,
+    source: 'open_meteo',
+    checkedAt: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+// One HTTP call with a hard deadline that also covers a body that never
+// finishes and a fetch that ignores its abort signal. Never throws.
+async function openMeteoJson(url, timeoutMs) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ ok: false, reason: 'timeout' });
+    }, timeoutMs);
+  });
+  const work = (async () => {
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) return { ok: false, reason: 'http_error' };
+      return { ok: true, payload: await response.json() };
+    } catch {
+      return { ok: false, reason: controller.signal.aborted ? 'timeout' : 'network_error' };
+    }
+  })();
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function toInstantMs(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') return parseETDateTime(value).getTime();
+  return NaN;
+}
+
+// The ET calendar day `ymd` as a { from, to } window (ET midnight to the next
+// ET midnight). null for anything that is not a YYYY-MM-DD date.
+function etDayWindow(ymd) {
+  const s = String(ymd || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const from = parseETDateTime(`${s}T00:00`);
+  const next = new Date(Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10) + 1)).toISOString().slice(0, 10);
+  const to = parseETDateTime(`${next}T00:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+  return { from, to };
+}
+
+function normalizeForecastPayload(payload) {
+  const h = payload?.hourly || {};
+  const times = Array.isArray(h.time) ? h.time : [];
+  const column = (name) => (Array.isArray(h[name]) ? h[name] : []);
+  const precip = column('precipitation');
+  const prob = column('precipitation_probability');
+  const temp = column('temperature_2m');
+  const rh = column('relative_humidity_2m');
+  const wind = column('wind_speed_10m');
+  const gust = column('wind_gusts_10m');
+  const hourly = [];
+  times.forEach((time, i) => {
+    const ms = parseETDateTime(String(time)).getTime();
+    if (!Number.isFinite(ms)) return;
+    hourly.push({
+      ms,
+      time: String(time),
+      precipitation_in: roundedNumber(precip[i], 3),
+      precipitation_probability_pct: roundedNumber(prob[i]),
+      temperature_f: roundedNumber(temp[i], 1),
+      humidity_pct: roundedNumber(rh[i]),
+      wind_mph: roundedNumber(wind[i], 1),
+      wind_gust_mph: roundedNumber(gust[i], 1),
+    });
+  });
+  const c = payload?.current;
+  let current = null;
+  if (c && typeof c === 'object') {
+    const ms = c.time ? parseETDateTime(String(c.time)).getTime() : NaN;
+    current = {
+      time: c.time ? String(c.time) : null,
+      at: Number.isFinite(ms) ? new Date(ms).toISOString() : null,
+      temperature_f: roundedNumber(c.temperature_2m, 1),
+      humidity_pct: roundedNumber(c.relative_humidity_2m),
+      wind_mph: roundedNumber(c.wind_speed_10m, 1),
+      wind_gust_mph: roundedNumber(c.wind_gusts_10m, 1),
+      precipitation_probability_pct: roundedNumber(c.precipitation_probability),
+      weather_code: finiteNumber(c.weather_code),
+    };
+    const anyValue = [current.temperature_f, current.humidity_pct, current.wind_mph, current.wind_gust_mph,
+      current.precipitation_probability_pct, current.weather_code].some((v) => v != null);
+    if (!anyValue) current = null;
+  }
+  if (!hourly.length && !current) return null;
+  return { hourly, current };
+}
+
+// The standard shape (yesterday through six days ahead) serves almost every
+// window, so callers share one cache entry per property; a window outside it
+// (a dated report row, a far-future day) is fetched by date range.
+function planForecastFetch(nowMs, fromMs, toMs) {
+  const nowDate = new Date(nowMs);
+  const stdFrom = parseETDateTime(`${etDateString(addETDays(nowDate, -1))}T00:00`).getTime();
+  const stdTo = parseETDateTime(`${etDateString(addETDays(nowDate, 7))}T00:00`).getTime();
+  const standard = fromMs >= stdFrom && toMs <= stdTo;
+  const startDate = etDateString(new Date(fromMs));
+  const endDate = etDateString(new Date(toMs - 1));
+  const coverage = standard
+    ? { from: stdFrom, to: stdTo }
+    : {
+      from: parseETDateTime(`${startDate}T00:00`).getTime(),
+      to: parseETDateTime(`${etDateString(addETDays(new Date(toMs - 1), 1))}T00:00`).getTime(),
+    };
+  return { standard, startDate, endDate, coverage };
+}
+
+function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
   const url = new URL('https://api.open-meteo.com/v1/forecast');
-  url.searchParams.set('latitude', String(lat));
-  url.searchParams.set('longitude', String(lon));
-  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation,weather_code');
-  url.searchParams.set('hourly', 'precipitation');
-  url.searchParams.set('past_days', '1');
-  url.searchParams.set('forecast_days', '1');
+  url.searchParams.set('latitude', String(keyLat));
+  url.searchParams.set('longitude', String(keyLon));
+  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code');
+  url.searchParams.set('hourly', 'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m');
+  if (standard) {
+    url.searchParams.set('past_days', '1');
+    url.searchParams.set('forecast_days', '7');
+  } else {
+    url.searchParams.set('start_date', startDate);
+    url.searchParams.set('end_date', endDate);
+  }
   url.searchParams.set('temperature_unit', 'fahrenheit');
   url.searchParams.set('wind_speed_unit', 'mph');
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
+  return url;
+}
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return null;
-    const payload = await response.json();
-    const current = payload.current || {};
-    const times = Array.isArray(payload.hourly?.time) ? payload.hourly.time : [];
-    const precip = Array.isArray(payload.hourly?.precipitation) ? payload.hourly.precipitation : [];
-    let currentIndex = times.length - 1;
-    if (current.time) {
-      const idx = times.lastIndexOf(current.time);
-      if (idx >= 0) currentIndex = idx;
-    }
-    const rainWindow = precip.slice(Math.max(0, currentIndex - 23), currentIndex + 1);
-    const rain24h = rainWindow.reduce((sum, value) => {
-      const n = Number(value);
-      return Number.isFinite(n) ? sum + n : sum;
-    }, 0);
-    const conditions = {
-      temp_f: roundedNumber(current.temperature_2m),
-      humidity_pct: roundedNumber(current.relative_humidity_2m),
-      wind_mph: roundedNumber(current.wind_speed_10m),
-      rain_24h_in: roundedNumber(rain24h, 2),
-      sky: weatherCodeLabel(current.weather_code),
-      source: 'Open-Meteo',
-      provider: 'open_meteo',
-      captured_at: new Date().toISOString(),
-      latitude: lat,
-      longitude: lon,
-    };
-    return hasUsefulConditionValue(conditions) ? conditions : null;
-  } catch (err) {
-    logger.warn(`[application-conditions] Open-Meteo fallback failed: ${err.message}`);
-    return null;
-  } finally {
-    clearTimeout(timeout);
+// 0,0 is only ever what a failed geocode looks like (see fetchServiceWeekWeather).
+function usablePropertyPoint(lat, lon) {
+  return lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
+}
+
+function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
+  const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
+  let total = 0;
+  let complete = rows.length > 0;
+  for (const r of rows) {
+    if (r.precipitation_in == null) complete = false;
+    else total += r.precipitation_in;
   }
+  return {
+    status: 'ok',
+    source: 'open_meteo',
+    fetchedAt: new Date(entry.fetchedAtMs).toISOString(),
+    cached,
+    latitude: keyLat,
+    longitude: keyLon,
+    window: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() },
+    current: entry.current,
+    hourly: rows.map(({ ms, ...rest }) => ({ ...rest, at: new Date(ms).toISOString() })),
+    precipitationInTotal: complete ? roundedNumber(total, 2) : null,
+  };
+}
+
+// Property forecast. Returns
+//   { status: 'ok', source: 'open_meteo', fetchedAt, cached, latitude, longitude,
+//     window: { from, to },                       // ISO instants, [from, to)
+//     current: { time, at, temperature_f, humidity_pct, wind_mph, wind_gust_mph,
+//                precipitation_probability_pct, weather_code } | null,
+//     hourly: [{ time, at, precipitation_in, precipitation_probability_pct,
+//                temperature_f, humidity_pct, wind_mph, wind_gust_mph }],
+//     precipitationInTotal }                      // inches over the window; null if any hour is missing
+//   { status: 'unavailable', reason, source: 'open_meteo', checkedAt }
+// `from`/`to` are Dates, epoch ms, or ISO strings (a zone-less string is ET);
+// the default window is the current hour through the next 24 h. `timeoutMs` is
+// the CALLER's deadline. `maxAgeMs` is how stale a cached result may be (0 =
+// always fetch, the result is still cached for others).
+async function fetchPropertyForecast({
+  latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS, maxAgeMs = FORECAST_CACHE_TTL_MS, now,
+} = {}) {
+  try {
+    const lat = toCoordinate(latitude);
+    const lon = toCoordinate(longitude);
+    if (!usablePropertyPoint(lat, lon)) {
+      return forecastUnavailable('no_coordinates');
+    }
+    const nowMs = now == null ? Date.now() : toInstantMs(now);
+    const fromMs = from == null ? Math.floor(nowMs / 3600000) * 3600000 : toInstantMs(from);
+    const toMs = to == null ? fromMs + 24 * 3600000 : toInstantMs(to);
+    if (!Number.isFinite(nowMs) || !Number.isFinite(fromMs) || !Number.isFinite(toMs)
+      || toMs <= fromMs || toMs - fromMs > FORECAST_MAX_WINDOW_MS) {
+      return forecastUnavailable('bad_window');
+    }
+
+    const { standard, startDate, endDate, coverage } = planForecastFetch(nowMs, fromMs, toMs);
+    const keyLat = Number(lat.toFixed(FORECAST_KEY_DECIMALS));
+    const keyLon = Number(lon.toFixed(FORECAST_KEY_DECIMALS));
+    const key = `${keyLat.toFixed(FORECAST_KEY_DECIMALS)},${keyLon.toFixed(FORECAST_KEY_DECIMALS)}|${standard ? 'std' : `${startDate}..${endDate}`}`;
+
+    const slice = (entry, cached) => sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon });
+
+    const hit = _forecastCache.get(key);
+    if (hit && maxAgeMs > 0 && nowMs - hit.fetchedAtMs < maxAgeMs && nowMs >= hit.fetchedAtMs
+      && hit.coverage.from <= fromMs && toMs <= hit.coverage.to) {
+      return slice(hit, true);
+    }
+
+    const url = propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate });
+
+    const res = await openMeteoJson(url, timeoutMs);
+    if (!res.ok) {
+      logger.warn(`[application-conditions] property forecast unavailable: ${res.reason}`);
+      return forecastUnavailable(res.reason);
+    }
+    const normalized = normalizeForecastPayload(res.payload);
+    if (!normalized) {
+      logger.warn('[application-conditions] property forecast unavailable: bad_payload');
+      return forecastUnavailable('bad_payload');
+    }
+    const entry = { ...normalized, fetchedAtMs: nowMs, coverage };
+    _forecastCache.delete(key);
+    _forecastCache.set(key, entry);
+    while (_forecastCache.size > FORECAST_CACHE_MAX) _forecastCache.delete(_forecastCache.keys().next().value);
+    return slice(entry, false);
+  } catch (err) {
+    logger.warn(`[application-conditions] property forecast failed: ${err.message}`);
+    return forecastUnavailable('error');
+  }
+}
+
+// Current conditions + trailing rain for the FDACS ledger and the service
+// report, built on the property forecast (same client, same cache). Always a
+// fresh fetch (maxAgeMs 0): these are "conditions at the visit". No coordinates
+// → the named service-area default, as before.
+//
+// Legacy rain window, preserved on purpose: the 24 hourly slots ending at the
+// hour matching current.time, and when current.time (a :15-grid instant) matches
+// no hourly slot, ending at the LAST slot of that ET day. In practice that makes
+// rain_24h_in "the whole ET day so far plus the rest of today's model" rather
+// than a true trailing 24 h; changing it would change report copy, so it is
+// left for an owner decision.
+async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
+  const lat = toCoordinate(latitude) ?? SERVICE_AREA_DEFAULT_LOCATION.latitude;
+  const lon = toCoordinate(longitude) ?? SERVICE_AREA_DEFAULT_LOCATION.longitude;
+  const nowDate = new Date();
+  const forecast = await fetchPropertyForecast({
+    latitude: lat,
+    longitude: lon,
+    from: parseETDateTime(`${etDateString(addETDays(nowDate, -1))}T00:00`),
+    to: parseETDateTime(`${etDateString(addETDays(nowDate, 1))}T00:00`),
+    maxAgeMs: 0,
+  });
+  if (forecast.status !== 'ok') return null;
+  const current = forecast.current || {};
+  const hourly = forecast.hourly;
+  let currentIndex = hourly.length - 1;
+  if (current.time) {
+    const exact = hourly.findIndex((r) => r.time === current.time);
+    if (exact >= 0) {
+      currentIndex = exact;
+    } else {
+      const day = current.time.slice(0, 10);
+      for (let i = hourly.length - 1; i >= 0; i -= 1) {
+        if (hourly[i].time.slice(0, 10) === day) { currentIndex = i; break; }
+      }
+    }
+  }
+  const rain24h = hourly.slice(Math.max(0, currentIndex - 23), currentIndex + 1)
+    .reduce((sum, r) => (r.precipitation_in == null ? sum : sum + r.precipitation_in), 0);
+  const conditions = {
+    temp_f: roundedNumber(current.temperature_f),
+    humidity_pct: roundedNumber(current.humidity_pct),
+    wind_mph: roundedNumber(current.wind_mph),
+    rain_24h_in: roundedNumber(rain24h, 2),
+    sky: weatherCodeLabel(current.weather_code),
+    source: 'Open-Meteo',
+    provider: 'open_meteo',
+    captured_at: forecast.fetchedAt,
+    latitude: lat,
+    longitude: lon,
+  };
+  return hasUsefulConditionValue(conditions) ? conditions : null;
 }
 
 // Open-Meteo only. A FAWN-first branch sat here, but FAWN's feed URL 400'd,
@@ -611,6 +883,9 @@ module.exports = {
   nextEtMidnight,
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
+  fetchPropertyForecast,
+  etDayWindow,
+  SERVICE_AREA_DEFAULT_LOCATION,
   fetchServiceWeekWeather,
   fetchRecentMinTempF,
   sumPrecipInches,
