@@ -782,6 +782,25 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
       .rejects.toBe(cancelled);
   });
+  test.each(['service_records', 'invoices'])('scoped cancellation in nested %s reads cannot become missing activity', async (failedTable) => {
+    const cancelled = Object.assign(new Error('nested read timed out'), { name: 'KnexTimeoutError' });
+    const scopedDatabase = jest.fn((table) => {
+      const api = {
+        where: () => api, whereNot: () => api, whereIn: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => {
+          if (table === failedTable) throw cancelled;
+          if (table === 'scheduled_services') return { n: '1' };
+          if (table === 'service_visits') return { id: 'v1', status: 'open' };
+          return null;
+        },
+        select: async () => table === 'scheduled_services' ? [{ id: 's1' }] : [],
+      };
+      return api;
+    });
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+    expect(scopedDatabase).not.toHaveBeenCalledWith('service_completion_attempts');
+  });
   test('terminal verdicts win without a membership query', async () => {
     mockDb.mockClear();
     expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });
