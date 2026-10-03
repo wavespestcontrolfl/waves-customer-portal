@@ -22,6 +22,7 @@ const TIER_LABEL = {
 };
 
 const REASON_LABELS = {
+  same_address_different_phone: "Same address, different phone",
   name_conflict: "Names differ",
   address_conflict: "Different addresses",
   address_unit_conflict: "Different units at the same address",
@@ -54,7 +55,30 @@ function displayName(customer) {
   return [customer?.first_name, customer?.last_name].filter(Boolean).join(" ").trim() || "Unknown";
 }
 
-function CustomerLine({ customer, isWinner }) {
+function fmtPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "").slice(-10);
+  if (digits.length !== 10) return value ? String(value) : "";
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+function visitsText(count) {
+  if (count == null) return null;
+  return count === 0 ? "no upcoming visits" : `${count} upcoming visit${count === 1 ? "" : "s"}`;
+}
+
+// What the merge did with the merged-away person's phone (same-address merges).
+function phoneCarryResult(carry, customer) {
+  const phone = fmtPhone(customer?.phone);
+  if (carry?.status === "carried") {
+    return { toast: `Merged — ${displayName(customer)}’s number${phone ? ` ${phone}` : ""} is saved as a contact on the kept customer, so their next call finds this account. It is not set to receive texts until they confirm.` };
+  }
+  if (carry?.status === "no_free_slot") {
+    return { error: `Merged, but the kept customer has no free contact slot — add ${phone || "that phone number"} to them manually so ${displayName(customer)}’s next call finds this account.` };
+  }
+  return { toast: "Merged" };
+}
+
+function CustomerLine({ customer, isWinner, showPhone = false }) {
   return (
     <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -68,6 +92,11 @@ function CustomerLine({ customer, isWinner }) {
         {customer.has_stripe && <Badge tone="neutral">Stripe</Badge>}
         {customer.has_portal_login && <Badge tone="neutral">Portal login</Badge>}
       </div>
+      {showPhone && (
+        <div className="u-nums break-words text-ui-body text-ink-secondary">
+          {[fmtPhone(customer.phone) || "No phone", visitsText(customer.upcoming_visits)].filter(Boolean).join(" · ")}
+        </div>
+      )}
       <div className="break-words text-ui-body text-ink-secondary">
         {[customer.address_line1, customer.city, customer.zip].filter(Boolean).join(", ") || "No address on file"}
       </div>
@@ -80,6 +109,9 @@ function CustomerLine({ customer, isWinner }) {
 
 export default function DuplicateCustomersPage() {
   const [groups, setGroups] = useState([]);
+  // Present only when GATE_DUPLICATES_SAME_ADDRESS is on (the API omits the key otherwise).
+  const [sameAddressGroups, setSameAddressGroups] = useState([]);
+  const [sameAddressError, setSameAddressError] = useState("");
   const [merges, setMerges] = useState([]);
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState("");
@@ -101,6 +133,8 @@ export default function DuplicateCustomersPage() {
       const journal = await api("/admin/customer-duplicates/merges").catch(() => null);
       if (seq !== loadSeq.current) return;
       setGroups(data.groups || []);
+      setSameAddressGroups(data.sameAddressGroups || []);
+      setSameAddressError(data.sameAddressError || "");
       if (journal) setMerges(journal.merges || []);
       else if (!background) setMerges([]);
       setReadError("");
@@ -137,7 +171,133 @@ export default function DuplicateCustomersPage() {
     }
   };
 
-  const pendingCount = groups.reduce((n, g) => n + g.candidates.length, 0);
+  const pendingCount = [...groups, ...sameAddressGroups].reduce((n, g) => n + g.candidates.length, 0);
+
+    const renderGroupCard = (group, sameAddress = false) => (
+      <Card key={sameAddress ? `same-address:${group.winner.id}` : group.winner.id}>
+        <CardBody>
+          {sameAddress ? (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-ui-caption font-medium text-ink-secondary">Same address</span>
+              <span className="break-words text-ui-body font-medium text-zinc-900">
+                {[group.winner.address_line1, group.winner.address_line2, group.winner.city, group.winner.zip].filter(Boolean).join(", ") || "Address on a saved property"}
+              </span>
+            </div>
+          ) : (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-ui-caption font-medium text-ink-secondary">Shared phone</span>
+              <span className="u-nums text-ui-body font-medium text-zinc-900">
+                ({group.phone10.slice(0, 3)}) {group.phone10.slice(3, 6)}-{group.phone10.slice(6)}
+              </span>
+            </div>
+          )}
+
+          <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
+            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} />
+          </div>
+
+          <div className="grid gap-2">
+            {group.candidates.map(({ customer, tier, reasons }) => {
+              const acting = actionKey.startsWith(`${customer.id}:`);
+              // Every positive address disagreement (street, unit, ZIP,
+              // city) is a potential second property worth preserving.
+              const addressConflict = reasons.some((r) => r.startsWith("address_"));
+              return (
+                <div
+                  key={customer.id}
+                  className="flex flex-wrap items-start justify-between gap-3 rounded-sm border-hairline border-zinc-200 px-3 py-2"
+                >
+                  {/* basis-full takes the whole row below md, so the action
+                      buttons WRAP underneath on phones instead of crushing
+                      this column to slivers; md:basis-auto restores the
+                      side-by-side row once there is width for both */}
+                  <div className="min-w-0 basis-full flex-1 md:basis-auto">
+                    <CustomerLine customer={customer} showPhone={sameAddress} />
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <Badge tone={TIER_TONE[tier] || "neutral"}>{TIER_LABEL[tier] || tier}</Badge>
+                      {reasons.map((reason) => (
+                        <span key={reason} className="text-ui-body text-ink-secondary">
+                          {reasonLabel(reason)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className={cn("flex shrink-0 flex-wrap items-center gap-2")}>
+                    {/* Address-conflict candidates must go through
+                        "Merge + keep address" — the server 409s a plain
+                        merge so the second service address isn't lost. */}
+                    {tier !== "red" && !addressConflict && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={acting}
+                        onClick={() => runAction({
+                          key: `${customer.id}:merge`,
+                          endpoint: "/admin/customer-duplicates/merge",
+                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}) },
+                          confirmText: sameAddress
+                            ? `Merge ${displayName(customer)} into ${displayName(group.winner)}? They are two customers at the same address with different phones. All history moves to the kept customer, and ${displayName(customer)}’s phone number is saved as a contact on them.`
+                            : `Merge ${displayName(customer)} into ${displayName(group.winner)}? All history moves to the kept customer.`,
+                          ...(sameAddress
+                            ? {
+                              onResult: (res) => {
+                                const carry = phoneCarryResult(res?.phoneCarry, customer);
+                                if (carry.error) setActionError(carry.error);
+                                else setToast(carry.toast);
+                              },
+                            }
+                            : { successText: "Merged" }),
+                        })}
+                      >
+                        Merge into kept
+                      </Button>
+                    )}
+                    {tier !== "red" && addressConflict && customer.address_line1 && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={acting}
+                        onClick={() => runAction({
+                          key: `${customer.id}:link`,
+                          endpoint: "/admin/customer-duplicates/link-as-property",
+                          body: { winnerId: group.winner.id, loserId: customer.id, ...(sameAddress ? { kind: "same_address" } : {}) },
+                          confirmText: `Merge ${displayName(customer)} into ${displayName(group.winner)} and keep ${customer.address_line1} as an additional property?`,
+                          // The merge can commit while the property write
+                          // fails — never claim the address was saved
+                          // unless the server says it was.
+                          onResult: (res) => {
+                            const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer) : null;
+                            if (!res?.propertyLinked) setActionError(`Merged, but the address could NOT be saved as a property — add it to the kept customer manually.${carry?.error ? ` ${carry.error}` : ""}`);
+                            else if (carry?.error) setActionError(carry.error);
+                            else setToast(carry && carry.toast !== "Merged" ? "Merged — address saved as a property, and the number saved as a contact (not set to receive texts until they confirm)" : "Merged — address saved as a property");
+                          },
+                        })}
+                      >
+                        Merge + keep address
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={acting}
+                      onClick={() => runAction({
+                        key: `${customer.id}:dismiss`,
+                        endpoint: "/admin/customer-duplicates/dismiss",
+                        body: { customerIdA: group.winner.id, customerIdB: customer.id },
+                        confirmText: `Mark ${displayName(customer)} and ${displayName(group.winner)} as NOT duplicates? This pair won't be flagged again.`,
+                        successText: "Dismissed",
+                      })}
+                    >
+                      Not a duplicate
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CardBody>
+      </Card>
+    );
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
@@ -170,111 +330,27 @@ export default function DuplicateCustomersPage() {
       )}
 
       <div className="grid gap-3">
-        {groups.map((group) => (
-          <Card key={group.winner.id}>
-            <CardBody>
-              <div className="mb-2 flex items-center gap-2">
-                <span className="text-ui-caption font-medium text-ink-secondary">Shared phone</span>
-                <span className="u-nums text-ui-body font-medium text-zinc-900">
-                  ({group.phone10.slice(0, 3)}) {group.phone10.slice(3, 6)}-{group.phone10.slice(6)}
-                </span>
-              </div>
-
-              <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-                <CustomerLine customer={group.winner} isWinner />
-              </div>
-
-              <div className="grid gap-2">
-                {group.candidates.map(({ customer, tier, reasons }) => {
-                  const acting = actionKey.startsWith(`${customer.id}:`);
-                  // Every positive address disagreement (street, unit, ZIP,
-                  // city) is a potential second property worth preserving.
-                  const addressConflict = reasons.some((r) => r.startsWith("address_"));
-                  return (
-                    <div
-                      key={customer.id}
-                      className="flex flex-wrap items-start justify-between gap-3 rounded-sm border-hairline border-zinc-200 px-3 py-2"
-                    >
-                      {/* basis-full takes the whole row below md, so the action
-                          buttons WRAP underneath on phones instead of crushing
-                          this column to slivers; md:basis-auto restores the
-                          side-by-side row once there is width for both */}
-                      <div className="min-w-0 basis-full flex-1 md:basis-auto">
-                        <CustomerLine customer={customer} />
-                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                          <Badge tone={TIER_TONE[tier] || "neutral"}>{TIER_LABEL[tier] || tier}</Badge>
-                          {reasons.map((reason) => (
-                            <span key={reason} className="text-ui-body text-ink-secondary">
-                              {reasonLabel(reason)}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                      <div className={cn("flex shrink-0 flex-wrap items-center gap-2")}>
-                        {/* Address-conflict candidates must go through
-                            "Merge + keep address" — the server 409s a plain
-                            merge so the second service address isn't lost. */}
-                        {tier !== "red" && !addressConflict && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={acting}
-                            onClick={() => runAction({
-                              key: `${customer.id}:merge`,
-                              endpoint: "/admin/customer-duplicates/merge",
-                              body: { winnerId: group.winner.id, loserId: customer.id },
-                              confirmText: `Merge ${displayName(customer)} into ${displayName(group.winner)}? All history moves to the kept customer.`,
-                              successText: "Merged",
-                            })}
-                          >
-                            Merge into kept
-                          </Button>
-                        )}
-                        {tier !== "red" && addressConflict && customer.address_line1 && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={acting}
-                            onClick={() => runAction({
-                              key: `${customer.id}:link`,
-                              endpoint: "/admin/customer-duplicates/link-as-property",
-                              body: { winnerId: group.winner.id, loserId: customer.id },
-                              confirmText: `Merge ${displayName(customer)} into ${displayName(group.winner)} and keep ${customer.address_line1} as an additional property?`,
-                              // The merge can commit while the property write
-                              // fails — never claim the address was saved
-                              // unless the server says it was.
-                              onResult: (res) => {
-                                if (res?.propertyLinked) setToast("Merged — address saved as a property");
-                                else setActionError("Merged, but the address could NOT be saved as a property — add it to the kept customer manually.");
-                              },
-                            })}
-                          >
-                            Merge + keep address
-                          </Button>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={acting}
-                          onClick={() => runAction({
-                            key: `${customer.id}:dismiss`,
-                            endpoint: "/admin/customer-duplicates/dismiss",
-                            body: { customerIdA: group.winner.id, customerIdB: customer.id },
-                            confirmText: `Mark ${displayName(customer)} and ${displayName(group.winner)} as NOT duplicates? This pair won't be flagged again.`,
-                            successText: "Dismissed",
-                          })}
-                        >
-                          Not a duplicate
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </CardBody>
-          </Card>
-        ))}
+        {groups.map((group) => renderGroupCard(group))}
       </div>
+
+      {(sameAddressGroups.length > 0 || sameAddressError) && (
+        <div className="mt-4">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-ui-caption font-medium text-ink-secondary">Same address, different phone</span>
+            <span className="text-ui-body text-ink-secondary">review only · never merged automatically</span>
+          </div>
+          <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
+            These customers live at the same address but have different phone numbers — often a
+            family member who called from their own phone. Merging keeps the highlighted row and
+            saves the other person’s phone as a contact on it, so their next call finds the account.
+            If they are separate households, choose Not a duplicate.
+          </div>
+          {sameAddressError && <ActionFeedback error className="mb-3">{sameAddressError}</ActionFeedback>}
+          <div className="grid gap-3">
+            {sameAddressGroups.map((group) => renderGroupCard(group, true))}
+          </div>
+        </div>
+      )}
 
       {merges.length > 0 && (
         <div className="mt-4">
