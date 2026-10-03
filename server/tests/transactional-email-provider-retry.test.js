@@ -811,3 +811,66 @@ describe('transactional email provider retry classification', () => {
     });
   });
 });
+
+// B15: a correction of the customer's email stops the provider-block retries
+// still addressed to the replaced address. The SQL itself is proven against
+// Postgres in transactional-email-provider-retry-postgres.test.js; these pin
+// what the stop writes and which rows it reaches.
+describe('stopRetriesForReplacedEmail', () => {
+  let chain;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    chain = {};
+    for (const method of ['where', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereNot', 'whereNull', 'whereNotNull', 'forUpdate', 'update']) {
+      chain[method] = jest.fn((arg) => { if (typeof arg === 'function') arg(chain); return chain; });
+    }
+    chain.select = jest.fn(async () => [message({ status: 'failed', send_attempt_token: 'attempt-1', provider_retry_next_at: new Date() })]);
+    chain.returning = jest.fn(async () => [message({ status: 'blocked' })]);
+    db.mockReturnValue(chain);
+  });
+
+  test('stops a scheduled retry to the replaced address without a provider request', async () => {
+    const stopped = await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: ' Old.Typo@Example.com ' });
+
+    expect(stopped).toBe(1);
+    expect(chain.whereRaw).toHaveBeenCalledWith('LOWER(recipient_email_snapshot) = ?', ['old.typo@example.com']);
+    expect(chain.forUpdate).toHaveBeenCalled();
+    // The write is a compare-and-set on the row it read: a claim that moved it wins.
+    expect(chain.where).toHaveBeenCalledWith({ id: 'message-1', send_attempt_token: 'attempt-1', status: 'failed' });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      error_message: 'Customer email was corrected; retry to the replaced address stopped.',
+      provider_retry_next_at: null,
+      provider_retry_exhausted_at: expect.any(Date),
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+  });
+
+  test('reaches only scheduled or claimed-but-unsent rows and never a visit summary', async () => {
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+
+    // A visit summary keeps its own re-authorization fence.
+    expect(chain.orWhereNot).toHaveBeenCalledWith('template_key', 'service.visit_summary');
+    // Claimed rows count only with positive pre-request evidence (pending phase).
+    expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining('provider_handoff_phase = ANY(?::text[])'), [['pending'], 'provider_handoff_pending', true]);
+    expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
+    expect(chain.whereNull).toHaveBeenCalledWith('provider_message_id');
+    expect(chain.whereNull).toHaveBeenCalledWith('sent_at');
+    // Ownership: the customer's own mail, or mail about the customer's leads and estimates.
+    expect(chain.where).toHaveBeenCalledWith('recipient_id', 'cust-1');
+    expect(chain.orWhereIn).toHaveBeenCalledWith('lead_id', expect.anything());
+    expect(chain.orWhereIn).toHaveBeenCalledWith('estimate_id', expect.anything());
+  });
+
+  test('a row another worker settled first is not counted', async () => {
+    chain.returning.mockResolvedValueOnce([]);
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' })).resolves.toBe(0);
+  });
+
+  test('does nothing without a customer or a replaced address', async () => {
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: null, oldEmail: 'old@example.com' })).resolves.toBe(0);
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: '  ' })).resolves.toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+});

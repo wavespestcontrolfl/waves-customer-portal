@@ -396,3 +396,37 @@ test('a failed terminal-reservation stamp does not put the email back on the sch
     error_message: `${reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}charge-date-passed`,
   }));
 });
+
+test('a billing replay stopped by a corrected customer email resolves its reservation like a refused retry', async () => {
+  const { stopRetriesForReplacedEmail } = require('../services/transactional-email-provider-retry');
+  const row = storedMessage({ status: 'failed', provider_retry_next_at: new Date(), provider_handoff_phase: 'rejected' });
+  const stopped = storedMessage({ status: 'blocked' });
+  query.select = jest.fn(async () => [row]);
+  query.returning = jest.fn(async () => [stopped]);
+
+  await expect(stopRetriesForReplacedEmail(heldDatabase, { customerId: 'customer-1', oldEmail: 'customer@example.com' }))
+    .resolves.toBe(1);
+
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'blocked', provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
+    error_message: `${reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Customer email was corrected; retry to the replaced address stopped.`,
+  }));
+  // Reconciled on the caller's transaction, so it commits with the correction.
+  expect(reservation.resolveBillingEmailReservationRefusal).toHaveBeenCalledWith(stopped, heldDatabase);
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
+test('a billing notice without the replay contract stops without touching a reservation', async () => {
+  const { stopRetriesForReplacedEmail } = require('../services/transactional-email-provider-retry');
+  const row = storedMessage({ status: 'failed', provider_retry_next_at: new Date(), payload_snapshot: JSON.stringify({}) });
+  query.select = jest.fn(async () => [row]);
+  query.returning = jest.fn(async () => [storedMessage({ status: 'blocked' })]);
+
+  await expect(stopRetriesForReplacedEmail(heldDatabase, { customerId: 'customer-1', oldEmail: 'customer@example.com' }))
+    .resolves.toBe(1);
+
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'blocked', error_message: 'Customer email was corrected; retry to the replaced address stopped.',
+  }));
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});

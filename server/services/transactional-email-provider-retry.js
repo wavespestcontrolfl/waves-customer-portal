@@ -416,6 +416,62 @@ async function stopRetry(message, {
   return { sent: false, stopped: true, reason };
 }
 
+const EMAIL_REPLACED_REASON = 'Customer email was corrected; retry to the replaced address stopped.';
+
+// A correction of the customer's email retires the provider-block retries
+// still addressed to the address it replaced (customer-email-fanout calls this
+// inside its own transaction): the stored copy would otherwise go on to the
+// rejected address, which can be a third party's inbox. The retry is stopped,
+// never retargeted: the senders that own these emails re-issue them to the
+// corrected address themselves. Stops a row that is scheduled, or claimed but
+// provably unsent (pending phase): the claiming worker loses its
+// pending-to-started marker CAS and makes no request, the same path a lost
+// claim already takes. A row whose provider request began (started phase)
+// belongs to its worker and is left to settle, and a visit summary keeps its
+// own re-authorization fence (summaryRetryAuthorized refuses a recipient that
+// is no longer current). The row settles like any refused retry: a billing
+// replay resolves its reservation on `database`; an error propagates so the
+// caller's transaction rolls back with it.
+async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now = new Date() }) {
+  const replaced = String(oldEmail || '').trim().toLowerCase();
+  if (!customerId || !replaced) return 0;
+  const rows = await database('email_messages')
+    .whereRaw('LOWER(recipient_email_snapshot) = ?', [replaced])
+    .where((owner) => owner
+      .where('recipient_id', String(customerId))
+      .orWhereIn('lead_id', database('leads').where({ customer_id: customerId }).select('id'))
+      .orWhereIn('estimate_id', database('estimates').where({ customer_id: customerId }).select('id')))
+    .where((template) => template.whereNull('template_key').orWhereNot('template_key', 'service.visit_summary'))
+    .where((pending) => pending
+      .where((scheduled) => scheduled.where({ status: 'failed' }).whereNotNull('provider_retry_next_at'))
+      .orWhere((claimed) => retryEvidence(
+        claimed.where({ status: 'queued' }).where('provider_retry_count', '>', 0)
+          .whereNull('provider_message_id').whereNull('sent_at'),
+        [HANDOFF_PHASE_PENDING],
+      )))
+    .forUpdate()
+    .select('*');
+  let stopped = 0;
+  for (const row of rows) {
+    const billing = billingReplay.isBillingEmailProviderReplay(row);
+    const [updated] = await database('email_messages')
+      .where({ id: row.id, send_attempt_token: row.send_attempt_token, status: row.status })
+      .update({
+        status: 'blocked',
+        error_message: billing
+          ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
+        provider_retry_next_at: null,
+        provider_retry_exhausted_at: now,
+        updated_at: now,
+      })
+      .returning('*');
+    if (!updated) continue;
+    stopped += 1;
+    if (billing) await billingReservation.resolveBillingEmailReservationRefusal(updated, database);
+  }
+  return stopped;
+}
+
 // The visit-summary handoff around one provider request. Resolves to the
 // provider result, or to the rail's terminal/uncertain outcome when nothing
 // (or something unknowable) reached the provider.
@@ -838,6 +894,7 @@ module.exports = {
   claimDueRetries,
   markRetryFailure,
   markRetryHeld,
+  stopRetriesForReplacedEmail,
   retryClaimAtProviderBoundary,
   retryOne,
   runDueRetries,
