@@ -98,7 +98,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, thank you for choosing Waves Lawn and Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
     expect(verify(good('Hi Dana, thank you for choosing Waves Lawn for your home. Marcus got the ants.'))).toBe('legacy_brand');
     expect(verify(good('Hi Dana, thank you for choosing Waves Pest Control for your home. Marcus got the ants.'))).toBe(null);
-    expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
+    expect(verify(good('Hi Dana, it means the world that Marcus got the ants out of your kitchen.'))).toBe('stock_phrase');
   });
   test('never a link, email, phone, money, or street address', () => {
     expect(verify(good('Hi Dana, see wavespestcontrol.com/ants for more on what Marcus did.'))).toBe('url');
@@ -581,10 +581,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     // The old fixed "pest and lawn team" line can never post again (2026-09-24
     // fix): it is now a banned stock phrase, not a passing no_text reply.
     expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBe('stock_phrase');
-    // Owner 2026-10-03: "kind" is fine. A 5-star review parked after two
-    // drafts failed on that one word; "kind words" stays a stock phrase.
+    // Owner 2026-10-03: "kind" and "kind words" are fine. A 5-star review
+    // parked after two drafts failed on that one word.
     expect(verify(good('Hello there, that is kind of you. Thanks for the rating.'), g)).toBeNull();
-    expect(verify(good('Hello there, thanks for the kind words and the rating.'), g)).toBe('stock_phrase');
+    expect(verify(good('Hello there, thanks for the kind words and the rating.'), g)).toBeNull();
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
@@ -1065,9 +1065,9 @@ describe('draftReviewReply — fallback ladder', () => {
     expect(prompts.some((p) => p.includes('give Jane and Marcus five stars'))).toBe(true);
     // A fixed-vocabulary span is stored as-is.
     mockDispatch.mockReset();
-    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana,\n\nGlad Marcus got the ants. Thanks for the kind words.') });
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana,\n\nGlad Marcus got the ants. That made our day.') });
     const r5 = await Drafter.draftReviewReply({ grounding: grounding({ rating: 3 }), recentReplies: [] });
-    expect(r5.rejectionDetails[0]).toEqual({ attempt: 1, code: 'stock_phrase', span: 'kind words' });
+    expect(r5.rejectionDetails[0]).toEqual({ attempt: 1, code: 'stock_phrase', span: 'made our day' });
   });
   test('the first prompt names the reviewer phrases the reply may not echo, and the relationship rule', () => {
     const g = grounding({ text: 'If you want to be bug free call Marcus, absolutely the best pest control around.', account: null });

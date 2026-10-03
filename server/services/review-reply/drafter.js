@@ -76,7 +76,7 @@ const MODE_RULES = {
   },
 };
 
-const STOCK_PHRASE_RE = /\b(kind words|means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive|pest and lawn team|down here|here in the neighborhood)\b/i;
+const STOCK_PHRASE_RE = /\b(means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive|pest and lawn team|down here|here in the neighborhood)\b/i;
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/u;
 const URL_RE = /(?:https?:\/\/|www\.)|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s]+|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me)\b/i;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]+/;
@@ -1138,7 +1138,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - Never state an address, date, dollar amount, phone number, email, or link.
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
-- No emoji in the body. No em dashes. No stock phrases: "kind words", "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
+- No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
