@@ -15,6 +15,10 @@
  *  - `copy` is ADVICE, never an observation of this visit. "If you have
  *    bromeliads…" is fine; "I noticed your bromeliads…" is a finding and
  *    belongs in the tech's notes. The visit-claim lint rejects it.
+ *  - `watchKeys` (optional, tree & shrub tips only) names the seasonal watch
+ *    list items (config/tree-shrub-watch-list.js) the tip is advice for. The
+ *    Fast Complete sheet floats a tip to the top when the tech marks one of
+ *    them Seen; it never selects a tip. Every key must exist in that list.
  *  - Ids are stable forever — frozen structured_notes reference them and the
  *    picker's "already sent" mark matches on id. Never rename; retire by
  *    removing the entry (frozen reports keep their copy).
@@ -295,18 +299,88 @@ const TIPS = Object.freeze([
   // ── Trees and shrubs ──────────────────────────────────────────────────
   {
     id: 'ts_ants_on_trunk', group: 'tree_shrub', label: 'Ants on the trunk = scale or aphids',
-    keywords: ['ants', 'trunk', 'scale', 'aphids', 'sooty mold', 'honeydew'], lines: ['tree_shrub', 'pest'], season: 'all',
+    keywords: ['ants', 'trunk', 'scale', 'aphids', 'sooty mold', 'honeydew'], lines: ['tree_shrub', 'pest'], season: 'all', watchKeys: ['scale', 'sooty_mold', 'aphids'],
     copy: "Ants running up and down a trunk are usually farming scale or aphids for their honeydew, and the black sooty mold on the leaves is growing on that honeydew. If you see the ant traffic, let me know — it tells me exactly where the scale is.",
   },
   {
     id: 'ts_deep_water', group: 'tree_shrub', label: 'Deep and infrequent, not daily',
-    keywords: ['shrubs', 'water', 'root rot', 'wilting', 'yellow'], lines: ['tree_shrub'], season: 'all',
+    keywords: ['shrubs', 'water', 'root rot', 'wilting', 'yellow'], lines: ['tree_shrub'], season: 'all', watchKeys: ['root_rot'],
     copy: "Root rot from overwatering looks like drought — wilting and yellowing — and the reflex is to water more. Established shrubs want deep, infrequent watering; let the top inch of soil dry between runs.",
   },
   {
     id: 'ts_mulch_trunk', group: 'tree_shrub', label: 'Keep mulch off the trunk',
     keywords: ['mulch', 'trunk', 'volcano', 'borers', 'bark'], lines: ['tree_shrub'], season: 'all',
     copy: "Mulch piled against the trunk keeps the bark wet and invites borers and rot at the collar. Pull it back into a ring a few inches from the trunk — a donut, not a volcano.",
+  },
+  {
+    id: 'ts_black_film', group: 'tree_shrub', label: 'Black film on leaves comes from insects',
+    keywords: ['sooty mold', 'black', 'sticky', 'scale'], lines: ['tree_shrub'], season: 'all', watchKeys: ['scale', 'sooty_mold'],
+    copy: "That black film on leaves usually grows on the sticky honeydew insects leave behind, and it fades once the insects are under control.",
+  },
+  {
+    id: 'ts_leaf_undersides', group: 'tree_shrub', label: 'Check leaf undersides',
+    keywords: ['whitefly', 'underside', 'sticky'], lines: ['tree_shrub'], season: 'all', watchKeys: ['whitefly', 'scale'],
+    copy: "Whitefly and scale live on the underside of leaves, so that's the best place to look between visits.",
+  },
+  {
+    id: 'ts_dusty_leaves_dry', group: 'tree_shrub', label: 'Dusty leaves in dry weeks',
+    keywords: ['mites', 'dusty', 'dry', 'rinse'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['spider_mites'],
+    copy: "Rinsing dusty shrubs with plain water during dry spells helps keep mites from building up.",
+  },
+  {
+    id: 'ts_chewed_new_leaves', group: 'tree_shrub', label: 'Chewed new leaves',
+    keywords: ['chewed', 'caterpillar', 'holes'], lines: ['tree_shrub'], season: 'all', watchKeys: ['caterpillars'],
+    copy: "Fresh chewing on new growth is often caterpillars; a quick look at dusk can spot them.",
+  },
+  {
+    id: 'ts_yellow_new_leaves', group: 'tree_shrub', label: 'Yellow new leaves with green veins',
+    keywords: ['yellow', 'chlorosis', 'iron', 'veins'], lines: ['tree_shrub'], season: 'all', watchKeys: ['chlorosis'],
+    copy: "Yellow new leaves with green veins usually mean the plant can't pull iron or manganese from the soil, which takes a few weeks to green up after treatment.",
+  },
+  {
+    id: 'ts_palm_dont_trim_yellow', group: 'tree_shrub', label: "Don't trim yellow palm fronds",
+    keywords: ['palm', 'yellow fronds', 'trim', 'prune'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    copy: "Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.",
+  },
+  {
+    id: 'ts_palm_nine_and_three', group: 'tree_shrub', label: "Never prune above 9 and 3 o'clock",
+    keywords: ['palm', 'prune', 'hurricane cut'], lines: ['tree_shrub'], season: 'all',
+    copy: "When fronds are trimmed, keep everything above the 9-to-3 o'clock line on the palm.",
+  },
+  {
+    id: 'ts_palm_fertilizer_canopy', group: 'tree_shrub', label: 'Keep fertilizer off the trunk',
+    keywords: ['palm', 'fertilizer', 'trunk'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    copy: "Palm fertilizer works spread under the whole canopy, not piled against the trunk.",
+  },
+  {
+    id: 'ts_water_early_morning', group: 'tree_shrub', label: 'Water beds in the early morning',
+    keywords: ['water', 'morning', 'leaf spot'], lines: ['tree_shrub'], season: 'wet', watchKeys: ['leaf_spot'],
+    copy: "Watering beds early in the morning lets leaves dry fast, which keeps leaf spot down.",
+  },
+  {
+    id: 'ts_soggy_beds_root_rot', group: 'tree_shrub', label: 'Wet beds invite root rot',
+    keywords: ['soggy', 'wet', 'root rot', 'sprinkler'], lines: ['tree_shrub'], season: 'wet', watchKeys: ['root_rot'],
+    copy: "Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.",
+  },
+  {
+    id: 'ts_new_plantings_water', group: 'tree_shrub', label: 'New plantings need extra water the first summer',
+    keywords: ['new plants', 'heat', 'wilt'], lines: ['tree_shrub'], season: 'all', watchKeys: ['heat_stress', 'heat_drought_decline'],
+    copy: "Shrubs planted in the last year need more water than established ones through their first summer.",
+  },
+  {
+    id: 'ts_wait_prune_cold', group: 'tree_shrub', label: 'Wait to prune cold damage',
+    keywords: ['cold', 'freeze', 'brown', 'prune'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['cold_freeze_damage'],
+    copy: "After a cold snap, wait until spring growth starts before cutting back damaged branches.",
+  },
+  {
+    id: 'ts_fresh_mulch_weeds', group: 'tree_shrub', label: 'Weeds in fresh mulch',
+    keywords: ['weeds', 'mulch', 'beds'], lines: ['tree_shrub'], season: 'all', watchKeys: ['bed_weeds'],
+    copy: "A thin layer of fresh mulch helps the pre-emergent hold weeds back between treatments.",
+  },
+  {
+    id: 'ts_blooms_gentler', group: 'tree_shrub', label: 'Blooming shrubs get gentler treatment',
+    keywords: ['bees', 'blooms', 'flowers'], lines: ['tree_shrub'], season: 'all',
+    copy: "We time insect treatments around blooms to protect bees, so flowering shrubs may get a lighter touch that visit.",
   },
 
   // ── Pets and fleas ────────────────────────────────────────────────────

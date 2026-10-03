@@ -22,6 +22,7 @@ const {
   sentenceCount,
 } = require('../services/service-report/tip-library');
 const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+const { ITEMS: WATCH_ITEMS } = require('../config/tree-shrub-watch-list');
 
 // A canned tip must not read as an observation of this house — that is what
 // the tech's [Found] note lines are for.
@@ -90,6 +91,83 @@ describe('tip-library registry', () => {
       expect(tip.link.path).toMatch(/^\/portal(?:\?|$)/);
       expect(tip.link.label.trim().length).toBeGreaterThan(0);
     }
+  });
+});
+
+// The owner-approved T&S seed (2026-10-03): every draft label is either its
+// own entry or maps to an older id whose copy the owner has not changed.
+const TS_SEED_LABELS = {
+  'Black film on leaves comes from insects': 'ts_black_film',
+  'Check leaf undersides': 'ts_leaf_undersides',
+  'Dusty leaves in dry weeks': 'ts_dusty_leaves_dry',
+  'Chewed new leaves': 'ts_chewed_new_leaves',
+  'Yellow new leaves with green veins': 'ts_yellow_new_leaves',
+  "Don't trim yellow palm fronds": 'ts_palm_dont_trim_yellow',
+  "Never prune above 9 and 3 o'clock": 'ts_palm_nine_and_three',
+  'Keep fertilizer off the trunk': 'ts_palm_fertilizer_canopy',
+  // Same advice as the older tip: the existing id and copy stay (frozen reports).
+  'Pull mulch back from trunks': 'ts_mulch_trunk',
+  'Water beds in the early morning': 'ts_water_early_morning',
+  'Wet beds invite root rot': 'ts_soggy_beds_root_rot',
+  'New plantings need extra water the first summer': 'ts_new_plantings_water',
+  'Wait to prune cold damage': 'ts_wait_prune_cold',
+  'Weeds in fresh mulch': 'ts_fresh_mulch_weeds',
+  'Blooming shrubs get gentler treatment': 'ts_blooms_gentler',
+};
+
+describe('tree & shrub seed (owner-approved 2026-10-03)', () => {
+  test('each of the 15 approved labels is present, or mapped to its older id', () => {
+    expect(Object.keys(TS_SEED_LABELS)).toHaveLength(15);
+    for (const [label, id] of Object.entries(TS_SEED_LABELS)) {
+      const tip = TIPS.find((t) => t.id === id);
+      expect(tip).toBeDefined();
+      expect(tip.group).toBe('tree_shrub');
+      expect(tip.lines).toContain('tree_shrub');
+      if (id !== 'ts_mulch_trunk') {
+        expect(tip.label).toBe(label);
+        expect(id.startsWith('ts_')).toBe(true);
+      }
+    }
+  });
+
+  test('the older ts_ ids and their copy are untouched', () => {
+    expect(TIPS.find((t) => t.id === 'ts_mulch_trunk').copy).toMatch(/^Mulch piled against the trunk keeps the bark wet/);
+    expect(TIPS.find((t) => t.id === 'ts_deep_water').copy).toMatch(/^Root rot from overwatering looks like drought/);
+    expect(TIPS.find((t) => t.id === 'ts_ants_on_trunk').copy).toMatch(/^Ants running up and down a trunk/);
+  });
+
+  test('every watchKey is a real key on the seasonal watch list', () => {
+    const withKeys = TIPS.filter((t) => t.watchKeys);
+    expect(withKeys.length).toBeGreaterThan(10);
+    for (const tip of withKeys) {
+      expect(tip.lines).toContain('tree_shrub');
+      expect(tip.watchKeys.length).toBeGreaterThan(0);
+      expect(new Set(tip.watchKeys).size).toBe(tip.watchKeys.length);
+      for (const key of tip.watchKeys) expect(Object.hasOwn(WATCH_ITEMS, key)).toBe(true);
+    }
+  });
+
+  test('the tree & shrub picker payload carries watchKeys, and general tips carry none', () => {
+    const served = tipsForVisit({ serviceLine: 'tree_shrub', date: '2026-08-15' }).groups.flatMap((g) => g.tips);
+    const byId = Object.fromEntries(served.map((t) => [t.id, t]));
+    expect(byId.ts_black_film.watchKeys).toEqual(['scale', 'sooty_mold']);
+    expect(byId.ts_palm_dont_trim_yellow.watchKeys).toContain('palm_potassium_deficiency');
+    expect(byId.ts_mulch_trunk.watchKeys).toBeUndefined();
+    expect(byId.ts_blooms_gentler.watchKeys).toBeUndefined();
+    expect(Object.isFrozen(byId.ts_black_film.watchKeys)).toBe(true);
+  });
+
+  test('the new tips do not change which lines they lead for', () => {
+    const ts = TIPS.filter((t) => t.id.startsWith('ts_') && t.id !== 'ts_ants_on_trunk');
+    for (const tip of ts) expect(tip.lines).toEqual(['tree_shrub']);
+  });
+
+  test('wet and dry seasons lead with their own seasonal tips inside the group', () => {
+    const ids = (date) => tipsForVisit({ serviceLine: 'tree_shrub', date }).groups.find((g) => g.id === 'tree_shrub').tips.map((t) => t.id);
+    const wet = ids('2026-08-15');
+    const dry = ids('2027-02-15');
+    expect(wet.indexOf('ts_water_early_morning')).toBeLessThan(wet.indexOf('ts_dusty_leaves_dry'));
+    expect(dry.indexOf('ts_dusty_leaves_dry')).toBeLessThan(dry.indexOf('ts_water_early_morning'));
   });
 });
 

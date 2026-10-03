@@ -145,16 +145,22 @@ async function assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId, pac
 //   replay/reuse re-check so ordering holds for adoption too.
 async function acquireScheduledMintLockChain(trx, {
   scheduledServiceId, customerId = null, assertEligibleInTrx = null, visitColumns = ['id'],
+  // 'share' (a membership-dues mint): FOR SHARE instead of FOR KEY SHARE on the
+  // customer row, taken at the SAME point of the order (customer before visit),
+  // so a concurrent UPDATE of the billing terms (monthly_rate / billing_mode /
+  // waveguard_tier) cannot commit between the mint's read of them and its insert.
+  customerLock = 'key_share',
 }) {
   await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+  const lockClause = customerLock === 'share' ? 'FOR SHARE' : 'FOR KEY SHARE';
   if (customerId != null) {
     await trx.raw(
-      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE',
+      `SELECT id FROM customers WHERE id = ? ${lockClause}`,
       [customerId],
     );
   } else {
     await trx.raw(
-      'SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) FOR KEY SHARE',
+      `SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) ${lockClause}`,
       [scheduledServiceId],
     );
   }
@@ -276,6 +282,11 @@ async function mintScheduledServiceInvoiceWithDeposit({
   // the visit row first waits for this mint, so a throw here is the only
   // race left. A throw carrying a status is terminal for the deposit retry.
   recheckInTrx = null,
+  // { month: 'YYYY-MM', amount } when the mint IS a member's monthly dues for an
+  // unpriced plan visit (Charge now's pre-mint): the lines go through the same
+  // stamp + coverage check the completion mint uses, so the invoice is visible
+  // to the month's dedupe (and refused if the month is already covered).
+  membershipDues = null,
 }) {
   const InvoiceService = require('../services/invoice');
   const {
@@ -296,6 +307,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
+          customerLock: membershipDues ? 'share' : 'key_share',
           visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price', 'scheduled_date'],
         });
         if (!lockedSvc) {
@@ -330,6 +342,25 @@ async function mintScheduledServiceInvoiceWithDeposit({
           && (priceMovedBetween(svc, lockedSvc, 'estimated_price')
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
+        }
+        // Dues stamp + coverage under the dues-month lock — BEFORE the
+        // estimate ledger lock below, the order createFromService's dues mint
+        // also takes them in (dues-month, then estimate ledger), so the two
+        // mint paths can never lock them in opposite orders.
+        let createParams = buildCreateParams();
+        if (membershipDues) {
+          const stamped = await InvoiceService.stampMembershipDuesUnderLock(trx, {
+            customerId: svc.customer_id,
+            scheduledServiceId: svc.id,
+            month: membershipDues.month,
+            lineItems: createParams.lineItems,
+            derivedAmount: membershipDues.amount,
+          });
+          createParams = {
+            ...createParams,
+            lineItems: stamped,
+            ...(stamped.some((li) => li && li.membership_dues_month) ? { trustedMembershipDues: true } : {}),
+          };
         }
         // Codex round-6 P1: the estimate-scoped ledger lock used to be taken
         // AFTER recheckInTrx. siblingCoverageRecheckInTrx's own lookup
@@ -375,7 +406,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
         const created = await InvoiceService.create({
-          ...buildCreateParams(),
+          ...createParams,
           database: trx,
           ...(depositCredit && Number(depositCredit.amount) > 0
             ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
