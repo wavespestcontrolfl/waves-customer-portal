@@ -4289,7 +4289,17 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
-bearer. OAuth callbacks validate a one-time `state` nonce, never bearer (see
+bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
+`/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
+type `staff_mfa_challenge`, never an access token) instead of a session, and
+the public `POST /login/mfa` (same `authLimiter` by prefix, plus a 5-wrong-code
+per-account lockout) takes that challenge plus an authenticator or recovery
+code and is the only path that mints an access token carrying `mfa: true`;
+`/reset-password` on an enrolled account returns `{ passwordReset,
+signInRequired }` with no session. The native WavesPay `/login` caller does
+not handle the challenge yet (an enrolled account signs in there only through
+the tech-portal handoff). The `/mfa*` self-service routes require the staff
+bearer and 404 while the gate is off. OAuth callbacks validate a one-time `state` nonce, never bearer (see
 the AGENTS.md admin OAuth rule).
 `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
 (static universal-link association JSON for the native app shell — no auth,

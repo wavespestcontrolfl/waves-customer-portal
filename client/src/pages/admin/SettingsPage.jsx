@@ -14,6 +14,7 @@ import {
   Save,
   Server,
   Settings as SettingsIcon,
+  ShieldCheck,
   Target,
   ToggleLeft,
   X,
@@ -330,6 +331,12 @@ export default function SettingsPage() {
               <Link to="/admin/change-password" className={buttonStyles({ variant: "secondary", density: "comfortable", className: "mt-4 gap-2" })}>
                 <KeyRound size={16} aria-hidden /> Change password
               </Link>
+              {/* Present only while GATE_ADMIN_MFA is on (/auth/me twoStep). */}
+              {user?.twoStep && (
+                <Link to="/admin/two-step" className={buttonStyles({ variant: "secondary", density: "comfortable", className: "mt-4 ml-2 gap-2" })}>
+                  <ShieldCheck size={16} aria-hidden /> Two-step sign-in: {user.twoStep.enabled ? "On" : "Off"}
+                </Link>
+              )}
             </CardBody>
           </Card>
           <Card>

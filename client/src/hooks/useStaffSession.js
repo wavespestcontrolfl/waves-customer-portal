@@ -96,6 +96,14 @@ export default function useStaffSession() {
           } else endSession("/admin/forgot-password", { email: profile.email, resetRequired: true });
           return;
         }
+        if (profile.twoStep?.enrollmentRequired) {
+          // GATE_ADMIN_MFA_ENFORCE: the server answers only /me and the setup
+          // routes until an authenticator is set up. The token stays for that
+          // page; the offline pass goes so Today cannot open around it.
+          clearStaffDeviceData();
+          navigate("/admin/two-step", { replace: true });
+          return;
+        }
         patch({ user: profile, offline: false, status: "ready" });
         // A failed cache write must not leave a stale copy behind.
         try {

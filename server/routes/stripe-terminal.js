@@ -14,6 +14,7 @@ const {
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 const {
   buildSurchargeAmountDetails,
   computeSurchargeCents,
@@ -71,6 +72,11 @@ async function terminalAuthenticate(req, res, next) {
     if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
       return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
     }
+    // A regular staff login token follows the two-step rule (GATE_ADMIN_MFA).
+    // A terminal-scoped token is minted only by /validate-handoff from a
+    // handoff a full staff session created, so it already passed that rule.
+    const mfaBlock = decoded.scope === 'terminal' ? null : sessionMfaBlock(decoded, tech);
+    if (mfaBlock) return res.status(mfaBlock.status).json({ error: mfaBlock.error, code: mfaBlock.code });
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;

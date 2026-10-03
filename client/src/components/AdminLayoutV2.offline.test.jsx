@@ -264,6 +264,29 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(localStorage.getItem("waves_tech_route_snapshot")).toBeNull();
   });
 
+  it("an admin who still owes two-step setup goes to the setup page, and the offline pass goes (GATE_ADMIN_MFA_ENFORCE)", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN, ADMIN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...ADMIN, twoStep: { enabled: false, enrollmentRequired: true } })));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/two-step" element={<div>Two-step setup page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Two-step setup page")).toBeInTheDocument();
+    expect(screen.queryByText("Admin dashboard content")).not.toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+    expect(localStorage.getItem("waves_tech_offline_pass")).toBeNull();
+  });
+
   it("leaving Today while its bounded check is pending restarts it unbounded, so a slow answer still verifies (Codex #5573 r12)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);

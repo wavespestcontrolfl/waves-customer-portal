@@ -54,6 +54,12 @@ export default function AdminResetPasswordPage() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Password reset failed');
+      if (data.signInRequired) {
+        // Two-step sign-in is on for this account: the reset link proves the
+        // inbox only, so sign in with the new password and the app code.
+        navigate('/admin/login', { replace: true, state: { passwordReset: true } });
+        return;
+      }
 
       localStorage.setItem('waves_admin_token', data.token);
       localStorage.setItem('waves_admin_user', JSON.stringify(data.user));

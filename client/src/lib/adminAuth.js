@@ -34,7 +34,7 @@ function tokenUnexpired(token, now = Date.now()) {
 export function saveStaffOfflinePass(token, profile) {
   const binding = tokenBinding(token);
   try {
-    if (!binding || profile?.mustChangePassword) throw new Error('not eligible');
+    if (!binding || profile?.mustChangePassword || profile?.twoStep?.enrollmentRequired) throw new Error('not eligible');
     localStorage.setItem(STAFF_OFFLINE_PASS_KEY, JSON.stringify({ binding, profile }));
   } catch {
     try { localStorage.removeItem(STAFF_OFFLINE_PASS_KEY); } catch { /* storage unavailable */ }
@@ -50,6 +50,7 @@ export function loadStaffOfflinePass(token, now = Date.now()) {
     const profile = pass?.profile;
     if (!binding || pass?.binding !== binding || !tokenUnexpired(token, now)) return null;
     if (!profile?.id || !['admin', 'technician'].includes(profile.role) || profile.mustChangePassword) return null;
+    if (profile.twoStep?.enrollmentRequired) return null;
     return profile;
   } catch {
     return null;

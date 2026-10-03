@@ -3,6 +3,7 @@ const config = require('../config');
 const db = require('../models/db');
 const { installStaffCallRecordingPrivacy } = require('./staff-call-recording-privacy');
 const { enforceTechnicianScope } = require('./technician-scope');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 
 function isStaffAccessToken(decoded) {
   return decoded?.type === 'access'
@@ -22,6 +23,16 @@ function passwordChangeRouteAllowed(req) {
   const routePath = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '');
   return routePath === '/api/admin/auth/me'
     || routePath === '/api/admin/auth/change-password';
+}
+
+// While GATE_ADMIN_MFA_ENFORCE holds an admin on enrollment, only the profile
+// and the two-step setup routes answer.
+function mfaEnrollmentRouteAllowed(req) {
+  const routePath = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '');
+  return routePath === '/api/admin/auth/me'
+    || routePath === '/api/admin/auth/mfa'
+    || routePath === '/api/admin/auth/mfa/totp/setup'
+    || routePath === '/api/admin/auth/mfa/totp/confirm';
 }
 
 async function adminAuthenticate(req, res, next) {
@@ -51,6 +62,10 @@ async function adminAuthenticate(req, res, next) {
         error: 'Password change required',
         code: 'PASSWORD_CHANGE_REQUIRED',
       });
+    }
+    const mfaBlock = sessionMfaBlock(decoded, tech);
+    if (mfaBlock && !(mfaBlock.code === 'MFA_ENROLLMENT_REQUIRED' && mfaEnrollmentRouteAllowed(req))) {
+      return res.status(mfaBlock.status).json({ error: mfaBlock.error, code: mfaBlock.code });
     }
 
     req.technician = tech;
@@ -94,6 +109,7 @@ async function verifyStaffBearer(req) {
     if (!['admin', 'technician'].includes(tech.role)) return null;
     if (!staffTokenVersionMatches(decoded, tech)) return null;
     if (tech.must_change_password) return null;
+    if (sessionMfaBlock(decoded, tech)) return null;
     return tech;
   } catch {
     return null;

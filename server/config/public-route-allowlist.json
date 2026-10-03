@@ -207,10 +207,11 @@
     {
       "router": "server/routes/admin-auth.js",
       "mount": "/api/admin/auth",
-      "reason": "Staff login / forgot-password / reset-password — the routes that mint staff credentials cannot require them",
+      "reason": "Staff login / two-step code step / forgot-password / reset-password — the routes that mint staff credentials cannot require them (login/mfa requires the signed short-lived challenge /login issued after the password, and shares /login's rate limiter)",
       "routes": [
         "POST /api/admin/auth/forgot-password",
         "POST /api/admin/auth/login",
+        "POST /api/admin/auth/login/mfa",
         "POST /api/admin/auth/reset-password"
       ]
     },

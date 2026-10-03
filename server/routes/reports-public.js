@@ -45,6 +45,7 @@ const { verifyAssessmentPin } = require('../services/service-report/assessment-p
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
+const { sessionMfaBlock } = require('../services/staff-mfa');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
@@ -202,13 +203,14 @@ async function staffCanViewSuppressed(req) {
     if (!isStaffAccessToken(decoded) || !decoded.technicianId || decoded.scope === 'terminal') return false;
     const tech = await db('technicians')
       .where({ id: decoded.technicianId })
-      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password', 'mfa_enabled_at');
     return Boolean(
       tech
       && tech.active
       && ['admin', 'technician'].includes(tech.role)
       && !tech.must_change_password
       && staffTokenVersionMatches(decoded, tech)
+      && !sessionMfaBlock(decoded, tech)
     );
   } catch {
     return false;

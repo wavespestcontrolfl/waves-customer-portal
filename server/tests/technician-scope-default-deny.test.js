@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ jwt: { secret: 'test-secret' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 let mockGateOn = false;
-jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => (g === 'staffDefaultDeny' ? mockGateOn : false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => (g === 'staffDefaultDeny' ? mockGateOn : false), adminMfaLive: () => false, adminMfaEnforceLive: () => false }));
 
 const jwt = require('jsonwebtoken');
 const express = require('express');
