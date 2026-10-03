@@ -30,8 +30,8 @@ export function createServicePhotoDeviceIdentity() {
 const canUploadPhoto = (photo, activeServiceId, inFlight) => (
   Boolean(photo) && photo.serviceId === activeServiceId && !inFlight
 );
-const ownsPendingPhoto = (photo, activeServiceId, pendingPhoto) => (
-  activeServiceId === photo.serviceId && pendingPhoto?.draftId === photo.draftId
+const samePendingPhoto = (photo, pendingPhoto) => (
+  pendingPhoto?.serviceId === photo.serviceId && pendingPhoto?.draftId === photo.draftId
 );
 
 async function verifyFreshPhotoVisit(photo, serviceId, token, onFreshPhotos) {
@@ -73,6 +73,7 @@ export default function useServicePhotoRecovery({
   const [discarding, setDiscarding] = useState(false);
   const [restoredPending, setRestoredPending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
   const [deviceIdentity] = useState(initialDeviceIdentity);
   const pendingPhotoRef = useRef(null);
@@ -82,13 +83,14 @@ export default function useServicePhotoRecovery({
   const activeServiceId = String(serviceId || '');
   const activeServiceIdRef = useRef(activeServiceId);
   activeServiceIdRef.current = activeServiceId;
-  deviceSaveStateRef.current = deviceSaveState;
 
   useEffect(() => {
     let cancelled = false;
-    const retainUnsavedPhoto = pendingPhotoRef.current && deviceSaveStateRef.current !== 'saved';
+    const retainUnsavedPhoto = pendingPhotoRef.current
+      && (uploadInFlight.current || deviceSaveStateRef.current !== 'saved');
     if (!retainUnsavedPhoto) {
       pendingPhotoRef.current = null;
+      deviceSaveStateRef.current = 'idle';
       setPendingPhoto(null);
       setDeviceSaveState('idle');
       setRestoredPending(false);
@@ -117,13 +119,14 @@ export default function useServicePhotoRecovery({
       if (cancelled || pendingPhotoRef.current || uploadInFlight.current) return;
       const scopedPhoto = { ...restored, serviceId: activeServiceId };
       pendingPhotoRef.current = scopedPhoto;
+      deviceSaveStateRef.current = 'saved';
       setPendingPhoto(scopedPhoto);
       setDeviceSaveState('saved');
       setRestoredPending(true);
       setErrorMsg(visibleError(restored.stage, record.message || INTERRUPTED_UPLOAD_MESSAGE));
     })().finally(() => { if (!cancelled) setRestoring(false); });
     return () => { cancelled = true; };
-  }, [activeServiceId, deviceScope]);
+  }, [activeServiceId, deviceScope, restoreAttempt]);
 
   useEffect(() => {
     if (!pendingPhoto || deviceSaveState === 'saved' || terminalHandoff(pendingPhoto.stage)) return undefined;
@@ -148,19 +151,24 @@ export default function useServicePhotoRecovery({
         });
         if (!stillActive()) return;
       }
+      deviceSaveStateRef.current = 'saving';
       setDeviceSaveState('saving');
       const savedState = await persistBeforeUpload(photo, photoServiceId, deviceScope);
-      if (!stillActive()) return;
+      deviceSaveStateRef.current = savedState;
       setDeviceSaveState(savedState);
+      if (!stillActive()) return;
       ensureCurrentDeviceIdentity(deviceScope);
       const data = await postServicePhoto(photo, photoServiceId, deviceIdentity.token, deviceScope);
       await confirmPhotoDraft(photo, photoServiceId, deviceScope);
-      if (ownsPendingPhoto(photo, activeServiceIdRef.current, pendingPhotoRef.current)) {
+      if (samePendingPhoto(photo, pendingPhotoRef.current)) {
         pendingPhotoRef.current = null;
+        deviceSaveStateRef.current = 'idle';
         setPendingPhoto(null);
         setDeviceSaveState('idle');
-        onUploaded(data);
-        refreshPhotos();
+        if (stillActive()) {
+          onUploaded(data);
+          refreshPhotos();
+        }
       }
     } catch (error) {
       const savedState = await retainFailedPhoto(
@@ -169,18 +177,22 @@ export default function useServicePhotoRecovery({
       const message = uploadFailureMessage(error, {
         saved: savedState === 'saved' || deviceSaveState === 'saved',
       });
-      if (ownsPendingPhoto(photo, activeServiceIdRef.current, pendingPhotoRef.current)) {
+      if (samePendingPhoto(photo, pendingPhotoRef.current)) {
+        if (savedState) deviceSaveStateRef.current = savedState;
         photo.stage = error.uploadStage;
         pendingPhotoRef.current = photo;
         setPendingPhoto({ ...photo });
         setErrorMsg(visibleError(error.uploadStage, message));
         if (savedState) setDeviceSaveState(savedState);
-        onUploadFailed(error);
-        refreshPhotos();
+        if (stillActive()) {
+          onUploadFailed(error);
+          refreshPhotos();
+        }
       }
     } finally {
       uploadInFlight.current = false;
       setUploading(false);
+      if (activeServiceIdRef.current !== photoServiceId) setRestoreAttempt(attempt => attempt + 1);
     }
   }, [deviceIdentity.token, deviceScope, deviceSaveState, onFreshPhotos, onUploadFailed, onUploaded, refreshPhotos]);
 
@@ -208,28 +220,29 @@ export default function useServicePhotoRecovery({
     const photo = pendingPhotoRef.current;
     if (!photo || photo.serviceId !== activeServiceIdRef.current || uploadInFlight.current || discarding) return false;
     setDiscarding(true);
-    if (deviceScope && deviceSaveState === 'saved') {
-      const removed = await deleteServicePhotoDraftIfCurrent(photo.serviceId, deviceScope, photo.draftId);
-      if (!removed) {
-        setErrorMsg(terminalHandoff(photo.stage)
-          ? 'Could not dismiss the saved notice from this device. Try Dismiss again.'
-          : 'Could not remove the saved photo from this device. Try Discard again.');
-        setDiscarding(false);
-        return false;
-      }
+    const removed = !deviceScope || !photo.draftStored
+      || await deleteServicePhotoDraftIfCurrent(photo.serviceId, deviceScope, photo.draftId);
+    if (!samePendingPhoto(photo, pendingPhotoRef.current)) {
+      setDiscarding(false);
+      return false;
     }
-    if (!ownsPendingPhoto(photo, activeServiceIdRef.current, pendingPhotoRef.current)) {
+    if (!removed) {
+      setErrorMsg(terminalHandoff(photo.stage)
+        ? 'Could not dismiss the saved notice from this device. Try Dismiss again.'
+        : 'Could not remove the saved photo from this device. Try Discard again.');
       setDiscarding(false);
       return false;
     }
     pendingPhotoRef.current = null;
+    deviceSaveStateRef.current = 'idle';
     setPendingPhoto(null);
     setDeviceSaveState('idle');
     setRestoredPending(false);
     setErrorMsg('');
     setDiscarding(false);
+    if (activeServiceIdRef.current !== photo.serviceId) setRestoreAttempt(attempt => attempt + 1);
     return true;
-  }, [deviceSaveState, deviceScope, discarding]);
+  }, [deviceScope, discarding]);
 
   return {
     pendingPhoto,

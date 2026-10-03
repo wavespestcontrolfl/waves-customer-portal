@@ -67,7 +67,10 @@ beforeEach(() => {
   auth.getToken.mockReturnValue('token-a');
   recovery.currentStaffId.mockReturnValue('tech-a');
   recovery.newDraftId.mockReturnValue('draft-a');
-  recovery.persist.mockResolvedValue('saved');
+  recovery.persist.mockImplementation(async (photo) => {
+    photo.draftStored = true;
+    return 'saved';
+  });
   recovery.postPhoto.mockResolvedValue({ photo: { id: 'photo-a', staged: false } });
   recovery.confirm.mockResolvedValue(undefined);
   recovery.retain.mockResolvedValue('saved');
@@ -97,6 +100,7 @@ describe('service photo recovery controller', () => {
     const record = { draftId: 'saved-a', stage: 'reconciliation_handed_off', message: 'hidden' };
     const photo = {
       draftId: 'saved-a',
+      draftStored: true,
       file: new File(['photo'], 'yard.jpg'),
       stage: 'reconciliation_handed_off',
     };
@@ -161,6 +165,44 @@ describe('service photo recovery controller', () => {
     expect(result.current).toMatchObject({ pendingPhoto: null, deviceSaveState: 'idle' });
   });
 
+  it.each([
+    ['stage persistence', true],
+    ['photo POST', false],
+    ['photo POST after unavailable persistence', false, true],
+  ])('resumes a scoped draft restore after another service upload settles during %s', async (_, duringSave, unavailable) => {
+    const stageSave = deferred();
+    const upload = deferred();
+    const record = { draftId: 'saved-b', stage: 'failed', message: 'Retry B' };
+    const restored = { draftId: 'saved-b', draftStored: true, file: new File(['b'], 'b.jpg') };
+    if (duringSave) recovery.persist.mockImplementationOnce(async (photo) => {
+      await stageSave.promise; photo.draftStored = true; return 'saved';
+    });
+    else {
+      if (unavailable) recovery.persist.mockResolvedValueOnce('unavailable');
+      recovery.postPhoto.mockReturnValue(upload.promise);
+    }
+    store.getDraft.mockImplementation(service => Promise.resolve(service === 'visit-b' ? record : null));
+    recovery.restore.mockReturnValue(restored);
+    let props = defaults();
+    const { result, rerender } = renderHook(() => useServicePhotoRecovery(props));
+    await waitFor(() => expect(result.current.restoring).toBe(false));
+    act(() => result.current.selectPhoto(new File(['a'], 'a.jpg'), { photoType: 'before', caption: '' }));
+    await waitFor(() => expect(duringSave ? recovery.persist : recovery.postPhoto).toHaveBeenCalledTimes(1));
+
+    props = { ...props, serviceId: 'visit-b' };
+    rerender();
+    await waitFor(() => expect(store.getDraft).toHaveBeenCalledWith('visit-b', 'tech-a'));
+    expect(result.current.pendingPhoto?.serviceId).toBe('visit-a');
+    await act(async () => (duringSave
+      ? stageSave.resolve() : upload.resolve({ photo: { id: 'photo-a' } })));
+
+    await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe('saved-b'));
+    expect(result.current).toMatchObject({ restoredPending: true, deviceSaveState: 'saved' });
+    expect(recovery.postPhoto).toHaveBeenCalledTimes(duringSave ? 0 : 1);
+    expect(props.onUploaded).not.toHaveBeenCalled();
+    expect(props.refreshPhotos).not.toHaveBeenCalled();
+  });
+
   it('protects an unavailable pending receipt but not a terminal handoff', async () => {
     recovery.persist.mockResolvedValue('unavailable');
     recovery.retain.mockResolvedValue('unavailable');
@@ -185,7 +227,15 @@ describe('service photo recovery controller', () => {
     });
     terminal.unmount();
 
-    recovery.postPhoto.mockImplementationOnce(failAfterReceipt('reconciliation_pending'));
+    recovery.persist.mockImplementation(async (photo) => {
+      photo.draftStored = true;
+      return 'saved';
+    });
+    const reconciliation = deferred();
+    recovery.postPhoto.mockImplementationOnce(async (photo) => {
+      await reconciliation.promise;
+      return failAfterReceipt('reconciliation_pending')(photo);
+    });
     let props = defaults();
     const pending = renderHook(() => useServicePhotoRecovery(props));
     await waitFor(() => expect(pending.result.current.restoring).toBe(false));
@@ -195,15 +245,18 @@ describe('service photo recovery controller', () => {
         photoType: 'after', caption: '',
       });
     });
+    await waitFor(() => expect(recovery.postPhoto).toHaveBeenCalledTimes(2));
+    props = { ...props, serviceId: 'visit-b', visitSnapshot: { ...visit, revision: 'revision-b' } };
+    pending.rerender();
+    await act(async () => reconciliation.resolve());
     await waitFor(() => expect(pending.result.current.uploading).toBe(false));
     expect(pending.result.current).toMatchObject({
       pendingPhoto: { stage: 'reconciliation_pending' },
       deviceSaveState: 'unavailable',
       closeNeedsConfirmation: true,
     });
-
-    props = { ...props, serviceId: 'visit-b', visitSnapshot: { ...visit, revision: 'revision-b' } };
-    pending.rerender();
+    expect(props.onUploadFailed).not.toHaveBeenCalled();
+    expect(props.refreshPhotos).not.toHaveBeenCalled();
     await waitFor(() => expect(pending.result.current.restoring).toBe(false));
     expect(pending.result.current.pendingPhoto).toMatchObject({
       file, serviceId: 'visit-a', uploadReceipt: { photo: { id: 'photo-a' } },
@@ -222,12 +275,15 @@ describe('service photo recovery controller', () => {
   });
 
   it('revalidates a restored photo before retry and retains it when the visit changed', async () => {
-    const photo = { draftId: 'saved-a', file: new File(['photo'], 'yard.jpg'), expectedVisit: visit };
+    const photo = {
+      draftId: 'saved-a', draftStored: true, file: new File(['photo'], 'yard.jpg'), expectedVisit: visit,
+    };
     store.getDraft.mockResolvedValue({ draftId: 'saved-a', stage: 'failed', message: 'Try again' });
     recovery.restore.mockReturnValue(photo);
     recovery.getPhotos.mockResolvedValue({ photos: [], visit: { ...visit, revision: 'revision-b' } });
     recovery.photoVisitChanged.mockReturnValue(true);
     recovery.failureMessage.mockReturnValue('The visit changed.');
+    recovery.retain.mockResolvedValue('unavailable');
     const props = defaults();
     const { result } = renderHook(() => useServicePhotoRecovery(props));
     await waitFor(() => expect(result.current.restoredPending).toBe(true));
@@ -245,11 +301,13 @@ describe('service photo recovery controller', () => {
     expect(props.onUploadFailed).toHaveBeenCalledWith(expect.objectContaining({ visitChanged: true }));
     expect(result.current).toMatchObject({
       pendingPhoto: expect.objectContaining({ draftId: 'saved-a' }),
-      deviceSaveState: 'saved',
+      deviceSaveState: 'unavailable',
       errorMsg: 'The visit changed.',
       uploading: false,
     });
     expect(props.refreshPhotos).toHaveBeenCalledTimes(1);
+    await act(async () => { expect(await result.current.discard()).toBe(true); });
+    expect(store.deleteIfCurrent).toHaveBeenCalledWith('visit-a', 'tech-a', 'saved-a');
   });
 
   it('refuses selection until the visit read is verified', async () => {
@@ -278,29 +336,35 @@ describe('service photo recovery controller', () => {
     await waitFor(() => expect(result.current.restoring).toBe(false));
   });
 
-  it('does not let an old asynchronous discard clear a new scoped restore', async () => {
+  it.each([false, true])('finishes a delayed discard without clearing a newer photo (latest save unavailable: %s)', async (unavailable) => {
     const deletion = deferred();
     store.getDraft
-      .mockResolvedValueOnce({ draftId: 'saved-a', stage: 'failed' })
-      .mockResolvedValueOnce({ draftId: 'saved-b', stage: 'failed' });
+      .mockResolvedValue({ draftId: 'saved-b', stage: 'failed' })
+      .mockResolvedValueOnce({ draftId: 'saved-a', stage: 'failed' });
     recovery.restore.mockImplementation(record => ({
-      draftId: record.draftId, file: new File([record.draftId], `${record.draftId}.jpg`),
+      draftId: record.draftId, draftStored: true, file: new File([record.draftId], `${record.draftId}.jpg`),
     }));
     store.deleteIfCurrent.mockReturnValue(deletion.promise);
     let props = defaults();
     const { result, rerender } = renderHook(() => useServicePhotoRecovery(props));
     await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe('saved-a'));
 
+    if (unavailable) {
+      recovery.getPhotos.mockRejectedValueOnce(new Error('offline'));
+      recovery.retain.mockResolvedValueOnce('unavailable');
+      await act(async () => result.current.retry());
+    }
     let discardPromise;
     act(() => { discardPromise = result.current.discard(); });
     props = { ...props, serviceId: 'visit-b', visitSnapshot: { ...visit, revision: 'revision-b' } };
     rerender();
-    await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe('saved-b'));
+    await waitFor(() => expect(result.current.restoring).toBe(false));
+    expect(result.current.pendingPhoto?.draftId).toBe(unavailable ? 'saved-a' : 'saved-b');
     await act(async () => {
       deletion.resolve(true);
-      expect(await discardPromise).toBe(false);
+      expect(await discardPromise).toBe(unavailable);
     });
     expect(store.deleteIfCurrent).toHaveBeenCalledWith('visit-a', 'tech-a', 'saved-a');
-    expect(result.current.pendingPhoto?.draftId).toBe('saved-b');
+    await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe('saved-b'));
   });
 });
