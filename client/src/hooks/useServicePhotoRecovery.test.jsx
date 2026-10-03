@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useLayoutEffect, useRef } from 'react';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useServicePhotoRecovery from './useServicePhotoRecovery';
@@ -72,7 +73,7 @@ beforeEach(() => {
     return 'saved';
   });
   recovery.postPhoto.mockResolvedValue({ photo: { id: 'photo-a', staged: false } });
-  recovery.confirm.mockResolvedValue(undefined);
+  recovery.confirm.mockResolvedValue(true);
   recovery.retain.mockResolvedValue('saved');
   recovery.failureMessage.mockImplementation(error => error.message);
   recovery.photoVisitChanged.mockReturnValue(false);
@@ -163,6 +164,83 @@ describe('service photo recovery controller', () => {
     expect(props.onUploaded).toHaveBeenCalledWith({ photo: { id: 'photo-a', staged: true } });
     expect(props.refreshPhotos).toHaveBeenCalledTimes(1);
     expect(result.current).toMatchObject({ pendingPhoto: null, deviceSaveState: 'idle' });
+  });
+
+  it('closes the restore gate before layout effects on the initial render and a service switch', async () => {
+    const secondRestore = deferred();
+    const selections = [];
+    let props = defaults();
+    const { result, rerender } = renderHook(() => {
+      const recoveryState = useServicePhotoRecovery(props);
+      const attemptedService = useRef('');
+      useLayoutEffect(() => {
+        if (attemptedService.current === props.serviceId) return;
+        attemptedService.current = props.serviceId;
+        selections.push(recoveryState.selectPhoto(new File(['new'], 'new.jpg'), {
+          photoType: 'after', caption: '',
+        }));
+      }, [props.serviceId, recoveryState.selectPhoto]);
+      return recoveryState;
+    });
+
+    expect(selections).toEqual([false]);
+    await waitFor(() => expect(result.current.restoring).toBe(false));
+    store.prune.mockReturnValueOnce(secondRestore.promise);
+    props = { ...props, serviceId: 'visit-b' };
+    rerender();
+
+    expect(selections).toEqual([false, false]);
+    expect(result.current.restoring).toBe(true);
+    expect(recovery.persist).not.toHaveBeenCalled();
+    expect(recovery.postPhoto).not.toHaveBeenCalled();
+
+    await act(async () => secondRestore.resolve());
+    await waitFor(() => expect(result.current.restoring).toBe(false));
+  });
+
+  it('retains an accepted-photo receipt until draft confirmation is durable', async () => {
+    let byteUploads = 0;
+    recovery.postPhoto.mockImplementation(async (photo) => {
+      if (!photo.uploadReceipt) {
+        byteUploads += 1;
+        photo.uploadReceipt = { photo: { id: 'photo-a', staged: false } };
+      }
+      return photo.uploadReceipt;
+    });
+    recovery.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    recovery.retain.mockResolvedValueOnce('unavailable');
+    recovery.failureMessage.mockImplementation((error) => (
+      error.uploadStage === 'receipt_unconfirmed' ? 'Keep the accepted receipt' : error.message
+    ));
+    const props = defaults();
+    const { result } = renderHook(() => useServicePhotoRecovery(props));
+    await waitFor(() => expect(result.current.restoring).toBe(false));
+
+    act(() => {
+      expect(result.current.selectPhoto(new File(['photo'], 'yard.jpg'), {
+        photoType: 'after', caption: '',
+      })).toBe(true);
+    });
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+
+    expect(result.current).toMatchObject({
+      pendingPhoto: {
+        stage: 'receipt_unconfirmed',
+        uploadReceipt: { photo: { id: 'photo-a', staged: false } },
+      },
+      deviceSaveState: 'unavailable',
+      closeNeedsConfirmation: true,
+      errorMsg: 'Keep the accepted receipt',
+    });
+    expect(props.onUploaded).not.toHaveBeenCalled();
+    expect(props.onUploadFailed).toHaveBeenCalledWith(expect.objectContaining({
+      uploadStage: 'receipt_unconfirmed',
+    }));
+
+    await act(async () => { await result.current.retry(); });
+    expect(byteUploads).toBe(1);
+    expect(result.current.pendingPhoto).toBeNull();
+    expect(props.onUploaded).toHaveBeenCalledWith({ photo: { id: 'photo-a', staged: false } });
   });
 
   it.each([

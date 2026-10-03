@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../lib/adminAuth';
 import {
   deleteServicePhotoDraftIfCurrent,
@@ -67,21 +67,26 @@ export default function useServicePhotoRecovery({
   onUploaded,
   refreshPhotos,
 }) {
+  const [deviceIdentity] = useState(initialDeviceIdentity);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+  const deviceScope = deviceIdentity.staffId;
+  const activeServiceId = String(serviceId || '');
+  const restoreToken = useMemo(
+    () => ({ activeServiceId, deviceScope, restoreAttempt }),
+    [activeServiceId, deviceScope, restoreAttempt],
+  );
+  const [restoredToken, setRestoredToken] = useState(null);
+  const restoring = Boolean(activeServiceId && deviceScope && restoredToken !== restoreToken);
   const [pendingPhoto, setPendingPhoto] = useState(null);
   const [deviceSaveState, setDeviceSaveState] = useState('idle');
-  const [restoring, setRestoring] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [restoredPending, setRestoredPending] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
-  const [deviceIdentity] = useState(initialDeviceIdentity);
   const pendingPhotoRef = useRef(null);
   const deviceSaveStateRef = useRef(deviceSaveState);
   const uploadInFlight = useRef(false);
   const discardInFlight = useRef(false);
-  const deviceScope = deviceIdentity.staffId;
-  const activeServiceId = String(serviceId || '');
   const activeServiceIdRef = useRef(activeServiceId);
   activeServiceIdRef.current = activeServiceId;
 
@@ -98,10 +103,8 @@ export default function useServicePhotoRecovery({
       setErrorMsg('');
     }
     if (!activeServiceId || !deviceScope) {
-      setRestoring(false);
       return undefined;
     }
-    setRestoring(true);
     (async () => {
       await pruneServicePhotoDrafts();
       if (cancelled) return;
@@ -125,9 +128,9 @@ export default function useServicePhotoRecovery({
       setDeviceSaveState('saved');
       setRestoredPending(true);
       setErrorMsg(visibleError(restored.stage, record.message || INTERRUPTED_UPLOAD_MESSAGE));
-    })().finally(() => { if (!cancelled) setRestoring(false); });
+    })().finally(() => { if (!cancelled) setRestoredToken(restoreToken); });
     return () => { cancelled = true; };
-  }, [activeServiceId, deviceScope, restoreAttempt]);
+  }, [activeServiceId, deviceScope, restoreAttempt, restoreToken]);
 
   useEffect(() => {
     if (!pendingPhoto || deviceSaveState === 'saved' || terminalHandoff(pendingPhoto.stage)) return undefined;
@@ -160,7 +163,12 @@ export default function useServicePhotoRecovery({
       if (!stillActive()) return;
       ensureCurrentDeviceIdentity(deviceScope);
       const data = await postServicePhoto(photo, photoServiceId, deviceIdentity.token, deviceScope);
-      await confirmPhotoDraft(photo, photoServiceId, deviceScope);
+      const confirmationDurable = await confirmPhotoDraft(photo, photoServiceId, deviceScope);
+      if (!confirmationDurable) {
+        const failure = new Error('Photo attached, but this device could not save its upload receipt');
+        failure.uploadStage = 'receipt_unconfirmed';
+        throw failure;
+      }
       if (samePendingPhoto(photo, pendingPhotoRef.current)) {
         pendingPhotoRef.current = null;
         deviceSaveStateRef.current = 'idle';
