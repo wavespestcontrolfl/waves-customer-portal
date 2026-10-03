@@ -25930,7 +25930,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         : '')
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // Under the writer rules a cached draft is screened again below before it
+    // is served.
+    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -25944,12 +25946,20 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
     // visit's: a catalog product the prompt itself mentions (a note saying
-    // "the customer asked about <product>") joins the trade-name screen.
+    // "the customer asked about <product>") joins the trade-name screen in
+    // full, and every other catalog product is screened by its brand word
+    // or its name as a phrase (wholeCatalog, in the shared builder), so a
+    // name the model brings from its own knowledge is caught without an
+    // ordinary word inside an unmentioned catalog name ("snap", "trap")
+    // rejecting plain copy.
+    let catalogRows = null;
     const mentionedCatalogNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient', 'category');
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
+        const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
         mentionedCatalogNames.push(...mentioned.names);
         mentionedCatalogActives.push(...mentioned.actives);
@@ -25967,6 +25977,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
+        wholeCatalog: writerRulesOn,
+        catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
@@ -26013,6 +26026,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // A cached draft is served only if it still passes both screens as they
+    // read now: a product, alias or active ingredient added since it was
+    // cached must not ride out on the cache.
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
     // copy's meaning check below is charged against it too.
     const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
@@ -27397,10 +27416,16 @@ function blackoutDateString(value) {
 function catalogScreensForPrompt(catalogRows, promptText) {
   const names = [];
   const actives = [];
+  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
   for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
-    const named = Boolean(row?.name)
-      && CompletionRecap.containsProductName(promptText, [{ name: row.name }], { wholeWord: true });
-    if (named) names.push(row.name);
+    // By its name or its short display name. A registered alias the prompt
+    // writes out is screened in the shared builder (mentionedText): aliases
+    // are staff shorthand, matched whole.
+    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true }));
+    // Its alias written out counts as naming it for its actives.
+    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
+    names.push(...mentioned);
     // Its actives too: a draft must not swap the named product for its
     // active ingredient; and an active the prompt names on its own
     // ("azoxystrobin" in a note) is screened even with no product name.
