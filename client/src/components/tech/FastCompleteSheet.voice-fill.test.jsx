@@ -39,6 +39,8 @@ const CATALOG = [
   { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
+  // a spray that is not in the house mix (an added row that follows How)
+  { id: 'demand', name: 'Demand CS', category: 'Insecticide' },
 ];
 const CONTEXT_SERVICE = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
@@ -509,17 +511,17 @@ describe('FastCompleteSheet voice fill, gate on', () => {
   });
 
   test('✓ on a spray product whose fill set only an amount leaves it following How', async () => {
-    const request = makeRequest({ fill: { ...FILL, products: [{ productId: 'talstar', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'two ounces of Talstar' }], unclear: [], visit: { ...FILL.visit, method: '' } } });
+    const request = makeRequest({ fill: { ...FILL, products: [{ productId: 'demand', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'two ounces of Demand' }], unclear: [], visit: { ...FILL.visit, method: '' } } });
     await openSheet(request);
     say('hello');
-    fireEvent.click(await screen.findByRole('button', { name: /^Confirm Atticus Talak/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Confirm Demand CS/ }));
     confirmAll();
     // the tech now taps Perimeter spray: the added spray row follows it
     fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
     fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '120' } });
     fireEvent.click(completeButton());
     await waitFor(() => expect(completeBodies(request)).toHaveLength(1));
-    const row = completeBodies(request)[0].products.find((p) => p.productId === 'talstar');
+    const row = completeBodies(request)[0].products.find((p) => p.productId === 'demand');
     expect(row.applicationMethod).toBe('perimeter_spray');
   });
 
@@ -540,6 +542,17 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('an added spray product still says it follows the visit\'s How (never "the way your note says")', async () => {
+    const request = makeRequest({ fill: { ...FILL, products: [{ productId: 'demand', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'two ounces of Demand' }], unclear: [], visit: { ...FILL.visit, method: '' } } });
+    await openSheet(request);
+    say('hello');
+    await screen.findByRole('button', { name: /^Demand CS/ });
+    // open the added row's editor if the fill did not leave it open
+    if (!screen.queryByText(/Same as the visit's How/)) fireEvent.click(screen.getByRole('button', { name: /^Demand CS/ }));
+    expect(await screen.findByText('Same as the visit\'s How until you pick one')).toBeTruthy();
+    expect(screen.queryByText(/way your note says/)).toBeNull();
   });
 });
 

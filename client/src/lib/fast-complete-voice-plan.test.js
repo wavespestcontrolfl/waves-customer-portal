@@ -335,3 +335,8 @@ test('an amount the tech typed is kept even when it equals the starting amount',
   expect(result.patches).toEqual({});
   expect(texts(result)).toEqual(['You entered 4 fl oz; heard 6 fl oz for Product a.']);
 });
+
+test('a way the fill sets on a product shows on its confirm', () => {
+  const result = plan({ rows: [row('b', { catalogMethod: 'bait_placement', totalAmount: '2', amountUnit: 'gal' })], products: [product('b', { method: 'granular_broadcast' })] });
+  expect(result.confirms.map((c) => c.text)).toEqual(['Product b — 2 gal · Granular broadcast']);
+});

@@ -317,7 +317,10 @@ function addConfirms(plan) {
     const row = plan.rows.get(key);
     if (!row) continue;
     const amount = hasAmount(row) ? ` — ${textOf(rowAmount(row))}` : '';
-    plan.confirms.push({ text: `${row.name}${amount}`, heard: plan.heard.products[key] || '', watch: `row:${key}` });
+    // a way the fill set on the row is part of what the tech confirms
+    const setWay = plan.newKeys.has(key) ? row.methodInput : plan.patches[key]?.methodInput;
+    const way = setWay ? ` · ${titled(setWay)}` : '';
+    plan.confirms.push({ text: `${row.name}${amount}${way}`, heard: plan.heard.products[key] || '', watch: `row:${key}` });
   }
   for (const field of Object.keys(plan.formPatch)) {
     plan.confirms.push({ text: `${VISIT_LABELS[field] || titled(field)}: ${visitValueText(field, plan.formPatch[field])}`, heard: plan.heard.visit, watch: `form:${field}` });

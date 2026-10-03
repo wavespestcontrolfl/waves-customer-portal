@@ -775,8 +775,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             products={products}
             heardLines={<ProductHeardLines voice={voice} rows={rows} />}
             // With voice fill on, a way the tech picks for a product is stored as
-            // picked (never "follows How"), so a dictated How cannot move it.
-            stickyPicks={voiceFillEnabled === true}
+            // picked (never "follows How"), so a dictated How cannot move it. 'how':
+            // an unpicked spray still follows the How row here (not the note).
+            stickyPicks={voiceFillEnabled === true ? 'how' : false}
             method={form.method}
             editAmounts={editAmounts}
             locked={formLocked}
@@ -2083,6 +2084,8 @@ const methodLabel = (value) => {
 // is read for its record, not its sprays).
 function followHint(row, sticky) {
   if (!sticky) return 'Same as the visit\'s How';
+  // voice fill's sticky picks: the row still follows How until a way is picked
+  if (sticky === 'how') return 'Same as the visit\'s How until you pick one';
   return row.lane ? 'Spot treatment until you pick another way' : 'Goes the way your note says until you pick one';
 }
 
