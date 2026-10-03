@@ -254,7 +254,10 @@ function mfaFailureResponse(res, result, invalidStatus = 401) {
   return res.status(invalidStatus).json({ error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' });
 }
 
-const JWT_SHAPE_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+// A signed JWT's shape, bounded (the challenge is ~250 characters).
+const JWT_SHAPE_RE = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,1024}\.[A-Za-z0-9_-]{1,512}$/;
+// An authenticator code or a recovery code, as typed (spaces and dashes).
+const MFA_CODE_INPUT_RE = /^[\sA-Za-z0-9-]{6,64}$/;
 
 // Step two of an enrolled staff member's sign-in: the challenge from /login
 // plus a 6-digit authenticator code or a recovery code. A malformed body and
@@ -266,8 +269,7 @@ async function loginMfa(req, res, next) {
   try {
     const { challengeToken, code } = req.body || {};
     const restart = () => res.status(404).json(require('../middleware/errors').notFoundBody(req));
-    if (typeof challengeToken !== 'string' || challengeToken.length > 2048 || !JWT_SHAPE_RE.test(challengeToken)
-      || typeof code !== 'string' || !code.trim() || code.length > 64) {
+    if (!JWT_SHAPE_RE.test(String(challengeToken ?? '')) || !MFA_CODE_INPUT_RE.test(String(code ?? ''))) {
       return restart();
     }
     let claims;
@@ -292,7 +294,10 @@ async function loginMfa(req, res, next) {
       mfa: true,
       mfaRecoveryUntil: result.method === 'recovery' ? staffMfa.recoveryReplaceDeadline() : null,
     });
-    await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
+    // Best-effort: the code (possibly the last recovery code) is already
+    // spent, so a failed timestamp write must not withhold the session.
+    await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() })
+      .catch((stampErr) => logger.warn(`[staff-auth] last_login_at stamp failed after two-step sign-in (${stampErr?.code || 'db_error'})`));
     setAdminMarkerCookie(res, tech.id);
     return res.json({ token, refreshToken, user: staffUser(tech) });
   } catch (err) { return next(err); }
@@ -404,10 +409,9 @@ async function mfaRegenerateRecoveryCodes(req, res, next) {
     if (typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
-    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
-    if (!result.ok) return mfaFailureResponse(res, result, 400);
-    const regenerated = await staffMfa.regenerateRecoveryCodes(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
-    if (!regenerated.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    // The code is checked and the new batch written in one transaction.
+    const regenerated = await staffMfa.regenerateRecoveryCodes(tech.id, { expectedTokenVersion: staffTokenVersion(tech), code });
+    if (!regenerated.ok) return mfaFailureResponse(res, regenerated, 400);
     return res.json({ recoveryCodes: regenerated.recoveryCodes });
   } catch (err) { return next(err); }
 }
@@ -426,10 +430,9 @@ async function mfaDisable(req, res, next) {
     if (typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
-    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
-    if (!result.ok) return mfaFailureResponse(res, result, 400);
-    const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
-    if (!disabled.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    // The code is checked and the factor removed in one transaction.
+    const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech), code });
+    if (!disabled.ok) return mfaFailureResponse(res, disabled, 400);
     // Every earlier session and device is signed out; this one continues.
     disconnectRevokedStaffSessions(tech.id, 'mfa_disabled');
     const { token, refreshToken } = mintStaffTokens(disabled.technician);

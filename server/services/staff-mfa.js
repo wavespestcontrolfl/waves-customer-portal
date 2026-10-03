@@ -439,10 +439,16 @@ async function lockAccountAtVersion(trx, technicianId, expectedTokenVersion, { w
 // regenerations replace the codes one after the other instead of both
 // deleting the old batch and leaving two new ones valid.
 // Returns { ok: true, recoveryCodes } or { ok: false, reason: 'revoked' }.
-async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = {}) {
+// `code` (the current authenticator or a recovery code) is checked in the
+// SAME transaction, so a recovery code is consumed only if the new batch is
+// written too — a failure never leaves the last recovery code spent for
+// nothing.
+async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion, code } = {}) {
   return db.transaction(async (trx) => {
     if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
+    const verified = await verifySecondFactor(technicianId, code, { expectedTokenVersion, conn: trx });
+    if (!verified.ok) return verified;
     return { ok: true, recoveryCodes: await replaceRecoveryCodes(trx, technicianId) };
   });
 }
@@ -454,10 +460,13 @@ async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = 
 // password-only token or device the gate was refusing (minted while the gate
 // was briefly off) must not come back to life once the factor is gone.
 // Returns { ok: true, technician } or { ok: false, reason: 'revoked' }.
-async function disable(technicianId, { expectedTokenVersion } = {}) {
+// `code` is checked in the same transaction (see regenerateRecoveryCodes).
+async function disable(technicianId, { expectedTokenVersion, code } = {}) {
   return db.transaction(async (trx) => {
     if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion, { writesAccount: true })) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
+    const verified = await verifySecondFactor(technicianId, code, { expectedTokenVersion, conn: trx });
+    if (!verified.ok) return verified;
     await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();
     const [technician] = await trx('technicians')

@@ -66,6 +66,7 @@ function builder({ first, select, returning } = {}) {
     returning: jest.fn(async () => returning || []),
     first: jest.fn(async () => first),
     then: (resolve, reject) => Promise.resolve(1).then(resolve, reject),
+    catch: (onRejected) => Promise.resolve(1).catch(onRejected),
   };
   return qb;
 }
@@ -168,6 +169,17 @@ describe('POST /login/mfa', () => {
     expect(jwt.verify(res.body.token, SECRET).mfaRecoveryUntil).toBeUndefined();
     expect(res.body.user.twoStep).toEqual({ enabled: true, enrollmentRequired: false });
     expect(res.cookie).toHaveBeenCalledWith('waves_admin', expect.any(String), expect.any(Object));
+  });
+
+  test('the last-login stamp failing never withholds a session whose code was already spent', async () => {
+    db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date() }) }));
+    const failing = builder();
+    failing.update = jest.fn(() => Promise.reject(Object.assign(new Error('db down'), { code: '57P01' })));
+    db.mockReturnValueOnce(failing);
+    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'recovery' });
+    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.token).toEqual(expect.any(String));
   });
 
   test('a recovery-code sign-in marks the session so a lost phone can be replaced', async () => {
@@ -344,17 +356,21 @@ describe('self-service routes', () => {
     expect(staffMfa.disable).not.toHaveBeenCalled();
   });
 
-  test('turning it off needs the password and a code', async () => {
-    bcrypt.compare.mockResolvedValue(true);
-    staffMfa.verifySecondFactor.mockResolvedValue({ ok: false, reason: 'invalid' });
-    let res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '000000' } });
+  test('turning it off needs the password and a code, checked with the removal in one step', async () => {
+    bcrypt.compare.mockResolvedValue(false);
+    let res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
     expect(res.statusCode).toBe(400);
     expect(staffMfa.disable).not.toHaveBeenCalled();
-    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
+    bcrypt.compare.mockResolvedValue(true);
+    staffMfa.disable.mockResolvedValue({ ok: false, reason: 'invalid' });
+    res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '000000' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('MFA_INVALID');
     staffMfa.disable.mockResolvedValue({ ok: true, technician: staffRow({ auth_token_version: 4 }) });
     res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
     expect(res.body.ok).toBe(true);
-    expect(staffMfa.disable).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3 });
+    expect(staffMfa.disable).toHaveBeenLastCalledWith('tech-1', { expectedTokenVersion: 3, code: '123456' });
+    expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
     // Earlier sessions are signed out (version moved); this one continues.
     expect(jwt.verify(res.body.token, SECRET).tokenVersion).toBe(4);
     expect(require('../sockets').disconnectStaffSockets).toHaveBeenCalledWith('tech-1', 'mfa_disabled');
@@ -385,10 +401,10 @@ describe('self-service routes', () => {
   });
 
   test('new recovery codes are fenced on the session version', async () => {
-    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
     staffMfa.regenerateRecoveryCodes.mockResolvedValue({ ok: false, reason: 'revoked' });
     const res = await invoke(mfaRegenerateRecoveryCodes, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { code: '123456' } });
-    expect(staffMfa.regenerateRecoveryCodes).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3 });
+    expect(staffMfa.regenerateRecoveryCodes).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3, code: '123456' });
+    expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
     expect(res.body.recoveryCodes).toBeUndefined();
   });

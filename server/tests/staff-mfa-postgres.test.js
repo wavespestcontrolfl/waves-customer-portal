@@ -157,15 +157,17 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   test('regenerating replaces every recovery code; turning it off removes the factor and the stamp', async () => {
     const { recoveryCodes } = await enroll();
     // enroll() moved the credential version from 1 to 2.
-    expect(await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
-    expect(await staffMfa.disable(techId, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
-    const { recoveryCodes: fresh } = await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 2 });
+    expect(await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 1, code: recoveryCodes[0] })).toEqual({ ok: false, reason: 'revoked' });
+    expect(await staffMfa.disable(techId, { expectedTokenVersion: 1, code: recoveryCodes[0] })).toEqual({ ok: false, reason: 'revoked' });
+    // A wrong code changes nothing and consumes nothing.
+    expect(await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 2, code: 'AAAA-AAAA-AAAA-AAAA' })).toEqual({ ok: false, reason: 'invalid' });
+    // The code is checked and consumed with the new batch, atomically.
+    const { recoveryCodes: fresh } = await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 2, code: recoveryCodes[0] });
     expect(fresh).toHaveLength(10);
-    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
-    expect(await staffMfa.verifySecondFactor(techId, fresh[0], { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'recovery' });
+    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[1], { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
 
     await mockDatabase('push_subscriptions').insert({ admin_user_id: techId, subscription_data: '{}', active: true, staff_token_version: 2 });
-    const disabled = await staffMfa.disable(techId, { expectedTokenVersion: 2 });
+    const disabled = await staffMfa.disable(techId, { expectedTokenVersion: 2, code: fresh[0] });
     expect(disabled.ok).toBe(true);
     // A password-only token the gate was refusing must not come back: the
     // version moves and devices are deactivated, like enrolling.
@@ -235,9 +237,9 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   test('turning it off while a recovery code is being used never deadlocks', async () => {
     const { recoveryCodes } = await enroll();
     const results = await Promise.allSettled([
-      staffMfa.disable(techId, { expectedTokenVersion: 2 }),
+      staffMfa.disable(techId, { expectedTokenVersion: 2, code: recoveryCodes[2] }),
       staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 }),
-      staffMfa.disable(techId, { expectedTokenVersion: 2 }),
+      staffMfa.disable(techId, { expectedTokenVersion: 2, code: recoveryCodes[3] }),
       staffMfa.verifySecondFactor(techId, recoveryCodes[1], { expectedTokenVersion: 2 }),
     ]);
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
