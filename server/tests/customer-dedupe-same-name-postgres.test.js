@@ -77,7 +77,7 @@ maybeDescribe('findSameNameGroups (TEMP tables)', () => {
     expect(evidence.addresses.winner.address_line1).toMatch(/Example Loop/);
   });
 
-  test.each([['Unknown.'], ['N.A.'], ['n/a.'], ['UNKNOWN,']])('a punctuated placeholder (%s) in a name never groups or admits the pair', async (bad) => {
+  test.each([['Unknown.'], ['N.A.'], ['n/a.'], ['UNKNOWN,'], ['Unknown!'], ['N/A-'], ['(Unknown)'], ['n.a'], ['N / A']])('a punctuated placeholder (%s) in a name never groups or admits the pair', async (bad) => {
     const a = await customer({ pipeline_stage: 'active_customer', first_name: bad, last_name: 'Smithson' });
     const b = await customer({ first_name: bad, last_name: 'Smithson' });
     const c = await customer({ first_name: 'Pat', last_name: bad });
@@ -97,6 +97,45 @@ maybeDescribe('findSameNameGroups (TEMP tables)', () => {
     expect(groups[0].winner.id).toBe(strong);
     expect((await dedupe.duplicatePairEligibility(strong, b, conn, { kind: 'same_name' })).code).toBe('eligible');
     expect((await dedupe.duplicatePairEligibility(b, c, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+  });
+
+  describe('only live rows are group members, winners or losers', () => {
+    const check = async (w, l) => (await dedupe.duplicatePairEligibility(w, l, conn, { kind: 'same_name' })).code;
+    test.each([
+      ['a legacy active = NULL twin', { active: null }],
+      ['an inactive twin', { active: false }],
+      ['a churned (former-stage) twin that is still active', { pipeline_stage: 'churned', stripe_customer_id: 'cus_syn_old', password_hash: 'x' }],
+      ['a past_customer twin', { pipeline_stage: 'past_customer' }],
+      ['a dormant twin', { pipeline_stage: 'dormant' }],
+    ])('live + %s: not grouped, refused in both directions', async (_label, extra) => {
+      const live = await customer({ pipeline_stage: 'active_customer' });
+      const other = await customer(extra);
+      expect(await dedupe.findSameNameGroups(conn)).toEqual([]);
+      expect(await check(live, other)).toBe('not_in_queue');
+      expect(await check(other, live)).toBe('not_in_queue');
+    });
+
+    test('a non-live third twin never becomes the winner of the live pair, and a lead-stage shell still lists', async () => {
+      const a = await customer({ pipeline_stage: 'active_customer' });
+      const b = await customer({ pipeline_stage: 'new_lead' });
+      await customer({ pipeline_stage: 'churned', stripe_customer_id: 'cus_syn_old', password_hash: 'x', created_at: new Date('2010-01-01') });
+      await customer({ active: null, stripe_customer_id: 'cus_syn_null', password_hash: 'x', created_at: new Date('2010-01-01') });
+      const groups = await dedupe.findSameNameGroups(conn);
+      expect(pairsOf(groups)).toEqual([pair(a, b)]);
+      expect(groups[0].winner.id).toBe(a);
+      expect(await check(a, b)).toBe('eligible');
+    });
+  });
+
+  test('non-ASCII names: a pair is grouped only with its own name, and unrelated all-non-ASCII names never match each other', async () => {
+    const a = await customer({ first_name: 'Ёлкин', last_name: 'Иванов', pipeline_stage: 'active_customer' });
+    const b = await customer({ first_name: 'ёлкин', last_name: 'ИВАНОВ' });
+    await customer({ first_name: 'Пётр', last_name: 'Сидоров' });
+    await customer({ first_name: '李明', last_name: '王芳' });
+    await customer({ first_name: '李明', last_name: '张伟' });
+    const groups = await dedupe.findSameNameGroups(conn);
+    expect(pairsOf(groups)).toEqual([pair(a, b)]);
+    expect((await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_name' })).code).toBe('eligible');
   });
 
   test('a missing phone or address on one side is still listed', async () => {
@@ -559,6 +598,53 @@ maybeDescribe('same-name merge: both actions, phone carried under the consent ho
       // After the commit the row is free again (the lock was transaction-scoped).
       await db('customers').where({ id: g.thirdId }).update({ last_name: `Renamed${digits(uniq())}` });
     });
+  });
+
+  test('merging a non-ASCII same-name pair locks only that name group: an unrelated all-non-ASCII customer is neither locked nor grouped', async () => {
+    const stamp = digits(uniq());
+    const first = `Ёлкин${stamp}`;
+    const pair = await namedPair({ winnerExtra: { first_name: first, last_name: 'Иванов' }, loserExtra: { first_name: first.toLowerCase(), last_name: 'ИВАНОВ' } });
+    const [unrelatedA, unrelatedB] = [randomUUID(), randomUUID()];
+    made.customers.push(unrelatedA, unrelatedB);
+    for (const [id, f, l] of [[unrelatedA, '李明', '王芳'], [unrelatedB, 'Пётр', 'Сидоров']]) {
+      await db('customers').insert({
+        id, first_name: f, last_name: l, phone: `+1941555${String(uniq()).padStart(4, '0').slice(-4)}`,
+        address_line1: `${uniq()} ${digits(uniq())} Lane`, city: 'Venice', state: 'FL', zip: '34285', pipeline_stage: 'new_lead', active: true,
+      });
+    }
+    expect((await dedupe.duplicatePairEligibility(pair.winnerId, unrelatedA, undefined, { kind: 'same_name' })).code).toBe('not_in_queue');
+    // Hold an unrelated customer's row lock on another connection: a merge that tried to lock it would block.
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let ready;
+    const locked = new Promise((resolve) => { ready = resolve; });
+    const holder = db.transaction(async (trx) => {
+      await trx('customers').whereIn('id', [unrelatedA, unrelatedB]).forUpdate().select('id');
+      ready();
+      await held;
+    });
+    await locked;
+    try {
+      const outcome = await Promise.race([
+        mergeSameName(pair.winnerId, pair.loserId).then(() => 'merged', (e) => e.message),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 8000)),
+      ]);
+      expect(outcome).toBe('merged');
+    } finally {
+      release();
+      await holder;
+    }
+    expect((await db('customers').where({ id: pair.loserId }).first()).deleted_at).not.toBeNull();
+  });
+
+  test.each([
+    ['a legacy active = NULL twin', { active: null }],
+    ['a churned (former-stage) twin', { pipeline_stage: 'churned' }],
+  ])('a merge with %s is refused in both directions and nothing moves', async (_label, extra) => {
+    const { winnerId, loserId } = await namedPair({ loserExtra: extra });
+    await expect(mergeSameName(winnerId, loserId)).rejects.toThrow(/no longer mergeable/);
+    await expect(mergeSameName(loserId, winnerId)).rejects.toThrow(/no longer mergeable/);
+    expect((await db('customers').whereIn('id', [winnerId, loserId]).whereNotNull('deleted_at')).length).toBe(0);
   });
 
   test('the executor refuses a same-name pair in auto mode, and without the locked queue pair', async () => {

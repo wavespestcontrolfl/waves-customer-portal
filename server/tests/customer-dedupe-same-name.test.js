@@ -73,7 +73,8 @@ describe('same-name grouping', () => {
   });
 
   test('a blank, placeholder or one-letter name never keys, so such rows never pair', () => {
-    for (const bad of [null, '', '   ', 'Unknown', 'unknown', 'N/A', 'na', 'J', 'j.', 'Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,', ' unknown. ', 'Na,']) {
+    for (const bad of [null, '', '   ', 'Unknown', 'unknown', 'N/A', 'na', 'J', 'j.', 'Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,', ' unknown. ', 'Na,',
+      'Unknown!', 'N/A-', '(Unknown)', 'n.a', 'N / A', '--', '??', '123', 'J-']) {
       expect(sameNameKey(cust({ first_name: bad }))).toBeNull();
       expect(sameNameKey(cust({ last_name: bad }))).toBeNull();
       expect(buildSameNameGroups({ customers: [cust({ first_name: bad }), cust({ first_name: bad })] })).toEqual([]);
@@ -83,11 +84,15 @@ describe('same-name grouping', () => {
   });
 
   test('a punctuated placeholder in one name never groups the rows on the other name alone', () => {
-    for (const bad of ['Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,']) {
+    for (const bad of ['Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,', 'Unknown!', 'N/A-', '(Unknown)', 'n.a', 'N / A']) {
       expect(buildSameNameGroups({ customers: [cust({ first_name: bad, last_name: 'Smithson' }), cust({ first_name: bad, last_name: 'Smithson' })] })).toEqual([]);
       expect(buildSameNameGroups({ customers: [cust({ first_name: 'Pat', last_name: bad }), cust({ first_name: 'Pat', last_name: bad })] })).toEqual([]);
     }
     expect(dedupe._test.sameNamePart('N.A.')).toBe('');
+    expect(dedupe._test.sameNamePart('(Unknown)')).toBe('');
+    // A REAL name keeps its key (lowercase, periods and commas dropped, spaces squashed); non-ASCII letters count as letters.
+    expect(dedupe._test.sameNameKey({ first_name: 'Mary  Ann.', last_name: "O'Neil" })).toBe("mary ann|o'neil");
+    expect(dedupe._test.sameNameKey({ first_name: 'Ёлкин', last_name: 'Иванов' })).toBe('ёлкин|иванов');
     expect(dedupe._test.sameNamePart('Mary  Ann.')).toBe('mary ann');
   });
 
@@ -110,12 +115,19 @@ describe('same-name grouping', () => {
     expect(groups[0].candidates[0].tier).toBe('yellow');
   });
 
-  test('inactive, soft-deleted and commercial customers never group; a null active column is live', () => {
+  test('only live rows group: inactive, NULL-active, soft-deleted, former-stage and commercial customers never do; lead-stage shells still do', () => {
     expect(buildSameNameGroups({ customers: [cust(), cust({ active: false })] })).toEqual([]);
+    expect(buildSameNameGroups({ customers: [cust(), cust({ active: null })] })).toEqual([]);
     expect(buildSameNameGroups({ customers: [cust(), cust({ deleted_at: '2026-09-01' })] })).toEqual([]);
+    for (const stage of ['churned', 'past_customer', 'dormant']) {
+      expect(buildSameNameGroups({ customers: [cust(), cust({ pipeline_stage: stage })] })).toEqual([]);
+      expect(buildSameNameGroups({ customers: [cust({ pipeline_stage: stage, stripe_customer_id: 'cus_syn_old' }), cust()] })).toEqual([]);
+    }
     expect(buildSameNameGroups({ customers: [cust(), cust({ property_type: 'Commercial' })] })).toEqual([]);
     expect(buildSameNameGroups({ customers: [cust(), cust({ waveguard_tier: 'Commercial' })] })).toEqual([]);
-    expect(buildSameNameGroups({ customers: [cust({ active: null }), cust()] })).toHaveLength(1);
+    for (const stage of ['new_lead', 'estimate_sent', 'active_customer', 'won', 'at_risk', null]) {
+      expect(buildSameNameGroups({ customers: [cust(), cust({ pipeline_stage: stage })] })).toHaveLength(1);
+    }
   });
 
   test('profiles of one account are not duplicates of each other', () => {
@@ -125,12 +137,10 @@ describe('same-name grouping', () => {
     expect(buildSameNameGroups({ customers: [cust({ account_id: acct }), cust({ account_id: null })] })).toHaveLength(1);
   });
 
-  test('a pair the phone queue lists is not repeated here, but a shared phone with a not-active row stays', () => {
+  test('a pair the phone queue lists is not repeated here; a shared phone with a NULL-active row is not live, so it is not listed here either', () => {
     const shared = '+19415550199';
     expect(buildSameNameGroups({ customers: [cust({ phone: shared }), cust({ phone: '941-555-0199' })] })).toEqual([]);
-    const groups = buildSameNameGroups({ customers: [cust({ phone: shared }), cust({ phone: shared, active: null })] });
-    expect(groups).toHaveLength(1);
-    expect(groups[0].candidates[0].reasons[0]).toBe(SAME_NAME_PHONE_SHARED_REASON);
+    expect(buildSameNameGroups({ customers: [cust({ phone: shared }), cust({ phone: shared, active: null })] })).toEqual([]);
   });
 
   test('a pair at one premise belongs to the same-address queue, not this one (customer row or saved property)', () => {

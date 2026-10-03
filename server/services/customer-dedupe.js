@@ -45,6 +45,7 @@ const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./bill
 const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
+const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -855,19 +856,25 @@ const SAME_NAME_PHONE_SHARED_REASON = 'same_name_phone_shared';
 // The bucket key: first AND last name, after normName (so 'Unknown' / 'N/A' /
 // 'NA' placeholders are blank), periods and commas dropped and spaces squashed.
 // A one-letter side (an initial) is not a name: no key, never paired.
-// The placeholder check (normName's: unknown / n/a / na) runs AFTER the
-// punctuation is stripped, so "Unknown.", "N.A.", "n/a." and "UNKNOWN," are as
-// blank as "Unknown": none of them can key a group on the other name alone.
-const SAME_NAME_PLACEHOLDERS = ['unknown', 'n/a', 'na'];
+// A name's PLACEHOLDER test compares letters only (every non-letter stripped,
+// lowercased), so no punctuation spelling can slip past it: "Unknown.",
+// "Unknown!", "(Unknown)", "N.A.", "n.a", "N/A-", "N / A" are all blank, exactly
+// like "Unknown" and "N/A". The key itself is NOT changed beyond that: a real
+// name keeps lowercase / periods and commas dropped / spaces squashed.
+const SAME_NAME_PLACEHOLDER_LETTERS = ['unknown', 'na'];
+const lettersOnly = (v) => String(v || '').toLowerCase().replace(/[^\p{L}]/gu, '');
 function sameNamePart(raw) {
   const part = String(raw || '').trim().toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
-  return normName(part) === '' || SAME_NAME_PLACEHOLDERS.includes(part) ? '' : part;
+  const letters = lettersOnly(part);
+  return !letters || SAME_NAME_PLACEHOLDER_LETTERS.includes(letters) ? '' : part;
 }
 
+// A usable name part has at least two letters (an initial, or a part made of
+// punctuation or digits, is not a name).
 function sameNameKey(row) {
   const first = sameNamePart(row.first_name);
   const last = sameNamePart(row.last_name);
-  if (first.length < 2 || last.length < 2) return null;
+  if (lettersOnly(first).length < 2 || lettersOnly(last).length < 2) return null;
   return `${first}|${last}`;
 }
 
@@ -878,21 +885,47 @@ function sameNameKey(row) {
 // twin.
 const sameNamePartSql = (col) => {
   const canon = `btrim(regexp_replace(regexp_replace(lower(btrim(${col})), '[.,]', '', 'g'), '\\s+', ' ', 'g'))`;
-  return `(CASE WHEN ${canon} IN ('unknown', 'n/a', 'na') THEN '' ELSE ${canon} END)`;
+  const letters = `regexp_replace(lower(${col}), '[^[:alpha:]]', '', 'g')`;
+  return `(CASE WHEN ${letters} IN ('', 'unknown', 'na') THEN '' ELSE ${canon} END)`;
 };
 
 // A deliberately LOOSER SQL form used only to fetch a SUPERSET of a name group:
-// ASCII letters and digits only, so any two names the JS key calls equal (a
-// difference of case, spacing, periods or commas) also match here whatever the
-// whitespace class or unicode form. The exact test is always the JS key,
-// applied to what this returns (sameNameGroupSql). Over-fetching is harmless
-// (it is filtered, and for the merge lock it only locks a few extra rows).
-const sameNameLooseSql = (col) => `regexp_replace(lower(${col}), '[^a-z0-9]', '', 'g')`;
-const sameNameLooseJs = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// lowercase with whitespace (every unicode space JS's \s covers), periods and
+// commas removed, and NOTHING else removed, so non-ASCII letters are kept (a
+// fully non-ASCII name never collapses to an empty key and never matches
+// unrelated names). Any two names the JS key calls equal also match here. The
+// exact test is always the JS key, applied to what this returns
+// (sameNameGroupSql callers filter, and lock only true members). An empty loose
+// key can never match everything: sameNameGroupSql refuses it.
+const SAME_NAME_LOOSE_STRIP = '[\\s.,\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]';
+const sameNameLooseSql = (col) => `regexp_replace(lower(${col}), '${SAME_NAME_LOOSE_STRIP}', '', 'g')`;
+const sameNameLooseJs = (v) => String(v || '').toLowerCase().replace(/[\s.,\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/g, '');
 function sameNameGroupSql(query, first, last) {
+  const f = sameNameLooseJs(first);
+  const l = sameNameLooseJs(last);
+  // An empty loose key would equal every blank name: no group, no rows.
+  if (!f || !l) return query.whereRaw('1 = 0');
   return query
-    .whereRaw(`${sameNameLooseSql('c.first_name')} = ?`, [sameNameLooseJs(first)])
-    .whereRaw(`${sameNameLooseSql('c.last_name')} = ?`, [sameNameLooseJs(last)]);
+    .whereRaw(`${sameNameLooseSql('c.first_name')} = ?`, [f])
+    .whereRaw(`${sameNameLooseSql('c.last_name')} = ?`, [l]);
+}
+
+// The liveness rule of the same-name kind, ONE definition for the JS filter and
+// the SQL filter. It is the phone queue's own live-ROW rule (findDuplicateGroups:
+// active = true, not deleted, and deliberately NOT whereLiveCustomer's customer
+// stages: the duplicates this tool exists to clean up are lead-stage shells that
+// intake minted on a repeat call) PLUS the shared FORMER_CUSTOMER_STAGES
+// (churned / past_customer / dormant): a legacy active = NULL row or a former
+// customer is neither the kept row nor the retired one in this queue, so a
+// merge can never retire a current customer into a record live flows omit.
+function isSameNameLiveRow(row) {
+  return row.active === true && !row.deleted_at && !FORMER_CUSTOMER_STAGES.includes(row.pipeline_stage);
+}
+function whereSameNameLive(query, alias = 'c') {
+  return query
+    .where(`${alias}.active`, true)
+    .whereNull(`${alias}.deleted_at`)
+    .where((q) => q.whereNull(`${alias}.pipeline_stage`).orWhereNotIn(`${alias}.pipeline_stage`, FORMER_CUSTOMER_STAGES));
 }
 
 // ONE name comparison for the whole same-name kind. The key (above) treats
@@ -928,7 +961,7 @@ function sameNameLeadReason({ phonesMissing, phonesShared }) {
 function sameNameEdges({ customers, properties = [], dismissed = new Set() }) {
   const buckets = new Map();
   for (const row of customers) {
-    if (row.active === false || row.deleted_at || isCommercialRow(row)) continue;
+    if (!isSameNameLiveRow(row) || isCommercialRow(row)) continue;
     const key = sameNameKey(row);
     if (!key) continue;
     if (!buckets.has(key)) buckets.set(key, []);
@@ -1041,9 +1074,7 @@ function buildSameNameGroups(input) {
 // "same address", which can only list MORE same-name pairs, never merge one.
 async function readSameNameRows(database, ids = null, group = null) {
   const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'account_id', 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
-  const customerQuery = database('customers as c')
-    .where((q) => q.where('c.active', true).orWhereNull('c.active'))
-    .whereNull('c.deleted_at')
+  const customerQuery = whereSameNameLive(database('customers as c'))
     .whereRaw("COALESCE(TRIM(c.first_name), '') <> ''")
     .whereRaw("COALESCE(TRIM(c.last_name), '') <> ''");
   if (group) {
@@ -2750,8 +2781,12 @@ async function lockSameNameGroupRows(trx, winnerId, loserId) {
   const key = sameNameKey(seedWinner);
   if (!key || key !== sameNameKey(seedLoser)) throw stale();
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`customer-duplicate-name-group:${key}`]);
-  const members = await sameNameGroupSql(trx('customers as c').whereNull('c.deleted_at'), sameNamePart(seedWinner.first_name), sameNamePart(seedWinner.last_name))
-    .select('c.id');
+  // The SQL read is a superset; only TRUE members (exact JS key, live by the
+  // kind's own rule) are locked, plus the pair itself so a pair that stopped
+  // being live is still read and refused by the re-check under its own lock.
+  const candidates = await sameNameGroupSql(whereSameNameLive(trx('customers as c')), sameNamePart(seedWinner.first_name), sameNamePart(seedWinner.last_name))
+    .select('c.id', 'c.first_name', 'c.last_name');
+  const members = candidates.filter((r) => sameNameKey(r) === key);
   const ids = [...new Set([winnerId, loserId, ...members.map((r) => r.id)])].sort();
   const rows = await trx('customers').whereIn('id', ids).orderBy('id').forUpdate().select('*', trx.raw('updated_at::text AS version'));
   const lockedWinner = rows.find((r) => r.id === winnerId);
