@@ -66,7 +66,7 @@ async function loadPendingSmsConversations({
   const callEndedAt = `COALESCE(
     CASE WHEN spoken.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
       THEN CAST(spoken.metadata->>'ended_at' AS timestamptz) END,
-    CASE WHEN NOT ${postCallRow}
+    CASE WHEN ${postCallRow} IS NOT TRUE
       THEN spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) END)`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
