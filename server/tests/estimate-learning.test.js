@@ -262,6 +262,10 @@ describe('computeEditSummary', () => {
     // A unit written after the ZIP is not a ZIP+4.
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205 #1234')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205 #1234', '123 Main St, Bradenton, FL 34205 #5678')).toBe(true);
+    // A "#" unit is never a ZIP, whatever its length.
+    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton, FL #12345')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL # 12345', '123 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St #4, Bradenton, FL', '123 Main St # 4, Bradenton, FL 34205')).toBeUndefined();
     // A lone four-digit ending is a unit, not a ZIP+4.
     expect(same('123 Main St, Bradenton', '123 Main St, Bradenton #1234')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();

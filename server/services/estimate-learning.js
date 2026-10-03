@@ -147,10 +147,12 @@ const STREET_WORDS = Object.freeze({
 const COUNTRY_TAIL = [['usa'], ['us'], ['united', 'states'], ['united', 'states', 'of', 'america']];
 
 function addressTokens(value) {
-  // A ZIP+4 is recognized by its hyphen, while the punctuation is still
-  // there, and kept as one token: "34205 #1234" is a ZIP and a unit.
+  // Read while the punctuation is still there: a ZIP+4 by its hyphen (kept
+  // as one token) and a "#" unit by its mark (kept as a unit token), so
+  // "34205 #1234" is a ZIP and a unit and "#12345" is never a ZIP.
   const tokens = norm(value)
     .replace(/\b(\d{5})-(\d{4})\b/g, '$1plus$2')
+    .replace(/#\s*([a-z0-9]+)/g, ' unit$1 ')
     .replace(/[^a-z0-9 ]/g, ' ')
     .split(' ')
     .filter(Boolean)
