@@ -416,10 +416,12 @@ const screenCasedWords = (value) => String(value || '').match(/[A-Za-z0-9]+/g) |
 // "Bora-Care", "TZone" for "T-Zone SE" (the visit screen's collapsedEcho
 // rule: four letters or more, or a digit).
 const screenCollapsible = (word) => word.length >= 4 || /\d/.test(word);
-// A label as the catalog cases it, two words or more.
+// A label as the catalog cases it, or in all capitals; two words or more.
 function screenAsWritten(label) {
   const cased = screenCasedWords(label).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  return cased.length >= 2 ? new RegExp(`(?<![A-Za-z0-9])${cased.join('[\\s-]+')}(?![A-Za-z0-9])`) : null;
+  if (cased.length < 2) return null;
+  const forms = [...new Set([cased, cased.map((word) => word.toUpperCase())].map((words) => words.join('[\\s-]+')))];
+  return new RegExp(`(?<![A-Za-z0-9])(?:${forms.join('|')})(?![A-Za-z0-9])`);
 }
 // Which words of a catalog name are plain report vocabulary.
 function catalogPlainTests(rows, genericTokens) {

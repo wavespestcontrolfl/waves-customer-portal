@@ -5622,11 +5622,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // reads now: the edit heads-up skips unchanged sentences, and
               // an active filled in since the draft was written must not
               // ride out on one. A failed read throws and drops the copy.
-              const bodyProductIds = writerRulesBody
-                ? (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean)
-                : [];
-              const bodyActives = bodyProductIds.length
-                ? (await savepointRead(db, (k) => k('products_catalog').whereIn('id', bodyProductIds).select('active_ingredient')))
+              // By id, and by name for a name-only product (a legacy or
+              // restored row has productId null), as generation reads them.
+              const bodyProducts = writerRulesBody && Array.isArray(products) ? products : [];
+              const bodyProductIds = bodyProducts.map((p) => p?.productId).filter(Boolean);
+              const bodyProductNames = [...new Set(bodyProducts.filter((p) => !p?.productId)
+                .map((p) => String(p?.name || p?.product_name || '').trim()).filter(Boolean))];
+              const bodyActives = bodyProductIds.length || bodyProductNames.length
+                ? (await savepointRead(db, (k) => k('products_catalog')
+                  .where((q) => {
+                    if (bodyProductIds.length) q.whereIn('id', bodyProductIds);
+                    if (bodyProductNames.length) q.orWhereIn('name', bodyProductNames);
+                  })
+                  .select('active_ingredient')))
                   .map((row) => row?.active_ingredient).filter(Boolean)
                 : [];
               if (screenTradeNames(technicianReportBody)) {

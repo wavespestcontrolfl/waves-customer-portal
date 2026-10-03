@@ -44,6 +44,7 @@ describe('catalog-wide brand screen', () => {
     'We added an Organic acidifier to the tank.',
     'We installed Advance Termite Bait Station units along the slab.',
     'We installed Advance bait stations along the slab.',
+    'ADVANCE TERMITE BAIT STATION was installed along the slab.',
     'We set T-Rex traps in the attic.',
     'We set trex traps in the attic.',
     'We applied Arena 0.25G to the beds.',
