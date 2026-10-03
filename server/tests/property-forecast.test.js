@@ -48,6 +48,31 @@ describe('fetchPropertyForecast', () => {
 
   const RAIN = { '2026-10-03T12:00': 0.12, '2026-10-03T13:00': 0.05 };
 
+  test('states no rain total when the payload skips an hour or stops short of the window', async () => {
+    const drop = (payload, times) => {
+      const keep = payload.hourly.time.map((t) => !times.includes(t));
+      const hourly = Object.fromEntries(Object.entries(payload.hourly).map(([k, v]) => [k, v.filter((_, i) => keep[i])]));
+      return { ...payload, hourly };
+    };
+    // A skipped hour inside the window: the hours that did arrive are still returned.
+    global.fetch = okFetch(drop(hourlyPayload({ rainAt: RAIN }), ['2026-10-03T13:00']));
+    let { fetchPropertyForecast } = load();
+    const gap = await fetchPropertyForecast({
+      latitude: 27.1234, longitude: -82.5678, from: '2026-10-03T12:00', to: '2026-10-03T15:00', now: NOW,
+    });
+    expect(gap.status).toBe('ok');
+    expect(gap.hourly.map((r) => r.time)).toEqual(['2026-10-03T12:00', '2026-10-03T14:00']);
+    expect(gap.precipitationInTotal).toBeNull();
+
+    // A payload that ends before the window does.
+    global.fetch = okFetch(drop(hourlyPayload({ rainAt: RAIN }), ['2026-10-03T14:00']));
+    ({ fetchPropertyForecast } = load());
+    const short = await fetchPropertyForecast({
+      latitude: 27.1234, longitude: -82.5678, from: '2026-10-03T12:00', to: '2026-10-03T15:00', now: NOW,
+    });
+    expect(short.precipitationInTotal).toBeNull();
+  });
+
   test('returns quantitative hourly inches, temperature, humidity, source and fetch time for the window', async () => {
     global.fetch = okFetch(hourlyPayload({ rainAt: RAIN }));
     const { fetchPropertyForecast } = load();

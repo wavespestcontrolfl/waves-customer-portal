@@ -246,11 +246,18 @@ function usablePropertyPoint(lat, lon) {
 
 function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
+  // A total is only stated when EVERY hour slot in the window has a reading:
+  // a provider payload that stops short of the window, or skips hours, would
+  // otherwise read as a smaller (or zero) rain total. Hour slots are whole
+  // hours in UTC, which ET hours always align to.
+  const HOUR_MS = 3600000;
+  const byMs = new Map(rows.map((r) => [r.ms, r]));
   let total = 0;
   let complete = rows.length > 0;
-  for (const r of rows) {
-    if (r.precipitation_in == null) complete = false;
-    else total += r.precipitation_in;
+  for (let slot = Math.ceil(fromMs / HOUR_MS) * HOUR_MS; slot < toMs; slot += HOUR_MS) {
+    const r = byMs.get(slot);
+    if (!r || r.precipitation_in == null) { complete = false; break; }
+    total += r.precipitation_in;
   }
   return {
     status: 'ok',
