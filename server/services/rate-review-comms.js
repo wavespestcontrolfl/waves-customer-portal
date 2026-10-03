@@ -889,6 +889,7 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
     const awaiting = siblings.some((r) => r.status === 'approved' && !r.notice_id && Number(r.delta_cents) > 0);
     const otherSnaps = siblings.filter((r) => r.notice_id && !claimedIds.has(String(r.notice_id)));
     const suppressedLines = [];
+    let newlyReady = false;
     if (otherSnaps.length) {
       const others = await dbh('price_change_notices').whereIn('id', otherSnaps.map((r) => r.notice_id));
       const octx = await loadLineContext(dbh, { snapshots: otherSnaps, notices: others, today });
@@ -897,10 +898,15 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
         const line = lineFor(n, snap, octx.customers.get(String(n.customer_id)) || customer);
         const reason = firstMatch(LINE_RULES, { notice: n, snapshot: snap, line, today, now, declinedTerms: octx.declinedTerms, liveLanes: octx.liveLanes, ratesMoved: octx.ratesMoved, linesGone: octx.linesGone });
         if (reason) suppressedLines.push({ reason });
+        else newlyReady = true;
       }
     }
     const hold = accountHoldFor({ awaiting, suppressedLines });
     if (hold) return { ok: false, reason: hold };
+    // A sibling prepared and eligible AFTER the batch was read is not in this letter (nor
+    // in the digest the owner reviewed): refuse so the next preview carries all the lines
+    // in one letter, never a second one later.
+    if (newlyReady) return { ok: false, reason: 'line_added' };
   }
   lines.sort(byEffective);
   return { ok: true, entry: { ...entry, lines } };

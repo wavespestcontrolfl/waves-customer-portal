@@ -714,6 +714,27 @@ describe('customer surfaces', () => {
     expect(emailLeg).not.toHaveBeenCalled();
   });
 
+  test('a sibling line prepared and eligible AFTER the batch was read refuses the send (line_added) — one complete letter on the next preview, never a second letter later', async () => {
+    const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => {
+      if (!fired) {
+        fired = true;
+        mockDb.store.price_change_notices.push({ ...second });
+        mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(2, { id: ROW(2), customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'approved', notice_id: second.id, delta_cents: 300 }));
+        mockDb.store.scheduled_services.push(...openVisitsFor([second]));
+      }
+      return { rows: [] };
+    }]);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('line_added');
+    expect(emailLeg).not.toHaveBeenCalled();
+    // the next preview carries both lines in one letter
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts).toMatchObject({ letters: 1, lines: 2 });
+  });
+
   test('send: an ambiguous provider error whose bounce callback already landed on the live row is a certain non-send — back to draft with the failure recorded, not send_uncertain', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();

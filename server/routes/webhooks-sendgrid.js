@@ -187,8 +187,11 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
       processed++;
     } catch (err) {
       logger.error(`[sendgrid-webhook] event ${ev.sg_event_id || '?'} (${ev.event}) failed: ${err.message}`);
-      // A rate review reconciliation that could not be recorded must be redelivered.
-      if (err && err.retryWebhook) retryNeeded = true;
+      // A rate review reconciliation that could not be recorded must be redelivered — and so
+      // must ANY failure to process a bounce / dropped / blocked event (a lookup that failed
+      // before the message was even classified would otherwise lose a failure the rate
+      // review letter's notice depends on). The event ledger dedupes what already committed.
+      if ((err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
     }
   }
   res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
