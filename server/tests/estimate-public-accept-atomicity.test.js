@@ -1149,6 +1149,69 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
     expect(JSON.stringify(res.data)).not.toContain('/pay/');
   });
 
+  // A deferred year whose charge failed after the first visit delivered its
+  // pay link: a retry of a card-lane accept still shows it (GitHub Codex #5567 r18).
+  test('a deferred year whose charge failed shows its pay link on a card-lane retry', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-paf-2',
+      token: 'tok-paf-2-x0123456789abc',
+      status: 'accepted',
+      customer_id: 'cust-9',
+      accepted_service_mode: 'recurring',
+      price_locked_at: new Date(),
+      estimate_data: { recurringCardLaneAccepted: true, prepayAutoChargeJob: { status: 'delivered_fallback', deferred_to_first_visit: true, invoice_id: 'inv-paf2' } },
+    });
+    resetStore(accepted);
+    db.__state.tables.annual_prepay_terms = [{ id: 'apt-paf2', source_estimate_id: 'est-paf-2', prepay_invoice_id: 'inv-paf2', created_at: new Date() }];
+    db.__state.tables.invoices = [{
+      id: 'inv-paf2', token: 'paf2tok', total: '684.00', status: 'sent', payer_id: null, created_at: new Date(),
+      title: 'Annual prepay', notes: 'Auto-generated from accepted estimate #est-paf-2. Annual prepay.',
+    }];
+    const res = await putAccept('tok-paf-2-x0123456789abc');
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.data)).toContain('/pay/paf2tok');
+  });
+
+  // GATE_PAF_PREPAY: a year whose charge waits for the first visit is not owed
+  // now — a retry must not hand out its /pay link, and says it is charged
+  // after that visit.
+  test('a prepay charge waiting for the first visit yields confirmed with no pay link', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-paf-1',
+      token: 'tok-paf-1-x0123456789abc',
+      status: 'accepted',
+      customer_id: 'cust-9',
+      accepted_service_mode: 'recurring',
+      price_locked_at: new Date(),
+      estimate_data: { prepayAutoChargeJob: { status: 'awaiting_first_visit', deferred_to_first_visit: true, invoice_id: 'inv-paf' } },
+    });
+    resetStore(accepted);
+    db.__state.tables.annual_prepay_terms = [{
+      id: 'apt-paf',
+      source_estimate_id: 'est-paf-1',
+      prepay_invoice_id: 'inv-paf',
+      created_at: new Date(),
+    }];
+    db.__state.tables.invoices = [{
+      id: 'inv-paf',
+      token: 'paftok',
+      total: '684.00',
+      status: 'draft',
+      payer_id: null,
+      created_at: new Date(),
+      title: 'Annual prepay',
+      notes: 'Auto-generated from accepted estimate #est-paf-1. Annual prepay.',
+    }];
+
+    const res = await putAccept('tok-paf-1-x0123456789abc');
+    expect(res.status).toBe(200);
+    expect(res.data.nextStep).toBe('confirmed');
+    expect(res.data.invoiceMode).toBe(false);
+    expect(res.data.prepayChargeStatus).toBe('after_first_visit');
+    expect(JSON.stringify(res.data)).not.toContain('paftok');
+    expect(JSON.stringify(res.data)).not.toContain('/pay/');
+  });
+
   test('a re-billed estimate (settled + collectible stamped invoices) surfaces the collectible one', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-rebill-1',
@@ -3854,5 +3917,208 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(updates[0].ids).toEqual(['anchor-1', 'member-2']);
     expect(updates[0].patch).toEqual({ first_application_invoice_id: 'inv-9' });
     expect(rows[0].pending_setup_fee).toBe(99);
+  });
+});
+
+// GATE_PAF_PREPAY (owner ruling 2026-09-30): an in-lane annual prepay accept
+// still quotes and binds the exact cents and method, but charges nothing at
+// approval — the durable job waits for the first performed visit. The tab
+// must attest the after-visit authorization it rendered; a charge-now accept
+// never records that text.
+describe('PAF prepay — annual prepay charged after the first visit', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const SAVED_RAIL_POLICY = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1' };
+  const SAVED_METHOD = {
+    stripePaymentMethodId: 'pm_saved_1', paymentMethodRowId: 'pm-row-1', methodType: 'card', funding: 'debit', last4: '4242', source: 'saved',
+  };
+  const ENV = { RECURRING_CARD_ON_FILE: 'true', GATE_PREPAY_CARD_AND_CHARGE: 'true', GATE_PAY_AFTER_FIRST_VISIT: 'true', GATE_PAF_PREPAY: 'true' };
+  const saved = {};
+  const spies = [];
+  let seq = 0;
+  let token;
+
+  beforeEach(() => {
+    for (const [k, v] of Object.entries(ENV)) { saved[k] = process.env[k]; process.env[k] = v; }
+    spies.push(jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue(SAVED_RAIL_POLICY));
+    spies.push(jest.spyOn(RecurringCards, 'resolvePrepayChargeMethod').mockResolvedValue(SAVED_METHOD));
+    const credit = require('../services/customer-credit');
+    spies.push(jest.spyOn(credit, 'getBalance').mockResolvedValue(0));
+    spies.push(jest.spyOn(credit, 'applyAccountCreditToInvoice').mockResolvedValue({ applied: 0 }));
+    const inspection = require('../services/inspection-credit');
+    spies.push(jest.spyOn(inspection, 'projectRedeemableOfferAmount').mockResolvedValue(0));
+    spies.push(jest.spyOn(inspection, 'redeemInspectionCreditForBooking').mockResolvedValue({ redeemed: 0, reason: 'no_open_offer' }));
+    const consents = require('../services/payment-method-consents');
+    spies.push(jest.spyOn(consents, 'hasConsentSnapshotForVariant').mockResolvedValue(false));
+    spies.push(jest.spyOn(consents, 'recordConsent').mockResolvedValue({ id: 'consent-1' }));
+    spies.push(jest.spyOn(require('../services/stripe'), 'chargeInvoiceWithSavedCard').mockResolvedValue({ ok: true }));
+    seq += 1;
+    token = `tok-paf-prepay-${seq}-x0123456789`;
+    resetStore(recurringPestEstimate({
+      id: 'est-paf-prepay',
+      token,
+      monthly_total: 79,
+      annual_total: 948,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, visitsPerYear: 12 }] },
+          oneTime: { items: [], membershipFee: 99 },
+          results: { mq: [{ n: 'Monthly', key: 'monthly12', v: 12, mo: 79, ann: 948, pv: 79 }] },
+        },
+      }),
+    }));
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-prepay-hold', source_estimate_id: 'est-paf-prepay',
+      customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    }];
+    EstimateConverter.convertEstimate.mockImplementation(async () => {
+      // The minted year invoice carries exactly the quoted base, as the real
+      // converter's shared total does.
+      const total = db.__state.quotedBase;
+      db.__state.tables.invoices.push({ id: 'inv-prepay-1', token: 'prepaytok', total: String(total), credit_applied: 0, status: 'draft', payer_id: null });
+      return { customerId: 'cust-1', tier: 'Bronze', draftInvoiceId: 'inv-prepay-1', draftInvoiceAmount: total, draftInvoicePayUrl: '/pay/prepaytok', firstScheduledServiceId: 'ss-prepay-hold' };
+    });
+    db.__state.slotDate = scheduledDate;
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    while (spies.length) spies.pop().mockRestore();
+    EstimateConverter.convertEstimate.mockReset();
+  });
+
+  // The tab attests the consent text version it rendered (#5434's bundle
+  // fence on the in-lane prepay quote).
+  const accept = (body = {}) => putAccept(token, {
+    paymentMethodPreference: 'prepay_annual',
+    slotId: `${db.__state.slotDate}_09-00_unassigned`,
+    consentTextVersion: require('../services/payment-method-consent-text').CONSENT_VERSION,
+    ...body,
+  });
+  const quoteOf = async () => {
+    const res = await accept();
+    expect(res.status).toBe(402);
+    db.__state.quotedBase = res.data.quote.base;
+    return res.data.quote;
+  };
+  const jobOf = () => {
+    const data = storedEstimate().estimate_data;
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    const job = parsed.prepayAutoChargeJob;
+    return typeof job === 'string' ? JSON.parse(job) : job;
+  };
+
+  test('the quote says the charge runs after the first visit and names the after-visit authorization', async () => {
+    const quote = await quoteOf();
+    expect(quote).toMatchObject({ chargedAfterFirstVisit: true, consentVariant: 'after_visit_prepay', consentRequired: true });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('an acknowledgement without the after-visit attestation is re-quoted, nothing committed', async () => {
+    const quote = await quoteOf();
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+    });
+    expect(res.status).toBe(402);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('the attested accept books the year, charges nothing, sends no pay link, and leaves the job waiting', async () => {
+    const quote = await quoteOf();
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+      prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.prepayChargeStatus).toBe('after_first_visit');
+    expect(res.data.nextStep).toBe('confirmed');
+    expect(JSON.stringify(res.data)).not.toContain('/pay/');
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(jobOf()).toMatchObject({
+      status: 'awaiting_first_visit', deferred_to_first_visit: true, invoice_id: 'inv-prepay-1', authorized_total_cents: quote.totalCents,
+      authorized_invoice_total_cents: Math.round(Number(db.__state.quotedBase) * 100),
+      consent_variant_version: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+    });
+    expect(require('../services/payment-method-consents').recordConsent)
+      .toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_prepay', paymentMethodId: 'pm-row-1' }));
+  });
+
+  test('a tab attesting older after-visit copy reloads (409 CONSENT_VERSION_STALE), nothing committed (GitHub Codex #5567 r11)', async () => {
+    const quote = await quoteOf();
+    for (const version of [undefined, 'v12_2026-09-30']) {
+      const res = await accept({
+        prepayChargeAcknowledgedTotalCents: quote.totalCents,
+        prepayChargeAcknowledgedMethodKey: quote.methodKey,
+        prepayChargeConsentAccepted: true,
+        prepayChargeConsentVariant: 'after_visit_prepay',
+        ...(version ? { prepayChargeConsentVersion: version } : {}),
+      });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VERSION_STALE');
+    }
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a year minted to a third-party payer never waits for a first visit: the normal job routes it to the payer', async () => {
+    EstimateConverter.convertEstimate.mockImplementation(async () => {
+      const total = db.__state.quotedBase;
+      db.__state.tables.invoices.push({ id: 'inv-prepay-1', token: 'prepaytok', total: String(total), credit_applied: 0, status: 'draft', payer_id: 'payer-1', customer_id: 'cust-1' });
+      return { customerId: 'cust-1', tier: 'Bronze', draftInvoiceId: 'inv-prepay-1', draftInvoiceAmount: total, draftInvoicePayUrl: '/pay/prepaytok', firstScheduledServiceId: 'ss-prepay-hold' };
+    });
+    const quote = await quoteOf();
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+      prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.prepayChargeStatus).not.toBe('after_first_visit');
+    expect(jobOf()).not.toHaveProperty('deferred_to_first_visit');
+    expect(jobOf()).toMatchObject({ after_visit_attested: true });
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('with the item gate off the accept still charges at approval under the charge-now authorization', async () => {
+    delete process.env.GATE_PAF_PREPAY;
+    const quote = await quoteOf();
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+    });
+    expect(res.status).toBe(200);
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    expect(jobOf()).not.toHaveProperty('deferred_to_first_visit');
+    expect(require('../services/payment-method-consents').recordConsent)
+      .toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'prepay_card' }));
+  });
+
+  test('with the item gate off the quote is unchanged and an after-visit attestation is refused', async () => {
+    delete process.env.GATE_PAF_PREPAY;
+    const quote = await quoteOf();
+    expect(quote).not.toHaveProperty('chargedAfterFirstVisit');
+    expect(quote).not.toHaveProperty('consentVariant');
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+      prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+    });
+    expect(res.status).toBe(402);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });

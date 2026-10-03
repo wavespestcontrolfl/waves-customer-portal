@@ -6820,6 +6820,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       return loc ? { id: loc.id, name: loc.name, reviewUrl: loc.googleReviewUrl } : null;
     })(),
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
+    // The customer's own first name for greetings. customerName is the
+    // composed full name, which for a customer with a blank first_name (the
+    // call booker's last-name-only path) is just the surname; greeting sites
+    // prefer this field (null = no first name, greet "there"). Display of the
+    // full name is unchanged.
+    customerFirstName: String(service.first_name || '').trim() || null,
     // Tips from your tech (GATE_TECH_TIPS, live report only — the client
     // renders it under the Visit Timeline). Null unless the gate is on and
     // the record froze tips. The technician's first name comes from the

@@ -164,6 +164,19 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'invoice', amount: 33.33, grossAmount: 33.33, conflictStampedPrice: false });
   });
 
+  // GATE_PAF_PREPAY: a deferred annual prepay customer stays per_application
+  // until the year is paid; completion holds the unstamped visit, so the
+  // sheet must not promise a charge.
+  test('per-application: an unstamped visit held by a deferred annual prepay predicts no charge', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
+    expect(predictCompletionBilling({ ...perApp, prepaidMethod: null, annualCoverageValidated: true }))
+      .toEqual({ kind: 'covered_annual', amount: null, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, prepaidMethod: null, annualCoverageValidated: null }))
+      .toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, payerBilled: true, prepaidMethod: null, annualCoverageValidated: true }).kind)
+      .not.toBe('covered_annual');
+  });
+
   test('per-application: auto-charge with a live saved method, invoice without one', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
     expect(predictCompletionBilling(perApp)).toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });

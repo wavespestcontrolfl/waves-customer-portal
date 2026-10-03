@@ -12,6 +12,7 @@ const {
   pestPressureConfigAllowsTechnicianRating,
   completionOwnershipError,
   techTipsGateOn,
+  backfillCompletionPlan,
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
@@ -836,6 +837,57 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
     const facts = await readLaneFacts({ note, laneKey });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/standard-wording { values, activityScore, backfill, products }
+// — the standard sentences a typed visit's customer report keeps when its
+// record says nothing was found (GATE_STANDARD_WORDING_PREVIEW; owner mockup
+// approval 2026-10-03), for the office form to show where it greys out
+// Generate AI report. Built as /complete builds the report, from the visit's
+// own form (its completion profile, never the client's) and the form's own
+// fields only (visit-typed-facts.js currentValuesFor), dated as /complete
+// dates it (today, or the scheduled day for a backdated closeout); answers
+// { available: true, headline, body } only when the report keeps its standard
+// wording, else { available: false }. A technician reads only their own
+// current visit; admins office-wide (the completion routes' rule). Read-only.
+router.post('/:serviceId/standard-wording', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').standardWordingPreviewLive()) return res.json({ available: false });
+    const raw = req.body?.values;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return res.status(400).json({ error: 'values must be an object' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!profile?.findingsType) return res.json({ available: false });
+    const { currentValuesFor } = require('../services/visit-typed-facts');
+    const { standardWordingPreview } = require('../services/service-report/standard-wording-preview');
+    const score = req.body?.activityScore;
+    const backfillPlan = backfillCompletionPlan({
+      backfill: req.body?.backfill === true,
+      scheduledDate: svc.scheduled_date,
+      role: req.techRole,
+    });
+    const wording = await standardWordingPreview(db, {
+      svc,
+      serviceDate: backfillPlan.active ? backfillPlan.serviceDate : etDateString(),
+      profile,
+      values: currentValuesFor(profile.findingsType, raw),
+      techScore: Number.isInteger(score) ? score : null,
+      products: req.body?.products,
+    });
+    return res.json(wording ? { available: true, ...wording } : { available: false });
+  } catch (err) { return next(err); }
 });
 
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
@@ -4469,6 +4521,64 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill
+// body: { sheet: 'pest_reservice', transcript }
+// Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL): maps what
+// the tech said onto the sheet's own choices through one structured model call
+// and answers the VALIDATED fill — products {productId, amount, unit,
+// sameAsLast, method, heard}, visit fields, customerNote, officeNote and
+// `unclear` items (anything off-list, ambiguous or unspoken; each becomes a
+// Check chip on the sheet). It only suggests: nothing is saved or completed, and
+// the transcript is never stored or logged (the audit line carries ids and
+// counts only; the notes never reach the report writer from here). A visit whose
+// live completion profile is not pest_re_service is refused (409). A model
+// failure is 502 and the client keeps the typed sheet. See
+// services/fast-complete-voice-fill.js.
+// Paid model call: cap per staff bucket (same key as every other paid-LLM
+// limiter, rate-limit-key.js), like the dictation upload.
+const fastCompleteVoiceFillLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many voice fills. Keep typing for now.' },
+});
+// Dark gate ahead of the limiter: while off, a request is the 404 and never
+// spends the staff bucket.
+const fastCompleteVoiceFillGate = (req, res, next) => (
+  require('../config/feature-gates').fastCompleteVoiceFillLive() ? next() : res.status(404).json({ enabled: false })
+);
+router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillGate, fastCompleteVoiceFillLimiter, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').fastCompleteVoiceFillLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const { sheet, transcript } = req.body || {};
+    if (sheet !== VoiceFill.SHEET) {
+      return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
+    }
+    const trimmed = typeof transcript === 'string' ? transcript.trim() : '';
+    if (!trimmed || trimmed.length > VoiceFill.MAX_TRANSCRIPT_CHARS) {
+      return res.status(400).json({ error: `transcript must be 1-${VoiceFill.MAX_TRANSCRIPT_CHARS} characters`, code: 'bad_transcript' });
+    }
+    const result = await VoiceFill.voiceFill({ serviceId: req.params.serviceId, sheet, transcript: trimmed });
+    if (!result.ok) {
+      if (result.reason === 'model_failed' || result.reason === 'catalog_unavailable') {
+        logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=false`);
+        return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
+      }
+      const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible'
+        ? 409 : recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const counts = VoiceFill.fillCounts(result.fill);
+    // Audit line: who/what/size only — never the transcript or either note.
+    logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
+    return res.json({ enabled: true, ...result.fill });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -6477,7 +6587,12 @@ router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.approveRecap(req.params.serviceId, { approvedBy: recapVideoActor(req) });
-    if (!result.ok) return res.status(409).json({ error: result.error });
+    if (!result.ok) {
+      const error = result.error === 'rerendering_greeting'
+        ? 'This recap is being re-rendered with an updated greeting. Approve it again when it is ready.'
+        : result.error;
+      return res.status(409).json({ error, code: result.error });
+    }
     // Approval sends the customer the watch-recap link (best-effort, idempotent).
     // sendRecap is idempotent + retryable, so a failed send leaves the recap
     // approved-but-unsent and the client surfaces a retry (sent:false).
