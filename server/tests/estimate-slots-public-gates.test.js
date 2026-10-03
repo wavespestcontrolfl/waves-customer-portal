@@ -653,7 +653,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
       const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
       const mint = route.indexOf('createRecurringCardSetupIntentForEstimate(estimate)');
-      const exit = route.indexOf('return sendRecheckedIntentResponse(res, estimate, 200, {');
+      const exit = route.indexOf('return await sendRecheckedIntentResponse(res, estimate, 200, {');
       expect(mint).toBeGreaterThan(0);
       expect(exit).toBeGreaterThan(mint);
       expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId }');
@@ -687,6 +687,10 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       // The re-check helper appears twice: its definition and its one call, inside the exit.
       expect(src.split('postMintRefusal(estimate)').length - 1).toBe(2);
       expect(src.split('sendRecheckedIntentResponse(res, estimate').length - 1).toBeGreaterThanOrEqual(6);
+      // Every exit is AWAITED inside the route's try: a rejected final recheck must reach the catch (Express 4
+      // does not handle a rejected handler promise, so an un-awaited return would hang the request).
+      expect(src).not.toMatch(/return sendRecheckedIntentResponse\(/);
+      expect(src.split('return await sendRecheckedIntentResponse(').length - 1).toBeGreaterThanOrEqual(6);
     });
 
     test('card-hold-intent: a candidate that turned contradictory AFTER the early check is parked even on the exemption path (no exemptReason leaks, alert + release)', async () => {

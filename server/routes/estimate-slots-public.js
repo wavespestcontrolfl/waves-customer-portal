@@ -867,7 +867,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {
-      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
+      return await sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
     // Auto-satisfy (spec §3.2: existing customers with a saved card are
@@ -894,7 +894,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     }
     // Outside the try above: a failure of the exit's own re-check must not be read as "the saved-method lookup failed".
     if (savedMethodCovers) {
-      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
+      return await sendRecheckedIntentResponse(res, estimate, 409, { error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
     }
 
     const intent = await createCardHoldSetupIntentForEstimate(estimate);
@@ -909,7 +909,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
     // payment-step-abandoned follow-up stage.
     await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.CARD_HOLD, intent.setupIntentId);
-    return sendRecheckedIntentResponse(res, estimate, 200, {
+    return await sendRecheckedIntentResponse(res, estimate, 200, {
       success: true,
       clientSecret: intent.clientSecret,
       setupIntentId: intent.setupIntentId,
@@ -999,7 +999,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
         treatAsOneTime,
         billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
       })) {
-        return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' }, { retireSetupIntentId: replaceSetupIntentId || null });
+        return await sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' }, { retireSetupIntentId: replaceSetupIntentId || null });
       }
     }
     const membership = await buildEstimateMembershipContext(estimate);
@@ -1011,7 +1011,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {
-      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null }, { retireSetupIntentId: replaceSetupIntentId || null });
+      return await sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null }, { retireSetupIntentId: replaceSetupIntentId || null });
     }
 
     // "Use a different payment method": the customer already saved one on
@@ -1066,7 +1066,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
     // payment-step-abandoned follow-up stage.
     await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.RECURRING_CARD, intent.setupIntentId);
-    return sendRecheckedIntentResponse(res, estimate, 200, {
+    return await sendRecheckedIntentResponse(res, estimate, 200, {
       success: true,
       clientSecret: intent.clientSecret,
       setupIntentId: intent.setupIntentId,
