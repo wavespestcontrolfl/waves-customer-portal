@@ -38,7 +38,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
 const { isKeypadCode, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
-const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -195,20 +195,28 @@ const NO_NEIGHBORHOOD = {
   body: { error: 'This stop has no neighborhood yet. Ask the office to set one.', code: 'no_neighborhood' },
 };
 
-// The neighborhood of a visit this login may act on, its row locked (the
-// lock every writer of a neighborhood's entries takes first). A technician
-// reaches only a visit they can see on their own route: assigned to them,
-// not dead, inside the access window. The visit row itself is read without a
-// lock: nothing here writes it, and invoice settlement takes it NOWAIT.
-// Returns { neighborhoodId } or { status, body }.
+// The neighborhood of a visit this login may act on. Lock order: the visit
+// row, then the neighborhood row (the lock every writer of a neighborhood's
+// entries takes first). A technician reaches only a visit they can see on
+// their own route (assigned to them, not dead, inside the access window,
+// completed allowed), re-checked under the visit's row lock so a reassignment
+// or cancellation landing meanwhile cannot let a former assignee's write
+// through. Returns { neighborhoodId } or { status, body }.
 async function lockVisitNeighborhood(trx, req, visitId) {
-  if (!UUID_RE.test(visitId)) return { status: 404, body: { error: 'Visit not found' } };
-  const visit = await technicianCurrentVisitFilter(req, trx('scheduled_services').where('scheduled_services.id', visitId))
-    .first(
+  const notFound = { status: 404, body: { error: 'Visit not found' } };
+  if (!UUID_RE.test(visitId)) return notFound;
+  let visit;
+  try {
+    visit = await lockOwnedLiveVisit(trx, req, visitId, [
       'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_zip',
-    );
-  if (!visit) return { status: 404, body: { error: 'Visit not found' } };
+    ], { allowCompleted: true });
+  } catch (err) {
+    // Not theirs and not there read the same: a technician learns nothing
+    // about another route's visits.
+    if (err && (err.status === 403 || err.status === 404)) return notFound;
+    throw err;
+  }
   const neighborhoodId = (await visitNeighborhoodIds(trx, [visit])).get(visit.id);
   if (!neighborhoodId) return NO_NEIGHBORHOOD;
   const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
