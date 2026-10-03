@@ -3287,6 +3287,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
             });
           })
           .first('id');
+        if (alreadyFlagged) {
+          // The nightly check already flagged this occurrence, so no second row is
+          // logged — but a person has now called it a no-show: that confirms the
+          // existing row (reopening one settled earlier) and its card.
+          await require('../services/not-closed-out').confirmMiss({
+            logId: alreadyFlagged.id, confirmedBy: req.technicianId, reopen: true,
+          });
+        }
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
           // the occurrence as it stood under the transition's row lock
@@ -4596,6 +4604,80 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
     const counts = VoiceFill.fillCounts(result.fill);
     logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} chars=${result.chars} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
     return res.json({ enabled: true, ...result.fill });
+  } catch (err) { next(err); }
+});
+
+// The report flow's two voice-fill reads (any untyped pest visit, a regular visit
+// or a re-service; same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence).
+// Each is a paid call with its own staff bucket, so a long note dictated in pieces
+// never spends the product read's budget.
+const voiceFillBucket = (max, error) => require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error },
+});
+const voiceFillDictationLimiter = voiceFillBucket(40, 'Too many dictation clips. Type your notes for now.');
+const voiceFillProductsLimiter = voiceFillBucket(30, 'Too many voice fills. Pick the products by hand for now.');
+// A refusal about the visit itself (gone, not a pest visit the sheet takes).
+const voiceFillVisitRefusal = (res, reason) => res
+  .status(reason === 'not_pest_re_service' || reason === 'not_eligible' ? 409 : recapStatusForReason(reason))
+  .json({ error: reason, code: reason });
+const VOICE_FILL_VISIT_REASONS = new Set(['not_found', 'not_pest_re_service', 'not_eligible']);
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/dictation
+// multipart: audio (the recording), duration_seconds
+// The report flow's note mic (owner ruling 2026-10-03, "always our transcriber"):
+// the clip is transcribed with the sheet's own product names and the words come
+// back for the note box, where the tech reads and edits them. Nothing is stored;
+// the audit line carries sizes only. Silence answers { text: '' }.
+router.post('/:serviceId/fast-complete/voice-fill/dictation', fastCompleteVoiceFillGate, voiceFillDictationLimiter, voiceFillClipOwner, voiceFillClipParse, async (req, res, next) => {
+  try {
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
+    const { baseType, filename } = dictationClipType(req.file);
+    if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
+    const result = await VoiceFill.transcribeVisitClip({
+      serviceId: req.params.serviceId, audio: req.file.buffer, mimeType: baseType, filename,
+      durationSeconds: Number(req.body?.duration_seconds) || 0,
+    });
+    const size = `bytes=${req.file.buffer.length} type=${baseType}`;
+    if (!result.ok) {
+      logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=false reason=${result.reason}`);
+      if (result.reason === 'nothing_heard') return res.json({ text: '' });
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.status(502).json({ error: 'Transcription unavailable. Type your notes instead.' });
+    }
+    logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=true chars=${result.text.length}`);
+    return res.json({ text: result.text });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/products
+// body: { note }
+// The report flow's product read: the products the note names, each with the
+// amount, unit and way the tech said for it and the words it stood on, checked by
+// the same rules as the re-service sheet's fill (services/fast-complete-voice-fill.js
+// voiceProductsFromNote). It only suggests: the sheet shows each as an unconfirmed
+// row the tech confirms, and writes nothing here. A failed read answers
+// { available: true, status: 'failed' }, never an error, so the sheet carries on
+// with the products picked by hand. The audit line carries counts only.
+router.post('/:serviceId/fast-complete/voice-fill/products', fastCompleteVoiceFillGate, voiceFillProductsLimiter, async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text', code: 'bad_note' });
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const result = await VoiceFill.voiceProductsFromNote({ serviceId: req.params.serviceId, note });
+    if (!result.ok) {
+      logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${note.trim().length} ok=false reason=${result.reason}`);
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.json({ enabled: true, available: true, status: 'failed', reason: result.reason, products: [], unclear: [] });
+    }
+    logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${result.chars} ok=true products=${result.fill.products.length} unclear=${result.fill.unclear.length}`);
+    return res.json({ enabled: true, available: true, status: 'read', products: result.fill.products, unclear: result.fill.unclear });
   } catch (err) { next(err); }
 });
 
@@ -6422,6 +6504,53 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/admin/dispatch/not-closed-out/:logId/confirm-miss — "This was a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/dismiss      — "Not a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/done         — "Done" (a confirmed miss was dealt with).
+//
+// The person decisions on a "Visit not closed out" Action Queue card
+// (services/not-closed-out.js; owner 2026-10-03). :logId is the reschedule_log
+// row the card's payload carries. Rebooking and closing the visit out go through
+// the existing job tools, which settle the row themselves. No customer contact.
+const NOT_CLOSED_OUT_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.post('/not-closed-out/:logId/confirm-miss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').confirmMiss({ logId: req.params.logId, confirmedBy: req.technicianId });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/confirm-miss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/dismiss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const note = typeof req.body?.note === 'string' ? req.body.note : null;
+    const result = await require('../services/not-closed-out').dismiss({ logId: req.params.logId, dismissedBy: req.technicianId, note });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/dismiss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/done', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').markHandled({ logId: req.params.logId, handledBy: req.technicianId });
+    if (!result.ok && result.reason === 'not_confirmed') {
+      return res.status(409).json({ error: 'Say whether this was a miss first.', code: 'NOT_CONFIRMED' });
+    }
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/done] failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/alerts/resolve-all — clear current Action Queue.
 //
 // Bulk version of PATCH /alerts/:id/resolve. It marks every unresolved
@@ -6538,7 +6667,13 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert } = require('../services/dispatch-alerts');
+    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+    // A decision-only card (a visit not closed out) is settled by its own
+    // decision routes; a bare resolve would close it and record nothing.
+    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
+    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
     const row = await resolveAlert({
       id: req.params.id,
       resolvedBy: req.technicianId,

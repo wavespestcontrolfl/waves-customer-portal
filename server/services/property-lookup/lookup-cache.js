@@ -353,6 +353,29 @@ const EVIDENCE_BACKFILL_KEYS = {
   _commercialSuiteSize: 'TRUE',
 };
 
+// The profile as it may be stored. Google's Places policies allow storing a
+// place ID and nothing else, and Places only suggests (owner 2026-10-03), so
+// what a Places listing put on the profile for one screen is dropped: the
+// listed business, the suggested scope, the flags resting on the listing
+// and, while staff have not answered, the open question itself. What staff
+// answered (the decision and the answer) is theirs and stays.
+function enrichedSnapshotForStorage(enriched) {
+  if (!enriched || typeof enriched !== 'object') return enriched;
+  if (!('businessIdentity' in enriched) && !('serviceScopeDecision' in enriched)) return enriched;
+  const {
+    businessIdentity: _identity, serviceScopeSuggestion: _suggestion, ...rest
+  } = enriched;
+  if (!rest.occupancyAnswer) {
+    delete rest.serviceScopeDecision;
+    delete rest.serviceScopeQuestion;
+    delete rest.occupancyAnswer;
+  }
+  if (Array.isArray(rest.fieldVerifyFlags)) {
+    rest.fieldVerifyFlags = rest.fieldVerifyFlags.filter((f) => f?.source !== 'google_places');
+  }
+  return rest;
+}
+
 async function attachEvidenceToCachedLookup(address, key, value) {
   if (isCacheDisabled() || !value) return;
   const guard = EVIDENCE_BACKFILL_KEYS[key];
@@ -566,7 +589,7 @@ async function saveLookup(address, result, attemptId) {
       ai_analysis: JSON.stringify(result.aiAnalysis),
       parcel: record._parcel ? JSON.stringify(record._parcel) : null,
       providers: JSON.stringify(record._aiProviders || []),
-      enriched_snapshot: result.enriched ? JSON.stringify(result.enriched) : null,
+      enriched_snapshot: result.enriched ? JSON.stringify(enrichedSnapshotForStorage(result.enriched)) : null,
       lookup_ms: Number.isFinite(result.meta?.lookupMs) ? result.meta.lookupMs : null,
       // Freshness anchor for the override-vs-data comparison in
       // getCachedLookup (updated_at also moves on override saves).
@@ -700,6 +723,7 @@ module.exports = {
   attachAddressAuditToCachedLookup,
   attachCommercialSuiteSizeToCachedLookup,
   saveLookup,
+  enrichedSnapshotForStorage,
   markLookupAttempt,
   claimLiveRefresh,
   sweepStalePendingAttempts,

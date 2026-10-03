@@ -174,30 +174,53 @@ function requireAiContentReport(req, res, next) {
 router.post('/chat/report', requireAiContentReport, chatReportLimiter, authenticate, async (req, res, next) => {
   try {
     const customerId = req.customerId;
-    const messageContent = String(req.body?.messageContent || '').trim().slice(0, 4000);
-    if (!messageContent) return res.status(400).json({ error: 'messageContent required' });
-    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
+    const { messageContent: rawMessage = '', sessionId: rawSession = '', conversationId: rawConversation = '' } = Object.assign({}, req.body);
+    const messageContent = String(rawMessage || '').trim().slice(0, 4000);
+    const sessionId = String(rawSession || '').trim().slice(0, 120);
+    const conversationId = String(rawConversation || '').trim().toLowerCase();
+    const validationError = [
+      [!messageContent, 'messageContent required'],
+      [!/^(?:|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(conversationId), 'Invalid conversationId'],
+    ].find(([failed]) => failed)?.[1];
+    if (validationError) return res.status(400).json({ error: validationError });
 
     let conversation = null;
     if (sessionId) {
-      conversation = await db('agent_sessions')
-        .where({
-          channel: 'portal_chat',
-          channel_identifier: sessionId,
-          customer_id: customerId,
-        })
-        .orderBy('created_at', 'desc')
-        .first();
+      const scope = {
+        channel: 'portal_chat',
+        channel_identifier: sessionId,
+        customer_id: customerId,
+      };
+      if (conversationId) {
+        scope.id = conversationId;
+        conversation = await db('agent_sessions').where(scope).orderBy('created_at', 'desc').first();
+      } else {
+        const conversations = db('agent_sessions').where(scope);
+        conversation = await conversations.clone()
+          .whereExists(function reportedAssistantMessage() {
+            this.select(db.raw('1'))
+              .from('agent_messages as reported_message')
+              .whereRaw('reported_message.conversation_id = agent_sessions.id')
+              .where({
+                'reported_message.role': 'assistant',
+                'reported_message.content': messageContent,
+              });
+          })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (!conversation) conversation = await conversations.orderBy('created_at', 'desc').first();
+      }
       // Keep a second check at the trust boundary even though the SQL is
       // scoped; it protects against future query refactors and mock/adapter
       // mistakes returning a row outside the predicate.
-      if (conversation && String(conversation.customer_id) !== String(customerId)) {
-        conversation = null;
-      }
+      conversation = [conversation].find((row) => row
+        && Object.entries(scope).every(([key, value]) => String(row[key]) === String(value)));
     }
 
+    const linkedConversationId = conversation?.id || null;
+
     const [escalation] = await db('ai_escalations').insert({
-      conversation_id: conversation?.id || null,
+      conversation_id: linkedConversationId,
       customer_id: customerId,
       reason: 'reported_ai_content',
       summary: 'Customer flagged an AI chat reply as inappropriate via the portal Report button.',
@@ -206,6 +229,7 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
       priority: 'normal',
       status: 'pending',
     }).returning('id');
+    const escalationId = [escalation?.id, escalation].find(Boolean) || null;
 
     // Best-effort mirror into the operator inbox — that's the queue the admin
     // agent hub actually loads (ai_escalations has no admin UI consumer yet).
@@ -214,7 +238,7 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
       if (await tableExists('operator_inbox_items')) {
         await db('operator_inbox_items').insert({
           source: 'ai_report',
-          source_id: String(escalation?.id || escalation),
+          source_id: String(escalationId),
           customer_id: customerId,
           channel: 'portal_chat',
           status: 'open',
@@ -227,8 +251,8 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
           // so truncation here could hide the objectionable part from review.
           summary: messageContent,
           metadata: JSON.stringify({
-            escalation_id: escalation?.id || escalation || null,
-            conversation_id: conversation?.id || null,
+            escalation_id: escalationId,
+            conversation_id: linkedConversationId,
             // Full reply for the Agent Ops disclosure — the card compacts
             // summary to 220 chars, and nothing else links the full text.
             reported_content: messageContent,

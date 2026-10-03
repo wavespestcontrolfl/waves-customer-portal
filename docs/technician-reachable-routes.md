@@ -59,6 +59,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/dispatch/:serviceId/completion-status` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/default-products` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/dictation` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/products` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/lane-facts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/lawn-reservice/fast-context` | admin-dispatch |
 | PATCH | `/api/admin/dispatch/:serviceId/note` | admin-dispatch |
@@ -296,6 +298,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/notifications/:id/dismiss` | tech-notifications |
 | POST | `/api/tech/notifications/:id/read` | tech-notifications |
 | POST | `/api/tech/notifications/:id/undo-stop` | tech-notifications |
+| POST | `/api/tech/notifications/dismiss-batch` | tech-notifications |
+| GET | `/api/tech/notifications/schedule-changes` | tech-notifications |
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
