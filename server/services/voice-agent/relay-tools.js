@@ -519,9 +519,12 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
     // street. booking's matcher accepts a submitted unit against a unitless
     // record (its legacy rule for /book); here the visit would be written at
     // the stored address WITHOUT the unit, so it goes to a person instead.
-    const UNIT_RE = /(?:\b(?:apt|apartment|unit|suite|ste|lot|bldg|building|trailer|trlr|rm|room)\b\.?\s*#?\s*[\w-]+|#\s*[\w-]+)/i;
-    const accountHasUnit = Boolean(text(customer.address_line2)) || UNIT_RE.test(String(customer.address_line1 || ''));
-    if (UNIT_RE.test(stated.street) && !accountHasUnit) return { kind: 'other_property' };
+    // The unit is read with the address normalizer's own parser, the one
+    // that matcher peels units with, so the two can never disagree on what
+    // a unit is.
+    const { splitStreetLineUnit } = require('../../utils/address-normalizer');
+    const accountHasUnit = Boolean(text(customer.address_line2)) || Boolean(splitStreetLineUnit(customer.address_line1 || '').unit);
+    if (splitStreetLineUnit(stated.street).unit && !accountHasUnit) return { kind: 'other_property' };
     return require('../../routes/booking')._internals.addressMatchesCustomer(customer, stated.street, stated.zip)
       ? account : { kind: 'other_property' };
   } catch (err) {

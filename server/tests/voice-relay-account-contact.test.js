@@ -14,11 +14,14 @@ jest.mock('../routes/booking', () => ({
     loadBookingConfig: jest.fn(),
     resolveBookingCoords: jest.fn(),
     buildBookingAvailability: jest.fn(),
-    // Stand-in for booking's own matcher (covered by its own suites): same
-    // street once "Street"/"St" are folded, and no ZIP disagreement.
+    // Booking's REAL matcher semantics, rebuilt from the same normalizer
+    // (requiring the whole route file here would load the booking router):
+    // same street once units are peeled and the line is normalized, and no
+    // ZIP disagreement. Like the real one, a submitted unit matches a
+    // unitless record.
     addressMatchesCustomer: (customer, address, zip) => {
-      // …and, like the real one, a submitted unit still matches a unitless record.
-      const norm = (v) => String(v || '').toLowerCase().replace(/\s*(apt\s*\w+|#\s*\w+)$/g, '').replace(/\bstreet\b/g, 'st').replace(/[^a-z0-9]/g, '');
+      const { splitStreetLineUnit } = jest.requireActual('../utils/address-normalizer');
+      const norm = (v) => splitStreetLineUnit(String(v || '')).street.toLowerCase().replace(/\bstreet\b/g, 'st').replace(/[^a-z0-9]/g, '');
       return norm(customer.address_line1) === norm(address) && (!zip || !customer.zip || String(zip) === String(customer.zip));
     },
     MAX_BOOKING_HORIZON_DAYS: 90,
@@ -87,6 +90,8 @@ describe('a known customer\'s open times are for the property on their account',
     [{ address_line1: '9 Rental Road', city: 'Bradenton', zip: '34205' }],
     [{ address_line1: '12 Test Street Apt B' }], // a unit the account does not hold is another premise
     [{ address_line1: '12 Test Street #4', zip: '34205' }],
+    [{ address_line1: '12 Test Street Space 4' }],
+    [{ address_line1: '12 Test Street Floor 2' }],
     [{ address_line1: '12 Test Street', city: 'Venice' }],
     [{ city: 'Venice' }],
     [{ zip: '34285' }],
