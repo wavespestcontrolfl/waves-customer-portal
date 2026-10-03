@@ -313,6 +313,17 @@ describe('RelayConversation — explicit end after capture', () => {
       await own._runCaptureFloor('hangup');
       expect(bell).not.toHaveBeenCalled();
       expect(createLeadFromExtraction).toHaveBeenCalled();
+
+      // A bell that could not be raised falls back to the lead, after it resolved.
+      createLeadFromExtraction.mockClear();
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-fallback' });
+      bell.mockResolvedValue(false);
+      const fallback = new RelayConversation({ callSid: 'CA-floor-fallback', from: '+19415550133', send: jest.fn() });
+      fallback._callerVerified = true;
+      fallback._callerContext = { customer: { id: 'c-1111', first_name: 'Pat' }, tier: 'redacted' };
+      await fallback._runCaptureFloor('hangup');
+      expect(bell).toHaveBeenCalledTimes(1);
+      expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
       bell.mockRestore();
     });
 

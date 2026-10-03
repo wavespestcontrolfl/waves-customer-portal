@@ -642,7 +642,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
  * (the caller is recognised, not verified). Returns true only when a bell row
  * exists; never throws.
  */
-async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid }) {
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [] }) {
   if (!customerId || !callSid) return false;
   try {
     const db = require('../../models/db');
@@ -652,19 +652,22 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
     const result = await raiseAdminAlert('alert', {
       area: 'Comms',
       action: name
-        ? fitAction('Comms', name, [(n) => `call back a contact on ${n}'s account`, (n) => `call back ${n}'s contact`])
-        : 'call back a contact on a customer account',
+        ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
+        : 'follow up with a contact on a customer account',
       why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: String(customerId) },
-      doneWhen: 'contact_called_back',
+      doneWhen: 'contact_followed_up',
       who: 'person',
     }, {
       bell: true,
       dedupeKey: `sandy-contact-followup:${callSid}`,
-      // The full summary and the number to call, read from "Show full text".
-      detail: `Call back ${callbackPhone || 'the number this call came from'}. ${String(summary || '').trim()}`.trim(),
+      // The number to reach them on, the whole summary, and anything they
+      // asked about HOW to be contacted (a channel, a do-not-contact request)
+      // — read from "Show full text".
+      detail: [`Their number: ${callbackPhone || 'the number this call came from'}.`, String(summary || '').trim(), ...notes]
+        .filter(Boolean).join(' '),
       metadata: { customerId, callSid, callbackPhone: callbackPhone || null, source: 'voice_relay_contact_followup' },
     });
     return Boolean(result?.id) && !result.suppressed;

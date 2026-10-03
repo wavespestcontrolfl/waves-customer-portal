@@ -1292,14 +1292,25 @@ async function executeTool(name, input = {}, ctx = {}) {
           callbackPhone: callerPhone,
           summary: [extracted.call_summary, extracted.requested_service, extracted.preferred_date_time].filter(Boolean).join(' — '),
           callSid: ctx.callSid || null,
+          // What the lead row would have carried about HOW to reach them: the
+          // office must see a channel preference or a do-not-contact request,
+          // and whether the text opt-out already landed.
+          notes: [
+            extracted.preferred_contact_method ? `Prefers: ${extracted.preferred_contact_method}.` : null,
+            scrubbedField(extracted.contact_preference) ? `Contact preference: “${scrubbedField(extracted.contact_preference)}”.` : null,
+            extracted.do_not_contact_request
+              ? `Asked not to be contacted — ${smsSuppressionApplied ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
+              : null,
+          ].filter(Boolean),
         });
         if (belled) {
           if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
           if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
           return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
-            + 'lead was created and none should be. The office has their callback number and your summary. Tell '
+            + 'lead was created and none should be. The office has their number and your summary. Tell '
             + 'the caller a Waves team member will follow up with THEM, and do not say a new request or appointment '
-            + 'was created. Never promise that Waves will contact the account holder.';
+            + 'was created. Never promise that Waves will contact the account holder.'
+            + (smsSuppressionApplied ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
         }
       }
       // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE LEAD COMMITS. Writing it

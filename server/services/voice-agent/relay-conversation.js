@@ -4403,26 +4403,26 @@ class RelayConversation {
     // ⭐ A RECOGNISED CONTACT'S HANGUP RINGS THE OFFICE, NEVER A LEAD (owner
     // ruling 2026-10-03; the same rule capture_lead applies). The verified
     // number sits in a secondary slot on a customer's account, so the floor's
-    // artifact is the bell tied to that customer. A bell that cannot be raised
-    // falls through to the lead below, so the call still ends with something.
+    // artifact is the bell tied to that customer. Only a bell that RESOLVED as
+    // not raised starts the lead write below — never a race between the two —
+    // and the whole chain rides the same close deadline as the lead write.
     const recognised = this._callerContext;
-    if (this._callerVerified === true && recognised && recognised.customer && recognised.customer.id && recognised.tier !== 'full') {
-      const belled = await require('./relay-alert').alertOfficeContactFollowUp({
-        customerId: recognised.customer.id,
-        callbackPhone: callerPhone,
-        // The caller's own words lead the bell (the lead-shaped floor summary
-        // opens with boilerplate a person would read first).
-        summary: callerTurns.length ? scrubForStorage(callerTurns.join(' | ')).slice(0, 600) : 'Hung up before saying what they needed',
-        callSid: this.callSid,
-      });
-      if (belled) {
-        this.leadCaptured = true;
-        this._noLeadCreated = true;
-        logger.info(`[voice-relay] capture-floor rang the office for a recognised contact (no lead) callSid=${maskSid(this.callSid)} reason=${reason || 'end'}`);
-        return;
-      }
-    }
-    const write = createLeadFromExtraction(
+    const recognisedContact = this._callerVerified === true && recognised && recognised.customer && recognised.customer.id && recognised.tier !== 'full';
+    const ringOffice = () => require('./relay-alert').alertOfficeContactFollowUp({
+      customerId: recognised.customer.id,
+      callbackPhone: callerPhone,
+      // The caller's own words lead the bell (the lead-shaped floor summary
+      // opens with boilerplate a person would read first).
+      summary: callerTurns.length ? scrubForStorage(callerTurns.join(' | ')).slice(0, 600) : 'Hung up before saying what they needed',
+      callSid: this.callSid,
+    }).then((belled) => {
+      if (!belled) return false;
+      this.leadCaptured = true;
+      this._noLeadCreated = true;
+      logger.info(`[voice-relay] capture-floor rang the office for a recognised contact (no lead) callSid=${maskSid(this.callSid)} reason=${reason || 'end'}`);
+      return true;
+    });
+    const writeLead = () => createLeadFromExtraction(
       {
         call_summary: floorSummary(callerTurns, scrubForStorage),
         requested_service: null,
@@ -4489,6 +4489,7 @@ class RelayConversation {
         return false;
       },
     );
+    const write = recognisedContact ? ringOffice().then((belled) => belled || writeLead()) : writeLead();
     // Keep the eventual outcome observable after the close deadline.
     const landed = await withTimeout(write, WRITE_DRAIN_TIMEOUT_MS, null);
     this._captureFloorWrite = landed === null ? write : null;

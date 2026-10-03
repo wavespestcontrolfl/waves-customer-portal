@@ -233,6 +233,19 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(fixture.fixtures.toolResponses.capture_lead).toEqual({ text: out, capture: { leadCreated: false } });
   });
 
+  test('a channel preference and a do-not-contact request reach the office with the bell', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Wants the office to email, not call.', preferred_contact_method: 'email',
+      contact_preference: 'please stop calling me', do_not_contact_request: true,
+    }, recognised());
+    const { notes } = bell.mock.calls[0][0];
+    expect(notes).toEqual(expect.arrayContaining([
+      'Prefers: email.',
+      'Contact preference: “please stop calling me”.',
+      expect.stringMatching(/^Asked not to be contacted/),
+    ]));
+  });
+
   test('a card number in the summary is scrubbed before it reaches the bell', async () => {
     await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
     expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);
