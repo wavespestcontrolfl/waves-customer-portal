@@ -41,7 +41,7 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
       workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer',
     }).returning('id');
     const [offer] = await trx('sms_offers').insert({
-      agent_decision_id: decision.id || decision, phone_last10: PHONE.slice(-10), customer_id: customerId,
+      agent_decision_id: decision.id || decision, phone_last10: PHONE.slice(-10), waves_line: '9415550199', customer_id: customerId,
       kind: 'book_new', service_key: 'pest_control',
       slots: JSON.stringify([{ date_label: 'Tuesday, March 6', window_label: '10:00 AM - 12:00 PM', date: '2040-03-06', start: '10:00', end: '12:00' }]),
       sent_at: new Date('2040-03-01T13:00:00Z'), expires_at: new Date('2040-03-03T13:00:00Z'), status: 'open',
@@ -97,7 +97,7 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const closedAt = new Date('2040-03-01T14:59:30Z');
     await trx('sms_offers').where({ id: offerId }).update({ status: 'superseded', closed_at: closedAt });
     await trx('sms_offers').insert({
-      agent_decision_id: later.id || later, phone_last10: PHONE.slice(-10), customer_id: customerId, kind: 'book_new', service_key: 'pest_control',
+      agent_decision_id: later.id || later, phone_last10: PHONE.slice(-10), waves_line: '9415550199', customer_id: customerId, kind: 'book_new', service_key: 'pest_control',
       slots: JSON.stringify([{ date_label: 'Friday, March 9', window_label: '1:00 PM - 3:00 PM', date: '2040-03-09', start: '13:00', end: '15:00' }]),
       sent_at: closedAt, expires_at: new Date('2040-03-03T14:59:30Z'), status: 'open',
     });
@@ -146,7 +146,7 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const { customerId, offerId, inboundId } = await seed(trx);
     const [d2] = await trx('agent_decisions').insert({ workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer 2' }).returning('id');
     const [o2] = await trx('sms_offers').insert({
-      agent_decision_id: d2.id || d2, phone_last10: PHONE.slice(-10), customer_id: customerId, kind: 'book_estimate',
+      agent_decision_id: d2.id || d2, phone_last10: PHONE.slice(-10), waves_line: '9415550199', customer_id: customerId, kind: 'book_estimate',
       slots: '[]', sent_at: new Date('2040-03-01T13:00:00Z'), expires_at: new Date('2040-03-03T13:00:00Z'), status: 'open',
     }).returning('id');
     await trx('sms_offer_decisions').insert({ sms_offer_id: offerId, inbound_sms_log_id: inboundId, outcome: 'no_action' });
@@ -160,6 +160,16 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const run = jest.fn(async () => ({ recorded: true }));
     await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
     expect(run).not.toHaveBeenCalled();
+  }));
+
+  test('a reply to one Waves line never sees an offer sent from another line', () => inTrx(async (trx) => {
+    const { offerId, inboundId, customerId } = await seed(trx);
+    await trx('sms_offers').where({ id: offerId }).update({ waves_line: '9415550188' });
+    const customer = await trx('customers').where({ id: customerId }).first();
+    const llm = { dispatch: jest.fn() };
+    await expect(decide.runShadowDecision({ customer, inboundBody: 'Tuesday works', inboundSmsLogId: inboundId, fromPhone: PHONE, now: NOW, dbh: trx, llm }))
+      .resolves.toMatchObject({ recorded: false, reason: 'no_open_offer' });
+    expect(llm.dispatch).not.toHaveBeenCalled();
   }));
 
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {

@@ -29,6 +29,7 @@ test('gate on: the ledger gets the decision, the approved body and the destinati
   await recordSmsOfferAfterSend(input, sendInput, accepted);
   expect(mockRecord).toHaveBeenCalledWith({
     agentDecisionId: 'd-1', outgoingBody: input.body, providerMessageId: SID, to: '+19415550100', sentAt: new Date('2026-10-02T15:00:00.000Z'),
+    preSendVisitSnapshot: null,
   });
 });
 
@@ -52,4 +53,11 @@ test('gate on: a ledger failure never reaches the send result', async () => {
   process.env[GATE] = 'true';
   mockRecord.mockRejectedValue(new Error('boom'));
   await expect(recordSmsOfferAfterSend(input, sendInput, accepted)).resolves.toBeUndefined();
+});
+
+test('the visit snapshot read before the send is handed to the ledger', async () => {
+  process.env[GATE] = 'true';
+  const snap = { scheduled_service_id: 'v-1', date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', pre_send: true };
+  await recordSmsOfferAfterSend(input, sendInput, accepted, snap);
+  expect(mockRecord.mock.calls[0][0].preSendVisitSnapshot).toBe(snap);
 });

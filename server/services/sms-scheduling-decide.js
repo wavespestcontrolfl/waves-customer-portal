@@ -43,14 +43,6 @@ const CONFIDENCE = Object.freeze(['high', 'medium', 'low']);
 const MOVABLE_STATUSES = Object.freeze(['pending', 'confirmed']);
 const THREAD_ROWS = 10;
 const DECIDE_TIMEOUT_MS = 30000;
-// A visit snapshot taken this long after the send (a backfilled offer) may
-// already miss a change: it proves nothing about the visit at send time.
-const SNAPSHOT_MAX_LAG_MS = 10 * 60000;
-// The snapshot is read just after the send, so an edit landing between the
-// two would be in it as if the offer described it. Any change to the visit
-// row from shortly before the send until the snapshot was read is treated as
-// possibly that race: refused, whatever the change was.
-const SEND_RACE_MARGIN_MS = 2 * 60000;
 const KIND_LABEL = Object.freeze({ move_visit: 'to move their upcoming visit', book_estimate: 'to book their quoted service', book_new: 'to book a new visit' });
 
 // Structured output: the model can only answer in this shape. slot_number is
@@ -205,15 +197,13 @@ function slotStarted(slot, now) {
 
 // The visit must be exactly as it stood when the offer went out: any move
 // (including the admin Edit appointment form, which logs none) or status
-// change since means the offer no longer describes it. The snapshot is read
-// just after the send, so any change to the row from shortly before the send
-// until that read may be in it: refused, whatever the change was.
+// change since means the offer no longer describes it. Only a snapshot the
+// send step read BEFORE the provider handoff counts (sms-offers.js
+// captureOfferVisitSnapshot); a backfilled offer's post-send read could
+// already hold an edit, so it proves nothing.
 function snapshotRefusal(offer, visit) {
   const snapshot = parseJson(offer.visit_snapshot, null);
-  if (!snapshot?.taken_at) return 'no_visit_snapshot';
-  const sentMs = new Date(offer.sent_at).getTime();
-  if (new Date(snapshot.taken_at).getTime() - sentMs > SNAPSHOT_MAX_LAG_MS) return 'visit_snapshot_late';
-  if (!snapshot.updated_at || new Date(snapshot.updated_at).getTime() >= sentMs - SEND_RACE_MARGIN_MS) return 'visit_changed_near_send';
+  if (snapshot?.pre_send !== true) return 'no_pre_send_snapshot';
   return sameVisitShape(visitShape(snapshot), visitShape(visit)) ? null : 'visit_changed_since_offer';
 }
 
@@ -311,9 +301,11 @@ function evaluateDecision(c) {
  * time). A replacement offer sent while this text waited for its decision is
  * not the one the customer answered.
  */
-async function findOffersAsOf(dbh, phone, at) {
+async function findOffersAsOf(dbh, phone, line, at) {
   return dbh('sms_offers')
-    .where({ phone_last10: phone })
+    // The same customer can hold offers from two Waves lines; a reply reaches
+    // one of them, and only that line's offers are its to answer.
+    .where({ phone_last10: phone, waves_line: line })
     .where('sent_at', '<=', at)
     .where('expires_at', '>', at)
     .where((q) => q.where('status', 'open')
@@ -323,9 +315,11 @@ async function findOffersAsOf(dbh, phone, at) {
 
 // The thread up to (never after) the text being decided: a later message the
 // customer sent must not colour the decision on this one.
-async function loadThread(dbh, phone, inbound) {
+async function loadThread(dbh, phone, line, inbound) {
   const rows = await dbh('sms_log')
     .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN from_phone ELSE to_phone END")} = ?`, [phone])
+    // This Waves line's conversation only.
+    .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN to_phone ELSE from_phone END")} = ?`, [line])
     .whereIn('status', ['received', 'queued', 'sent', 'delivered'])
     .whereNot('id', inbound.id)
     .where('created_at', '<=', inbound.created_at)
@@ -352,14 +346,16 @@ async function recheckSlot(dbh, offer, slot) {
 
 // Phase 1: what stood when the text arrived. null when there is nothing to decide.
 async function loadDecideContext(dbh, phone, inboundSmsLogId) {
-  const inbound = await dbh('sms_log').where({ id: inboundSmsLogId }).first('id', 'created_at');
+  const inbound = await dbh('sms_log').where({ id: inboundSmsLogId }).first('id', 'created_at', 'to_phone');
   if (!inbound) return { skip: 'inbound_missing' };
-  const rows = await findOffersAsOf(dbh, phone, inbound.created_at);
+  const line = inbound.to_phone ? phoneIdentityKey(String(inbound.to_phone)) : null;
+  if (!line) return { skip: 'no_waves_line' };
+  const rows = await findOffersAsOf(dbh, phone, line, inbound.created_at);
   if (!rows?.length) return { skip: 'no_open_offer' };
   const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id');
   if (already) return { skip: 'already_decided', id: already.id };
   const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
-  const thread = await loadThread(dbh, phone, inbound);
+  const thread = await loadThread(dbh, phone, line, inbound);
   // The visits the offers would move, read before the model answers.
   const visitsBefore = new Map();
   for (const o of offers) {
@@ -445,7 +441,13 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     // every other check already passed (a confirm-only accept writes nothing).
     if (verdict.outcome === 'would_move' || verdict.outcome === 'would_book') {
       const slotStillOpen = await slotRecheck(dbh, offer, slot).catch(() => ({ ok: false, reason: 'recheck_failed' }));
-      verdict = evaluateDecision({ ...base, slotStillOpen });
+      // Every fence again, read after the last wait: the visit (against its
+      // pre-model read), the portal request, the reminder offer, a logged move.
+      const fresh = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore, now });
+      verdict = evaluateDecision({
+        ...base, slotStillOpen, customer: fresh.who, visitAfter: fresh.visitAfter, movedSinceOffer: fresh.movedSinceOffer,
+        portalRequestOpen: fresh.portalRequestOpen, reminderOfferPending: fresh.reminderOfferPending,
+      });
     }
     return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict });
   } catch (err) {
@@ -536,6 +538,7 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .whereExists(function offered() {
           this.select(dbh.raw('1')).from('sms_offers as o')
             .whereRaw(`o.phone_last10 = ${phoneIdentitySql('sl.from_phone')}`)
+            .whereRaw(`o.waves_line = ${phoneIdentitySql('sl.to_phone')}`)
             .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
             .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
         })

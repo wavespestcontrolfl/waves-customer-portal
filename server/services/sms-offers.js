@@ -198,6 +198,30 @@ function hhmmOf(value) {
   return m ? `${String(Number(m[1])).padStart(2, '0')}:${m[2]}` : null;
 }
 
+function lineIdentity(value) {
+  return value ? require('../utils/phone').phoneIdentityKey(String(value)) : null;
+}
+
+/**
+ * Read by the send step just BEFORE the provider handoff, for a decision send
+ * whose offer is a visit move: the visit as the offer describes it. Gate off,
+ * or anything else, null. Never throws (a miss only means the decide step will
+ * refuse that offer's accepts).
+ */
+async function captureOfferVisitSnapshot({ agentDecisionId, dbh = db } = {}) {
+  if (!agentDecisionId || !offerLedgerLive()) return null;
+  try {
+    const decision = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
+    const lookup = parseJson(decision?.input_snapshot)?.open_times_snapshot?.lookup || {};
+    const source = lookup.source || (lookup.scheduledServiceId ? 'scheduler' : null);
+    if (source !== 'scheduler' || !lookup.scheduledServiceId) return null;
+    return { ...(await visitSnapshot(dbh, lookup.scheduledServiceId)), scheduled_service_id: lookup.scheduledServiceId, pre_send: true };
+  } catch (err) {
+    logger.warn(`[sms-offers] pre-send visit snapshot skipped: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return null;
+  }
+}
+
 /** The visit's date, window and status now; null fields when it is gone. */
 async function visitSnapshot(dbh, scheduledServiceId) {
   const v = await dbh('scheduled_services').where({ id: scheduledServiceId })
@@ -216,7 +240,7 @@ async function visitSnapshot(dbh, scheduledServiceId) {
  * offer to the same phone for the same kind supersedes the open one. Returns
  * { recorded: true, id } or { recorded: false, reason } and never throws.
  */
-async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, sentAt = new Date(), ignoreLinks = false, dbh = db } = {}) {
+async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, from = null, sentAt = new Date(), ignoreLinks = false, preSendVisitSnapshot = null, dbh = db } = {}) {
   if (!offerLedgerLive()) return { recorded: false, reason: 'gate_off' };
   if (!agentDecisionId) return { recorded: false, reason: 'no_decision' };
   try {
@@ -226,11 +250,21 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
     const built = buildOfferRow({ decision, outgoingBody, providerMessageId, to, sentAt, ignoreLinks });
     if (built.skip) return { recorded: false, reason: built.skip };
     const { row } = built;
-    // A visit-move offer keeps the visit as it stood now, so the decide step
-    // can tell whether it moved or changed status after the offer went out.
+    // A visit-move offer keeps the visit as it stood just BEFORE the send
+    // (read by the send step, captureOfferVisitSnapshot), so the decide step
+    // can tell whether it changed after the offer went out. With none (a
+    // backfilled offer), the visit is read now and marked post-send: the
+    // decide step never treats that as the offered state.
     if (row.kind === 'move_visit' && row.scheduled_service_id) {
-      row.visit_snapshot = JSON.stringify(await visitSnapshot(dbh, row.scheduled_service_id));
+      const snap = preSendVisitSnapshot?.scheduled_service_id === row.scheduled_service_id
+        ? preSendVisitSnapshot
+        : { ...(await visitSnapshot(dbh, row.scheduled_service_id)), post_send: true };
+      row.visit_snapshot = JSON.stringify(snap);
     }
+    // The Waves line the text went out on: the caller's, else the send's own
+    // log row (written by the provider step during the send).
+    row.waves_line = lineIdentity(from)
+      || lineIdentity((providerMessageId ? await dbh('sms_log').where({ twilio_sid: providerMessageId }).first('from_phone') : null)?.from_phone);
     return await dbh.transaction(async (trx) => {
       // Offers to one phone are serialised so "one open offer per phone and
       // kind" holds without a failed insert.
@@ -301,7 +335,7 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
       rows = await query
         .orderBy([{ column: 'sl.created_at', order: 'asc' }, { column: 'sl.id', order: 'asc' }])
         .limit(batchSize)
-        .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
+        .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.from_phone', 'sl.created_at');
     } catch (err) {
       logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
       return { scanned: seen.size, recorded, errors: errors + 1, skipped: seen.size - recorded - errors, reason: 'error' };
@@ -315,6 +349,7 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
         outgoingBody: r.message_body,
         providerMessageId: r.twilio_sid,
         to: r.to_phone,
+        from: r.from_phone,
         sentAt: new Date(r.created_at),
         ignoreLinks: true,
         dbh,
@@ -338,6 +373,7 @@ module.exports = {
   phoneLast10,
   withoutLinks,
   visitSnapshot,
+  captureOfferVisitSnapshot,
   OFFER_TTL_HOURS,
   KIND_BY_SOURCE,
 };

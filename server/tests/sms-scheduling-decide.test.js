@@ -20,8 +20,8 @@ const SLOTS = [
 const OFFER = {
   id: 'offer-1', kind: 'move_visit', customer_id: 'cust-1', scheduled_service_id: VISIT_ID,
   estimate_id: null, service_key: null, slots: SLOTS, sent_at: new Date('2026-10-02T13:00:00Z'),
-  // The visit as it stood when the offer went out (taken a second after the send).
-  visit_snapshot: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', updated_at: '2026-09-28T12:00:00Z', taken_at: '2026-10-02T13:00:01Z' },
+  // The visit as it stood just before the offer went out (read by the send step).
+  visit_snapshot: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', scheduled_service_id: VISIT_ID, pre_send: true },
 };
 const VISIT = {
   id: VISIT_ID, customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-05',
@@ -99,14 +99,13 @@ describe('evaluateDecision', () => {
     ['slot_no_longer_open', { slotStillOpen: { ok: false, reason: 'open_times_no_longer_offered' } }],
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, date: '2026-10-04' } } }],
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, status: 'pending' } } }],
-    ['no_visit_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
+    ['no_pre_send_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
     ['portal_request_open', { portalRequestOpen: true }],
     ['reminder_offer_pending', { reminderOfferPending: true }],
     ['slot_off_hour', { offer: { ...OFFER, slots: [{ ...SLOTS[0], start: '09:30' }] } }],
     ['ambiguous_slot', { ambiguousSlot: true }],
-    ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: '2026-10-02T13:00:00.500Z' } } }],
-    ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: null } } }],
-    ['visit_snapshot_late', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, taken_at: '2026-10-02T14:00:00Z' } } }],
+    // A backfilled offer's snapshot was read after the send: it proves nothing.
+    ['no_pre_send_snapshot', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, pre_send: undefined, post_send: true } } }],
     ['visit_changed_during_decide', { visitAfter: { ...VISIT, scheduled_date: '2026-10-09' } }],
     ['visit_changed_during_decide', { visitAfter: null }],
   ])('%s refuses the accept to staff', (reason, over) => {
@@ -191,7 +190,7 @@ describe('runShadowDecision', () => {
 
   test('gate on: a phone with no open offer costs one read and no model call', async () => {
     process.env[GATE] = 'true';
-    const builder = { where: () => builder, first: async () => ({ id: 'in-1', created_at: NOW }), orderBy: () => Promise.resolve([]) };
+    const builder = { where: () => builder, first: async () => ({ id: 'in-1', created_at: NOW, to_phone: '+19415550199' }), orderBy: () => Promise.resolve([]) };
     const dbh = jest.fn(() => builder);
     const llm = { dispatch: jest.fn() };
     await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', now: NOW, dbh, llm }))
