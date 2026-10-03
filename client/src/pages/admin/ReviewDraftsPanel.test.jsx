@@ -36,7 +36,8 @@ describe("Tech-voice review texts panel", () => {
         { id: 3, customerName: "Ana P", step: 1, channel: "sms", outcome: "fallback", reason: "fact_check_unavailable", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T17:00:00Z" },
       ],
       paymentHolds: [
-        { sequenceId: "s-9", customerName: "Rosa M", step: 1, reason: "payment_hold", nextEvalAt: "2026-10-03T14:00:00Z", detail: { hold: "overdue_invoice", heldSince: "2026-10-02T14:00:00Z" } },
+        { sequenceId: "s-8", customerName: "Email Hold", step: 2, channel: "email", reason: "payment_hold", nextEvalAt: "2026-10-03T14:00:00Z", detail: { hold: "payment_reminder_recent" } },
+        { sequenceId: "s-9", customerName: "Rosa M", step: 1, channel: "sms", reason: "payment_hold", nextEvalAt: "2026-10-03T14:00:00Z", detail: { hold: "overdue_invoice", heldSince: "2026-10-02T14:00:00Z" } },
       ],
     }));
     vi.stubGlobal("fetch", fetch);
@@ -52,6 +53,8 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.getAllByText(/not sent yet/)).toHaveLength(1);
     expect(screen.getByText("Held for payment")).toBeInTheDocument();
     expect(screen.getByText(/overdue bill since/)).toBeInTheDocument();
+    expect(screen.getByText(/· email 3 ·/)).toBeInTheDocument();
+    expect(screen.getByText(/· text 2 ·/)).toBeInTheDocument();
   });
 
   it("says when nothing has been drafted yet", async () => {

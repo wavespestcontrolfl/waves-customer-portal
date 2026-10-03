@@ -61,12 +61,15 @@ function parseJson(value) {
 // nothing.
 function sentAtFor(row, sent) {
   if (row.outcome === 'held') return null;
-  const sameStep = sent.filter((r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel);
+  // Only a request made at or after this outcome: an earlier send of the
+  // same step (even one with the same words) is not this draft going out.
+  const after = sent
+    .filter((r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel
+      && new Date(r.created_at) >= new Date(row.created_at))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const match = row.outcome === 'drafted'
-    ? sameStep.find((r) => r.custom_body === row.body)
-    : sameStep
-      .filter((r) => !/_tech_voice$/.test(String(r.template_key || '')) && new Date(r.created_at) >= new Date(row.created_at))
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
+    ? after.find((r) => r.custom_body === row.body)
+    : after.find((r) => !/_tech_voice$/.test(String(r.template_key || '')));
   return match ? (match.sms_sent_at || match.sent_at) : null;
 }
 
@@ -101,7 +104,7 @@ async function listRecent({ days = 14, database = db } = {}) {
     .whereRaw("s.decision->>'reason' = ANY(?)", [PAYMENT_HOLD_REASONS])
     .orderBy('s.updated_at', 'desc')
     .limit(MAX_ROWS)
-    .select('s.id', 's.customer_id', 's.status', 's.current_step', 's.decision', 's.updated_at', 'c.first_name', 'c.last_name');
+    .select('s.id', 's.customer_id', 's.status', 's.current_step', 's.plan', 's.decision', 's.updated_at', 'c.first_name', 'c.last_name');
   return {
     days: span,
     drafts: rows.map((r) => {
@@ -127,14 +130,17 @@ async function listRecent({ days = 14, database = db } = {}) {
     }),
     paymentHolds: holds.map((h) => {
       const decision = parseJson(h.decision) || {};
+      const step = Number.isInteger(decision.detail?.step) ? decision.detail.step : h.current_step;
       return {
         sequenceId: h.id,
         customerId: h.customer_id,
         customerName: customerName(h),
         status: h.status,
         // The step the hold recorded: a dropped step has already advanced
-        // current_step past it.
-        step: Number.isInteger(decision.detail?.step) ? decision.detail.step : h.current_step,
+        // current_step past it. Its channel is the plan's (an email step is
+        // held like a text).
+        step,
+        channel: (parseJson(h.plan) || [])[step]?.channel === 'email' ? 'email' : 'sms',
         reason: decision.reason,
         detail: decision.detail || null,
         nextEvalAt: decision.nextEvalAt || null,

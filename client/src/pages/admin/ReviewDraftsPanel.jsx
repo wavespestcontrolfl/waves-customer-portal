@@ -179,7 +179,7 @@ export default function ReviewDraftsPanel() {
             {holds.map((h) => (
               <li key={h.sequenceId}>
                 <span className="text-zinc-900">{h.customerName || "Customer"}</span>
-                {` · text ${Number(h.step) + 1} · `}
+                {` · ${stepLabel(h.step, h.channel).toLowerCase()} · `}
                 {h.reason === "ask_dropped_payment_hold" ? "dropped after 3 days" : `waiting, next check ${fmtET(h.nextEvalAt)}`}
                 {h.detail?.hold ? ` · ${HOLD_TEXT[h.detail.hold] || String(h.detail.hold).replace(/_/g, " ")}` : ""}
                 {h.detail?.heldSince ? ` since ${fmtET(h.detail.heldSince)}` : ""}

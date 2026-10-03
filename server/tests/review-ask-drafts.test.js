@@ -109,6 +109,12 @@ describe('listRecent: whether THIS outcome went out', () => {
     ], [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: 'Tuesday draft', template_key: 'soft_reminder_tech_voice', created_at: new Date('2026-10-03T15:01:00Z'), sms_sent_at: new Date('2026-10-03T15:02:00Z') }]);
     expect(out.drafts.find((d) => d.id === 1).sentAt).toBeNull();
     expect(out.drafts.find((d) => d.id === 2).sentAt).toEqual(new Date('2026-10-03T15:02:00Z'));
+    // a retry that drafts the same words as an EARLIER sent request is not sent by that older request
+    const again = await listWith(
+      [draftRow({ id: 6, outcome: 'drafted', body: 'Same words', created_at: new Date('2026-10-04T15:00:00Z') })],
+      [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: 'Same words', template_key: 'soft_reminder_tech_voice', created_at: new Date('2026-10-03T15:01:00Z'), sms_sent_at: new Date('2026-10-03T15:02:00Z') }],
+    );
+    expect(again.drafts[0].sentAt).toBeNull();
   });
 
   test('a fallback is sent once a fixed-text request of its step goes out after it; a held repeat never is', async () => {
@@ -129,9 +135,15 @@ test('a dropped payment hold names the step it held, not the step the cadence mo
     const q = {};
     for (const m of ['leftJoin', 'where', 'whereIn', 'whereRaw', 'orWhereNotNull', 'whereNotNull', 'orderBy', 'limit']) q[m] = () => q;
     q.select = async () => (name === 'review_sequences'
-      ? [{ id: 's-1', customer_id: 'c', status: 'completed', current_step: 1, updated_at: new Date(), decision: { reason: 'ask_dropped_payment_hold', detail: { step: 0, hold: 'overdue_invoice' } } }]
+      ? [
+        { id: 's-1', customer_id: 'c', status: 'completed', current_step: 1, plan: JSON.stringify([{ day: 0, channel: 'sms' }]), updated_at: new Date(), decision: { reason: 'ask_dropped_payment_hold', detail: { step: 0, hold: 'overdue_invoice' } } },
+        { id: 's-2', customer_id: 'c', status: 'active', current_step: 2, plan: [{ day: 0, channel: 'sms' }, { day: 4, channel: 'sms' }, { day: 7, channel: 'email' }], updated_at: new Date(), decision: { reason: 'payment_hold', detail: { step: 2, hold: 'overdue_invoice' } } },
+      ]
       : []);
     return q;
   });
-  expect((await Drafts.listRecent({ database })).paymentHolds[0]).toMatchObject({ step: 0, reason: 'ask_dropped_payment_hold' });
+  const holds = (await Drafts.listRecent({ database })).paymentHolds;
+  expect(holds[0]).toMatchObject({ step: 0, channel: 'sms', reason: 'ask_dropped_payment_hold' });
+  // an email step held for payment is labelled an email
+  expect(holds[1]).toMatchObject({ step: 2, channel: 'email' });
 });
