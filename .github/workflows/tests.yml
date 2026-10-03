@@ -389,7 +389,7 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
+        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
 
   client:
     runs-on: ubuntu-latest
@@ -504,6 +504,10 @@ jobs:
           retention-days: 7
 
   native-android:
+    # `gates` reports whether the PR touches anything the mobile builds read
+    # (see its "mobile scope" step). Fails open: no answer still builds.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -527,6 +531,10 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
   native-ios:
+    # Same scope rule as native-android. macOS runners are capped at 5 at a
+    # time on this plan, so a build nobody needs is the costliest one to queue.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -568,12 +576,35 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      mobile: ${{ steps.mobile-scope.outputs.mobile }}
     steps:
       - uses: actions/checkout@v4
         with:
           # Full history: the changed-files lint diffs against the PR base's
           # merge-base, which a shallow clone doesn't have.
           fetch-depth: 0
+      - name: Mobile scope (do the iOS and Android builds need to run?)
+        id: mobile-scope
+        # The mobile builds compile the web app (client/, shared/, the root
+        # lockfile) and scripts/mobile. They are skipped ONLY when every file
+        # the PR changes sits in a directory they never read. Anything else
+        # builds both apps: another directory, a root file, an empty or
+        # unreadable diff, a push to main. First step after checkout, so the
+        # answer exists even when a later gate fails.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          mobile=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if files=$(git diff --name-only "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
+              if ! printf '%s\n' "$files" | grep -qvE '^(server|docs|\.claude|ops|video|wiki)/'; then
+                mobile=false
+              fi
+            fi
+          fi
+          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "mobile builds needed: $mobile"
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
