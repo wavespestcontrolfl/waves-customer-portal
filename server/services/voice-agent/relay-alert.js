@@ -649,7 +649,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
  * re-proven under the call row's lock in the SAME transaction as the write
  * (claimOwnedElsewhere — the lead, booking and re-service writers' fence).
  */
-async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null }) {
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null, doNotContact = false }) {
   if (!customerId || !callSid) return false;
   try {
     const db = require('../../models/db');
@@ -664,14 +664,20 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       }
       return raiseAdminAlert('alert', {
       area: 'Comms',
-      action: name
-        ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
-        : 'follow up with a contact on a customer account',
+      // A contact who asked NOT to be contacted is a request to review, never
+      // an instruction to reach out.
+      action: doNotContact
+        ? (name
+          ? fitAction('Comms', name, [(n) => `review a no-contact request on ${n}'s account`, (n) => `review ${n}'s no-contact request`])
+          : 'review a no-contact request on a customer account')
+        : (name
+          ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
+          : 'follow up with a contact on a customer account'),
       why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: String(customerId) },
-      doneWhen: 'contact_followed_up',
+      doneWhen: doNotContact ? 'contact_request_reviewed' : 'contact_followed_up',
       who: 'person',
     }, {
       bell: true,

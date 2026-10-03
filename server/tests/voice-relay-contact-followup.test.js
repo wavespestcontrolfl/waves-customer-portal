@@ -46,6 +46,14 @@ test('rings one needs-you bell on the customer, naming them and quoting the requ
   expect(opts.detail).toBe('Their number: +19415550133. Asked what time the lawn tech is coming today. Wants a call back.');
 });
 
+test('a no-contact request rings as a review, never as outreach', async () => {
+  await call({ doNotContact: true });
+  const [, headline, , opts] = notifyAdmin.mock.calls[0];
+  expect(headline).toBe("Comms — review a no-contact request on Pat Example's account");
+  expect(headline.length).toBeLessThanOrEqual(60);
+  expect(opts.metadata.doneWhen).toBe('contact_request_reviewed');
+});
+
 test('how they asked to be contacted is kept for the office', async () => {
   await call({ notes: ['Prefers: email.', 'Asked not to be contacted — check before reaching out.'] });
   expect(notifyAdmin.mock.calls[0][3].detail).toMatch(/Prefers: email\. Asked not to be contacted — check before reaching out\.$/);

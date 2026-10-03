@@ -58,7 +58,7 @@ function nonEmptyFields(fields) {
   return Object.keys(kept).length ? kept : null;
 }
 
-const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing'];
+const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing', 'request'];
 const CONTACT_FOLLOWUP_FLAGS = ['doNotContact', 'textsStopped', 'estimateAsked'];
 
 /** The contact follow-up bag in its stored shape: known keys only, or null when empty. */

@@ -1077,6 +1077,25 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     expect(ctx.block).not.toContain(CONTACT_SLOT_CUSTOMER.first_name);
   });
 
+  // …and not through the free-text history either: a prior-call gist or a
+  // recent text can read "Hi Pat, …", which no scrubber removes. Even a
+  // carrier-attested contact-slot caller gets neither; they are not fetched.
+  test('an ATTESTED contact-slot caller gets no prior-call gist and no recent-texts turn', async () => {
+    primeDb({ customers: [CONTACT_SLOT_CUSTOMER], callLog: [VERIFIED_CALL_ROW] });
+    loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+    summarizePriorCall.mockResolvedValue({ hoursAgo: 2, summary: 'Pat asked about ants', captured: {} });
+    const history = require('../services/voice-agent/relay-history');
+    const texts = jest.spyOn(history, 'buildRecentTextsBlock').mockResolvedValue('RECENT TEXTS: Hi Pat, your tech is on the way');
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
+    expect(ctx.tier).toBe('redacted');
+    expect(ctx.attested).toBe(true);
+    expect(summarizePriorCall).not.toHaveBeenCalled();
+    expect(texts).not.toHaveBeenCalled();
+    expect(ctx.dataTurn).toBeNull();
+    expect(ctx.block).not.toContain('Pat');
+    texts.mockRestore();
+  });
+
   test('a contact-slot ANI cannot reach a full-tier surface', async () => {
     primeDb({ records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }] });
     const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'redacted' });

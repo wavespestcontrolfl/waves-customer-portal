@@ -287,6 +287,24 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(bell.mock.calls[2][0].callbackPhone).toBe('+19415550188');
   });
 
+  test('a later capture that only adds a detail keeps the original reason for the call', async () => {
+    let bag = {};
+    const ctx = recognised({ getContactFollowUp: () => ({ ...bag }), noteContactFollowUp: (f) => { bag = { ...f }; } });
+    await executeTool('capture_lead', { call_summary: 'Asked what time the lawn tech is coming today.' }, ctx);
+    await executeTool('capture_lead', { call_summary: 'Added their email.', email: 'robin@example.com' }, ctx);
+    const second = bell.mock.calls[1][0];
+    expect(second.summary).toBe('Asked what time the lawn tech is coming today.');
+    expect(second.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email.']));
+  });
+
+  test('a no-contact request is passed on for review — Sandy is never told to promise a follow-up', async () => {
+    const out = await executeTool('capture_lead', { call_summary: 'Do not contact me again.', do_not_contact_request: true }, recognised());
+    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ doNotContact: true }));
+    expect(out).toMatch(/asked NOT to be contacted/);
+    expect(out).toMatch(/Do NOT promise that anyone will call, text or email them/);
+    expect(out).not.toMatch(/follow up with THEM/);
+  });
+
   test('a card number in the summary is scrubbed before it reaches the bell', async () => {
     await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
     expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);

@@ -1302,12 +1302,19 @@ async function executeTool(name, input = {}, ctx = {}) {
           doNotContact: extracted.do_not_contact_request === true || prior.doNotContact === true,
           textsStopped: smsSuppressionApplied || prior.textsStopped === true,
           estimateAsked: estimateRequested || prior.estimateAsked === true,
+          // WHY they called is the FIRST capture's summary and stays: a later
+          // capture that only adds a detail ("added their email") must not
+          // replace the reason the office is reaching out.
+          request: prior.request || extracted.call_summary || extracted.requested_service || null,
         };
+        const latestSummary = extracted.call_summary || '';
         if (typeof ctx.noteContactFollowUp === 'function') ctx.noteContactFollowUp(followUp);
         const belled = await alertOfficeContactFollowUp({
           customerId: ctx.customerId,
           callbackPhone: followUp.callbackPhone,
-          summary: extracted.call_summary || extracted.requested_service || '',
+          summary: followUp.request || '',
+          // A total no-contact request turns the bell into a review, not outreach.
+          doNotContact: followUp.doNotContact,
           callSid: ctx.callSid || null,
           // The claim-owner nonce: the bell write re-proves ownership under the
           // call row's lock, like the lead capture below.
@@ -1322,6 +1329,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             extracted.email ? `Email: ${extracted.email}.` : null,
             [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).length
               ? `Address given: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}.` : null,
+            latestSummary && latestSummary !== followUp.request ? `Later on the call: ${latestSummary}` : null,
             extracted.requested_service ? `Service: ${extracted.requested_service}.` : null,
             followUp.timing ? `Timing: ${followUp.timing}.` : null,
             extracted.pain_points ? `Problem: ${extracted.pain_points}.` : null,
@@ -1340,6 +1348,14 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (belled) {
           if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
           if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+          // ⭐ NO PROMISE OF CONTACT AFTER A NO-CONTACT REQUEST. The office
+          // reviews it; Sandy says only that the request was passed on.
+          if (followUp.doNotContact) {
+            return 'Saved for the office — the caller asked NOT to be contacted, and the office has that request to '
+              + 'review. Do NOT promise that anyone will call, text or email them, and do not say a new request '
+              + 'or appointment was created. Tell the caller their request has been passed to the office.'
+              + (followUp.textsStopped ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
+          }
           return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
             + 'lead was created and none should be. The office has their number and your summary. Tell '
             + 'the caller a Waves team member will follow up with THEM, and do not say a new request or appointment '
