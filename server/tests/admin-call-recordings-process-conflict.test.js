@@ -346,7 +346,7 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // column; reading its silence as death let the new pod steal a live
     // transcription after three minutes.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    const predicate = require('fs').readFileSync(require.resolve('../utils/call-claim'), 'utf8').match(/const reclaimableClaim = [^;]+;/s)[0];
     expect(predicate).toContain('CURRENT_BEAT');
     expect(predicate).toContain('LEGACY_CLAIM_QUIET_MINUTES');
   });
@@ -357,7 +357,7 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // once. The COALESCE keeps a NULL start from making the row match
     // neither branch, which would be permanently unreclaimable.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const beat = source.match(/const CURRENT_BEAT = [^;]+;/s)[0];
+    const beat = require('fs').readFileSync(require.resolve('../utils/call-claim'), 'utf8').match(/const CURRENT_BEAT = [^;]+;/s)[0];
     expect(beat).toContain('processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)');
   });
 
@@ -408,7 +408,7 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // No ceiling, for anybody: every ceiling ultimately steals a live claim,
     // and that duplicates side effects on a customer's record.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    const predicate = require('fs').readFileSync(require.resolve('../utils/call-claim'), 'utf8').match(/const reclaimableClaim = [^;]+;/s)[0];
     expect(predicate).not.toMatch(/CeilingMinutes/);
     expect(predicate).toContain('CURRENT_BEAT');
   });
@@ -492,7 +492,7 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // the longest legitimate pass, and the pipeline has unbounded provider
     // calls; set too low it steals live work and duplicates side effects.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    const predicate = require('fs').readFileSync(require.resolve('../utils/call-claim'), 'utf8').match(/const reclaimableClaim = [^;]+;/s)[0];
     expect(predicate).toContain('processing_heartbeat_at');
     expect(predicate).not.toMatch(/CeilingMinutes/);
   });

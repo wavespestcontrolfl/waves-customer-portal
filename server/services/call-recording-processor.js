@@ -29,7 +29,8 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
-const { findCustomersAtAddress } = require('./customer-address-match');
+const { findCustomersAtAddress, whereLiveCustomer, isLiveCustomerRow } = require('./customer-address-match');
+const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
 const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
@@ -3659,19 +3660,7 @@ function summarizeBatch(results) {
 // claim's silence made a freshly claimed row look instantly dead — an old pod
 // reclaiming a row it had processed before would have its live pass stolen at
 // once, skipping the legacy window entirely (pre-push audit P1).
-const LEGACY_CLAIM_QUIET_MINUTES = 10;
-// What a human forcing a reprocess waits for a claim that IS beating.
-const FORCE_CLAIM_QUIET_MINUTES = 3;
-// COALESCE, not a bare comparison: with a NULL processing_started_at the
-// comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
-// branch — permanently unreclaimable, the worst possible bug in a lock.
-const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
-  + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
-const reclaimableClaim = (quietMinutes) => "("
-  + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
-  + ` OR (NOT (${CURRENT_BEAT}) AND`
-  + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
-  + ")";
+const { LEGACY_CLAIM_QUIET_MINUTES, FORCE_CLAIM_QUIET_MINUTES, reclaimableClaim } = require('../utils/call-claim');
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -3953,7 +3942,9 @@ function householdHoldEligible({
 // identity evidence): a number that belongs to an account is never a "stranger at the address".
 async function householdPhoneOnFile(conn, key) {
   if (!key) return false;
-  const hit = await conn('customers').whereNull('deleted_at')
+  // The SAME live-customer predicate the address side uses (a deleted or explicitly inactive
+  // account is not identity evidence), on every phone column checked.
+  const hit = await whereLiveCustomer(conn('customers'))
     .where(function orPhones() {
       for (const col of [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone']) {
         this.orWhereRaw(key.length === 10
@@ -3984,7 +3975,7 @@ const householdCallAddress = (a = {}) => ({
 // { customer, reason: 'address_match' } or { customer: null, reason }.
 function classifyHouseholdCandidates(rows = [], address = {}) {
   const wanted = householdCallAddress(address);
-  const matching = rows.filter((row) => row.active !== false && addressesExactlyMatch(row, wanted));
+  const matching = rows.filter((row) => isLiveCustomerRow(row) && addressesExactlyMatch(row, wanted));
   const ids = [...new Set(matching.map((row) => String(row.id)))];
   if (ids.length === 0) return { customer: null, reason: 'no_address_match' };
   if (ids.length > 1) return { customer: null, reason: 'multiple_customers_at_address' };
@@ -12434,8 +12425,9 @@ const CallRecordingProcessor = {
           isVoicemail: !!extracted.is_voicemail,
           isSpam: !!extracted.is_spam,
           nonCustomerNature: !!v2NonCustomerCallNature,
-          commercialCall: v2CanonicalExtraction?.property?.property_type === 'commercial'
-            || v2CanonicalExtraction?.property?.hoa_common_area_service === true,
+          // The repo's one commercial-extraction classifier (hoa/common-area service, any populated
+          // commercial_subtype, commercial / office / multi-family-manager property types ...).
+          commercialCall: !!commercialCategoryConflict({ extraction: v2CanonicalExtraction, intent: null }),
           createBranchOpen: !!(extracted.first_name || firstNameAdvisoryCreate),
           addressOk: !addressRecovery?.recovered
             && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null),

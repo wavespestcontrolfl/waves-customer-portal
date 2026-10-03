@@ -514,6 +514,15 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // r33 guarantee against the email-correction fanout, which pre-locks
     // the same way.
     await lockTriageCall(trx, item.call_log_id);
+    // A household-hold card cannot be settled while a pass is still working its call (the pass keeps
+    // holding the call in memory: closing the card under it would leave the call unbooked with no
+    // open card). Judged HERE, under the per-call lock the card filer also holds — the same
+    // "pass is still working this call" refusal the operator link route gives.
+    if (item.reason_code === 'household_address_match' && ['resolved', 'dismissed'].includes(nextStatus) && item.call_log_id) {
+      const working = await trx('call_log').where({ id: item.call_log_id })
+        .whereRaw(require('../utils/call-claim').ACTIVE_CLAIM_SQL).first('id');
+      if (working) return { outcome: 'call_still_processing' };
+    }
     // A street-level address hold settles with its visit, never by Resolve /
     // Dismiss. Checked HERE, under the per-call lock and inside the
     // transaction, so the decision and the write cannot straddle a concurrent
@@ -765,6 +774,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    case 'call_still_processing': return res.status(409).json({ error: 'This call is still being processed. Try again in a moment.', code: 'CALL_STILL_PROCESSING', reason: 'already_processing' });
     case 'first_name_missing': return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
     case 'email_disagreement_unconfirmed': return res.status(409).json({
       error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',

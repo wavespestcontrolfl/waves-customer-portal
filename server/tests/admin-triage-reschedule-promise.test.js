@@ -72,6 +72,12 @@ function makeFakeDb(seed = {}) {
       whereRaw(sql) {
         // The street-level address-hold exclusion: none of these fixtures holds one.
         if (sql.includes('street_level_address')) return api;
+        // ACTIVE_CLAIM_SQL: a pass holds the claim and it has not gone quiet long enough to be reclaimed
+        // (fixtures mark a crashed pass with claim_stale; the real predicate is proven on Postgres).
+        if (sql.includes("processing_status = 'processing'")) {
+          rawPredicates.push((row) => row.processing_status === 'processing' && !!row.processing_token && !row.claim_stale);
+          return api;
+        }
         if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
         rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
         return api;
@@ -472,6 +478,38 @@ describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operat
       }
     });
     expect(tables.triage_items[0].status).toBe('open');
+  });
+
+  test('Resolve AND Dismiss are refused (409, plain message) while a pass is working the call, atomically under the per-call lock; fine once it finishes, and a crashed (stale) claim never blocks', async () => {
+    const f = seed();
+    f.tables.call_log[0].processing_status = 'processing';
+    f.tables.call_log[0].processing_token = 'tok-live';
+    wireDb(db, { conn: f.conn });
+    const { lockTriageCall } = require('../utils/triage-locks');
+    await withServer(async (baseUrl) => {
+      for (const action of ['resolve', 'dismiss']) {
+        lockTriageCall.mockClear();
+        const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION });
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        expect(body.code).toBe('CALL_STILL_PROCESSING');
+        expect(body.error).toBe('This call is still being processed. Try again in a moment.');
+        expect(lockTriageCall).toHaveBeenCalledTimes(1); // judged under the lock the filer takes
+        expect(f.tables.triage_items[0].status).toBe('open');
+      }
+      // a crashed pass stops beating: the claim is reclaimable, so it no longer blocks
+      f.tables.call_log[0].claim_stale = true;
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('dismissed');
+    // a finished pass
+    const g = seed();
+    wireDb(db, { conn: g.conn });
+    g.tables.call_log[0].processing_status = 'processed';
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+    });
+    expect(g.tables.triage_items[0].status).toBe('resolved');
   });
 
   test('a technician cannot reach the card through /verdict either (403), and an admin gets the plain 400', async () => {

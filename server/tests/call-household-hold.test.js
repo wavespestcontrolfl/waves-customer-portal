@@ -98,9 +98,30 @@ describe('the address check is the first-name advisory predicate, validated_acce
     expect(block).toContain('callHouseholdHoldLive()');
     expect(block).toContain('hasLinkOverride: !!customerLinkOverride');
     expect(block).toContain('explicitUnlink,');
-    expect(block).toContain("v2CanonicalExtraction?.property?.property_type === 'commercial'");
-    expect(block).toContain('hoa_common_area_service === true');
+    expect(block).toContain('commercialCall: !!commercialCategoryConflict({ extraction: v2CanonicalExtraction, intent: null })');
+    expect(block).not.toContain("property_type === 'commercial'");
     expect(block).toContain('createBranchOpen: !!(extracted.first_name || firstNameAdvisoryCreate)');
+  });
+});
+
+describe('commercial calls (the repo\'s one extraction classifier) never become a household hold', () => {
+  const { commercialCategoryConflict } = require('../services/estimator-engine/unit-scope-model');
+  const commercial = (property) => !!commercialCategoryConflict({ extraction: { property }, intent: null });
+  test.each([
+    ['literal commercial', { property_type: 'commercial' }],
+    ['an HOA common-area service', { property_type: 'single_family', hoa_common_area_service: true }],
+    ['office', { property_type: 'office' }],
+    ['a populated commercial_subtype on a residential-looking type', { property_type: 'multi_family', commercial_subtype: 'multi_unit_residential' }],
+    ['retail', { property_type: 'retail store' }],
+  ])('%s: commercial, so no hold', (_label, property) => {
+    expect(commercial(property)).toBe(true);
+    expect(householdHoldEligible({
+      gateLive: true, phone: '+19415550123', createBranchOpen: true, addressOk: true, commercialCall: commercial(property),
+    })).toBe(false);
+  });
+  test('an ordinary single-family call is not commercial and no extraction is not commercial', () => {
+    expect(commercial({ property_type: 'single_family' })).toBe(false);
+    expect(commercialCategoryConflict({ extraction: null, intent: null })).toBeFalsy();
   });
 });
 
@@ -226,6 +247,37 @@ const SKIP = !process.env.DATABASE_URL;
     await newCustomer({ phone: '+19415550999', address_line1: '7 Elsewhere Way', zip: '34241' });
     expect((await findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).reason).toBe('phone_on_file');
     expect((await findHouseholdCustomerByAddress({ phone: null, address: CALL, conn: trx })).reason).toBe('no_phone');
+  });
+
+  test('a number held only by an INACTIVE (or deleted) customer is not identity evidence on any phone column; a live one is — the same live predicate as the address side', async () => {
+    const owner = await newCustomer({ phone: '+19415550100' });
+    const cols = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone'];
+    for (const col of cols) {
+      const holder = await newCustomer({ phone: '+19415550777', address_line1: '9 Another Rd', zip: '34242', active: false, [col]: '+19415550999' });
+      if (col !== 'phone') await trx('customers').where({ id: holder.id }).update({ phone: '+19415550777' });
+      expect((await findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).customer.id).toBe(owner.id);
+      expect(await householdPhoneOnFile(trx, '9415550999')).toBe(false);
+      await trx('customers').where({ id: holder.id }).update({ active: null }); // NULL still counts, like the address side
+      expect(await householdPhoneOnFile(trx, '9415550999')).toBe(true);
+      expect((await findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).reason).toBe('phone_on_file');
+      await trx('customers').where({ id: holder.id }).update({ active: true, deleted_at: new Date() });
+      expect(await householdPhoneOnFile(trx, '9415550999')).toBe(false);
+      await trx('customers').where({ id: holder.id }).del();
+    }
+  });
+
+  test('ACTIVE_CLAIM_SQL: a beating claim blocks, a crashed (reclaimable) one and a finished one do not', async () => {
+    const { ACTIVE_CLAIM_SQL } = require('../utils/call-claim');
+    const mk = (over) => trx('call_log').insert({ direction: 'inbound', ...over }).returning('id').then(([r]) => r.id);
+    const ago = (min) => new Date(Date.now() - min * 60000);
+    const beating = await mk({ processing_status: 'processing', processing_token: 't1', processing_started_at: ago(30), processing_heartbeat_at: ago(1) });
+    const crashed = await mk({ processing_status: 'processing', processing_token: 't2', processing_started_at: ago(30), processing_heartbeat_at: ago(15) });
+    const legacyFresh = await mk({ processing_status: 'processing', processing_token: 't3', processing_started_at: ago(2), processing_heartbeat_at: null });
+    const legacyStale = await mk({ processing_status: 'processing', processing_token: 't4', processing_started_at: ago(30), processing_heartbeat_at: null });
+    const done = await mk({ processing_status: 'processed', processing_token: null });
+    const active = (await trx('call_log').whereRaw(ACTIVE_CLAIM_SQL).select('id')).map((r) => r.id);
+    expect(active.sort()).toEqual([beating, legacyFresh].sort());
+    expect(active).not.toContain(crashed); expect(active).not.toContain(legacyStale); expect(active).not.toContain(done);
   });
 
   test('a soft-deleted customer owns neither the number nor the address', async () => {

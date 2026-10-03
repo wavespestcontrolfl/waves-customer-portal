@@ -388,6 +388,24 @@ describe('household hold card (GATE_CALL_HOUSEHOLD_HOLD)', () => {
     }));
   });
 
+  it('Resolve and Dismiss show the server\'s "still being processed" message and keep the card', async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) return { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      throw Object.assign(new Error('This call is still being processed. Try again in a moment.'), { status: 409, code: 'CALL_STILL_PROCESSING' });
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = await cardEl();
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    expect(await screen.findByText(/still being processed/i)).toBeInTheDocument();
+    expect(adminFetch.mock.calls.filter(([url]) => url.startsWith('/admin/triage?'))).toHaveLength(1); // no reload
+    fireEvent.click(within(el).getByRole('button', { name: /dismiss/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /^dismiss$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/hh/dismiss', expect.anything()));
+    expect(screen.getByText(/still being processed/i)).toBeInTheDocument();
+    expect(cardEl).toBeTruthy();
+  });
+
   it('a malformed suggested id never becomes a link', () => {
     render(<ConfirmEvidence reasonCode="household_address_match" payload={{ ...payload, suggested_customer_id: 'not-a-uuid' }} suggestedOpenId="also-bad" />);
     expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();

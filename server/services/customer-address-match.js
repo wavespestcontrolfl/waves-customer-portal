@@ -30,6 +30,19 @@ const { sameStreetAddress, canonicalizeLeadingUnit } = require('./estimator-engi
 
 const PER_LEG_LIMIT = 50;
 
+// THE live-customer predicate every "who is at this address / who owns this number" question
+// shares (the address legs below, the call booker's household phone check and classifier): not
+// soft-deleted and not explicitly inactive. A NULL `active` still counts, so it can never hide a
+// second household. `alias` prefixes the columns for a joined query ('c').
+function whereLiveCustomer(query, alias = null) {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  return query
+    .where((q) => q.where(col('active'), true).orWhereNull(col('active')))
+    .whereNull(col('deleted_at'));
+}
+// The same predicate over an already-loaded row.
+const isLiveCustomerRow = (row) => !row?.deleted_at && row?.active !== false;
+
 // The complete leading house-number token, read from the street-first form
 // the comparator uses. "123A Main St", "123-125 Main St", "123/2 Main St"
 // and "Unit 7, 123 Main St" all yield the token stored rows begin with, so
@@ -57,9 +70,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   if (!houseNumber) return [];
   const limit = complete ? null : PER_LEG_LIMIT;
 
-  const primaryQuery = database('customers')
-    .where((q) => q.where('active', true).orWhereNull('active'))
-    .whereNull('deleted_at')
+  const primaryQuery = whereLiveCustomer(database('customers'))
     .where('address_line1', 'ilike', `${houseNumber} %`)
     .orderBy('id');
   const primary = await (limit ? primaryQuery.limit(limit) : primaryQuery)
@@ -72,11 +83,9 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   const candidates = primary.map((row) => ({ ...row, matchedVia: 'primary' }));
 
   const propertyLeg = async () => {
-    const propertyQuery = database('customer_properties as cp')
+    const propertyQuery = whereLiveCustomer(database('customer_properties as cp')
       .join('customers as c', 'cp.customer_id', 'c.id')
-      .where('cp.active', true)
-      .where((q) => q.where('c.active', true).orWhereNull('c.active'))
-      .whereNull('c.deleted_at')
+      .where('cp.active', true), 'c')
       .where('cp.address_line1', 'ilike', `${houseNumber} %`)
       .orderBy('cp.id');
     const property = await (limit ? propertyQuery.limit(limit) : propertyQuery)
@@ -136,4 +145,4 @@ function rankByContact(rows, { phone = null, email = null } = {}) {
   return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
 }
 
-module.exports = { findCustomersAtAddress, rankByContact, _private: { houseNumberOf, candidateAddressString } };
+module.exports = { findCustomersAtAddress, rankByContact, whereLiveCustomer, isLiveCustomerRow, _private: { houseNumberOf, candidateAddressString } };

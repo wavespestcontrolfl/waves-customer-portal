@@ -722,7 +722,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setDismissFor(null);
         // A street-level address hold still waiting on its visit carries the
         // server's own instruction (confirm, correct or cancel the visit).
-        if (err?.status === 409 && err?.code === "STREET_LEVEL_HOLD_PENDING" && err?.message) {
+        if (err?.status === 409 && (err?.code === "STREET_LEVEL_HOLD_PENDING" || err?.code === "CALL_STILL_PROCESSING") && err?.message) {
           setError(err.message);
           return;
         }
@@ -782,6 +782,11 @@ export default function TriageInboxTabV2({ isAdmin }) {
       })
       .catch((err) => {
         setActioning(null);
+        // The call is still being processed: the server's own plain instruction, no reload.
+        if (err?.status === 409 && err?.code === "CALL_STILL_PROCESSING" && err?.message) {
+          setError(err.message);
+          return;
+        }
         if (err?.status === 409) {
           load(mode, status, autoOnly);
           setError("This card changed since it loaded — review the refreshed card before marking it handled.");
