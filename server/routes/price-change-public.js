@@ -5,6 +5,16 @@
  * guide page). Payload is deliberately minimal: first name, the price
  * change itself, and support contact — a forwarded/leaked link never yields
  * usable PII. Views are counted for the delivery record.
+ *
+ * Annual rate review notices (rate_review_row_id set) also carry `review`:
+ * the letter as it was SENT (frozen on the notice by
+ * services/rate-review-comms.js — service, old/new rate per application or
+ * per prepaid year, effective date, the reason, the owner's cost block).
+ * A rate-review notice renders once it was delivered, or once a send
+ * handed it to a provider with an uncertain outcome (the words frozen
+ * before that call — only a delivered message carries the token; its view
+ * is counted but never flips it to viewed). A notice no send ever touched
+ * is a 404, neither counted nor flipped.
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -14,6 +24,7 @@ const logger = require('../services/logger');
 const { formatMoney } = require('../services/price-change-notices');
 const { formatDisplayDate } = require('../utils/date-only');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { publicReview } = require('../services/rate-review-comms');
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -43,27 +54,36 @@ router.get('/:token', async (req, res) => {
   try {
     const notice = await db('price_change_notices').where({ notice_token: token }).first();
     if (!notice) return res.status(404).json({ error: 'Not found' });
+    const review = publicReview(notice);
+    if (review && review.unavailable) return res.status(404).json({ error: 'Not found' });
 
     const customer = await db('customers').where({ id: notice.customer_id }).first('first_name');
     const firstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
 
+    // An annual rate review notice whose send outcome is uncertain (not
+    // stamped sent) records the view but keeps its status: 'viewed' must
+    // never stand in for a delivery stamp, nor make it retirable.
+    const keepStatus = !!notice.rate_review_row_id && !notice.sent_at;
     void db('price_change_notices').where({ id: notice.id }).update({
       view_count: db.raw('view_count + 1'),
       first_viewed_at: db.raw('COALESCE(first_viewed_at, now())'),
       // An in-flight send claim ('sending') is kept: the sender finalizes it
       // to 'sent', and a viewed-but-unsent preview is what a draft
       // retirement may delete — a claimed notice must never read as one.
-      status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+      ...(keepStatus ? {} : { status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END") }),
       updated_at: new Date(),
     }).catch((err) => logger.warn(`[price-change-public] view update failed: ${err.message}`));
 
     return res.json({
-      firstName,
+      // A rate review notice greets by the name its delivered letter carried
+      // (the billing recipient's), never a fresh read of the customer row.
+      firstName: (review && review.firstName) || firstName,
       currentPrice: formatMoney(notice.current_amount_cents),
       newPrice: formatMoney(notice.new_amount_cents),
       cadenceLabel: notice.cadence_label || 'month',
       effectiveDate: formatDisplayDate(notice.effective_date, { fallback: '' }),
       supportPhone: WAVES_SUPPORT_PHONE_DISPLAY,
+      ...(review ? { review } : {}),
     });
   } catch (err) {
     logger.error(`[price-change-public] error for token: ${err.message}`);
