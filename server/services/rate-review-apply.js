@@ -1011,10 +1011,12 @@ async function assertFlatTargets(trx, { locked, addonRows, fields, noticedCurren
 
 // Every later extension spawns from the parent overlaid with the template
 // overrides — simulate that spawn and refuse unless it prices at the noticed
-// amount (a parent with add-on lines or a discount would not).
-async function assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fields, noticedNew, schedule }) {
-  const parent = await trx('scheduled_services').where({ id: parentId }).first();
-  if (!parent) throw hold('no_future_visit', { parentId });
+// amount (a parent with add-on lines or a discount would not). Read-only:
+// the apply throws the refusal; the comms lane's send preflight asks the same
+// question. Returns { reason, detail } | null.
+async function templateSpawnRefusal(dbh, { parentId, parentAddons, fields, noticedNew, schedule }) {
+  const parent = await dbh('scheduled_services').where({ id: parentId }).first();
+  if (!parent) return { reason: 'no_future_visit', detail: { parentId } };
   // An extension prices each date with the add-ons due on it
   // (filterAddonLinesForDate). A line sold for the anchor visit alone never
   // reaches a later one; any other line lands on some later visits and not
@@ -1022,13 +1024,34 @@ async function assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fiel
   // an anchor-only line here would let it offset a discount and hide
   // spawns that price below the notice.
   const recurring = parentAddons.filter((a) => schedule.addonRecursAfterAnchor(a));
-  if (recurring.length) throw hold('series_template_complex', { recurringAddons: recurring.length });
+  if (recurring.length) return { reason: 'series_template_complex', detail: { recurringAddons: recurring.length } };
   const existing = schedule.parseTemplateOverrides(parent.recurring_template_overrides) || {};
   const provenance = schedule.readProvenanceOverrides(parent.recurring_template_overrides);
   const template = { ...parent, ...provenance, ...existing, ...fields };
-  const scope = await schedule.loadStoredDiscountScope(trx, template, parentAddons);
+  const scope = await schedule.loadStoredDiscountScope(dbh, template, parentAddons);
   const spawn = schedule.calculateStoredVisitFinancials(template, [], parentAddons, scope);
-  if (cents(spawn.price) !== noticedNew) throw hold('series_template_complex', { spawn: spawn.price, parentAddons: parentAddons.length });
+  if (cents(spawn.price) !== noticedNew) return { reason: 'series_template_complex', detail: { spawn: spawn.price, parentAddons: parentAddons.length } };
+  return null;
+}
+
+async function assertTemplateSpawnsAtNoticed(trx, args) {
+  const refusal = await templateSpawnRefusal(trx, args);
+  if (refusal) throw hold(refusal.reason, refusal.detail);
+}
+
+// The apply's series-template checks as one read-only question for the comms
+// lane: the price-override gate, then the parent/template spawn test. `visits`
+// are the line's open visits from the effective date (loadLineOpenVisits).
+async function perApplicationTemplateRefusal(dbh, { visits, noticedNew, schedule }) {
+  if (!isEnabled('editApptPriceServiceScope')) return 'template_overlay_gate_off';
+  const roots = seriesRoots(visits);
+  if (roots.length !== 1) return null; // the structural predicate reports it
+  const parentId = roots[0];
+  const newDollars = dollars(noticedNew);
+  const fields = { primary_line_price: newDollars, estimated_price: newDollars };
+  const addonRows = await dbh('scheduled_service_addons').whereIn('scheduled_service_id', [parentId]).select('*');
+  const refusal = await templateSpawnRefusal(dbh, { parentId, parentAddons: addonRows, fields, noticedNew, schedule });
+  return refusal ? refusal.reason : null;
 }
 
 // The write: the series helper reprices the targets, the template is
@@ -1618,7 +1641,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, monthlyRefusal, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

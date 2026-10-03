@@ -37,6 +37,36 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     .where('t.term_end', '>=', today),
 }));
 
+// The apply's own series-template questions (rate-review-apply.js
+// perApplicationTemplateRefusal) read the schedule helpers; a faithful
+// reduction of them, as the apply suite uses.
+jest.mock('../routes/admin-schedule', () => {
+  const { parseTemplateOverrides } = require('../services/recurring-template-overrides');
+  const sum = (rows) => (rows || []).reduce((t, a) => t + (Number(a.estimated_price) > 0 ? Number(a.estimated_price) : 0), 0);
+  return {
+    _test: {
+      calculateStoredVisitFinancials: (parent, addonRows, allParentAddonRows) => {
+        const primaryGross = Number(parent.primary_line_price);
+        let primaryNet = Number.isFinite(primaryGross) && primaryGross > 0 ? Math.max(0, primaryGross - (Number(parent.line_discount_dollars) > 0 ? Number(parent.line_discount_dollars) : 0)) : null;
+        if (primaryNet == null) {
+          const est = Number(parent.estimated_price);
+          primaryNet = Number.isFinite(est) && est > 0 ? Math.max(0, est - sum(allParentAddonRows || addonRows)) : 0;
+        }
+        const subtotal = Math.round((primaryNet + sum(addonRows)) * 100) / 100;
+        let discount = 0;
+        if (parent.discount_type === 'percent') discount = Math.round(subtotal * Number(parent.discount_amount || 0)) / 100;
+        else if (parent.discount_type === 'fixed') discount = Number(parent.discount_amount || 0);
+        return { price: subtotal > 0 ? Math.max(0, Math.round((subtotal - discount) * 100) / 100) : null };
+      },
+      addonRecursAfterAnchor: (line) => (line?.recurring_pattern || line?.recurringPattern || null) !== 'one_time',
+      loadStoredDiscountScope: async () => null,
+      parseTemplateOverrides,
+      readProvenanceOverrides: () => ({}),
+    },
+  };
+});
+process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'true';
+
 const migration = require('../models/migrations/20261001200000_rate_review_letter_email_template');
 
 jest.mock('../services/email-template-library', () => {
@@ -59,6 +89,7 @@ jest.mock('../services/email-template-library', () => {
 
 const PriceChangeNotices = require('../services/price-change-notices');
 const comms = require('../services/rate-review-comms');
+const apply = require('../services/rate-review-apply');
 const { CUSTOMER, ROW, BATCH_KEY, NOW } = fixture;
 
 const COST_BLOCK = 'Technician pay is up [test]% since last January. Product and fuel costs went up too.';
@@ -82,10 +113,18 @@ function draft(n, overrides = {}) {
 // synthetic _line / _cadence tags).
 const parseJsonMeta = (n) => (typeof n.metadata === 'string' ? JSON.parse(n.metadata) : (n.metadata || {}));
 function openVisitsFor(notices) {
-  return notices.filter((n) => (n.billing_lane || 'per_application') === 'per_application').map((n, i) => ({
+  const perApp = notices.filter((n) => (n.billing_lane || 'per_application') === 'per_application');
+  // ...and each series' completed parent, the template the apply's spawn test reads.
+  const parents = perApp.filter((n) => parseJsonMeta(n).series_root_id).map((n) => ({
+    id: parseJsonMeta(n).series_root_id, customer_id: n.customer_id, scheduled_date: '2025-12-05', status: 'completed',
+    estimated_price: (Number(n.noticed_current_cents ?? 11700) / 100).toFixed(2), primary_line_price: null, discount_type: null, discount_amount: null, discount_dollars: null,
+    line_discount_id: null, line_discount_dollars: null, annual_prepay_term_id: null, prepaid_amount: null, is_callback: false, is_recurring: true, recurring_parent_id: null,
+    recurring_template_overrides: null, _line: n.family_key, _cadence: 'quarterly',
+  }));
+  return [...perApp.map((n, i) => ({
     id: `70000000-0000-4000-8000-00000000000${i + 1}`, customer_id: n.customer_id, scheduled_date: n.effective_date, status: 'pending', estimated_price: (Number(n.noticed_current_cents ?? 11700) / 100).toFixed(2),
     is_callback: false, is_recurring: true, recurring_parent_id: parseJsonMeta(n).series_root_id || null, _line: n.family_key, _cadence: 'quarterly',
-  }));
+  })), ...parents];
 }
 
 function book({ customers = [customer(1)], notices = [draft(1)], snapshots = null, costBlock = COST_BLOCK } = {}) {
@@ -649,10 +688,37 @@ describe('customer surfaces', () => {
 
   test('preview: a structure the apply refuses is held with the apply\'s own reason (apply_hold)', async () => {
     mockDb.reset(book());
-    mockDb.store.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: mockDb.store.scheduled_services[0].id, estimated_price: '20.00' }];
+    mockDb.store.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: mockDb.store.scheduled_services[0].id, estimated_price: '20.00', recurring_pattern: 'one_time' }];
     const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(out.counts.letters).toBe(0);
     expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: 'visit_has_addons' });
+  });
+
+  test.each([
+    ['a discount on the series parent while every future visit is flat', (st) => { st.scheduled_services.find((v) => v.status === 'completed').discount_type = 'percent'; st.scheduled_services.find((v) => v.status === 'completed').discount_amount = 10; }, 'series_template_complex'],
+    ['a recurring add-on on the series parent', (st) => { st.scheduled_service_addons = [{ id: 'ad-9', scheduled_service_id: st.scheduled_services.find((v) => v.status === 'completed').id, estimated_price: '20.00', recurring_pattern: 'quarterly' }]; }, 'series_template_complex'],
+  ])('preview + portal: %s is held with the apply\'s reason before any letter or projected charge', async (_label, mutate, reason) => {
+    mockDb.reset(book());
+    mutate(mockDb.store);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: reason });
+    // delivered, the same notice is not shown as upcoming
+    mockDb.store.price_change_notices[0].status = 'sent';
+    mockDb.store.price_change_notices[0].sent_at = NOW;
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('series price overrides switched off (the gate the apply reads at load): the shared template question answers template_overlay_gate_off', async () => {
+    process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'false';
+    let isolatedApply;
+    jest.isolateModules(() => { isolatedApply = require('../services/rate-review-apply'); });
+    process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'true';
+    mockDb.reset(book());
+    const visits = mockDb.store.scheduled_services.filter((v) => v.status === 'pending');
+    const schedule = require('../routes/admin-schedule')._test;
+    expect(await isolatedApply._private.perApplicationTemplateRefusal(mockDb, { visits, noticedNew: 12100, schedule })).toBe('template_overlay_gate_off');
+    expect(await apply._private.perApplicationTemplateRefusal(mockDb, { visits, noticedNew: 12100, schedule })).toBeNull();
   });
 
   test('send: a definite email rejection (certain non-send) returns the lines to a retryable draft with the reason; an ambiguous failure parks as send_uncertain', async () => {

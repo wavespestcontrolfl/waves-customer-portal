@@ -310,7 +310,7 @@ async function monthlyRefused(dbh, notice, customer, today) {
 // so the two cannot drift. Returns Map(noticeId → the apply's hold reason);
 // 'visits_unreadable' when the rows could not be read (held).
 async function linesGoneFor(dbh, notices, { snapshots, today }) {
-  const { loadLineOpenVisits, perApplicationStructuralRefusal } = require('./rate-review-apply')._private;
+  const { loadLineOpenVisits, perApplicationStructuralRefusal, perApplicationTemplateRefusal } = require('./rate-review-apply')._private;
   const cadenceByNotice = new Map((snapshots || []).map((s) => [String(s.notice_id), s.cadence]));
   const gone = new Map();
   for (const n of notices.filter((x) => x.billing_lane === 'per_application')) {
@@ -327,9 +327,16 @@ async function linesGoneFor(dbh, notices, { snapshots, today }) {
         ? (await require('./annual-prepay-renewals').coveredTermsAsOf(dbh, today).whereIn('t.id', linkedTermIds).select('t.id')).map((t) => String(t.id))
         : []);
       const firstVisit = meta.first_visit_id ? await dbh('scheduled_services').where({ id: meta.first_visit_id }).first('id', 'status') : null;
-      const reason = perApplicationStructuralRefusal({
+      let reason = perApplicationStructuralRefusal({
         visits, addonCounts, liveTermIds, noticedCurrentCents: noticedCurrent(n), noticedRoot: meta.series_root_id, firstVisit, effectiveDate: ymd(n.effective_date),
       });
+      // ...and the series template: the price-override gate, and a parent whose
+      // recurring add-ons or discount would spawn later visits off the noticed price.
+      if (!reason) {
+        reason = await perApplicationTemplateRefusal(dbh, {
+          visits, noticedNew: Number(n.noticed_new_cents ?? n.new_amount_cents), schedule: require('../routes/admin-schedule')._test,
+        });
+      }
       if (reason) gone.set(String(n.id), reason);
     } catch (err) {
       logger.warn(`[rate-review-comms] open visits unreadable for notice ${n.id}: ${err.message}`);
