@@ -1818,3 +1818,24 @@ describe('Codex #5698 round 7: which mention a quote points at', () => {
     expect(out.unclear.map((u) => u.reason)).toContain('not_heard');
   });
 });
+
+describe('voice test findings (real recordings, 2026-10-03)', () => {
+  const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+
+  test('"four ounces per meter" (a misheard "ounces, perimeter") is not a rate: the amount stays', () => {
+    const t = 'Treated the front only. Taurus four ounces per meter.';
+    expect(validateFill(answer({ products: [row(4, 'Taurus four ounces per meter')] }), ctx, t).products[0].amount).toBe(4);
+  });
+
+  test('real rates are still rates', () => {
+    for (const t of ['Taurus four ounces per gallon.', 'Taurus four ounces per 1,000 square feet.', 'Taurus four ounces per thousand.']) {
+      expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+    }
+  });
+
+  test('"four ounces, no weight, five ounces" (a misheard "no wait") corrects the four', () => {
+    const t = 'Use Taurus, four ounces, no weight, five ounces, along the foundation.';
+    expect(validateFill(answer({ products: [row(5, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+});

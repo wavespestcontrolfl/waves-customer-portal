@@ -577,7 +577,8 @@ function isCarrierVolume(tokens, start, end, unit, stops = []) {
 // corrected just after it ("four ounces, no wait, five").
 const RETRACT_BEFORE = 3;
 const CORRECTION_AFTER = 3;
-const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
+// ("no weight" is how a transcriber often writes "no wait")
+const CORRECTION_CUES = [['no', 'wait'], ['no', 'weight'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
 // A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
 // first and is not a negation of the second.
 // ("no, it was five", "no, make it five", "no, actually five": a short filler may sit between)
@@ -608,7 +609,14 @@ function isRetracted(tokens, breaks, start, end, stops = []) {
 // mixing rate, never the amount used.
 const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square', 'sq', 'acre', 'acres', 'tank', 'liter', 'litre']);
 // also "for every gallon", "for each gallon", "to the gallon" ("in a gallon" is the tank mix, the amount used)
-const isRate = (tokens, end) => tokens[end] === 'per'
+// "per" is a rate only before a rate base ("per gallon", "per 1,000 sq ft"): a
+// transcriber hears "ounces, perimeter" as "ounces per meter", which is no rate.
+const perRate = (tokens, end) => {
+  if (tokens[end] !== 'per') return false;
+  const number = readSpokenNumber(tokens, end + 1);
+  return RATE_BASES.has(tokens[end + 1]) || Boolean(number && RATE_BASES.has(tokens[number.next]));
+};
+const isRate = (tokens, end) => perRate(tokens, end)
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
   || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))
   // "in each / in every gallon", "for one gallon", "for 1 gallon"
@@ -861,7 +869,7 @@ const isCurrentVisitAt = (tokens, j) => tokens[j] === 'today' || tokens[j] === '
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
-  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && tokens[j + 1] === 'wait');
+  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && (tokens[j + 1] === 'wait' || tokens[j + 1] === 'weight'));
 }
 // Token positions a negation word governs: up to NEGATED_SPAN words after it, never
 // past a clause break ("Activity was not heavy, just light": only "heavy"; "Did not
@@ -903,7 +911,7 @@ function isNegatedMention(mention, world) {
     // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
     if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
       || token === 'ran' && world.tokens[j + 1] === 'out') return true;
-    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || world.tokens[j + 1] !== 'wait';
+    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || (world.tokens[j + 1] !== 'wait' && world.tokens[j + 1] !== 'weight');
     if (!AUXILIARY_WORDS.has(token)) return false;
   }
   return false;
