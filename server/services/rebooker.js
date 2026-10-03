@@ -35,7 +35,7 @@ const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
-  deriveWindowEnd, windowDurationMinutes,
+  deriveWindowEnd, windowDurationMinutes, dateOnlyString,
 } = require('../utils/datetime-et');
 
 // The window ONE series occurrence lands on, from ITS OWN stored window /
@@ -2079,6 +2079,22 @@ class SmartRebooker {
         // operator lock/move is caught atomically here, not just by a prior read.
         // .where({}) is a no-op, so callers that omit it are unaffected.
         .where(options.expect || {})
+        // The reschedule_log row below freezes the moved occurrence's slot AND scope
+        // (service + property) from this pre-read, which is unlocked: an Edit
+        // Appointment save landing in between would record a slot/scope pair that
+        // never existed (Codex #5610 r3-r4). Pin the observed occurrence, as the call
+        // reschedule path does (call-reschedule-apply expect) — a raced edit misses
+        // and surfaces the concurrent-change 409 below.
+        .where({
+          scheduled_date: dateOnlyString(service.scheduled_date) ?? null,
+          window_start: service.window_start ?? null,
+          window_end: service.window_end ?? null,
+          service_type: service.service_type ?? null,
+          service_id: service.service_id ?? null,
+          property_id: service.property_id ?? null,
+          // the account the log row is filed under (a racing customer merge repoints it)
+          customer_id: service.customer_id ?? null,
+        })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.
         .where(membershipFenced ? { visit_id: null } : {})
@@ -2149,6 +2165,11 @@ class SmartRebooker {
         initiated_by: initiatedBy,
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
+        // the moved occurrence's own scope, frozen at the move (a later edit of the row never rewrites it)
+        // the slot above and this scope are one snapshot, pinned by the CAS
+        occurrence_service_type: service.service_type || null,
+        occurrence_service_id: service.service_id || null,
+        occurrence_property_id: service.property_id || null,
       });
     });
 

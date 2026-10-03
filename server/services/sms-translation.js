@@ -599,7 +599,18 @@ async function translateThread(context, inboundMessage, inboundEnglish, customer
     const english = cache.get(key);
     if (english) { out.push({ ...m, body: english, translatedFrom: m.body }); translatedRows += 1; } else out.push(m);
   }
-  return { ok: true, context: { ...context, smsHistory: out }, translatedRows };
+  return { ok: true, context: withSmsHistory(context, out), translatedRows };
+}
+
+// A copy of the context with another thread. Object spread drops NON-enumerable
+// fields: context-aggregator attaches visitLoops that way (VISIT STATUS & OPEN
+// LOOPS, MISSED VISIT), so it is carried over explicitly, same shape (Codex #5610 r8).
+function withSmsHistory(context, smsHistory) {
+  const next = { ...context, smsHistory };
+  if (context && Object.prototype.hasOwnProperty.call(context, 'visitLoops') && !Object.prototype.hasOwnProperty.call(next, 'visitLoops')) {
+    Object.defineProperty(next, 'visitLoops', { value: context.visitLoops, enumerable: false, writable: true, configurable: true });
+  }
+  return next;
 }
 
 async function recordTrial(row) {
@@ -725,7 +736,7 @@ async function threadAsOfTrigger(context, smsLogId) {
   const cutoff = at ? new Date(at).getTime() : NaN;
   if (!Number.isFinite(cutoff)) return null;
   const rows = Array.isArray(context?.smsHistory) ? context.smsHistory : [];
-  return { ...context, smsHistory: rows.filter((m) => !(m?.date && new Date(m.date).getTime() > cutoff)) };
+  return withSmsHistory(context, rows.filter((m) => !(m?.date && new Date(m.date).getTime() > cutoff)));
 }
 
 async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId }) {
@@ -891,4 +902,5 @@ module.exports = {
   protectedTokens,
   TRIAL_TABLE,
   PROMPT_VERSION,
+  _test: { withSmsHistory },
 };

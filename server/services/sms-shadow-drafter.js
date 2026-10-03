@@ -169,7 +169,15 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // rules that act on it ('3_cflv': 34 chars, 39 with all four category tags).
 // PR #5331 (payment status contract) is the fresh identity above '3_cflv': numeric token "5" + 'cflvp' (COMPANY + LABEL + VISIT
 // STATUS & OPEN LOOPS ride along, cumulative, + PAYMENT FACTS) — see the cohort note above.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}5_cflvp`;
+// MISSED VISIT (#5610, the follow-up to #5499) adds the logged-no-show line + the
+// section's fixed MISSED VISIT scope line + the hand-off rule on top of '5_cflvp'.
+// '5_cflvp' already sits at PROMPT_VERSION_COLUMN_MAX with all four tags, so this
+// revision starts a COMPACT scheme: numeric token "6" (>= 2 → FREE RE-SERVICE) + ONE
+// key 'm' that names the whole cumulative set (sms-sealed-eval
+// VERSION_SUFFIX_FACT_MARKERS.m = COMPANY + LABEL + VISIT STATUS & OPEN LOOPS +
+// PAYMENT + the MISSED VISIT scope line). 'house_voice_v12_real_answers6_m': 31 chars,
+// 36 with all four category tags. A later revision mints the next number + its own key.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}6_m`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -4325,8 +4333,10 @@ LABEL FACTS (product timing from the label):
   const visitLoopsRules = realAnswersOn
     ? `
 VISIT STATUS & OPEN LOOPS:
-- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
+- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions — the office rebooks it. Never offer OPEN TIMES for the missed visit.
+- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4440,7 +4450,7 @@ function formatEtDate(value) {
     // service_date / scheduled_date are Postgres DATE values — calendar
     // days, not instants. Reparsing one as an instant puts it at midnight
     // UTC, which formats in ET as the PREVIOUS day. Anchor date-only values
-    // to noon instead (same idiom as the legacy drafter in twilio-webhook).
+    // to noon instead.
     // pg hands DATE columns over as Date objects at local midnight, so the
     // local calendar parts are the true day.
     const pad = (n) => String(n).padStart(2, '0');
@@ -4448,7 +4458,9 @@ function formatEtDate(value) {
       ? `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
       : String(value);
     const dateOnly = dayString.match(/^(\d{4}-\d{2}-\d{2})/);
-    const date = dateOnly ? new Date(`${dateOnly[1]}T12:00:00`) : new Date(value);
+    // noon UTC, not host-local noon: the same ET calendar day on any host TZ
+    // (local noon on a host east of UTC+12 is the previous day in ET)
+    const date = dateOnly ? new Date(`${dateOnly[1]}T12:00:00Z`) : new Date(value);
     return date.toLocaleDateString('en-US', {
       weekday: 'long',
       month: 'short',
@@ -4722,6 +4734,18 @@ function visitLoopPastWindowLine(past) {
   const win = visitLoopText(past.windowDisplay, 40);
   return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with ${past.assigned === false ? 'the office' : 'the tech'}, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
+// A logged customer no-show nobody followed up (visit-loops-facts loadMissedVisit):
+// the service and the day/window that were missed, as frozen when it was logged.
+// The office rebooks a miss (owner 10-02, #5610): the line always hands off — the
+// SLA plus followup_promised, never an OPEN TIMES offer (validateOpenLoopAnswer
+// enforces the escalation).
+function visitLoopMissedLine(missed) {
+  if (!missed || typeof missed !== 'object') return null;
+  const type = visitLoopText(missed.type, 60) || 'visit';
+  const date = visitLoopText(formatEtDate(missed.date), 40);
+  const win = visitLoopText(missed.windowDisplay, 40);
+  return `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and has not been rebooked — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it`;
+}
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
 // SMS timing comes only from LABEL FACTS, so a promise text stating one is withheld.
@@ -4765,25 +4789,54 @@ function visitLoopsNeedAnswer(context) {
   const listed = (list) => Array.isArray(list) && list.some((i) => i && typeof i === 'object');
   // a tracking gap is explicitly not confirmed lateness: not a loop
   const delay = v.lateAlert && typeof v.lateAlert === 'object' && v.lateAlert.missingTracking !== true;
-  return Boolean(delay || v.pastWindow) || listed(v.weOwe) || listed(v.customerWaiting);
+  return Boolean(delay || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
 }
 // Deterministic draft check (same loop as validateReserviceOffer): with an open loop
 // listed, an empty reply breaks the "never go silent" rule — it is revised, or stays
 // unconverged, instead of passing as "no reply warranted".
 // Read from the RENDERED facts block (live drafting and the sealed eval's frozen
 // facts alike): one of the lines the rule says must be answered is listed.
-const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
-function factsListOpenLoop(factsBlock) {
+const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|MISSED VISIT|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
+// The "- " item lines of the rendered VISIT STATUS & OPEN LOOPS section ([] when absent).
+function visitLoopItemLinesIn(factsBlock) {
   const text = String(factsBlock || '');
   const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
-  if (at < 0) return false;
+  if (at < 0) return [];
   const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
   const end = lines.findIndex((l) => !l.startsWith('- '));
-  return lines.slice(0, end < 0 ? lines.length : end).some((line) => MUST_ANSWER_LINE_RE.test(line));
+  return lines.slice(0, end < 0 ? lines.length : end);
 }
-function validateOpenLoopAnswer({ reply, factsBlock }) {
-  if (!factsListOpenLoop(factsBlock) || String(reply || '').trim()) return { ok: true, violations: [] };
-  return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+function factsListOpenLoop(factsBlock) {
+  return visitLoopItemLinesIn(factsBlock).some((line) => MUST_ANSWER_LINE_RE.test(line));
+}
+// The lines whose rule is a hand-off (WINDOW PASSED, MISSED VISIT): the reply must
+// carry the follow-up timing AND record the escalation a person owns — the
+// verifier only fact-checks claims and never sees intended_actions (Codex #5610 r2).
+const HANDOFF_LINE_RE = /^- (?:WINDOW PASSED|MISSED VISIT)\b/;
+function factsListHandoff(factsBlock) {
+  return visitLoopItemLinesIn(factsBlock).some((line) => HANDOFF_LINE_RE.test(line));
+}
+const MISSED_LINE_RE = /^- MISSED VISIT\b/;
+function factsListMissedVisit(factsBlock) {
+  return visitLoopItemLinesIn(factsBlock).some((line) => MISSED_LINE_RE.test(line));
+}
+function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, offeredTimes = null }) {
+  const text = String(reply || '').trim();
+  if (factsListOpenLoop(factsBlock) && !text) {
+    return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+  }
+  if (!factsListHandoff(factsBlock)) return { ok: true, violations: [] };
+  const { replyPromisesFollowup } = require('./sms-followup-sla');
+  // any escalation counts for a real-answers draft (sms-followup-sla draftPromisedFollowup)
+  const escalated = Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate');
+  const violations = [];
+  if (!replyPromisesFollowup(text)) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
+  if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
+  // the office rebooks a miss: no customer-selectable times beside it (a frozen block may still carry OPEN TIMES)
+  if (Array.isArray(offeredTimes) && offeredTimes.length && factsListMissedVisit(factsBlock)) {
+    violations.push('MISSED VISIT is listed: the office rebooks it — offer no times (leave offered_times empty)');
+  }
+  return { ok: violations.length === 0, violations };
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (a delay, a
 // passed window): { signature } from visit-loops-facts
@@ -4799,12 +4852,14 @@ function visitLoopStatus(context, factsBlock) {
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
-// header, then one line per present field, or the single line "- none". Pure.
+// header, then one line per present field, or the single line "- none", then the
+// fixed MISSED_VISIT_SCOPE_LINE. Pure.
 function renderVisitLoopsSection(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const lines = [
     visitLoopLateLine(v.lateAlert),
     visitLoopPastWindowLine(v.pastWindow),
+    visitLoopMissedLine(v.missedVisit),
     // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);
@@ -4815,7 +4870,9 @@ function renderVisitLoopsSection(visitLoops) {
       return since ? ` (since ${since})` : '';
     }),
   ].filter(Boolean);
-  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n`;
+  // the scope line closes the section (it is not a "- " item: factsListOpenLoop stops before it)
+  const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
+  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n${MISSED_VISIT_SCOPE_LINE}\n`;
 }
 
 /**
@@ -5556,10 +5613,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // its service_interest wins inside the engine — so no classification
   // then. Carried on the snapshot so the send-time recheck asks the same
   // question.
-  const needsOpenTimes = Boolean(schedulingIntent)
+  // A listed MISSED VISIT withholds OPEN TIMES for the whole reply (owner 10-02,
+  // #5610: the office rebooks a miss — a "can we rebook the one you missed?" must
+  // not converge with customer-selectable times; Codex r3).
+  const missedVisitListed = Boolean(context?.visitLoops?.missedVisit) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const needsOpenTimes = !missedVisitListed && (Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
-    || pestReportSignal(inboundMessage, context);
+    || pestReportSignal(inboundMessage, context));
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -5721,7 +5782,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
-    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock });
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, offeredTimes: parsed?.offered_times });
     if (!singlePassOpenLoop.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassOpenLoop.violations);
@@ -5752,7 +5813,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
       const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock }).ok) { converged = true; break; }
+      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock, intendedActions: parsed.intended_actions }).ok) { converged = true; break; }
     }
 
     // Owner-directed structural fix: check the model's own offered_times
@@ -5765,7 +5826,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
-    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock });
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, offeredTimes: parsed.offered_times });
     const paymentStatusCheck = draftPaymentStatusCheck({ realAnswersApplied, parsed, factsBlock, inboundMessage, context });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck, paymentStatusCheck]) {
       if (!check.ok) {

@@ -770,3 +770,15 @@ describe('runTranslationTrial', () => {
     expect(row).toMatchObject({ verdict: 'skipped', hold_reason: 'no_reply_needed' });
   });
 });
+
+test('a thread-swapped context keeps the non-enumerable visitLoops (Codex #5610 r8)', () => {
+  const { _test: { withSmsHistory } } = require('../services/sms-translation');
+  const ctx = { summary: 'x', smsHistory: [{ body: 'hola' }] };
+  const loops = { missedVisit: { logId: 'rl-1' } };
+  Object.defineProperty(ctx, 'visitLoops', { value: loops, enumerable: false, writable: true, configurable: true });
+  const next = withSmsHistory(ctx, [{ body: 'hello' }]);
+  expect(next.smsHistory).toEqual([{ body: 'hello' }]);
+  expect(next.visitLoops).toBe(loops);
+  expect(Object.keys(next)).not.toContain('visitLoops'); // still non-enumerable
+  expect(withSmsHistory({ smsHistory: [] }, []).visitLoops).toBeUndefined();
+});

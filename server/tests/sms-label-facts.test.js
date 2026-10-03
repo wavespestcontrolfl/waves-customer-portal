@@ -2728,13 +2728,13 @@ describe('prompt rules and hand-off narrowing', () => {
 
   test('prompt version: cumulative cflvp (LABEL + VISIT STATUS & OPEN LOOPS + PAYMENT FACTS), prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    // PR #5331 (payment facts) merged on top of #5499's '3_cflv': the combined identity is 5_cflvp (cumulative 'cflv' + 'p', one glued token)
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
+    // #5331 (payment facts) minted 5_cflvp; #5610 (missed visit) the compact '6_m' (one cumulative key, LABEL FACTS included)
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_m');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers6_m');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers5_cflvp+bclm');
+    expect(all).toBe('house_voice_v12_real_answers6_m+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2766,7 +2766,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers6_m');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2872,7 +2872,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers6_m');
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }

@@ -76,7 +76,7 @@ test('a verbatim copy converges on the first pass and is recorded in the snapsho
   expect(result.converged).toBe(true);
   expect(result.passes).toBe(1);
   expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [COPY], family_counts: { payment: 1 } });
-  expect(result.promptVersion).toBe('house_voice_v12_real_answers5_cflvp');
+  expect(result.promptVersion).toBe(require('../services/sms-shadow-drafter').REAL_ANSWERS_PROMPT_VERSION);
 });
 
 test('a paraphrase is fed back as a violation; the revised verbatim copy converges with the snapshot', async () => {
