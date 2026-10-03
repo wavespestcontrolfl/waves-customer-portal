@@ -4,10 +4,10 @@
  * deterministic copy). Pure data, no I/O.
  *
  * Source of the rows: scope appendix fable-plan-review.md section (B) and the
- * W5 draft rows. EVERY row ships `approved: false`. A row only reaches a
- * customer after the owner signs its windows, which is a one-line flip of
- * `approved` here (the engine withholds unapproved rows unless a test or
- * preview asks for them explicitly).
+ * W5 draft rows. A row only reaches a customer after the owner signs its
+ * windows, which is a one-line flip of `approved` here (the engine withholds
+ * unapproved rows unless a test or preview asks for them explicitly). Owner
+ * approved every row on 2026-10-02.
  *
  * Rules that bind this file (owner rulings 2026-09-28 / 09-29):
  *  - Product rows are keyed by the EXACT catalog product name (pest
@@ -196,7 +196,7 @@ const PRODUCT_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(3, 7),
       full: proposed(14, 21),
@@ -230,7 +230,7 @@ const PRODUCT_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(7, 14, { needsLabelCheck: true }),
       full: proposed(21, 28, { needsLabelCheck: true }),
@@ -255,7 +255,7 @@ const PRODUCT_ROWS = {
     metric: 'weed_suppression',
     transient: false,
     judgedByAbsence: true,
-    approved: false,
+    approved: true,
     windows: { first: null, full: null },
     visibleChange: 'There is nothing to see today. Success looks like the weeds that never sprout over the coming weeks and months.',
     limits: ['A few weeds can still break through where the barrier was disturbed or where they were already growing.'],
@@ -281,7 +281,7 @@ const PRODUCT_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(7, 14),
       // Same numbers the existing diagnostic prompt carries (2-3 weeks
@@ -308,7 +308,7 @@ const PRODUCT_ROWS = {
     metric: 'color_health',
     transient: true,
     judgedByAbsence: true,
-    approved: false,
+    approved: true,
     windows: { first: null, full: null },
     visibleChange: 'This feed supports the lawn through heat and dry spells, so a quick color change is not the goal.',
     limits: ['Its effect shows over the coming weeks as the lawn holds its color under stress.'],
@@ -327,7 +327,7 @@ const PRODUCT_ROWS = {
     metric: 'color_health',
     transient: true,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(3, 5),
       full: null,
@@ -357,7 +357,7 @@ const PRODUCT_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       // Catalog wording is "within days" and "weeks to months"; the numeric
       // bounds below are proposed (owner brief: spread slows in days, new
@@ -399,7 +399,7 @@ const PRODUCT_ROWS = {
     metric: 'stress_damage',
     transient: false,
     judgedByAbsence: true,
-    approved: false,
+    approved: true,
     windows: { first: null, full: null },
     visibleChange: 'This is a protective treatment, so nothing changes visibly. It helps protect the turf through wet, humid stretches.',
     limits: [],
@@ -423,7 +423,7 @@ const PRODUCT_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(3, 7),
       full: proposed(null, null, { text: 'several weeks' }),
@@ -449,7 +449,7 @@ const PRODUCT_ROWS = {
     metric: 'stress_damage',
     transient: false,
     judgedByAbsence: true,
-    approved: false,
+    approved: true,
     windows: { first: null, full: null },
     visibleChange: 'Nothing changes visibly. This works ahead of the pests, so success looks like damage that never shows up.',
     limits: [],
@@ -480,7 +480,7 @@ const ISSUE_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: null,
       full: catalog(14, 21, 'drought-irrigation-stress'),
@@ -508,7 +508,7 @@ const ISSUE_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: proposed(3, 7),
       full: proposed(null, null, { text: 'several weeks' }),
@@ -537,7 +537,7 @@ const ISSUE_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: catalog(null, null, 'large-patch', { text: 'within days' }),
       full: catalog(null, null, 'large-patch', { text: 'weeks to months' }),
@@ -562,7 +562,7 @@ const ISSUE_ROWS = {
     judgedByAbsence: false,
     // A site limit, not a failure: never "behind".
     behindEligible: false,
-    approved: false,
+    approved: true,
     windows: {
       first: null,
       full: catalog(60, 90, 'shade-thinning'),
@@ -586,7 +586,7 @@ const ISSUE_ROWS = {
     transient: false,
     judgedByAbsence: true,
     behindEligible: false,
-    approved: false,
+    approved: true,
     // Only Nov to Feb, and never for a new or worsening problem.
     months: [11, 12, 1, 2],
     steadyOnly: true,
@@ -618,7 +618,7 @@ const ISSUE_ROWS = {
     },
     transient: false,
     judgedByAbsence: false,
-    approved: false,
+    approved: true,
     windows: {
       first: null,
       full: catalog(14, 21, 'mower-scalping'),
@@ -643,7 +643,7 @@ const ISSUE_ROWS = {
     transient: false,
     judgedByAbsence: true,
     behindEligible: false,
-    approved: false,
+    approved: true,
     // Only used when no herbicide row applies on this visit.
     onlyWithoutRows: [FAMILY.BROADLEAF, FAMILY.SEDGE],
     windows: { first: null, full: null },

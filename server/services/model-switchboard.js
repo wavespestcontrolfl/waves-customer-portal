@@ -352,12 +352,14 @@ const LANES = [
   L('visit_lane_facts', 'Lane voice fill (a specialty visit\'s places and findings)', 'visit-lane-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_LANE_VOICE_FILL, dark' }),
   L('visit_typed_facts', 'Typed voice fill (a typed visit\'s findings)', 'visit-typed-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_TYPED_VOICE_FILL, dark' }),
   L('review_ask_fact_check', 'Tech-voice review text fact check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('review_ask_repeat_check', 'Tech-voice review text repeat check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('fast_complete_voice_fill', 'Fast Complete voice fill', 'fast-complete-voice-fill.js', 'fastText', T('FAST'), null, { inbound: true, note: 'GATE_FAST_COMPLETE_VOICE_FILL; technician speech mapped onto sheet choices, validated in code' }),
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('business_name_confirm', 'Competitor business-name confirmation', 'content/business-name-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('photo_subject_confirm', 'Blog brief single-subject photo confirmation', 'content/photo-subject-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -478,7 +480,7 @@ const LANES = [
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
-  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
+  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD_LLM, dark' }),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -717,6 +719,7 @@ const LANE_AREA = {
   review_reply: 'content',
   review_topic: 'content',
   review_ask_fact_check: 'content',
+  review_ask_repeat_check: 'content',
   hero_alt: 'content',
   image_screen: 'content',
   editorial_review: 'content',
@@ -770,6 +773,7 @@ const LANE_AREA = {
   tax_advisor: 'office',
   inventory_research: 'office',
   job_screen: 'office',
+  fast_complete_voice_fill: 'office',
 };
 // One line a person reads to know what the lane does.
 const LANE_DESCRIBE = {
@@ -876,6 +880,7 @@ const LANE_DESCRIBE = {
   review_reply: 'Replies to Google reviews',
   review_topic: 'Finds the topic a customer raised before the Day-0 review ask',
   review_ask_fact_check: 'Checks every sentence of a tech-voice review text against the customer record (GATE_REVIEW_ASK_TECH_VOICE)',
+  review_ask_repeat_check: 'Holds a later tech-voice review text that repeats an earlier one (GATE_REVIEW_ASK_TECH_VOICE)',
   hero_alt: 'Writes alt text for hero images',
   image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',
@@ -929,6 +934,7 @@ const LANE_DESCRIBE = {
   tax_advisor: 'Weekly tax advice',
   inventory_research: 'Matches vendors and researches prices',
   job_screen: 'Screens job applications',
+  fast_complete_voice_fill: 'Maps what a tech said onto the Fast Complete sheet',
 };
 // Continuity = what catches a regression after a model switch.
 //   judged    an LLM judge / replay eval scores output against human truth
@@ -939,7 +945,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {

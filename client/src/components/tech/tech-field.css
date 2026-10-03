@@ -62,3 +62,11 @@
   .tf-today-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 24px; }
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container
+   and has a fixed height, so the shell fills it exactly and the main scrolls
+   on its own; the header and the field nav stay in view at any page length. */
+.tech-field.tf-embedded { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.tech-field.tf-embedded .tf-header { position: static; flex: none; }
+.tech-field.tf-embedded .tf-main { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 24px; }
+.tech-field.tf-embedded .tf-nav { position: static; flex: none; }

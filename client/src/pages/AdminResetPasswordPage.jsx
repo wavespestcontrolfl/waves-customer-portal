@@ -66,7 +66,7 @@ export default function AdminResetPasswordPage() {
       }
       navigate(
         data.user?.role === 'technician'
-          ? '/tech'
+          ? '/admin/today'
           : '/admin/settings?passwordChanged=1',
         { replace: true },
       );

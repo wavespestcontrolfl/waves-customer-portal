@@ -552,8 +552,8 @@ describe('PayOverview', () => {
   });
 
   it('carries the active visit into the technician documents link', () => {
-    render(<MemoryRouter initialEntries={['/tech/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
-    expect(screen.getByRole('link', { name: 'Staff documents' })).toHaveAttribute('href', '/tech/documents?visit=visit%2F42');
+    render(<MemoryRouter initialEntries={['/admin/today/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: 'Staff documents' })).toHaveAttribute('href', '/admin/today/documents?visit=visit%2F42');
   });
 
   it('hides manager-only actions for a non-manager', () => {
@@ -604,7 +604,7 @@ describe('ServiceScore', () => {
     const { container, unmount } = render(withRouter(<ServiceScore serviceId="svc-1" />));
     await screen.findByText('Quarterly Pest');
     expect(container.querySelector('.pay-growth').hasAttribute('data-admin')).toBe(false);
-    expect(screen.getByRole('link', { name: 'Open Pay & Growth' })).toHaveAttribute('href', '/tech/pay-growth');
+    expect(screen.getByRole('link', { name: 'Open Pay & Growth' })).toHaveAttribute('href', '/admin/today/pay-growth');
     unmount();
     request.mockImplementation(() => new Promise(() => {}));
     const admin = render(withRouter(<ServiceScore serviceId="svc-1" manage />));

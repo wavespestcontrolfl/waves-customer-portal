@@ -25,6 +25,9 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The draft's call-us number is the line it will send from (home line under GATE_HOME_LINE).
+const mockDeriveOutboundNumber = jest.fn(async () => '+19413187612');
+jest.mock('../services/twilio', () => ({ deriveOutboundNumber: (...args) => mockDeriveOutboundNumber(...args) }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async () => 'Hi Dana — we miss you… call us at (941) 318-7612'),
 }));
@@ -186,6 +189,9 @@ describe('gate on — pending campaign drafts', () => {
     });
     // toGsm7Safe: em-dash → '-', ellipsis → '...'
     expect(payload.draft_response).toBe('Hi Dana - we miss you... call us at (941) 318-7612');
+    expect(mockDeriveOutboundNumber).toHaveBeenCalledWith({ customerId: expect.anything() });
+    // The named line is pinned on the draft so approval sends from it.
+    expect(JSON.parse(payload.flags)).toEqual({ fromNumber: '+19413187612' });
     expect(payload.draft_response).toMatch(/^[\x20-\x7E]*$/);
   });
 

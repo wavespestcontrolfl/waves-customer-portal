@@ -8,6 +8,7 @@
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
 import { UNIT_CHOICES } from '../../lib/fast-complete-products';
@@ -80,11 +81,12 @@ export function customerNameOf(visit, service) {
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
 export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, children }) {
+  const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
     <UiSurface
       density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onDismiss(); }}
     >
       <section
@@ -296,6 +298,7 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       className="tech-visit-control"
       rows={3}
       value={note}
+      disabled={locked}
       onChange={(e) => onChange(e.target.value)}
       placeholder="What you treated, where, and what you saw"
     />

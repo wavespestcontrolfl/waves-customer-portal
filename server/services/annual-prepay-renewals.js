@@ -2910,6 +2910,17 @@ async function applyPrepaidCoverageForTerm(
 // Best-effort: a failure here must never block the payment sync itself.
 const PENDING_COMPLETION_CREDIT_BY = 'system:annual_prepay_pending_completion';
 
+// Was this term's year charged after the first visit (GATE_PAF_PREPAY)? Read
+// from the accepting estimate's durable job, bound to this term's invoice.
+async function termWasPafDeferred(term, prepayInvoiceId, conn) {
+  if (!term?.source_estimate_id || !prepayInvoiceId) return false;
+  const estimate = await conn('estimates').where({ id: term.source_estimate_id }).first('estimate_data');
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
+  return !!job && job.deferred_to_first_visit === true && String(job.invoice_id || '') === String(prepayInvoiceId);
+}
+
 async function reconcilePendingWindowCompletions(term, conn = db) {
   const summary = { settled: 0, credited: 0 };
   try {
@@ -2943,6 +2954,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         .first('prepay_invoice_id');
       prepayInvoiceId = fullTerm ? fullTerm.prepay_invoice_id : null;
     }
+    const pafDeferredTerm = await termWasPafDeferred(term, prepayInvoiceId, conn);
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       if (String(row.status || '').toLowerCase() !== 'completed') continue;
@@ -2969,6 +2981,22 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       // annual_prepay_term_id — that column is null on some prepay invoices
       // (verified against prod), so the invoice-side check would miss them.
       if (prepayInvoiceId && String(invoice.id) === String(prepayInvoiceId)) continue;
+      // A year whose charge waited for the first visit (GATE_PAF_PREPAY) held
+      // its visits' base application unbilled. An invoice POSITIVELY made of
+      // the visit's own add-on lines only (the add-on billing's classifier:
+      // every line an add-on of this visit or a deposit credit) is not the
+      // base: the slice was delivered, so nothing comes back as credit. Any
+      // other invoice (an office invoice with free-text lines included) keeps
+      // the normal reconciliation.
+      if (pafDeferredTerm) {
+        // Classified from the invoice's own line ids (every add-on line is
+        // `scheduled_<visit>_addon_<row>`), never the visit's current add-on
+        // rows, which an edit deletes and reinserts (GitHub Codex #5567 r15).
+        const AddonBilling = require('./annual-prepay-addon-billing');
+        const addonPrefix = `scheduled_${row.id}_addon_`;
+        const addons = { clientIds: { has: (id) => typeof id === 'string' && id.startsWith(addonPrefix) } };
+        if (AddonBilling.classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons) continue;
+      }
       // Payer-billed visit: the money (owed or collected) is the PAYER's AR,
       // not the homeowner's — settling it as homeowner coverage or crediting
       // the homeowner a slice for the payer's money are both wrong. The
@@ -4067,7 +4095,196 @@ async function stampedTermStillCoversVisit(term, scheduledService, conn) {
   return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
 }
 
-async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
+// Pay after the first visit, annual prepay (GATE_PAF_PREPAY, PR-D). The accept
+// mints the year invoice and a payment_pending term but defers the charge
+// until the first visit is PERFORMED (estimate_data.prepayAutoChargeJob,
+// deferred_to_first_visit). Until the term is paid its visits carry no prepay
+// stamp, so without this every visit — the first one included — would be
+// billed per application on top of the year invoice. Covered: an unstamped
+// visit of THAT estimate's plan, while the term is still payment_pending on
+// the job's own invoice and the job is still collecting it (or its charge was
+// declined: owner R2, later visits are held, not billed, until it is paid or
+// the office decides). Keyed off the job's frozen flag, not the live gate, so
+// an accept already deferred stays held if the gate is turned off.
+const PAF_PREPAY_HOLD_STATUSES = new Set([
+  'awaiting_first_visit', 'pending', 'claimed', 'processing', 'paid', 'delivered_fallback',
+]);
+
+// A year handed to a third-party payer (or settled with nothing due) is still
+// the plan's bill while the term is payment_pending: keep holding the visits
+// until it settles. Other skips (invoice missing / voided / refunded) are not
+// a live year bill and bill normally.
+const PAF_PREPAY_HOLD_SKIP_REASONS = new Set(['payer_billed', 'settled_zero_due']);
+const PAF_PREPAY_DEAD_INVOICE_STATUSES = new Set(['void', 'voided', 'canceled', 'cancelled', 'refunded']);
+function pafPrepayJobHolds(job) {
+  const status = String(job?.status || '');
+  if (PAF_PREPAY_HOLD_STATUSES.has(status)) return true;
+  return status === 'skipped' && PAF_PREPAY_HOLD_SKIP_REASONS.has(String(job?.reason || ''));
+}
+
+// The term of a year whose charge waits for the first visit and that holds
+// this visit, or null. Completion stamps it on the visit at closeout
+// (scheduled_services.paf_held_term_id); everything after the closeout reads
+// that stamp (pafHeldStampCovers), never this live re-derivation.
+// `activated`: the same question for a year that was charged and ACTIVATED
+// while this visit's closeout was still running (GitHub Codex #5567 r14):
+// activation skips completed rows, so completion asks whether the visit is
+// one the now-paid year bought (canonical paid coverage, coveredTermsAsOf)
+// and stamps it, instead of billing it beside the year.
+async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = false, activated = false } = {}) {
+  if (scheduledService.prepaid_method) return null;
+  if (!scheduledService.customer_id) return null;
+  try {
+    // Strict callers (charging / completion guards) must see a probe failure,
+    // never a cached "no table" that reads as uncovered — same direct probe
+    // as the stamped branch below.
+    if (throwOnError) {
+      if (!(await conn.schema.hasTable('annual_prepay_terms'))) return null;
+    } else if (!(await annualPrepayTableExists())) return null;
+    // Cheapest question first: almost every customer has no payment_pending
+    // term at all, so most calls end on this one indexed read.
+    const terms = activated
+      ? await coveredTermsAsOf(conn)
+        .where('t.customer_id', scheduledService.customer_id)
+        .whereNot('t.status', PAYMENT_PENDING_STATUS)
+        .whereNotNull('t.source_estimate_id')
+        .whereNotNull('t.prepay_invoice_id')
+        .select('t.*')
+      : await conn('annual_prepay_terms')
+        .where({ customer_id: scheduledService.customer_id, status: 'payment_pending' })
+        // A term a payment dispute suspended back to payment_pending is no
+        // longer backed by money: its visits bill normally during the dispute.
+        .whereNull('dispute_suspended_at')
+        .whereNotNull('source_estimate_id')
+        .whereNotNull('prepay_invoice_id')
+        .select('*');
+    if (!terms.length) return null;
+    let estimateId = scheduledService.source_estimate_id || null;
+    if (scheduledService.recurring_parent_id) {
+      const parent = await conn('scheduled_services')
+        .where({ id: scheduledService.recurring_parent_id, customer_id: scheduledService.customer_id })
+        .first('source_estimate_id');
+      const parentEstimateId = parent?.source_estimate_id || null;
+      if (estimateId && parentEstimateId && String(estimateId) !== String(parentEstimateId)) return null;
+      estimateId = estimateId || parentEstimateId;
+    }
+    if (!estimateId) return null;
+    const term = terms.find((t) => String(t.source_estimate_id) === String(estimateId));
+    if (!term) return null;
+    const estimate = await conn('estimates').where({ id: estimateId }).first('estimate_data');
+    let data = estimate?.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+    const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
+    if (!job || job.deferred_to_first_visit !== true) return null;
+    if (String(job.invoice_id || '') !== String(term.prepay_invoice_id)) return null;
+    if (!activated) {
+      if (!pafPrepayJobHolds(job)) return null;
+      // The year bill must still be live: a voided / cancelled / refunded year
+      // holds nothing, even before the term sync catches up.
+      const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
+      if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return null;
+    }
+    // A visit billed to a third-party payer (a visit-specific or account
+    // payer assigned after the accept) is not held: completion bills it to
+    // that payer, so it never releases the year's charge either (GitHub Codex
+    // #5567 r9). The same resolver completion's own payer exclusion reads.
+    const visitPayer = await require('./payer').resolveForInvoice({
+      database: conn, customerId: scheduledService.customer_id, scheduledServiceId: scheduledService.id, throwOnError: true,
+    });
+    if (visitPayer?.payerId) return null;
+    // Only a visit the year actually BOUGHT is held: the same sold selection
+    // first activation will stamp (count cap, window as projected for a
+    // payment today, ownership, callbacks out), minus a visit the stamp-time
+    // price check would refuse — never every same-service visit on the plan.
+    const sold = await coverageRowsForTerm(term, conn, activated ? {} : { projectFirstActivationOn: etDateString() });
+    if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return null;
+    const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
+      includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
+    });
+    return heldIds.has(String(scheduledService.id)) ? null : term;
+  } catch (err) {
+    if (throwOnError) throw err;
+    logger.warn(`[annual-prepay] deferred-prepay coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
+    return null;
+  }
+}
+
+async function pafDeferredPrepayCoversVisit(scheduledService, conn, opts = {}) {
+  return !!(await pafDeferredHoldingTerm(scheduledService, conn, opts));
+}
+
+// A visit completion stamped as held by a waiting year (paf_held_term_id):
+// while the year still waits or charges (payment_pending), covered unless its
+// bill is voided / cancelled / refunded or a dispute suspended it; once past
+// that, covered exactly when the term carries paid coverage by the canonical
+// rules (coveredTermsAsOf: a paid end-at-term cancellation rides out its
+// window, a refund or lost dispute does not). Reads the stamp itself when a
+// caller's row does not carry the column. Returns null for an unstamped
+// visit. Throws on a failed read.
+async function pafHeldStampCovers(scheduledService, conn = db) {
+  if (!scheduledService) return null;
+  let termId = scheduledService.paf_held_term_id;
+  if (termId === undefined && scheduledService.id) {
+    termId = (await conn('scheduled_services').where({ id: scheduledService.id }).first('paf_held_term_id'))?.paf_held_term_id;
+  }
+  if (!termId) return null;
+  const term = await conn('annual_prepay_terms').where({ id: termId }).first('id', 'customer_id', 'status', 'prepay_invoice_id', 'dispute_suspended_at');
+  if (!term || (scheduledService.customer_id && String(term.customer_id) !== String(scheduledService.customer_id))) return false;
+  if (String(term.status || '') === PAYMENT_PENDING_STATUS) {
+    if (term.dispute_suspended_at) return false;
+    const invoice = term.prepay_invoice_id
+      ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status')
+      : null;
+    return !!invoice && !PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
+  }
+  return !!(await coveredTermsAsOf(conn).where('t.id', term.id).first('t.id'));
+}
+
+
+// The coverage verdict a billing PREDICTION (closeout status, appointment
+// sheet, card-expiry exemptions) passes as annualCoverageValidated: a stamped
+// visit is validated strictly against its term; an unstamped visit held by a
+// deferred annual prepay (GATE_PAF_PREPAY) reads as covered, exactly as
+// completion will treat it; anything else stays null (no stamp to validate).
+// Throws like the strict check, so each caller keeps its own failure posture.
+// `deferredCustomerIds` (from deferredPrepayHoldCustomerIds, one query for a
+// whole board) skips the per-visit check for every customer with no deferred
+// year at all.
+async function annualCoverageVerdictForPrediction(visit, conn = db, { deferredCustomerIds = null } = {}) {
+  if (visit?.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
+    return annualPrepayCoversVisit(visit, conn, { throwOnError: true });
+  }
+  // The batch prefilter covers every customer a stamp can belong to (any
+  // after-visit year, activated included), so it runs first: no per-visit
+  // read for anyone else (GitHub Codex #5567 r18). A visit completion
+  // stamped as held keeps its coverage after the year is paid.
+  if (deferredCustomerIds && !deferredCustomerIds.has(String(visit?.customer_id))) return null;
+  if (await pafHeldStampCovers(visit, conn)) return true;
+  return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
+}
+
+// The customers (of `customerIds`) that have an after-visit prepay year: any
+// term whose estimate carries a deferred job (waiting, paid, or cancelled to
+// end at term) (a stamped visit keeps coverage past activation). One query,
+// so a schedule board checks only those customers' visits one by one; the
+// per-visit check still decides. A failure throws; callers keep their own
+// posture.
+async function deferredPrepayHoldCustomerIds(conn, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return new Set();
+  const rows = await conn('annual_prepay_terms as t')
+    .join('estimates as e', 'e.id', 't.source_estimate_id')
+    .whereIn('t.customer_id', ids)
+    // Any after-visit year, not only one still waiting: a visit completion
+    // stamped keeps its coverage after the year is paid and activated, and a
+    // paid year cancelled to end at term still covers it (coveredTermsAsOf);
+    // the per-visit check decides.
+    .whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
+    .distinct('t.customer_id');
+  return new Set(rows.map((r) => String(r.customer_id)));
+}
+
+async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false, skipDeferredHold = false } = {}) {
   if (!scheduledService) return false;
 
   // Codex round-7 P1 (owner ruling 2026-09-26, P2-4): an UNPAID termite
@@ -4090,6 +4307,21 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // to an unstamped visit (see its own comment) — never waves through a
   // visit that already carries some other, even malformed, prepay stamp.
   if (await termiteGraceCoversVisit(scheduledService, conn, { throwOnError })) return true;
+
+  // GATE_PAF_PREPAY: an unstamped visit of a year whose charge waits for (or
+  // failed after) the first visit — see pafDeferredPrepayCoversVisit.
+  // A visit completion stamped as held by that year stays covered through the
+  // charge and activation (a resumed closeout reads the stamp, never the live
+  // hold that activation ends).
+  try {
+    if (await pafHeldStampCovers(scheduledService, conn)) return true;
+  } catch (stampErr) {
+    if (throwOnError) throw stampErr;
+    logger.warn(`[annual-prepay] held-stamp coverage check failed for scheduled service ${scheduledService.id}: ${stampErr.message}`);
+  }
+  // `skipDeferredHold`: a quiet backfill closeout never takes the waiting
+  // year's hold (it keeps its review invoice); paid coverage still applies.
+  if (!skipDeferredHold && await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED
@@ -6501,6 +6733,8 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         'c.ach_status as customer_ach_status',
         'c.per_application_fee', 'c.payer_id as customer_payer_id',
       );
+    // GATE_PAF_PREPAY: customers with a deferred year, one query for the batch.
+    const deferredCustomerIds = await deferredPrepayHoldCustomerIds(conn, (visits || []).map((v) => v.customer_id));
     for (const v of visits || []) {
       const customerId = String(v.customer_id);
       if (!evaluable(customerId)) continue;
@@ -6508,9 +6742,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // a malformed stamp (no amount / no term) or a failed coverage query
       // must fail toward the warning, not fall back to trusting the stamp
       // (predictCompletionBilling treats null as "trust the stamp").
-      const annualCoverageValidated = v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
-        ? await annualPrepayCoversVisit(v, conn, { throwOnError: true })
-        : null;
+      const annualCoverageValidated = await annualCoverageVerdictForPrediction(v, conn, { deferredCustomerIds });
       const payer = await resolveForInvoice({
         database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
         scheduledServiceId: v.id, throwOnError: true,
@@ -10826,6 +11058,12 @@ module.exports = {
   restoreWaveguardExtensionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
+  pafDeferredPrepayCoversVisit,
+  pafDeferredHoldingTerm,
+  pafHeldStampCovers,
+  annualCoverageVerdictForPrediction,
+  deferredPrepayHoldCustomerIds,
+  PAF_PREPAY_HOLD_STATUSES,
   coveredTermsAsOf,
   retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,

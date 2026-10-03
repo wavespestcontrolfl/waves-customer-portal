@@ -22,8 +22,8 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onFullForm }) => (
-    <div data-recap-enabled={String(service.recapEnabled)}>
+  default: ({ service, onFullForm, voiceFillEnabled }) => (
+    <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)}>
       Fast Complete sheet for {service.id}
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
@@ -48,11 +48,11 @@ const row = (id, overrides = {}) => ({
 let rows;
 let fetchMock;
 
-function mount(path = '/tech/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -102,7 +102,7 @@ it('keeps a completed re-service on the recap editor even with the gate on', asy
   // The legacy workspace lists completed rows; a completed visit is edited
   // through the recap path, which updates its existing record.
   rows = [row('svc-completed', { reserviceFastCompleteEnabled: true, status: 'completed' })];
-  mount('/tech/tools', { fieldWorkspace: false });
+  mount('/admin/today/tools', { fieldWorkspace: false });
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Existing recap form for svc-completed')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
@@ -139,5 +139,28 @@ it('the recap flag alone never opens the sheet: the routing gate still decides',
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Existing recap form for svc-recap-only')).toBeInTheDocument();
+  expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+});
+
+// GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: the sheet gets it
+// as the `voiceFillEnabled` prop, and only an exact true turns voice fill on.
+it.each([
+  [true, 'true'],
+  [false, 'false'],
+  [undefined, 'false'],
+  ['true', 'false'],
+])('passes fastCompleteVoiceFillEnabled %s to the sheet as voiceFillEnabled=%s', async (flag, expected) => {
+  rows = [row('svc-voice', { reserviceFastCompleteEnabled: true, ...(flag === undefined ? {} : { fastCompleteVoiceFillEnabled: flag }) })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  const sheet = (await screen.findByText('Fast Complete sheet for svc-voice')).closest('[data-voice-fill-enabled]');
+  expect(sheet.getAttribute('data-voice-fill-enabled')).toBe(expected);
+});
+
+it('the voice-fill flag alone never opens the sheet: the routing gate still decides', async () => {
+  rows = [row('svc-voice-only', { fastCompleteVoiceFillEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Existing recap form for svc-voice-only')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });

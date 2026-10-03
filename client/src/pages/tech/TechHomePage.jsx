@@ -41,6 +41,7 @@
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { useFieldPortalClass } from '../../components/tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
@@ -48,6 +49,7 @@ import TechFieldHome from './TechFieldHome';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
+import { useTechBasePath } from '../../components/tech/techBasePath';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
@@ -375,18 +377,20 @@ const ON_SITE_ELIGIBLE = new Set(['en_route']);
 // an underlying feature. Dropped from QUICK_ACTIONS until those
 // surfaces actually exist (matches the /tech/messages drop in #355).
 const QUICK_ACTIONS = [
-  { icon: '📅', label: "Today's Route", path: '/tech' },
+  { icon: '📅', label: "Today's Route", path: '' },
   // Estimator routes into the admin pipeline builder — owner-only under the
   // 2026-08-25 role lockdown, hidden for technician logins.
-  { icon: '📋', label: 'Field Estimator', path: '/tech/estimate', adminOnly: true },
-  { icon: '🌱', label: 'Lawn Diagnostic', path: '/tech/lawn-diagnostic' },
-  { icon: '📸', label: 'Social Post', path: '/tech/social-post' },
-  { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
+  { icon: '📋', label: 'Field Estimator', path: '/estimate', adminOnly: true },
+  { icon: '🌱', label: 'Lawn Diagnostic', path: '/lawn-diagnostic' },
+  { icon: '📸', label: 'Social Post', path: '/social-post' },
+  { icon: '📖', label: 'Protocols & SOPs', path: '/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
 
 export default function TechHomePage({ section = 'today' }) {
+  const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
+  const base = useTechBasePath();
   const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
@@ -486,7 +490,7 @@ export default function TechHomePage({ section = 'today' }) {
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
   const currentTechId = staff?.id || null;
-  // TechLayout refreshes this from /admin/auth/me on every load, so the
+  // The admin shell refreshes this from /admin/auth/me on every load, so the
   // stored role tracks the server; hiding is UX only — the estimate APIs
   // enforce owner-only server-side regardless.
   const currentRole = staff?.role || null;
@@ -916,7 +920,7 @@ export default function TechHomePage({ section = 'today' }) {
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
-    navigate(`/tech?visit=${encodeURIComponent(stop.key)}`);
+    navigate(`${base}?visit=${encodeURIComponent(stop.key)}`);
   };
   const closeFieldVisit = () => {
     if (navigationBusy) return;
@@ -929,13 +933,13 @@ export default function TechHomePage({ section = 'today' }) {
     else openProjectOrLane(service);
   };
   const fieldTools = [
-    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`/tech/protocols${visitSearch}`) },
-    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`/tech/lawn-diagnostic${visitSearch}`) },
+    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
+    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
     { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
-    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate('/tech/estimate') }] : []),
-    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`/tech/social-post${visitSearch}`) }] : []),
+    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
+    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
-  if (!fieldWorkspace && section !== 'today') return <Navigate to="/tech" replace />;
+  if (!fieldWorkspace && section !== 'today') return <Navigate to={base} replace />;
 
   return (
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
@@ -963,8 +967,8 @@ export default function TechHomePage({ section = 'today' }) {
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
-            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
-            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
+            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
+            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
@@ -1070,7 +1074,7 @@ export default function TechHomePage({ section = 'today' }) {
         marginBottom: 20,
       }}>
         {QUICK_ACTIONS
-          .filter((action) => action.path !== '/tech/social-post' || socialPostEnabled)
+          .filter((action) => action.path !== '/social-post' || socialPostEnabled)
           .filter((action) => !action.adminOnly || currentRole === 'admin')
           .map((action) => (
           <button
@@ -1079,7 +1083,7 @@ export default function TechHomePage({ section = 'today' }) {
               if (action.action === 'create-project') {
                 handleProjectQuickAction();
               }
-              else if (action.path) navigate(action.path);
+              else if (action.path !== undefined) navigate(`${base}${action.path}`);
             }}
             style={{
               background: DARK.card,
@@ -1186,7 +1190,7 @@ export default function TechHomePage({ section = 'today' }) {
               const addr = nextStop.address;
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
-            <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
+            <ActionBtn label="Protocol" icon="📖" onClick={() => navigate(`${base}/protocols`)} />
             <ActionBtn label="Quick Move" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
             <ActionBtn
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
@@ -1325,13 +1329,16 @@ export default function TechHomePage({ section = 'today' }) {
 
       {continueProjectId && createPortal(
         <div
+          className={fieldPortalClass || undefined}
           /* Portaled to document.body at zIndex 50 so the stack lands right
              (Codex P2): the overlay mounts AFTER #root, so it paints above
-             the TechLayout bottom nav (also z-50, inside #root) — and
+             the shell bottom nav (also z-50, inside #root) — and
              ProjectDetail's confirmations use the shared Dialog portal
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
-          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          /* Inside Waves Admin the fixed sidebar is z-100: sit above it but below
+             the shared Dialog layer (120) so confirmations still paint on top. */
+          style={{ position: 'fixed', inset: 0, zIndex: base === '/tech' ? 50 : 105, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
           onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders
@@ -1433,6 +1440,9 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
+          // exact true shows the mic, the Check chips and the office note.
+          voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setFastCompleteService(null);
             // A sheet blocked on a stale row asks for a refresh, so reopening

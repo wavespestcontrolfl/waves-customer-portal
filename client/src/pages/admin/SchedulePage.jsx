@@ -42,8 +42,8 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import {
   STATION_TYPE_PROGRAM, TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas,
-  trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedFormTakesPlaces,
-  typedTreatmentAreaField, typedZeroStateRefusesBody,
+  termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
@@ -1340,6 +1340,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
+  "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -7146,6 +7147,35 @@ function JobCardTank({ tank, serviceId, D }) {
   );
 }
 
+// Why the customer booked this visit (GATE_JOB_CARD_CUSTOMER_CONTEXT). Their
+// own typed or texted words are quoted; a call is an AI summary and an
+// office entry is the office's wording, so neither is quoted.
+const JOB_CARD_REQUEST_LABELS = {
+  picker: { label: "Customer wrote (re-service page)", quoted: true },
+  text: { label: "Customer texted", quoted: true },
+  call: { label: "From the call (AI summary)", quoted: false },
+  office: { label: "Office note on the booking", quoted: false },
+};
+
+export function JobCardCustomerRequest({ request, D }) {
+  if (!request || (!request.text && !request.pests?.length)) return null;
+  const how = JOB_CARD_REQUEST_LABELS[request.source] || { label: "Why they booked", quoted: false };
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Why they booked</div>
+      {request.text && (
+        <div>
+          <span style={{ color: D.muted }}>{how.label}: </span>
+          {how.quoted ? `\u201C${request.text}\u201D` : request.text}
+        </div>
+      )}
+      {request.pests?.length > 0 && (
+        <div><span style={{ color: D.muted }}>Pests picked: </span>{request.pests.join(", ")}</div>
+      )}
+    </div>
+  );
+}
+
 function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7160,6 +7190,7 @@ function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
       {card.notes?.chemicalSensitivity && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
       )}
@@ -9490,6 +9521,47 @@ export function restoredActivityScoreState(activity, values, savedScore, savedTo
   };
 }
 
+// The product rows a cockroach report reads its work from, as the completion
+// submits them (each product's id, application method and area): the
+// standard wording preview sends these.
+export function standardWordingProductRows(selectedProducts = [], serviceType = "", areasServiced = []) {
+  return (selectedProducts || []).map((p) => ({
+    productId: p.productId,
+    applicationMethod: productApplicationMethod(p, serviceType),
+    applicationArea: p.applicationArea || (areasServiced.length === 1 ? areasServiced[0] : null),
+  }));
+}
+
+// The standard wording a nothing-found report keeps (GATE_STANDARD_WORDING_
+// PREVIEW, owner mockup approval 2026-10-03): read-only, under the greyed-out
+// Generate AI report, the exact sentences the customer will read.
+export function StandardWordingCard({ wording }) {
+  if (!wording) return null;
+  const text = { margin: 0, fontSize: 14, color: CP_M.ink };
+  return (
+    <div
+      data-testid="standard-wording"
+      style={{
+        border: `1px solid ${CP_M.ink}`,
+        borderRadius: 12,
+        background: CP_M.card,
+        padding: "12px 14px",
+        marginBottom: 20,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase", color: CP_M.ink4 }}>
+        Report the customer will see · standard wording
+      </div>
+      {wording.headline && <p style={text}>{wording.headline}</p>}
+      {wording.body && <p style={text}>{wording.body}</p>}
+      <p style={{ ...text, color: CP_M.ink4 }}>Nothing was found, so the report uses its standard wording instead of a write-up.</p>
+    </div>
+  );
+}
+
 export function TypedFindingsSection({
   variant,
   schema,
@@ -9511,6 +9583,12 @@ export function TypedFindingsSection({
   // whether the notes left it unclear (step 4). Null off.
   heardScore = null,
   scoreUnclear = false,
+  // Step 5: whether Generate fills this form from the notes (a notice
+  // question then says it is always a tap), and the record fields the visit
+  // itself filled ({ key: { value, source } }, a termite treatment's products,
+  // EPA numbers, gallons and traced feet). Off by default.
+  voiceFill = false,
+  sources = null,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9568,6 +9646,9 @@ export function TypedFindingsSection({
   const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f) || leftUnclear(f);
   // The words a field was filled from, while it still holds that value.
   const heardQuotes = (f) => (heard?.[f.key] && heard[f.key].value === values?.[f.key] ? heard[f.key].quotes : null);
+  // Where the visit filled a field from (its products or its trace), while it
+  // still holds that value.
+  const sourceOf = (f) => (sources?.[f.key]?.value && sources[f.key].value === values?.[f.key] ? sources[f.key].source : null);
   const primaryFields = visibleFields.filter(staysPrimary);
   const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
@@ -9612,8 +9693,14 @@ export function TypedFindingsSection({
         quotes={heardQuotes(field)}
         unclear={leftUnclear(field)}
         color={mutedColor}
-        ask={({ chips: "Pick what applies.", count: "Enter the number." })[field.type] || "Pick one."}
+        ask={({ chips: "Pick what applies.", count: "Enter the number.", text: "Type it in." })[field.type] || "Pick one."}
       />
+      {sourceOf(field) && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>{sourceOf(field)}</div>
+      )}
+      {voiceFill && field.tapOnly && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>Always a tap: never filled from the notes.</div>
+      )}
     </div>
   );
   return (
@@ -10346,6 +10433,15 @@ function LawnAssessmentCompletionBlock({
                   </select>
                 </div>
               ))}
+            </div>
+          )}
+          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
+              "since your last visit" score line needs 2+ usable photos on both
+              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
+              can never show it. Analyze stays enabled at one photo. */}
+          {photos.length < 2 && (
+            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
           )}
           <button
@@ -13094,6 +13190,9 @@ export function CompletionPanel({
   // count into findings/companion state; consumed by the invalidation
   // effect below the state declarations (codex r70).
   const stationAutoWroteRef = useRef(false);
+  // Set when the termite record fill (step 5, below) actually writes a field;
+  // consumed by the same invalidation effect.
+  const termiteRecordWroteRef = useRef(false);
   useEffect(() => {
     if (!stationFeatureOn) return;
     // While an AI report request is in flight, the payload snapshot must stay
@@ -13254,8 +13353,9 @@ export function CompletionPanel({
   // Runs on the commit that applied the write, so the invalidation sees the
   // same findings state the next generation payload would submit.
   useEffect(() => {
-    if (!stationAutoWroteRef.current) return;
+    if (!stationAutoWroteRef.current && !termiteRecordWroteRef.current) return;
     stationAutoWroteRef.current = false;
+    termiteRecordWroteRef.current = false;
     invalidateGeneratedReportOnTypedEdit();
   }, [findingsValues, companionState]);
   // The trapping section — primary OR companion, `trap_visit_type` can
@@ -14257,6 +14357,80 @@ export function CompletionPanel({
   // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
   // notes for a typed visit's own findings (the schedule row's flag).
   const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
+  // GATE_STANDARD_WORDING_PREVIEW (owner mockup approval 2026-10-03): while
+  // the record says nothing was found (the rule that greys out Generate AI
+  // report), the exact sentences the customer's report keeps, from the
+  // server's own report builder, read again as the record changes. A card
+  // that may be out of date is never shown: it clears until the new answer.
+  const standardWordingWanted = isTypedFindings
+    && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore);
+  // Generate AI report is off when the report keeps its standard wording, so
+  // it looks off (the approved mockup); before, it looked on and did nothing.
+  const generateHeldForStandardWording = standardWordingWanted || zeroStateCompanionOnly;
+  const [standardWording, setStandardWording] = useState(null);
+  // The product rows a cockroach report's work comes from, as a text key, so
+  // typing an amount never asks again.
+  const standardWordingProducts = JSON.stringify(
+    standardWordingProductRows(selectedProducts, serviceTypeForArea, completionAreasServiced),
+  );
+  useEffect(() => {
+    setStandardWording(null);
+    if (!standardWordingWanted) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      adminFetch(`/admin/dispatch/${service.id}/standard-wording`, {
+        method: "POST",
+        body: JSON.stringify({
+          values: findingsValues,
+          activityScore: typedActivityScore,
+          backfill: backfillEligible && backfillCloseout,
+          products: JSON.parse(standardWordingProducts),
+        }),
+      })
+        .then((data) => {
+          if (!cancelled) {
+            setStandardWording(data?.available === true ? { headline: data.headline || "", body: data.body || "" } : null);
+          }
+        })
+        .catch(() => { if (!cancelled) setStandardWording(null); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [standardWordingWanted, service.id, findingsValues, typedActivityScore, backfillEligible, backfillCloseout, standardWordingProducts]);
+  // Fast Complete step 5: a termite treatment's state record fills from the
+  // visit's own products and trace (lib termiteRecordFromVisit), each field
+  // only while it is empty or still holds what was last filled this way, so
+  // a hand edit always wins (the station counts' rule). Never while an AI
+  // report is generating (its payload stays what the model saw); a write
+  // invalidates an untouched report like a typed edit.
+  const termiteRecord = useMemo(() => (
+    typedVoiceFill && service.completionProfile?.findingsType === "termite_treatment"
+      ? termiteRecordFromVisit({ products: selectedProducts, catalog: products, tracedFeet: tracedLinearFt })
+      : null
+  ), [typedVoiceFill, service.completionProfile?.findingsType, selectedProducts, products, tracedLinearFt]);
+  const termiteRecordAutoRef = useRef({});
+  useEffect(() => {
+    if (!termiteRecord || generating) return;
+    const lastAuto = { ...termiteRecordAutoRef.current };
+    const filled = Object.fromEntries(Object.entries(termiteRecord).map(([key, entry]) => [key, entry.value]));
+    // A field whose source went away (a product removed) clears while the
+    // fill still owns it.
+    const keys = [...new Set([...Object.keys(filled), ...Object.keys(lastAuto)])];
+    setFindingsValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of keys) {
+        const current = String(next[key] ?? "");
+        const value = filled[key] ?? "";
+        if ((current === "" || current === String(lastAuto[key] ?? "")) && current !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      if (changed) termiteRecordWroteRef.current = true;
+      return changed ? next : prev;
+    });
+    termiteRecordAutoRef.current = filled;
+  }, [termiteRecord, generating]);
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -20549,7 +20723,8 @@ export function CompletionPanel({
                   ...secondaryPill,
                   marginTop: 4,
                   marginBottom: 20,
-                  opacity: generating ? 0.5 : 1,
+                  opacity: generating ? 0.5 : generateHeldForStandardWording ? 0.45 : 1,
+                  cursor: generateHeldForStandardWording && !generating ? "default" : secondaryPill.cursor,
                 }}
               >
                 {generating ? "Generating…" : "Generate AI report"}
@@ -20579,6 +20754,7 @@ export function CompletionPanel({
                 Include recent customer calls/texts/emails
               </label>
             )}
+            {!quickComplete && <StandardWordingCard wording={standardWording} />}
             {!quickComplete && generatedReportCleared && (
               <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
                 Findings changed after the AI report was generated — the draft
@@ -20873,6 +21049,8 @@ export function CompletionPanel({
                 unclear={typedVoiceFill ? typedHeard?.unclear : null}
                 heardScore={typedVoiceFill ? typedHeard?.score : null}
                 scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+                voiceFill={typedVoiceFill}
+                sources={termiteRecord}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -23038,7 +23216,8 @@ export function CompletionPanel({
                 color: D.teal,
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: generating ? "wait" : "pointer",
+                cursor: generating ? "wait" : generateHeldForStandardWording ? "default" : "pointer",
+                opacity: generateHeldForStandardWording && !generating ? 0.45 : 1,
                 marginTop: 8,
                 marginBottom: 20,
                 display: "flex",
@@ -23074,6 +23253,7 @@ export function CompletionPanel({
               Include recent customer calls/texts/emails
             </label>
           )}
+          {!quickComplete && <StandardWordingCard wording={standardWording} />}
           {!quickComplete && generatedReportCleared && (
             <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
               Findings changed after the AI report was generated — the draft
@@ -23329,6 +23509,8 @@ export function CompletionPanel({
               unclear={typedVoiceFill ? typedHeard?.unclear : null}
               heardScore={typedVoiceFill ? typedHeard?.score : null}
               scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+              voiceFill={typedVoiceFill}
+              sources={termiteRecord}
             />
           )}
           {/* Companion sections — one typed form per companion schema,

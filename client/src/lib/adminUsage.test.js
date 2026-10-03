@@ -496,3 +496,11 @@ describe('trackAdminPageView', () => {
     expect(JSON.stringify(body)).not.toContain('Google');
   });
 });
+
+describe('Today field subpages (Codex #5573 r11)', () => {
+  it('stay distinct static paths, not one :id', () => {
+    expect(normalizeAdminPath('/admin/today/tools').path).toBe('/admin/today/tools');
+    expect(normalizeAdminPath('/admin/today/protocols').path).toBe('/admin/today/protocols');
+    expect(normalizeAdminPath('/admin/today/more').path).toBe('/admin/today/more');
+  });
+});

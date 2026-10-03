@@ -1928,7 +1928,8 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2)', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.v2).toMatchObject({ kind: 'workup', answer: { headline: 'Brown patches in the lawn' } });
-      expect(body.result).toBeDefined(); // v1 scores still computed (decision 3)
+      expect(body.result).toBeDefined(); // the v1 twin stays in the shape, unscored
+      expect(mockLawnAnalyzePhoto).not.toHaveBeenCalled(); // owner 2026-10-02: no v1 scorer with the gate on
       expect(mockIdentifyPestV2).not.toHaveBeenCalled();
       expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({
         subject: 'lawn', mode: 'workup', ladder: 'gemini_only', chips: { grass_type: 'st_augustine' },
@@ -1983,10 +1984,8 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2)', () => {
     });
   });
 
-  test('gate on: v1 scores failing does not block a v2 answer', async () => {
+  test('gate on: the v1 scorers never run; rows keep empty v1 scores (owner 2026-10-02)', async () => {
     mockGateState.photoIdV2 = true;
-    mockLawnAnalyzePhoto.mockRejectedValue(new Error('scores down'));
-    mockTreeAnalyzePhoto.mockRejectedValue(new Error('scores down'));
     mockIdentifyPlantV2.mockResolvedValue(plantOk('Thinning turf'));
     await withServer(async (base) => {
       const lawn = await post(base, '/api/photo-id/lawn', photoBody());
@@ -1995,6 +1994,10 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2)', () => {
       const tree = await post(base, '/api/photo-id/tree_shrub', photoBody());
       expect(tree.status).toBe(200);
       expect((await tree.json()).v2.answer.headline).toBe('Thinning turf');
+      expect(mockLawnAnalyzePhoto).not.toHaveBeenCalled();
+      expect(mockTreeAnalyzePhoto).not.toHaveBeenCalled();
+      expect(JSON.parse(TABLES.lawn_diagnostics[0].ai_analysis).composite).toEqual({});
+      expect(TABLES.tree_shrub_assessments[0].overall_score).toBeNull();
     });
   });
 

@@ -98,12 +98,14 @@ describe("useAdminBookmarkMeta", () => {
   });
 
   it("restores the SNAPSHOTTED identity on deactivate, not hardcoded customer defaults", () => {
+    // A customer token page that set its own identity (the retired /tech
+    // portal no longer counts as a pre-admin state; see the r6 case below).
     seedHead({
-      manifest: "/manifest.tech.json",
-      appTitle: "Field Tools",
-      description: "Tech portal",
-      themeColor: "#0f1923",
-      title: "Field Tools",
+      manifest: "/manifest.json",
+      appTitle: "Waves Report",
+      description: "Service report",
+      themeColor: "#123456",
+      title: "Service Report",
     });
 
     const view = render(<Harness active={false} />);
@@ -115,15 +117,15 @@ describe("useAdminBookmarkMeta", () => {
     expect(document.documentElement).not.toHaveClass("admin-app");
     expect(document.querySelector('link[rel="manifest"]')).toHaveAttribute(
       "href",
-      "/manifest.tech.json",
+      "/manifest.json",
     );
     expect(
       document.querySelector('meta[name="apple-mobile-web-app-title"]'),
-    ).toHaveAttribute("content", "Field Tools");
-    expect(document.title).toBe("Field Tools");
+    ).toHaveAttribute("content", "Waves Report");
+    expect(document.title).toBe("Service Report");
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
       "content",
-      "#0f1923",
+      "#123456",
     );
   });
 
@@ -159,5 +161,34 @@ describe("useAdminBookmarkMeta", () => {
       "content",
       "#111111",
     );
+  });
+
+  it("a legacy /tech entry's field identity is not restored when leaving admin (Codex #5573 r6)", () => {
+    seedHead({
+      manifest: "/manifest.tech.json",
+      appTitle: "Field Tools",
+      description: "Waves field technician tools",
+      themeColor: "#0f1923",
+      title: "Waves Tech",
+    });
+    const { unmount } = render(<Harness active />);
+    unmount();
+    expect(document.querySelector('link[rel="manifest"]').getAttribute("href")).toBe("/manifest.json");
+    expect(document.title).toBe("Waves Customer Portal");
+    expect(document.documentElement.classList.contains("admin-app")).toBe(false);
+  });
+
+  it("the server-rendered /tech manifest is a transient field identity too (Codex #5573 r7)", () => {
+    seedHead({
+      manifest: "/tech-manifest.json",
+      appTitle: "Waves Tech",
+      description: "Waves field technician tools",
+      themeColor: "#0f1923",
+      title: "Waves Tech",
+    });
+    const { unmount } = render(<Harness active />);
+    unmount();
+    expect(document.querySelector('link[rel="manifest"]').getAttribute("href")).toBe("/manifest.json");
+    expect(document.title).toBe("Waves Customer Portal");
   });
 });

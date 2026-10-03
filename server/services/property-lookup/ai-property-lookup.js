@@ -23,6 +23,7 @@ const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
+const { routeSpellingVariants } = require('./route-spellings');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -1884,7 +1885,12 @@ const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|R
 // its own pattern: a value must follow AND must not be a zip — otherwise
 // every "Venice FL 34285" would read as "floor 34285" and aggregation would
 // never fire anywhere in Florida.
-const FL_FLOOR_RE = /\bFL\b\.?\s*#?\s*(?!\d{5}(?:-\d{4})?\b)[A-Z0-9-]+/i;
+// A "FL" token straight after the house number (optionally one pre-direction)
+// is the STATE ROAD, not a floor — live miss: a "<number> FL-70" storefront read as
+// "floor 70", so a plaza address looked like a unit-level lookup. A real floor
+// follows the street ("123 Main St Fl 3") or carries a '#' ("FL #2"), so the
+// route position is excluded only for the bare form.
+const FL_FLOOR_RE = /(?:(?<!^\s*\d+[A-Z]?\s+(?:(?:N|S|E|W|NE|NW|SE|SW|NORTH|SOUTH|EAST|WEST)\s+)?)\bFL\b\.?\s*|\bFL\b\.?\s*#\s*)(?!\d{5}(?:-\d{4})?\b)[A-Z0-9-]+/i;
 
 function addressHasSubpremise(address) {
   const s = String(address || '');
@@ -2696,11 +2702,41 @@ async function fetchCountyJson(url, timeoutMs, init = {}) {
   return JSON.parse(response.text);
 }
 
+// Extra roll-search candidates for a numbered-route street: the bare route
+// without its post-direction ("9155 SR 70" finds a roll row spelled
+// "SR 70 E" or "SR 70"), then the other counties' spellings (Sarasota writes
+// "STATE ROAD 72", Hillsborough "US HWY 41"). Empty for an ordinary street.
+function routeSearchCandidates(street) {
+  const m = /^(\d+[A-Z]?)\s+(.+)$/.exec(street);
+  if (!m) return [];
+  // A unit tail ("SR 72 STE 12") is peeled for parsing and re-attached to
+  // each spelling, so a suite on a route still gets the other spellings.
+  const label = stripUnitDesignators(m[2]);
+  const route = parseCountyRouteLabel(label);
+  if (!route) return [];
+  const tail = m[2].startsWith(label) ? m[2].slice(label.length).trim() : '';
+  // The direction is searched in BOTH positions: the canonical key keeps it
+  // after the number ("5100 US 301 N"), but a roll may write it first
+  // ("5100 N US HWY 301", Hillsborough). The direction-free spellings follow
+  // for rolls that omit it.
+  const { direction } = route;
+  const bareForms = routeSpellingVariants(`${m[1]} ${route.type} ${route.number}`);
+  const routes = [
+    ...(direction ? routeSpellingVariants(`${m[1]} ${direction} ${route.type} ${route.number}`) : []),
+    // Expanded spelling with the direction AFTER the number ("5100 US HWY
+    // 301 N"): Charlotte matches candidates exactly, so this form must be
+    // listed itself, not left to normalization.
+    ...(direction ? bareForms.map((form) => `${form} ${direction}`) : []),
+    ...bareForms,
+  ];
+  return tail ? [...routes.map((r) => `${r} ${tail}`), ...routes] : routes;
+}
+
 function manateeAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street];
+  const candidates = [street, ...routeSearchCandidates(street)];
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 
@@ -2715,7 +2751,7 @@ function countyAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street];
+  const candidates = [street, ...routeSearchCandidates(street)];
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 
@@ -2828,6 +2864,54 @@ const TERMINAL_ONLY_SUFFIX_RE = new RegExp(
   + '(?=(?:\\s+[NSEW])?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
 );
 
+// Numbered-route spellings → one canonical county-search key. The typed
+// address is never rewritten; only the key the county roll is searched with.
+// Live miss (10-02): a plaza storefront typed "<number> FL-70" normalized to "FL 70",
+// so the roll search and the house-number audit hunted for a street called
+// "FL 70" and reported "street not found" while the Manatee roll lists the
+// road as "SR 70 E".
+// Canonical forms follow what the rolls spell (live GIS reads 10-02):
+//   Manatee   SR 70 E, SR 64 E, SR 62, US 41 N, US 301 N, CR 675, CR 39
+//   Charlotte SR 31
+//   Sarasota  "STATE ROAD 72" (no SR spelling at all) — handled by the query
+//             variants in route-spellings.js (applied to every roll query), because
+//             this key must stay one string for the typed and roll sides.
+//   Hillsborough "US HWY 41", "STATE ROAD 674", "SR 674"
+// Rewritten ONLY when the route token sits straight after the house number
+// (optionally one pre-direction): "FL"/"Hwy"/"CR" elsewhere is a floor, a
+// suffix ("Kings Hwy"), or the state ("Venice FL 34285"). The number is capped
+// at 4 digits so "123 FL 34285" never reads as a route.
+const FL_US_HIGHWAY_NUMBERS = new Set(['1', '17', '19', '27', '41', '90', '92', '98', '192', '301', '441']);
+const COUNTY_ROUTE_STREET_RE = new RegExp(
+  '^(\\d+[A-Z]?)\\s+((?:(?:NORTH|SOUTH|EAST|WEST|NE|NW|SE|SW|N|S|E|W)\\s+)?)'
+  + '(FL|FLORIDA|SR|STATE\\s+(?:ROAD|RD|ROUTE|RTE|HWY|HIGHWAY)|US(?:\\s+(?:HWY|HIGHWAY|ROUTE|RTE))?|U\\s+S(?:\\s+(?:HWY|HIGHWAY|ROUTE|RTE))?|CR|COUNTY\\s+(?:ROAD|RD)|HWY|HIGHWAY)'
+  + '\\s*(\\d{1,4}[A-Z]?)(?=\\s|$)(.*)$',
+);
+function canonicalizeCountyRouteStreet(street) {
+  // Spelled diagonals ("123 Northeast US Highway 41") abbreviate first —
+  // the route parser reads NE/NW/SE/SW. Only a route street is rewritten;
+  // any other street comes back exactly as given.
+  const m = COUNTY_ROUTE_STREET_RE.exec(street.replace(/\b(NORTH|SOUTH)(EAST|WEST)\b/g, (_, ns, ew) => `${ns[0]}${ew[0]}`));
+  if (!m) return street;
+  const [, houseNumber, preDirection, token, routeNumber, rest] = m;
+  let type;
+  if (/^(?:US|U\s+S)\b/.test(token)) type = 'US';
+  else if (/^(?:CR|COUNTY)\b/.test(token)) type = 'CR';
+  // A bare "Hwy 41"/"Highway 301" is the US route where one exists
+  // (Tamiami Trail, Dixie Hwy) and the state road otherwise ("Hwy 70").
+  else if (/^(?:HWY|HIGHWAY)$/.test(token)) type = FL_US_HIGHWAY_NUMBERS.has(routeNumber) ? 'US' : 'SR';
+  else type = 'SR';
+  // One position for the direction, so the typed address and a roll row
+  // compare equal however each placed it ("123 N US HWY 41" and
+  // "123 US 41 N" are one key): a pre-direction moves after the number
+  // unless a post-direction is already there.
+  const pre = preDirection.trim();
+  if (pre && !/^\s+(?:NORTH|SOUTH|EAST|WEST|NE|NW|SE|SW|N|S|E|W)(?=\s|$)/.test(rest)) {
+    return `${houseNumber} ${type} ${routeNumber} ${pre}${rest}`;
+  }
+  return `${houseNumber} ${preDirection}${type} ${routeNumber}${rest}`;
+}
+
 function normalizeCountyStreetLine(address) {
   const firstLine = String(address || '').split(',')[0] || '';
   const cleaned = firstLine
@@ -2839,7 +2923,7 @@ function normalizeCountyStreetLine(address) {
   // hints are raw names, and replacing directionals or suffix words first
   // corrupts cities that contain them ("ROTONDA WEST" → "ROTONDA W",
   // "SOUTH GULF COVE" → "SOUTH GULF CV") so they never strip.
-  return stripCountyLocationSuffix(cleaned)
+  return canonicalizeCountyRouteStreet(stripCountyLocationSuffix(cleaned))
     .replace(/\bNORTH\b/g, 'N')
     .replace(/\bSOUTH\b/g, 'S')
     .replace(/\bEAST\b/g, 'E')
@@ -2970,6 +3054,18 @@ function stripUnitDesignators(street) {
   return s;
 }
 
+// Canonical numbered-route street label ("SR 70 E", "N US 41", "CR 675") →
+// its parts, or null for an ordinary street. Input is post-normalization and
+// post-unit-strip, without the house number.
+const COUNTY_ROUTE_LABEL_RE = /^(?:(N|S|E|W|NE|NW|SE|SW)\s+)?(SR|US|CR)\s+(\d{1,4}[A-Z]?)(?:\s+(?:HWY|RD))?(?:\s+(N|S|E|W|NE|NW|SE|SW))?$/;
+function parseCountyRouteLabel(streetLabel) {
+  const m = COUNTY_ROUTE_LABEL_RE.exec(String(streetLabel || '').trim());
+  if (!m) return null;
+  // `direction` is whichever position carries it (canonical keys put it
+  // after the number); every caller compares directions through it.
+  return { preDirection: m[1] || null, type: m[2], number: m[3], postDirection: m[4] || null, direction: m[4] || m[1] || null };
+}
+
 // ZIP from the city/state tail of a comma-formed address — never from the
 // street line, where a 5-digit house number ("12345 Main St") would read as a
 // ZIP. No-comma addresses return null and the audit stays county-wide.
@@ -3035,7 +3131,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // phantom "MAIN ST 4" street), so peel them from the raw string first.
     const cleanedAddress = String(address || '').replace(/#\s*[A-Za-z0-9-]+/g, ' ');
     const street = normalizeCountyStreetLine(cleanedAddress); // "4867 TOBERMORY WAY"
-    const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
+    const m = /^(\d+)\s+(.{3,})$/.exec(street);
     if (!m) return null;
     let houseNumber = parseInt(m[1], 10);
     // The audit usually receives the geocoder's CANONICAL address (typo-fixed
@@ -3045,7 +3141,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // always taken from the ORIGINALLY TYPED address when one is supplied.
     if (options.typedAddress) {
       const typedStreet = normalizeCountyStreetLine(String(options.typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' '));
-      const typedM = /^(\d+)\s+/.exec(typedStreet || '');
+      const typedM = /^(\d+)\s+/.exec(typedStreet);
       if (typedM) houseNumber = parseInt(typedM[1], 10);
     }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
@@ -3053,10 +3149,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     if (streetLabel.length < 3) return null;
     // Query WITHOUT the suffix for recall (counties abbreviate differently),
     // then extract numbers with the full street tokens for precision.
-    const likeText = removeStreetSuffix(streetLabel) || streetLabel;
+    // A numbered route ("SR 70 E") has no suffix to strip, and its trailing
+    // direction is part of the roll's spelling, not the street name — query
+    // the bare "SR 70" so a roll row without the direction is still found.
+    const route = parseCountyRouteLabel(streetLabel);
+    const likeText = route ? `${route.type} ${route.number}` : (removeStreetSuffix(streetLabel) || streetLabel);
     const typedSuffix = extractStreetSuffix(streetLabel);
+    // No serviced county → the loop below never answers and the audit
+    // returns null (no signal) through the !anyAnswered exit.
     const counties = auditCountyCandidates(address, geoContext);
-    if (!counties.length) return null;
     // ZIP scope: the customer-typed ZIP wins over the canonical/geocoded one
     // (Google can rewrite the ZIP while snapping). When a typed address was
     // supplied but carries NO ZIP, do NOT fall back to the canonical ZIP —
@@ -3083,10 +3184,25 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // (formatting variance), a DIFFERENT direction never does.
     const typedDirection = extractPostSuffixDirection(streetLabel);
     const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : '[NSEW]';
-    const relaxedPattern = new RegExp(
-      `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${relaxedSuffixAlt}(?:\\s+${relaxedDirectionAlt})?)?(?=\\s*(?:[;,]|$))`,
-      'gi',
-    );
+    // Route rows put the direction straight after the number with no suffix
+    // between ("9155 SR 70 E" typed as "9155 FL-70": formatting variance,
+    // not a different street), may carry a pre-direction ("N US 41") or a
+    // spelled "HWY"/"RD" tail, and a DIFFERENT direction is still a
+    // different road — "SR 64 E" vs "SR 64 W". The typed direction pins BOTH
+    // positions: a roll row may write it before or after the number, so
+    // "123 US 41 N" must not accept "123 S US 41" through the prefix slot.
+    const routeDirectionAlt = route?.direction ? escapeAuditRegex(route.direction) : '[NSEW]{1,2}';
+    const relaxedPattern = route
+      ? new RegExp(
+        `\\b(\\d+)\\s+(?:${routeDirectionAlt}\\s+)?`
+        + `${escapeAuditRegex(likeText)}(?:\\s+(?:HWY|RD))?`
+        + `(?:\\s+${routeDirectionAlt})?(?=\\s*(?:[;,]|$))`,
+        'gi',
+      )
+      : new RegExp(
+        `\\b(\\d+)\\s+${escapeAuditRegex(likeText)}(?:\\s+${relaxedSuffixAlt}(?:\\s+${relaxedDirectionAlt})?)?(?=\\s*(?:[;,]|$))`,
+        'gi',
+      );
 
     // Multi-situs rows are split on ';' and each piece runs through
     // normalizeCountyStreetLine, so a roll that spells suffixes/directions
@@ -3123,6 +3239,12 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // A row only falls out of scope when it HAS a ZIP and it isn't the typed
     // one — unknown row ZIPs stay in scope (fail-open, never manufactures a
     // mismatch out of missing data).
+    // The targeted "<number> %<street>" query (truncated-page fallback). A
+    // row can carry a direction BETWEEN the number and the street
+    // ("123 N US 41", "123 NE US HWY 41"), which a LIKE on "123 US 41" never
+    // reaches; the mid-pattern wildcard does, and the direction-pinned
+    // patterns still decide what counts.
+    const queryTargeted = (county) => queryStreetSitusAddresses(county, likeText, { ...options, houseNumber });
     const zipCompatible = (zipSet) => !typedZip || !zipSet || [...zipSet].some((z) => !z || z === typedZip);
     const scopedNumbers = (map) => {
       const out = new Set();
@@ -3147,15 +3269,22 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       anyAnswered = true;
       if (!result.situs.length) continue;
 
-      let numbers = collect(result.situs, result.zips, strictPattern);
-      if (!numbers.size) numbers = collect(result.situs, result.zips, relaxedPattern);
+      // Strict and relaxed matches are merged, never relaxed-as-fallback: one
+      // road's rows mix spellings ("7100 SR 70" beside "7000 SR 70 E"), and a
+      // strict hit must not hide a same-street row that only the relaxed
+      // (suffix/direction-pinned) pattern reads — the targeted queries below
+      // already merge both the same way.
+      const numbers = mergeNumbers(
+        collect(result.situs, result.zips, strictPattern),
+        collect(result.situs, result.zips, relaxedPattern),
+      );
       if (!numbers.size) {
         // A truncated page with no matched rows proves nothing — the street
         // could live entirely in the unreturned rows. Try the targeted
         // exact-number query; a hit is positive evidence, anything else
         // makes this county inconclusive (suppresses negative verdicts).
         if (result.truncated) {
-          const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+          const targeted = await queryTargeted(county);
           if (targeted === null) { anyFailed = true; continue; }
           const tNumbers = mergeNumbers(
             collect(targeted.situs, targeted.zips, strictPattern),
@@ -3198,7 +3327,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       // and only accept it when the collected numbers actually CONTAIN the
       // typed number ("57" must not ride a LIKE hit on "4857").
       if (!hasExactMatch && result.truncated) {
-        const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+        const targeted = await queryTargeted(county);
         if (targeted === null) { anyFailed = true; continue; }
         targetedRan = true;
         const targetedNumbers = mergeNumbers(
@@ -3217,7 +3346,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       // #2718).
       if (hasExactMatch && result.truncated && !targetedRan
           && !zipCompatible(numbers.get(houseNumber))) {
-        const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+        const targeted = await queryTargeted(county);
         if (targeted === null) { anyFailed = true; continue; }
         mergeNumbers(numbers, mergeNumbers(
           collect(targeted.situs, targeted.zips, strictPattern),
@@ -3361,7 +3490,33 @@ function shouldRequireManateeResultCityMatch(address) {
   return !(zip && MANATEE_ZIPS.has(zip));
 }
 
+// Two normalized route addresses name the same premise when house number,
+// route type/number and unit tail agree and the directions do not conflict:
+// a roll row that omits the typed direction ("9155 SR 70" vs typed
+// "9155 SR 70 E") is formatting variance, like the audit treats it; an
+// OPPOSITE direction ("SR 70 W") is a different road. Null when either side
+// is not a route address — callers keep their own rules for ordinary streets.
+function routeAddressMatch(normalizedAddress, target) {
+  const parse = (value) => {
+    const m = /^(\d+[A-Z]?)\s+(.+)$/.exec(String(value || ''));
+    if (!m) return null;
+    const label = stripUnitDesignators(m[2]);
+    const route = parseCountyRouteLabel(label);
+    if (!route) return null;
+    const tail = m[2].startsWith(label) ? m[2].slice(label.length).trim() : '';
+    return { house: m[1], route, tail };
+  };
+  const a = parse(normalizedAddress);
+  const b = parse(target);
+  if (!a || !b) return null;
+  if (a.house !== b.house || a.route.type !== b.route.type || a.route.number !== b.route.number) return false;
+  if (a.tail !== b.tail) return false;
+  return !a.route.direction || !b.route.direction || a.route.direction === b.route.direction;
+}
+
 function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
+  const route = routeAddressMatch(normalizedAddress, target);
+  if (route !== null) return route;
   const targetSuffix = extractStreetSuffix(target);
   const resultSuffix = extractStreetSuffix(normalizedAddress);
   if (targetSuffix && resultSuffix !== targetSuffix) return false;
@@ -3497,14 +3652,19 @@ function isUniqueCountyAddressMatch(rows, address, requiresCityMatch) {
   const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
   if (!target || (requiresCityMatch && !targetCity)) return null;
 
-  const matches = rows
+  // City scope FIRST, then exact-before-loose: an exact-direction row in
+  // another city must not shadow a direction-less row in the typed city
+  // (Hillsborough always requires the city).
+  const inCity = rows
     .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
-    .filter((row) => row.parcelId && row.situsAddress && row.normalizedAddress === target)
-    .filter((row) => {
-      if (!targetCity) return true;
-      const rowCity = normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress);
-      return rowCity === targetCity;
-    });
+    .filter((row) => row.parcelId && row.situsAddress)
+    .filter((row) => !targetCity
+      || (normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress)) === targetCity);
+  // Exact equality first; only when nothing is exact may a route row that
+  // omits the typed direction stand in (routeAddressMatch) — and the
+  // uniqueness rule below still refuses an ambiguous pair.
+  const exact = inCity.filter((row) => row.normalizedAddress === target);
+  const matches = exact.length ? exact : inCity.filter((row) => routeAddressMatch(row.normalizedAddress, target) === true);
 
   const unique = dedupeCountyMatches(matches);
   if (unique.length !== 1) return null;
@@ -5468,6 +5628,8 @@ module.exports = {
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
     addressHasSubpremise,
+    FL_FLOOR_RE,
+    normalizeCountyStreetLine,
     resolveAggregateUnitParcel,
     aggregateUnitDesignatorMatch,
     typedDwellingUnit,
@@ -5482,6 +5644,7 @@ module.exports = {
     lookupPropertyFromHillsboroughPAO,
     lookupPropertyFromCountyRecords,
     manateeAddressSearchCandidates,
+    countyAddressSearchCandidates,
     mergePropertyRecords,
     normalizeLookupPropertyType,
     manateePoolFeatures,

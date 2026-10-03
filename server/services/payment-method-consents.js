@@ -180,6 +180,14 @@ async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, {
   if ((version || anyVersion) && variant === 'prepay_card') {
     q.where('consent_text_snapshot', 'like', `%${PREPAY_CONSENT_MARKER}%`);
   }
+  // Same for the after-visit prepay authorization (GATE_PAF_PREPAY): only a
+  // row carrying both the annual-prepay and the after-the-first-visit wording
+  // (card and ACH texts, every version) — never a base after_visit_card row
+  // or a charge-now prepay row.
+  if ((version || anyVersion) && variant === 'after_visit_prepay') {
+    q.where('consent_text_snapshot', 'like', '%12-month annual prepay invoice%')
+      .where('consent_text_snapshot', 'like', '%after my first service visit is completed%');
+  }
   // `source` scopes the idempotency to ONE capture surface: an identical
   // consent the customer gave elsewhere (portal, another link) is its own
   // ledger row and must not stand in for this surface's record.
