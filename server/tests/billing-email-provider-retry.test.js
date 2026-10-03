@@ -18,6 +18,8 @@ jest.mock('../services/billing-email-reservation', () => ({
   markBillingEmailReservationDelivered: jest.fn(async () => true),
   resolveBillingEmailReservationRefusal: jest.fn(async () => true),
   releaseBillingEmailReservationForRequote: jest.fn(async () => true),
+  isPrevisitReissue: jest.fn(() => false),
+  reopenBillingEmailReservationForReissue: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');
@@ -397,36 +399,68 @@ test('a failed terminal-reservation stamp does not put the email back on the sch
   }));
 });
 
-test('a billing replay stopped by a corrected customer email resolves its reservation like a refused retry', async () => {
+test('a billing replay stopped by a corrected customer email reopens its reservation instead of resolving it', async () => {
   const { stopRetriesForReplacedEmail } = require('../services/transactional-email-provider-retry');
   const row = storedMessage({ status: 'failed', provider_retry_next_at: new Date(), provider_handoff_phase: 'rejected' });
-  const stopped = storedMessage({ status: 'blocked' });
-  query.select = jest.fn(async () => [row]);
+  const stopped = storedMessage({ status: 'failed' });
+  query.select = jest.fn(async (column) => (column === '*' ? [row] : []));
   query.returning = jest.fn(async () => [stopped]);
 
   await expect(stopRetriesForReplacedEmail(heldDatabase, { customerId: 'customer-1', oldEmail: 'customer@example.com' }))
     .resolves.toBe(1);
 
+  // `failed` keeps the idempotency key reclaimable; `blocked` would dedupe the owner's re-issue.
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
-    status: 'blocked', provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
-    error_message: `${reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}Customer email was corrected; retry to the replaced address stopped.`,
+    status: 'failed', provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
+    error_message: 'Customer email was corrected; retry to the replaced address stopped.',
   }));
-  // Reconciled on the caller's transaction, so it commits with the correction.
-  expect(reservation.resolveBillingEmailReservationRefusal).toHaveBeenCalledWith(stopped, heldDatabase);
+  // A resolved leg is never claimed again (claimVerdict), so the stop must not resolve it: it
+  // reopens the leg on the caller's transaction, where it commits with the correction.
+  expect(reservation.reopenBillingEmailReservationForReissue).toHaveBeenCalledWith(stopped, heldDatabase);
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
+test('a previsit reminder stopped by a corrected customer email goes through the re-quote release', async () => {
+  const { stopRetriesForReplacedEmail } = require('../services/transactional-email-provider-retry');
+  reservation.isPrevisitReissue.mockReturnValueOnce(true);
+  const row = storedMessage({ status: 'failed', provider_retry_next_at: new Date(), provider_handoff_phase: 'rejected' });
+  const stopped = storedMessage({ status: 'failed' });
+  query.select = jest.fn(async (column) => (column === '*' ? [row] : []));
+  query.returning = jest.fn(async () => [stopped]);
+
+  await stopRetriesForReplacedEmail(heldDatabase, { customerId: 'customer-1', oldEmail: 'customer@example.com' });
+
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed',
+    error_message: `${reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}Customer email was corrected; retry to the replaced address stopped.`,
+  }));
+  expect(reservation.releaseBillingEmailReservationForRequote).toHaveBeenCalledWith(stopped, heldDatabase);
+  expect(reservation.reopenBillingEmailReservationForReissue).not.toHaveBeenCalled();
+});
+
+test('a stamped billing replay that was scheduled anyway is stopped before the provider and reopens its reservation', async () => {
+  const stamped = storedMessage({ categories: JSON.stringify(['email_template', 'billing', 'recipient_replaced']) });
+  query.returning = jest.fn(async () => [storedMessage({ status: 'failed' })]);
+
+  await expect(retryOne(stamped)).resolves.toMatchObject({ sent: false, stopped: true });
+
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+  expect(reservation.reopenBillingEmailReservationForReissue).toHaveBeenCalledTimes(1);
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
 
 test('a billing notice without the replay contract stops without touching a reservation', async () => {
   const { stopRetriesForReplacedEmail } = require('../services/transactional-email-provider-retry');
   const row = storedMessage({ status: 'failed', provider_retry_next_at: new Date(), payload_snapshot: JSON.stringify({}) });
-  query.select = jest.fn(async () => [row]);
-  query.returning = jest.fn(async () => [storedMessage({ status: 'blocked' })]);
+  query.select = jest.fn(async (column) => (column === '*' ? [row] : []));
+  query.returning = jest.fn(async () => [storedMessage({ status: 'failed' })]);
 
   await expect(stopRetriesForReplacedEmail(heldDatabase, { customerId: 'customer-1', oldEmail: 'customer@example.com' }))
     .resolves.toBe(1);
 
-  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
-    status: 'blocked', error_message: 'Customer email was corrected; retry to the replaced address stopped.',
-  }));
+  expect(reservation.reopenBillingEmailReservationForReissue).not.toHaveBeenCalled();
+  expect(reservation.releaseBillingEmailReservationForRequote).not.toHaveBeenCalled();
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });

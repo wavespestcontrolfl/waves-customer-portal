@@ -15,6 +15,9 @@ const STALE_CLAIM_MS = 10 * 60 * 1000;
 const HANDOFF_PHASE_PENDING = 'pending';
 const HANDOFF_PHASE_STARTED = 'started';
 const HANDOFF_PHASE_REJECTED = 'rejected';
+// Stamped on a row addressed to an email the office replaced (see
+// stopRetriesForReplacedEmail): such a row never gets a provider retry.
+const REPLACED_RECIPIENT_CATEGORY = 'recipient_replaced';
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -42,7 +45,8 @@ function isTransactionalRetryEligible(message) {
   if (String(message.recipient_type || '').toLowerCase() === 'job_application') return false;
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   if (group.startsWith('marketing_')) return false;
-  if (asArray(message.categories).map((v) => String(v).toLowerCase()).includes('bounce_recovery')) return false;
+  const categories = asArray(message.categories).map((v) => String(v).toLowerCase());
+  if (categories.includes('bounce_recovery') || categories.includes(REPLACED_RECIPIENT_CATEGORY)) return false;
   return !!message.recipient_email_snapshot && !!message.subject_snapshot;
 }
 
@@ -378,7 +382,7 @@ async function markRetryUncertain(message, err, now = new Date()) {
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
 async function stopRetry(message, {
-  status, reason, exhaustedAlert = false, rejectedAfterStart = false, requote = false,
+  status, reason, exhaustedAlert = false, rejectedAfterStart = false, requote = false, reissue = false,
 }) {
   const isSummary = message.template_key === 'service.visit_summary';
   const terminalBillingRefusal = status === 'blocked' && billingReplay.isBillingEmailProviderReplay(message);
@@ -412,36 +416,62 @@ async function stopRetry(message, {
     await billingReservation.releaseBillingEmailReservationForRequote(updated)
       .catch((err) => logger.warn(`[email-provider-retry] changed quote not reconciled for ${message.id}: ${err.message}`));
   }
+  if (updated && reissue) {
+    await billingReservation.reopenBillingEmailReservationForReissue(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] replaced-address stop not reconciled for ${message.id}: ${err.message}`));
+  }
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
   return { sent: false, stopped: true, reason };
 }
 
 const EMAIL_REPLACED_REASON = 'Customer email was corrected; retry to the replaced address stopped.';
 
-// A correction of the customer's email retires the provider-block retries
-// still addressed to the address it replaced (customer-email-fanout calls this
-// inside its own transaction): the stored copy would otherwise go on to the
-// rejected address, which can be a third party's inbox. The retry is stopped,
-// never retargeted: the senders that own these emails re-issue them to the
-// corrected address themselves. Stops a row that is scheduled, or claimed but
-// provably unsent (pending phase): the claiming worker loses its
-// pending-to-started marker CAS and makes no request, the same path a lost
-// claim already takes. A row whose provider request began (started phase)
-// belongs to its worker and is left to settle, and a visit summary keeps its
+// The customer's mail to an address the office replaced: rows naming the
+// customer in recipient_id, plus rows that name nobody (or the lead itself)
+// but are linked to the customer's leads or estimates. A row that names ANOTHER
+// customer is never theirs, whatever it links to. Visit summaries keep their
 // own re-authorization fence (summaryRetryAuthorized refuses a recipient that
-// is no longer current). The row settles like any refused retry: a billing
-// replay resolves its reservation on `database`; an error propagates so the
-// caller's transaction rolls back with it.
+// is no longer current).
+function mailToReplacedAddress(database, customerId, replaced) {
+  return database('email_messages')
+    .whereRaw('LOWER(TRIM(recipient_email_snapshot)) = ?', [replaced])
+    .where((owner) => owner
+      .where('recipient_id', String(customerId))
+      .orWhere((linked) => linked
+        .where((unowned) => unowned.whereNull('recipient_id').orWhereRaw('recipient_id = lead_id::text'))
+        .where((links) => links
+          .whereIn('lead_id', database('leads').where({ customer_id: customerId }).select('id'))
+          .orWhereIn('estimate_id', database('estimates').where({ customer_id: customerId }).select('id')))))
+    .where((template) => template.whereNull('template_key').orWhereNot('template_key', 'service.visit_summary'));
+}
+
+// A correction of the customer's email retires every provider-block retry
+// addressed to the address it replaced (customer-email-fanout calls this
+// inside its own transaction): the stored copy would otherwise go on to the
+// rejected address, which can be a third party's inbox. A retry is stopped,
+// never retargeted; the senders that own these emails re-issue them.
+//   1. A row scheduled, or claimed with no provider request yet (pending
+//      phase: the worker loses its pending-to-started marker CAS and sends
+//      nothing, the lost-claim path), settles as `failed` with its handoff
+//      evidence kept. Not `blocked`: that status makes the library dedupe the
+//      row's idempotency key, so the owner's re-issue would never go out,
+//      while a failed, definitely-unsent row is reclaimed to the live address.
+//      A billing replay's reservation stays claimable (see
+//      reopenBillingEmailReservationForReissue). Sender-rendered notices (the
+//      invoice follow-ups) are never replayed from a stored copy, so they keep
+//      their own settlement and are left alone here.
+//   2. Every row still awaiting a provider verdict (queued, sent) or without a
+//      schedule (failed) is stamped REPLACED_RECIPIENT_CATEGORY: a row already
+//      at the provider, or accepted and blocked asynchronously later, would
+//      otherwise be re-armed by that block event. Stamped rows are ineligible
+//      for scheduling (isTransactionalRetryEligible) and retryOne stops one
+//      that was scheduled anyway before any request. Nothing but the
+//      eligibility check reads it, and the stamp lives on the row, so it needs
+//      no schema.
 async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now = new Date() }) {
   const replaced = String(oldEmail || '').trim().toLowerCase();
   if (!customerId || !replaced) return 0;
-  const rows = await database('email_messages')
-    .whereRaw('LOWER(recipient_email_snapshot) = ?', [replaced])
-    .where((owner) => owner
-      .where('recipient_id', String(customerId))
-      .orWhereIn('lead_id', database('leads').where({ customer_id: customerId }).select('id'))
-      .orWhereIn('estimate_id', database('estimates').where({ customer_id: customerId }).select('id')))
-    .where((template) => template.whereNull('template_key').orWhereNot('template_key', 'service.visit_summary'))
+  const rows = await mailToReplacedAddress(database, customerId, replaced)
     .where((pending) => pending
       .where((scheduled) => scheduled.where({ status: 'failed' }).whereNotNull('provider_retry_next_at'))
       .orWhere((claimed) => retryEvidence(
@@ -453,13 +483,14 @@ async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now
     .select('*');
   let stopped = 0;
   for (const row of rows) {
-    const billing = billingReplay.isBillingEmailProviderReplay(row);
+    if (isSenderRenderedEmail(row)) continue;
+    const replay = billingReplay.isBillingEmailProviderReplay(row);
+    const requote = replay && billingReservation.isPrevisitReissue(row);
     const [updated] = await database('email_messages')
       .where({ id: row.id, send_attempt_token: row.send_attempt_token, status: row.status })
       .update({
-        status: 'blocked',
-        error_message: billing
-          ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
+        status: 'failed',
+        error_message: requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
         provider_retry_next_at: null,
         provider_retry_exhausted_at: now,
         updated_at: now,
@@ -467,8 +498,13 @@ async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now
       .returning('*');
     if (!updated) continue;
     stopped += 1;
-    if (billing) await billingReservation.resolveBillingEmailReservationRefusal(updated, database);
+    if (requote) await billingReservation.releaseBillingEmailReservationForRequote(updated, database);
+    else if (replay) await billingReservation.reopenBillingEmailReservationForReissue(updated, database);
   }
+  await mailToReplacedAddress(database, customerId, replaced)
+    .whereIn('status', ['queued', 'sent', 'failed'])
+    .whereRaw("NOT jsonb_exists(COALESCE(categories, '[]'::jsonb), ?)", [REPLACED_RECIPIENT_CATEGORY])
+    .update({ categories: database.raw("COALESCE(categories, '[]'::jsonb) || to_jsonb(?::text)", [REPLACED_RECIPIENT_CATEGORY]) });
   return stopped;
 }
 
@@ -620,6 +656,13 @@ async function retryOne(message) {
     const stopped = await stopRetry(message, { status: 'failed', reason: 'Not re-sent from stored copy (billing no-replay ruling).' });
     await alertFinalNoticeMissed(message, 'blocked');
     return stopped;
+  }
+  // The address was replaced after this row was written (stopRetriesForReplacedEmail's stamp): a
+  // block event or a failed attempt scheduled it again, and it must not reach the old address.
+  if (asArray(message.categories).includes(REPLACED_RECIPIENT_CATEGORY)) {
+    const replay = billingReplay.isBillingEmailProviderReplay(message);
+    const requote = replay && billingReservation.isPrevisitReissue(message);
+    return stopRetry(message, { status: 'failed', reason: EMAIL_REPLACED_REASON, requote, reissue: replay && !requote });
   }
   let suppression;
   try {
@@ -894,6 +937,7 @@ module.exports = {
   claimDueRetries,
   markRetryFailure,
   markRetryHeld,
+  REPLACED_RECIPIENT_CATEGORY,
   stopRetriesForReplacedEmail,
   retryClaimAtProviderBoundary,
   retryOne,

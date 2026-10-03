@@ -156,6 +156,34 @@ async function releaseBillingEmailReservationForRequote(message, database = db) 
   }
 }
 
+// A stored billing copy the retry rail STOPPED because the customer's address
+// was corrected (not refused): the reservation must stay claimable, so the
+// owning sender's next attempt renders fresh to the live address. A resolved
+// leg is never claimed again (claimVerdict) and an unsettled one is held, so
+// this stamps the plain failed-attempt flag, the same definite-non-send
+// outcome a bound customer-dunning row reaches (DUNNING_OUTCOME_PATCH.unsent).
+// A previsit reminder pinned to an appointment goes through the re-quote
+// release instead, which also frees its appointment claim.
+function isPrevisitReissue(message) {
+  const context = replayContext(message);
+  return !!context && context.source_entry_point === 'previsit_balance_reminder' && !!context.appointment_id;
+}
+
+async function reopenBillingEmailReservationForReissue(message, database = db) {
+  const context = replayContext(message);
+  if (!context) return false;
+  try {
+    return await ContactLedger.markSendFailed(
+      { id: context.collections_ledger_id },
+      { code: 'email_not_sent' },
+      { database, match: reservationMatch(context) },
+    );
+  } catch (err) {
+    logger.warn(`[billing-email-reservation] reissue reopen failed: ${redactContact(err.message)}`);
+    return false;
+  }
+}
+
 function metadataOf(row) {
   if (typeof row?.metadata !== 'string') return row?.metadata || {};
   try { return JSON.parse(row.metadata) || {}; } catch { return {}; }
@@ -396,5 +424,7 @@ module.exports = {
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,
   releaseBillingEmailReservationForRequote,
+  isPrevisitReissue,
+  reopenBillingEmailReservationForReissue,
   repairAcceptedBillingEmailReservations,
 };

@@ -32,7 +32,9 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const retry = require('../services/transactional-email-provider-retry');
 const sendgrid = require('../services/sendgrid-mail');
-const { BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX } = require('../services/billing-email-reservation');
+const { BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX } = require('../services/billing-email-reservation');
+const { claimVerdict } = require('../services/collections/contact-ledger');
+const { shouldRetryExistingMessage } = require('../services/email-template-library');
 
 const postgres = SKIP ? describe.skip : describe;
 const schema = `email_retry_replaced_${randomUUID().replaceAll('-', '')}`;
@@ -92,6 +94,10 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase.schema.createTable('estimates', (table) => {
       table.uuid('id').primary(); table.string('customer_id');
     });
+    await mockDatabase.schema.createTable('scheduled_services', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id').notNullable();
+      table.timestamp('balance_reminder_sent_at', { useTz: true });
+    });
     await mockDatabase.schema.createTable('collections_contact_ledger', (table) => {
       table.uuid('id').primary();
       table.uuid('customer_id').notNullable();
@@ -110,6 +116,7 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase('collections_contact_ledger').del();
     await mockDatabase('leads').del();
     await mockDatabase('estimates').del();
+    await mockDatabase('scheduled_services').del();
   });
   afterAll(async () => {
     await mockDatabase?.destroy();
@@ -144,6 +151,9 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
   );
   const rowOf = (id) => mockDatabase('email_messages').where({ id }).first();
 
+  const categoriesOf = async (id) => (await rowOf(id)).categories;
+  const STAMP = 'recipient_replaced';
+
   test('a corrected email stops the pending retry: nothing more goes to the old address, a different address is untouched', async () => {
     const customerId = randomUUID();
     const toOld = scheduled(customerId);
@@ -153,9 +163,12 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await expect(correct(customerId)).resolves.toBe(1);
 
     const stopped = await rowOf(toOld.id);
-    expect(stopped).toMatchObject({ status: 'blocked', provider_retry_next_at: null, error_message: REASON });
+    expect(stopped).toMatchObject({ status: 'failed', provider_retry_next_at: null, error_message: REASON });
     expect(stopped.provider_retry_exhausted_at).toBeInstanceOf(Date);
+    // Unlike `blocked`, a failed row with its unsent handoff evidence is reclaimed by the owner's re-issue.
+    expect(shouldRetryExistingMessage(stopped)).toBe(true);
     expect(await rowOf(toOther.id)).toMatchObject({ status: 'failed', error_message: null });
+    expect(await categoriesOf(toOther.id)).not.toContain(STAMP);
 
     // The retry sweep that would have re-sent the old copy now only finds the other row.
     const sweep = await retry.runDueRetries();
@@ -165,26 +178,34 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect(sendgrid.sendOne).not.toHaveBeenCalledWith(expect.objectContaining({ to: OLD }));
   });
 
-  test('the address matches case-insensitively and ownership covers the customer\'s own leads and estimates only', async () => {
+  test('the address matches case-insensitively and ignoring stored whitespace; ownership never crosses to another customer', async () => {
     const customerId = randomUUID();
+    const otherCustomerId = randomUUID();
     const leadId = randomUUID();
     const estimateId = randomUUID();
     const strangerLead = randomUUID();
     await mockDatabase('leads').insert([{ id: leadId, customer_id: customerId }, { id: strangerLead, customer_id: randomUUID() }]);
     await mockDatabase('estimates').insert({ id: estimateId, customer_id: customerId });
     const mixedCase = scheduled(customerId, { recipient_email_snapshot: 'Old.Typo@Example.com' });
+    const padded = scheduled(customerId, { recipient_email_snapshot: '  old.typo@example.com  ' });
     const viaLead = scheduled(null, { recipient_type: 'lead', recipient_id: null, lead_id: leadId });
     const viaEstimate = scheduled(null, { recipient_type: 'lead', recipient_id: null, estimate_id: estimateId });
+    const leadItself = scheduled(null, { recipient_type: 'lead', recipient_id: leadId, lead_id: leadId });
     const strangers = [
-      scheduled(randomUUID()),
+      scheduled(otherCustomerId),
       scheduled(null, { recipient_type: 'lead', recipient_id: null, lead_id: strangerLead }),
+      // Names another customer outright, so the edited customer's estimate link does not make it theirs.
+      scheduled(otherCustomerId, { estimate_id: estimateId, lead_id: leadId }),
     ];
-    await mockDatabase('email_messages').insert([mixedCase, viaLead, viaEstimate, ...strangers]);
+    await mockDatabase('email_messages').insert([mixedCase, padded, viaLead, viaEstimate, leadItself, ...strangers]);
 
-    await expect(correct(customerId)).resolves.toBe(3);
+    await expect(correct(customerId)).resolves.toBe(5);
 
-    for (const row of [mixedCase, viaLead, viaEstimate]) expect((await rowOf(row.id)).status).toBe('blocked');
-    for (const row of strangers) expect(await rowOf(row.id)).toMatchObject({ status: 'failed', error_message: null });
+    for (const row of [mixedCase, padded, viaLead, viaEstimate, leadItself]) expect((await rowOf(row.id)).error_message).toBe(REASON);
+    for (const row of strangers) {
+      expect(await rowOf(row.id)).toMatchObject({ status: 'failed', error_message: null });
+      expect(await categoriesOf(row.id)).not.toContain(STAMP);
+    }
   });
 
   test('a visit summary keeps its own fence; a request already at the provider is left to its worker; an unsent claim is stopped', async () => {
@@ -201,15 +222,56 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
       status: 'queued', provider_retry_next_at: null, provider_retry_count: 1, queued_at: new Date(),
       send_attempt_token: startedToken, provider_handoff_attempt_token: startedToken, provider_handoff_phase: 'started',
     });
-    const accepted = scheduled(customerId, { status: 'sent', provider_retry_next_at: null, sent_at: new Date(), provider_message_id: 'provider-0' });
+    const accepted = scheduled(customerId, { status: 'delivered', provider_retry_next_at: null, sent_at: new Date(), provider_message_id: 'provider-0' });
     await mockDatabase('email_messages').insert([summary, claimedUnsent, started, accepted]);
 
     await expect(correct(customerId)).resolves.toBe(1);
 
-    expect(await rowOf(claimedUnsent.id)).toMatchObject({ status: 'blocked', provider_retry_next_at: null, error_message: REASON });
+    expect(await rowOf(claimedUnsent.id)).toMatchObject({ status: 'failed', provider_retry_next_at: null, error_message: REASON });
     expect(await rowOf(summary.id)).toMatchObject({ status: 'failed', error_message: null });
+    expect(await categoriesOf(summary.id)).not.toContain(STAMP);
     expect(await rowOf(started.id)).toMatchObject({ status: 'queued', provider_handoff_phase: 'started', error_message: null });
-    expect(await rowOf(accepted.id)).toMatchObject({ status: 'sent', error_message: null });
+    expect(await rowOf(accepted.id)).toMatchObject({ status: 'delivered', error_message: null });
+    // Delivered mail is history: nothing can re-arm it, so it carries no stamp.
+    expect(await categoriesOf(accepted.id)).not.toContain(STAMP);
+  });
+
+  test('a request already at the provider, or accepted and blocked later, cannot re-arm the replaced address', async () => {
+    const customerId = randomUUID();
+    const startedToken = randomUUID();
+    const started = scheduled(customerId, {
+      status: 'queued', provider_retry_next_at: null, provider_retry_count: 1, queued_at: new Date(),
+      send_attempt_token: startedToken, provider_handoff_attempt_token: startedToken, provider_handoff_phase: 'started',
+    });
+    // Sent to the old address and awaiting SendGrid's verdict: the block event arrives AFTER the correction.
+    const sentAwaitingVerdict = scheduled(customerId, {
+      status: 'sent', provider_retry_next_at: null, sent_at: new Date(), provider_message_id: 'provider-1',
+    });
+    await mockDatabase('email_messages').insert([started, sentAwaitingVerdict]);
+
+    await correct(customerId);
+
+    for (const row of [started, sentAwaitingVerdict]) {
+      const stamped = await rowOf(row.id);
+      expect(stamped.categories).toEqual(['email_template', STAMP]);
+      // The block event's scheduling now refuses: no next retry is armed for the replaced address.
+      expect(retry.isTransactionalRetryEligible(stamped)).toBe(false);
+      expect(retry.retryStateForProviderBlock(stamped, new Date())).not.toHaveProperty('provider_retry_next_at');
+    }
+    // The worker's own state is untouched (no status, phase or token write): it settles as it would have.
+    expect(await rowOf(started.id)).toMatchObject({ status: 'queued', provider_handoff_phase: 'started', send_attempt_token: startedToken });
+    // Stamping twice does not duplicate the marker.
+    await correct(customerId);
+    expect((await rowOf(started.id)).categories).toEqual(['email_template', STAMP]);
+
+    // Even a retry scheduled by some other writer is stopped at the claim, before any provider request.
+    await mockDatabase('email_messages').where({ id: sentAwaitingVerdict.id })
+      .update({ status: 'failed', provider_retry_next_at: new Date(Date.now() - 1000), provider_handoff_phase: 'rejected',
+        provider_handoff_attempt_token: mockDatabase.ref('send_attempt_token') });
+    const sweep = await retry.runDueRetries();
+    expect(sweep).toMatchObject({ claimed: 1, sent: 0 });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await rowOf(sentAwaitingVerdict.id)).toMatchObject({ status: 'failed', provider_retry_next_at: null, error_message: REASON });
   });
 
   test('a claim stopped before its request loses the marker and makes no provider request', async () => {
@@ -222,43 +284,89 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase('email_messages').insert(claimed);
     await correct(customerId);
 
-    const outcome = await retry.retryOne(await rowOf(claimed.id).then((row) => ({ ...row, status: 'queued' })));
+    const outcome = await retry.retryOne(await rowOf(claimed.id).then((row) => ({ ...row, status: 'queued', categories: ['email_template'] })));
 
     expect(outcome).toMatchObject({ sent: false, stopped: true });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(await rowOf(claimed.id)).toMatchObject({ status: 'blocked', error_message: REASON });
+    expect(await rowOf(claimed.id)).toMatchObject({ status: 'failed', error_message: REASON });
   });
 
-  test('a billing replay stopped this way resolves its reservation like a refused retry', async () => {
-    const customerId = randomUUID();
+  // A billing replay row and the reservation its sender holds.
+  async function billingReplay(customerId, { previsit = false } = {}) {
     const ledgerId = randomUUID();
     const invoiceId = randomUUID();
-    const eventKey = `late-payment:${invoiceId}:14`;
+    const appointmentId = randomUUID();
+    const eventKey = previsit ? `previsit-balance:${appointmentId}` : `late-payment:${invoiceId}:14`;
+    const source = previsit ? 'previsit_balance_reminder' : 'late_payment_checker';
     await mockDatabase('collections_contact_ledger').insert({
       id: ledgerId, customer_id: customerId, channel: 'email', purpose: 'late_payment',
-      invoice_ids: JSON.stringify([invoiceId]), source: 'late_payment_checker', occurred_at: new Date(),
-      metadata: JSON.stringify({ notificationEventKey: eventKey }),
+      invoice_ids: JSON.stringify([invoiceId]), source, occurred_at: new Date(),
+      metadata: JSON.stringify({ notificationEventKey: eventKey, ...(previsit ? { delivered: true } : {}) }),
     });
-    const billing = scheduled(customerId, {
+    if (previsit) await mockDatabase('scheduled_services').insert({ id: appointmentId, customer_id: customerId, balance_reminder_sent_at: new Date() });
+    const row = scheduled(customerId, {
       template_key: 'billing.notice',
       suppression_group_key_snapshot: 'transactional_required',
       trigger_event_id: eventKey,
       idempotency_key: `billing_channel_email:${eventKey}:email`,
       categories: JSON.stringify(['billing']),
       payload_snapshot: { __billing_replay_context: {
-        schema_version: 1, customer_id: customerId, invoice_id: invoiceId, category: 'billing',
-        source_entry_point: 'late_payment_checker', notificationEventKey: eventKey, collections_ledger_id: ledgerId,
+        schema_version: 1, customer_id: customerId, ...(previsit ? { invoice_ids: [invoiceId] } : { invoice_id: invoiceId }),
+        category: 'billing', source_entry_point: source, notificationEventKey: eventKey, collections_ledger_id: ledgerId,
+        ...(previsit ? {
+          rendered_amount: '100.00', invoice_quotes: [{ id: invoiceId, dueCents: 10000 }], dues_cents: 0, selected_channels: ['email'],
+          appointment_id: appointmentId, appointment_date: '2030-06-10', appointment_rendered_on: '2030-06-09',
+          appointment_service_type: 'Pest Control',
+        } : {}),
       } },
     });
-    await mockDatabase('email_messages').insert(billing);
+    await mockDatabase('email_messages').insert(row);
+    return { row, ledgerId, appointmentId };
+  }
+  const ledgerMetadata = async (id) => (await mockDatabase('collections_contact_ledger').where({ id }).first()).metadata;
+
+  test('a billing replay stopped this way reopens its reservation: the owning sender can claim it again and reach the corrected address', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId } = await billingReplay(customerId);
 
     await expect(correct(customerId)).resolves.toBe(1);
 
-    expect(await rowOf(billing.id)).toMatchObject({
-      status: 'blocked', provider_retry_next_at: null,
-      error_message: `${BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${REASON}`,
+    const stopped = await rowOf(row.id);
+    expect(stopped).toMatchObject({ status: 'failed', provider_retry_next_at: null, error_message: REASON });
+    expect(shouldRetryExistingMessage(stopped)).toBe(true);
+    const metadata = await ledgerMetadata(ledgerId);
+    // Never `resolved`: claimVerdict refuses a resolved leg forever, which would mean the notice never goes out.
+    expect(metadata).toMatchObject({ send_failed: true, code: 'email_not_sent' });
+    expect(metadata.resolved).toBeUndefined();
+    expect(claimVerdict({ id: ledgerId, metadata, reused: true })).toEqual({ allowed: true, reopen: true });
+  });
+
+  test('a previsit reminder stopped this way frees its appointment claim for a fresh rendering', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId, appointmentId } = await billingReplay(customerId, { previsit: true });
+
+    await expect(correct(customerId)).resolves.toBe(1);
+
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'failed', error_message: 'Billing email old quote retired: ' + REASON,
     });
-    const reservation = await mockDatabase('collections_contact_ledger').where({ id: ledgerId }).first();
-    expect(reservation.metadata).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+    expect(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX).toBe('Billing email re-quote required: ');
+    const metadata = await ledgerMetadata(ledgerId);
+    expect(metadata.send_failed).toBe(true);
+    expect(metadata.delivered).toBeUndefined();
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeNull();
+  });
+
+  test('a sender-rendered dunning follow-up keeps its own settlement and reservation', async () => {
+    const customerId = randomUUID();
+    const followup = scheduled(customerId, {
+      template_key: 'invoice.followup_7_day', suppression_group_key_snapshot: 'transactional_required',
+      trigger_event_id: `customer_dunning_email:${randomUUID()}:1:d7`,
+    });
+    await mockDatabase('email_messages').insert(followup);
+
+    await expect(correct(customerId)).resolves.toBe(0);
+
+    expect(await rowOf(followup.id)).toMatchObject({ status: 'failed', error_message: null });
   });
 });
