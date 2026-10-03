@@ -1179,10 +1179,19 @@ describe('engine replay guards', () => {
     // the scheduled row's frozen category snapshot outranks the live (mutable) catalog category
     expect(src).toMatch(/COALESCE\(s\.service_category_snapshot, sv\.category,/);
     expect(src).not.toMatch(/COALESCE\(sv\.category, s\.service_category_snapshot/);
-    for (const fn of ['loadFirstCompletedVisits', 'loadCompletedVisitRows']) {
-      const body = src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
-      expect(body).toMatch(/\$\{PLAN_ROW_SQL\}/);
-    }
+    // revenue / $ per hour read purchased-plan rows; the anniversary reads every
+    // completed application of the family (DATING_ROW_SQL): a completed
+    // "Quarterly Pest Control Service" booked without the recurring flag still
+    // dates the line, while an explicit booster, callback or included follow-up
+    // never does.
+    const bodyOf = (fn) => src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
+    expect(bodyOf('loadCompletedVisitRows')).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    expect(bodyOf('loadFirstCompletedVisits')).toMatch(/\$\{DATING_ROW_SQL\}/);
+    expect(bodyOf('loadFirstCompletedVisits')).not.toMatch(/\$\{PLAN_ROW_SQL\}/);
+    expect(P.DATING_ROW_SQL).toMatch(/NOT \(s\.is_recurring = false AND s\.recurring_parent_id IS NOT NULL\)/);
+    expect(P.DATING_ROW_SQL).not.toMatch(/s\.is_recurring = true/);
+    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.is_callback, false\) = false/);
+    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.followup_included, false\) = false/);
     expect(src).not.toMatch(/RECURRING_SQL/);
     expect(planQuery).toMatch(/c\.active = true/);
     expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);

@@ -1260,6 +1260,17 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
 // included follow-up. One rule for the book and the history loaders.
 const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.recurring_parent_id IS NOT NULL))
   AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
+// The rows that DATE a line (its anniversary): every completed application
+// of the family that is not an explicit booster, a callback or an included
+// follow-up — the recurring flag is not required. Prod read 2026-10-02: 14
+// completed "Quarterly Pest Control Service" / "Bi-Monthly Tree & Shrub"
+// rows (7 imported pre-April history, 7 admin-booked since) carry
+// is_recurring = false with no parent, so the October batch held 12 of its
+// 25 no_anniversary lines although the work was done. A customer's first
+// paid application dates the line whether or not the booking was flagged
+// recurring; revenue and $/hr keep PLAN_ROW_SQL (loadCompletedVisitRows).
+const DATING_ROW_SQL = `(NOT (s.is_recurring = false AND s.recurring_parent_id IS NOT NULL)
+  AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
 // Live upcoming rows = the same statuses the plan-count reconciler counts
 // (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a
 // 'rescheduled' placeholder is not an application on the books.
@@ -1327,10 +1338,12 @@ async function loadCustomers(dbh, customerIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-// Completed non-callback recurring visit dates per (customer, line), oldest
-// first (first_visit = the oldest; completed_dates = all of them, so a line
+// Completed non-callback visit dates per (customer, line), oldest first
+// (first_visit = the oldest; completed_dates = all of them, so a line
 // restarted on a new estimate after a cancellation can take the first visit
-// of the CURRENT series, not of the family's whole history).
+// of the CURRENT series, not of the family's whole history). DATING_ROW_SQL,
+// not PLAN_ROW_SQL: an application booked without the recurring flag still
+// dates the line.
 async function loadFirstCompletedVisits(dbh, customerIds) {
   if (!customerIds.length) return new Map();
   const { rows } = await dbh.raw(`
@@ -1340,7 +1353,7 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND ${PLAN_ROW_SQL}
+      AND ${DATING_ROW_SQL}
     GROUP BY 1, 2
   `, [customerIds]);
   const map = new Map();
@@ -3057,7 +3070,7 @@ module.exports = {
   // anniversary / coverage helpers, shared with the apply lane
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
-  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL },
+  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL, DATING_ROW_SQL },
   lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
@@ -3102,7 +3115,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, LIVE_STATUS_SQL,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
