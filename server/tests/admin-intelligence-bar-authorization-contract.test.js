@@ -32,6 +32,13 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
 })));
 
+// The review-request card pins the recipient the sender resolves, which waits
+// for a contact's own opt-in YES. `global.mockOptinHeldKeys` = the held keys.
+jest.mock('../services/recipient-optin', () => ({
+  ...jest.requireActual('../services/recipient-optin'),
+  resolveServiceContactSmsRecipient: jest.fn(async (customer) => require('../services/customer-contact')
+    .getServiceContactSmsRecipient(customer, { heldPhoneKeys: global.mockOptinHeldKeys || null })),
+}));
 jest.mock('../models/db', () => jest.fn(() => ({
   insert: mockDbInsert,
   whereIn: (...whereArgs) => ({
@@ -592,6 +599,29 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
       expect((await res.json()).preview_changed).toBe(true);
       expect(mockExecuteTool).not.toHaveBeenCalled();
     });
+  });
+
+  test('trigger_review_request: a contact who has not replied YES to the opt-in ask is not pinned — the account holder is', async () => {
+    global.mockOptinHeldKeys = new Set(['9415551111']);
+    mockResolveCommsCustomer.mockResolvedValue({
+      id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000',
+      service_contact_name: 'acct 1042 tenant', service_contact_phone: '+19415551111',
+      service_contacts_consent_at: '2026-08-01T12:00:00Z',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'trigger_review_request', input: { customer_name: 'acct 1042' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    try {
+      await withServer(async (baseUrl) => {
+        await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
+        const stored = mockCreatePendingAction.mock.calls[0][0];
+        expect(stored.params._pinned_phone).toBe('+19415550000');
+        expect(stored.contract.pinned_recipient).toMatchObject({ customer_id: 'c1', phone_last4: '0000' });
+      });
+    } finally {
+      global.mockOptinHeldKeys = null;
+    }
   });
 
   test('trigger_review_request: a consented service contact is the pinned recipient — its phone AND name ride the card', async () => {
