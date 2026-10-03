@@ -31,8 +31,8 @@ const SENDER_RENDERED_TEMPLATES = new Set([
   // its 30-day clock, eligibility and the GATE_RATE_REVIEW kill switch are
   // judged at the send, and delivery is stamped on its notice by the
   // sender — a provider retry or bounce resend of the stored copy would
-  // bypass all three. A blocked or bounced letter stays unsent for the
-  // owner (the notice holds; no rate changes).
+  // bypass all three. A blocked or bounced letter is returned to the Rate
+  // review batch for a re-send (its reconciliation alert says so).
   'billing.rate_review_notice',
 ]);
 
@@ -61,8 +61,9 @@ function isFinalSenderRenderedEmail(message) {
   return [
     'billing_late_payment_90_day', 'invoice.followup_90_day', 'invoice.followup_combined_90_day',
     'billing.previsit_balance',
-    // Single-shot: no later stage re-sends the rate review letter.
-    'billing.rate_review_notice',
+    // NOT the rate review letter: it is sender-rendered (never replayed), but a
+    // bounced or blocked one is returned to the batch for re-send by its own
+    // reconciliation alert (rate-review-comms.js), so no "will not be re-sent" alert.
   ].includes(key);
 }
 
