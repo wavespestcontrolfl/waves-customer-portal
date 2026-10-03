@@ -75,7 +75,9 @@ router.get('/:token', async (req, res) => {
     }).catch((err) => logger.warn(`[price-change-public] view update failed: ${err.message}`));
 
     return res.json({
-      firstName,
+      // A rate review notice greets by the name its delivered letter carried
+      // (the billing recipient's), never a fresh read of the customer row.
+      firstName: (review && review.firstName) || firstName,
       currentPrice: formatMoney(notice.current_amount_cents),
       newPrice: formatMoney(notice.new_amount_cents),
       cadenceLabel: notice.cadence_label || 'month',

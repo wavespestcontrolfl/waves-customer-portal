@@ -775,6 +775,79 @@ describe('customer surfaces', () => {
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
   });
 
+  test('send: the text is declared a paired leg whenever an email leg EXISTS, not only when it succeeded — a failed email never opens the fallback text for an email-preferring customer', async () => {
+    const b = book();
+    b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_channel: 'email', sms_enabled: true }];
+    mockDb.reset(b);
+    emailLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(smsLeg.mock.calls[0][0].hasEmailLeg).toBe(true);
+    expect(res).toMatchObject({ sent: 0, failed: 1 });
+    expect(notices()[0].status).toBe('draft'); // definite rejection: retryable
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('email_rejected');
+    // ambiguous failure: parked for the owner, still no unpaired text
+    mockDb.reset(b);
+    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
+    expect(smsLeg.mock.calls.at(-1)[0].hasEmailLeg).toBe(true);
+    // a customer with no email on file has no email leg to pair with
+    mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(smsLeg.mock.calls.at(-1)[0].hasEmailLeg).toBe(false);
+  });
+
+  test('plan hold: a hold that still covers the start day holds the line (apply_hold / plan_on_hold) in the preview, after the claim, and in the portal; one that returns before it does not', async () => {
+    const b = book();
+    b.plan_holds = [{ id: 'h1', customer_id: CUSTOMER(1), status: 'active', family_key: 'pest_control', resume_on: '2027-01-15' }];
+    mockDb.reset(b);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: 'plan_on_hold' });
+    mockDb.store.plan_holds[0].resume_on = '2026-12-09'; // back before the 12-10 start
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    mockDb.store.plan_holds[0].resume_on = null; // open-ended
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(0);
+    // a hold created between the preview and the claim is caught by the post-claim re-check
+    mockDb.store.plan_holds[0].resume_on = '2026-12-09';
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { if (!fired) { fired = true; mockDb.store.plan_holds[0].resume_on = null; } return { rows: [] }; }]);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('apply_hold');
+    expect(emailLeg).not.toHaveBeenCalled();
+    // delivered, the same notice is not shown as upcoming while the hold covers the date
+    mockDb.store.price_change_notices[0].status = 'sent';
+    mockDb.store.price_change_notices[0].sent_at = NOW;
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('greeting: a distinct billing contact name is the one in the preview, the frozen letter and the email', async () => {
+    const b = book();
+    b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_email: 'billing1@example.com', billing_contact_name: 'Billy Contact' }];
+    mockDb.reset(b);
+    const preview = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
+    expect(preview.html).toContain('Hi Billy,');
+    expect(preview.html).not.toContain('Hi Testcust1,');
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(emailLeg.mock.calls[0][0].vars.first_name).toBe('Billy');
+    expect(JSON.parse(notices()[0].metadata).letter.first_name).toBe('Billy');
+    expect(comms.publicReview(notices()[0]).firstName).toBe('Billy');
+  });
+
+  test('clock: a batch that crosses Eastern midnight judges the 30-day floor on the day each letter is dispatched', async () => {
+    mockDb.reset(book({ notices: [draft(1, { effective_date: '2026-12-02' })] })); // exactly 30 days from Nov 2
+    const digest = await previewDigest();
+    // call 1 = batch start (23:30 ET Nov 2: the line is sendable), later calls = 00:30 ET Nov 3 (29 days)
+    const ticks = [new Date('2026-11-03T04:30:00Z')];
+    const clock = jest.fn(() => ticks.shift() || new Date('2026-11-03T05:30:00Z'));
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, clock });
+    expect(res).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('too_late');
+    expect(clock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   test('send: a notice repointed between provider acceptance and the delivery stamp is settled — never reported sent, never left sending; the stamp holds the comms fence', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();

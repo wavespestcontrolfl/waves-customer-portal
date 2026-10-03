@@ -874,6 +874,7 @@ describe('applyDueRateChanges — per_application', () => {
     }, 'multiple_series'],
     ['a discount on the series parent (every future visit flat)', (b) => { b.scheduled_services[0].discount_type = 'percent'; b.scheduled_services[0].discount_amount = 10; }, 'series_template_complex'],
     ['a recurring add-on on the series parent', (b) => { b.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'quarterly' }]; b.scheduled_services[0].discount_type = 'fixed'; b.scheduled_services[0].discount_amount = 20; }, 'series_template_complex'],
+    ['an active plan hold with no return date', (b) => { b.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), status: 'active', family_key: 'pest_control', resume_on: null }]; }, 'plan_on_hold'],
     ['the named first visit already under way', (b) => { b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: { ...b.price_change_notices[0].metadata, first_visit_id: VISIT(101) } }; b.scheduled_services[1].status = 'en_route'; }, 'effective_visit_started'],
   ])('comms preflight parity: %s (the apply holds it and the comms lane holds the same reason before sending)', async (_label, mutate, reason) => {
     const book = sentBook();

@@ -423,6 +423,15 @@ async function activePlanHold(dbh, customerId) {
   return dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).first('id', 'family_key', 'resume_on');
 }
 
+// Whether an ACTIVE plan hold still covers `day` (the day a rate would start):
+// it has no return date, or returns after that day. A hold returning on the day
+// itself is resumed ahead of the 03:10 apply (resumeHoldsEndingToday), so it
+// does not block. The comms lane asks this before announcing a start date the
+// apply would answer with plan_on_hold.
+function planHoldCovers(hold, day) {
+  return !!hold && (!hold.resume_on || ymd(hold.resume_on) > day);
+}
+
 // ── scheduling ──────────────────────────────────────────────────────────
 
 // Effective date per lane; throws a HoldError when none qualifies.
@@ -1652,7 +1661,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

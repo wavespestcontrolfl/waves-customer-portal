@@ -41,6 +41,13 @@ const letter = { first_name: 'Testcust', cost_block: 'Costs went up.', lines: [{
 
 beforeEach(() => { mockRows.updates = []; });
 
+test('the page greets by the name the delivered letter carried, not the customer row', async () => {
+  mockRows.notice = { ...base, rate_review_row_id: 'r1', sent_at: new Date(), metadata: { letter: { ...letter, first_name: 'Billingcontact' } } };
+  const { body } = await get(TOKEN);
+  expect(body.firstName).toBe('Billingcontact');
+  expect(body.review.firstName).toBe('Billingcontact');
+});
+
 test('a delivered rate review notice returns the frozen letter', async () => {
   mockRows.notice = { ...base, rate_review_row_id: 'r1', sent_at: new Date(), metadata: { letter } };
   const { status, body } = await get(TOKEN);

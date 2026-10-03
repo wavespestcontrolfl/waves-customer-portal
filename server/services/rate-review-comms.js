@@ -123,8 +123,13 @@ function unitFor(notice) {
   return notice.cadence_label === 'month' ? 'month' : 'application';
 }
 
-function firstName(customer) {
-  return String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
+// The name the email greets: the billing recipient's, exactly as
+// sendNoticeEmail resolves it (the invoice recipient's name, else the
+// customer's first name). The preview, the digest, the frozen letter and the
+// delivered email all take it from here, so they share one greeting.
+function greetingName(customer, prefs) {
+  const [recipient] = getInvoiceEmailRecipients(customer || {}, prefs || {});
+  return String(recipient?.name || customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
 }
 
 async function loadCostBlock(dbh = db) {
@@ -220,10 +225,10 @@ function lineFor(notice, snapshot, customer) {
 }
 
 // The email payload (and the frozen page content) for one customer's lines.
-function letterPayload({ customer, lines, costBlock, noticeUrl }) {
+function letterPayload({ customer, prefs = null, lines, costBlock, noticeUrl }) {
   const ordered = [...lines].sort(byEffective);
   const payload = {
-    first_name: firstName(customer),
+    first_name: greetingName(customer, prefs),
     effective_date: dateLabel(ordered[0].effectiveDate),
     cost_block: costBlock,
     notice_url: noticeUrl,
@@ -320,7 +325,20 @@ async function linesGoneFor(dbh, notices, { snapshots, today }) {
   const { loadLineOpenVisits, perApplicationStructuralRefusal, perApplicationTemplateRefusal } = require('./rate-review-apply')._private;
   const cadenceByNotice = new Map((snapshots || []).map((s) => [String(s.notice_id), s.cadence]));
   const gone = new Map();
-  for (const n of notices.filter((x) => x.billing_lane === 'per_application')) {
+  // An active plan hold that still covers the start day: the apply answers
+  // plan_on_hold (every lane), so no start date is announced until it clears.
+  const { planHoldCovers } = require('./rate-review-apply')._private;
+  const customerIds = [...new Set(notices.map((n) => n.customer_id))];
+  try {
+    const holds = customerIds.length ? await dbh('plan_holds').whereIn('customer_id', customerIds).where({ status: 'active' }).select('customer_id', 'resume_on') : [];
+    for (const n of notices) {
+      if (holds.some((h) => String(h.customer_id) === String(n.customer_id) && planHoldCovers(h, ymd(n.effective_date)))) gone.set(String(n.id), 'plan_on_hold');
+    }
+  } catch (err) {
+    logger.warn(`[rate-review-comms] plan holds unreadable: ${err.message}`);
+    for (const n of notices) gone.set(String(n.id), 'visits_unreadable');
+  }
+  for (const n of notices.filter((x) => x.billing_lane === 'per_application' && !gone.has(String(x.id)))) {
     try {
       const meta = parseJson(n.metadata, {});
       const visits = (await loadLineOpenVisits(dbh, { customerId: n.customer_id, familyKey: n.family_key, cadence: cadenceByNotice.get(String(n.id)) || null, fromDate: ymd(n.effective_date) }))
@@ -466,7 +484,7 @@ const firstMatch = (rules, ctx) => (rules.find(([, test]) => test(ctx)) || [null
 
 function planEntry(data, customerId, notices, { today, now }) {
   const customer = data.customers.get(customerId) || null;
-  const entry = { customerId, customer, name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer', lines: [], alreadySent: [], suppressedLines: [], reason: null, channels: { email: false, sms: false } };
+  const entry = { customerId, customer, prefs: data.prefs.get(customerId) || null, name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer', lines: [], alreadySent: [], suppressedLines: [], reason: null, channels: { email: false, sms: false } };
   for (const notice of notices) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
@@ -504,7 +522,7 @@ function digestFor(entries, costBlock, templateHash = null) {
   h.update(`cost:${costBlock || ''}\ntemplate:${templateHash || ''}\n`);
   for (const e of entries) {
     if (e.reason || !e.lines.length) continue;
-    const payload = letterPayload({ customer: e.customer, lines: e.lines, costBlock, noticeUrl: noticeUrlFor(e.lines) });
+    const payload = letterPayload({ customer: e.customer, prefs: e.prefs, lines: e.lines, costBlock, noticeUrl: noticeUrlFor(e.lines) });
     const ids = e.lines.map((l) => `${l.noticeId}:${l.currentCents}:${l.newCents}:${l.effectiveDate}`).sort();
     h.update(`${e.customerId}|${ids.join(',')}|${e.channels.email ? 'E' : ''}${e.channels.sms ? 'S' : ''}|${JSON.stringify(payload)}\n`);
   }
@@ -605,7 +623,7 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
     lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
-  const payload = letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
+  const payload = letterPayload({ customer, prefs: data.prefs.get(String(row.customer_id)), lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
   const rendered = await renderLetter(payload);
   return { ok: true, subject: rendered.subject, html: rendered.html, costBlockReady: !!costBlock, suppressed: entry ? entry.reason : null };
 }
@@ -742,7 +760,7 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
   return { ok: true, entry: { ...entry, lines } };
 }
 
-async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, today, now }) {
+async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, clock }) {
   let entry = originalEntry;
   const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
@@ -755,6 +773,12 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
     return { outcome: 'in_flight' };
   }
+  // The ET delivery day is read NOW, not at batch start: a batch that crosses
+  // Eastern midnight must judge the 30-day floor (and everything else) on the
+  // day this letter is actually handed to a provider, the day the apply will
+  // measure from sent_at.
+  const now = clock();
+  const today = etDateString(now);
   const fresh = await revalidateClaimed(dbh, entry, claimed, { today, now });
   if (!fresh.ok) {
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null, hold: fresh.reason });
@@ -762,7 +786,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   }
   entry = fresh.entry;
   const claimKey = claimKeyFor(claimed);
-  const payload = letterPayload({ customer, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  // The billing recipient is resolved BEFORE the payload is built, digested
+  // and frozen, so the greeting in the frozen letter and the public page is the
+  // one the email carries.
+  const prefs = await dbh('notification_prefs').where({ customer_id: entry.customerId }).first().catch(() => null);
+  const payload = letterPayload({ customer, prefs, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
   // Ownership is re-read right before each provider leg: a merge undo
@@ -772,6 +800,18 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   if (!(await stillOwned(dbh, claimed, entry.customerId))) {
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen });
     return { outcome: 'in_flight' };
+  }
+  // Last look at the clock before the first provider call: crossing ET midnight
+  // between the revalidation and here still holds a line exactly at the floor.
+  {
+    const dispatchDay = etDateString(clock());
+    if (dispatchDay !== today) {
+      const late = entry.lines.find((l) => daysBetween(dispatchDay, l.effectiveDate) < MIN_NOTICE_DAYS + (l.unit === 'year' ? 2 : 0));
+      if (late) {
+        await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: 'too_late' });
+        return { outcome: 'in_flight', holdReason: 'too_late' };
+      }
+    }
   }
   // Set when the handoff refused before dispatch: the request never left, so
   // the letter is definitively unsent (a named hold, not an uncertain send).
@@ -816,7 +856,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     requireAccepted: true,
     vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
     actorId,
-    hasEmailLeg: email.sent,
+    // Whether the customer HAS an email leg (an address on file), not whether
+    // it succeeded: the canonical consent gate enforces an email-only channel
+    // choice only when the paired email leg is declared, so a failed email
+    // must never open the fallback text for an email-preferring customer.
+    hasEmailLeg: hasContact(customer, prefs).email,
     operatorInitiated: true,
     sendOptions: {
       // Marks the lane for the canonical sender's locked SMS handoff.
@@ -863,7 +907,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
-  const sentAt = new Date();
+  const sentAt = clock();
   // Every line of one letter is stamped together, under the customer-comms
   // fence: a merge or merge undo (which repoints notices under it) either
   // commits before the stamp, which then sees it, or waits for the stamp.
@@ -906,7 +950,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
  * Returns { ok, sent, emailed, texted, unreachable, failed, inFlight,
  * suppressed, stoppedByGate }.
  */
-async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, now = new Date() } = {}) {
+async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, now: suppliedNow = null, clock: suppliedClock = null } = {}) {
+  // `now` pins the clock (tests, replays); otherwise each letter reads the real
+  // clock when it is dispatched. `clock` lets a caller supply its own.
+  const clock = suppliedClock || (suppliedNow ? () => suppliedNow : () => new Date());
+  const now = clock();
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
   const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey, etDateString(now)), loadCostBlock(dbh), letterTemplateHash()]);
@@ -916,14 +964,14 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
   if (String(expectedDigest || '') !== digestFor(entries, costBlock, templateHash)) return { ok: false, reason: 'list_changed' };
   const sendable = entries.filter((e) => !e.reason && e.lines.length);
   if (!sendable.length) return { ok: false, reason: 'nothing_to_send' };
-  await renderLetter(letterPayload({ customer: sendable[0].customer, lines: sendable[0].lines, costBlock, noticeUrl: portalUrl('/') })); // template installed?
+  await renderLetter(letterPayload({ customer: sendable[0].customer, prefs: sendable[0].prefs, lines: sendable[0].lines, costBlock, noticeUrl: portalUrl('/') })); // template installed?
 
   const summary = { sent: 0, emailed: 0, texted: 0, unreachable: 0, uncertain: 0, failed: 0, inFlight: 0, stoppedByGate: 0, suppressed: entries.filter((e) => e.reason && e.lines.length).length };
   for (let i = 0; i < sendable.length; i += SEND_CONCURRENCY) {
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, today: etDateString(now), now });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, clock });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
@@ -1084,8 +1132,11 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // same checks; once recorded (applied_at) it stays upcoming until renewal.
   const unappliedPrepay = pending.filter((n) => n.billing_lane === 'annual_prepay' && !n.applied_at);
   const moved = await ratesMovedFor(dbh, [...perApp, ...unappliedPrepay], { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp), today });
-  for (const id of (await linesGoneFor(dbh, perApp, { snapshots, today })).keys()) moved.add(id);
-  return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane
+  // Per-application structure, and (every lane) an active plan hold the apply
+  // would answer with plan_on_hold. An applied prepaid notice is already recorded.
+  const gone = await linesGoneFor(dbh, pending.filter((n) => !n.applied_at), { snapshots, today });
+  for (const id of gone.keys()) moved.add(id);
+  return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane && !(gone.get(String(n.id)) === 'plan_on_hold')
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),
