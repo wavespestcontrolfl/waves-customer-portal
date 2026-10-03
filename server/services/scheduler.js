@@ -124,6 +124,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
+const { registerDeployKillRetry, retryDeployKilledJobs } = require('../utils/deploy-kill-retry');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 // Required HERE, at scheduler init (= process boot), not lazily inside the
 // cron tick below (codex r3 P1): the module's own MODULE_LOAD_AT — the
@@ -799,8 +800,12 @@ function initScheduledJobs() {
   // update makes concurrent passes harmless. The sweep reads pg_locks and
   // never takes a work lease, and runs at :03/:18/:33/:48 — off every
   // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
-  // Fire-and-forget, fail-soft.
+  // Fire-and-forget, fail-soft. A settled job that registered itself with
+  // registerDeployKillRetry (below, next to its cron) is re-run once — see
+  // utils/deploy-kill-retry.js. An instance with cron jobs off registers
+  // nothing, so it never retries.
   const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
+    .then((settled) => retryDeployKilledJobs(settled))
     .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
   settleDeadRunning();
   cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
@@ -1310,9 +1315,10 @@ function initScheduledJobs() {
   // sweep — single source of truth; independent of the per-call
   // GATE_CALL_PROPERTY_LOOKUP lane). Real nightly LLM spend — the batch
   // cap is the budget. runExclusive: a deploy overlap must not double-buy
-  // the same batch.
+  // the same batch. Re-run once when a deploy kills it mid-run: the attempt
+  // cooldown shields rows the killed run already tried.
   // =========================================================================
-  cron.schedule('55 3 * * *', async () => {
+  const runPropertyEnrichBackfill = async () => {
     try {
       const res = await runExclusive('property-enrich-backfill', () =>
         require('./call-property-lookup').sweepUnenrichedProperties());
@@ -1322,7 +1328,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Property-enrich backfill failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('55 3 * * *', runPropertyEnrichBackfill, { timezone: 'America/New_York' });
+  registerDeployKillRetry('property-enrich-backfill', runPropertyEnrichBackfill);
 
   // =========================================================================
   // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
@@ -6364,9 +6372,10 @@ function initScheduledJobs() {
   // Property-lookup parser canary — nightly, one golden parcel per county
   // through the real by-parcel pipeline; alerts when a county PAO layout
   // change silently breaks the scrape-based parsers.
-  // See server/services/property-lookup-canary.js.
+  // See server/services/property-lookup-canary.js. Re-run once when a deploy
+  // kills it mid-run, so a busy merge night still gets its health check.
   // =========================================================================
-  cron.schedule('17 4 * * *', async () => {
+  const runPropertyLookupCanaryTick = async () => {
     try {
       const { runPropertyLookupCanary } = require('./property-lookup-canary');
       const result = await runPropertyLookupCanary();
@@ -6376,7 +6385,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Property-lookup canary cron failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('17 4 * * *', runPropertyLookupCanaryTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('property-lookup-canary', runPropertyLookupCanaryTick);
 
   // =========================================================================
   // WaveGuard inventory forecast — proactive product shortage warning before
