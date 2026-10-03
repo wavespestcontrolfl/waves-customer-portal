@@ -612,6 +612,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     for (const line of ["we can't thank you enough for the kind words and rating", "we couldn't be more grateful for the kind words and rating"]) {
       expect(verify(good(`Hello there, ${line}.`), g)).toBeNull();
     }
+    // codex #5788 r6: the idiom vouches only inside its own clause, plain
+    // modifiers are allowed, and every staff "kind <noun>" needs the phrase.
+    expect(verify(good("Hello there, we can't thank you enough. We don't appreciate your kind words."), g)).toBe('unlisted_experience_claim');
+    for (const line of ['thank you for the very kind words', 'we appreciate your truly kind words']) {
+      expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
+    }
     // The whole phrase in the review sources a staff-directed "kind words".
     const kindWords = grounding({ text: 'Marcus had kind words for our family and was very helpful.', topics: [], account: null });
     expect(verify(good('Hi Dana, we are glad Marcus had kind words for your family and was helpful.'), kindWords)).toBeNull();
@@ -621,6 +627,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     const saidKind = grounding({ text: 'Marcus was kind and the ants are gone.', topics: [], account: null });
     expect(verify(good('Hi Dana, Marcus had kind words for you and the ants are gone.'), saidKind)).toBe('unlisted_experience_claim');
     expect(verify(good('Hi Dana, we are glad Marcus was kind and the ants are gone.'), saidKind)).toBeNull();
+    for (const line of ['Marcus wrote a kind note for you', 'Marcus sent a kind message to you']) {
+      expect(verify(good(`Hi Dana, ${line} and the ants are gone.`), saidKind)).toBe('unlisted_experience_claim');
+    }
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {

@@ -772,14 +772,15 @@ function checkServiceClaims(ctx) {
 //   2. <that is|that was|it is|it was|so|very|really|how> kind of you.
 // A negated occurrence passes only in the two affirmative idioms "can't thank
 // you enough" and "couldn't be more grateful / thankful" (codex #5788 r1-r5).
-const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,30}\b(?:the|your|those|these|such)\s+$/;
+const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,30}\b(?:the|your|those|these|such)\s+(?:(?:very|truly|really|so|incredibly|extremely|most)\s+){0,2}$/;
 const KIND_REVIEW_NOUN_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message)\b/;
 const KIND_OF_YOU_BEFORE_RE = /\b(?:that\s+is|that's|that\s+was|it\s+is|it's|it\s+was|so|very|really|how)\s+$/;
 const KIND_AFFIRMATIVE_IDIOM_RE = /\b(?:can't|cannot|can\s+not|couldn't|could\s+not)\s+thank\s+you\s+enough\b|\b(?:couldn't|could\s+not)\s+be\s+more\s+(?:grateful|thankful)\b/;
-const KIND_WORDS_RE = /^kind\s+words\b/;
 function isReviewerThanksKind(bodyLower, idx, bodyNeg) {
   const after = bodyLower.slice(idx);
-  const before = bodyLower.slice(Math.max(0, idx - 80), idx);
+  // The clause this "kind" sits in: an idiom or lead-in in an earlier
+  // sentence never vouches for it.
+  const before = bodyLower.slice(Math.max(0, idx - 80), idx).split(/[.!?;,]/).pop();
   if (/^kind\s+of\s+you\b/.test(after)) return KIND_OF_YOU_BEFORE_RE.test(before) && !isNegatedAt(idx, bodyNeg);
   if (!KIND_REVIEW_NOUN_RE.test(after) || !KIND_ACK_BEFORE_RE.test(before)) return false;
   return !isNegatedAt(idx, bodyNeg) || KIND_AFFIRMATIVE_IDIOM_RE.test(before);
@@ -799,11 +800,15 @@ function checkExperienceClaims(ctx) {
     const flat = t.replace(/[- ]+/g, ' ');
     if (t === 'kind') {
       if (isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
-      // "kind words" outside the allowlist needs the WHOLE phrase un-negated in
-      // the review: a bare "kind" there must not source "Marcus had kind words
-      // for you". With the phrase present, the ordinary checks below decide.
-      if (KIND_WORDS_RE.test(bodyLower.slice(termIdx))
-        && allOccurrencesNegated(reviewLower, 'kind words', reviewNeg) !== false) return reject('unlisted_experience_claim', 'kind words');
+      // "kind <words|note|message|...>" outside the allowlist needs the WHOLE
+      // phrase un-negated in the review: a bare "kind" there must not source
+      // "Marcus had kind words for you" or "Marcus wrote a kind note". With
+      // the phrase present, the ordinary checks below decide.
+      const kindNoun = bodyLower.slice(termIdx).match(KIND_REVIEW_NOUN_RE);
+      if (kindNoun) {
+        const phrase = kindNoun[0].replace(/\s+/g, ' ');
+        if (allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, negationIndex(reviewLower.replace(/\s+/g, ' '))) !== false) return reject('unlisted_experience_claim', phrase);
+      }
     }
     const support = (() => {
       const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
