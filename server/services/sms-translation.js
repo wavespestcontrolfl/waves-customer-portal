@@ -995,25 +995,44 @@ function sendSnapshotFor({ draft, context, inboundEnglish }) {
  * The Agent Review send checks, run for a translation card's reply before its send takes the thread lock (as
  * verifyAgentDecisionForSend runs them for a reviewed draft): an offered time that is gone, a balance that
  * changed, a technician no longer on the way, a closed loop. Judged on the ENGLISH reply the translation was
- * checked against. Returns a short reason, or null when the facts still hold. Fails closed.
+ * checked against. Returns { reason } (a short reason, or null when the facts still hold) and, when they
+ * hold, the providerPreSendCheck that re-reads them at the provider boundary. Fails closed.
  */
-async function translationReplyFactsBlockReason({ trialId, customerId }) {
+async function translationReplySendChecks({ trialId, customerId }) {
   try {
-    if (!trialId || !customerId || !inboxAssistEnabled()) return 'not_readable';
+    if (!trialId || !customerId || !inboxAssistEnabled()) return { reason: 'not_readable' };
     const row = await db(TRIAL_TABLE).where({ id: trialId, customer_id: customerId, verdict: 'ready' }).first('checks', 'reply_english', 'inbound_english');
     const send = parseChecks(row?.checks).send;
-    if (!row?.reply_english || !send?.input_snapshot) return 'not_readable';
-    return await require('./agent-decision-send-checks').agentDecisionSendBlockReason({
-      decision: {
-        id: null, customer_id: customerId, prompt_version: send.prompt_version || null,
-        suggested_message: row.reply_english, inbound_message: row.inbound_english,
-        input_snapshot: { ...send.input_snapshot, sms: { body: row.inbound_english } },
-      },
-      outgoingBody: row.reply_english,
-    });
+    if (!row?.reply_english || !send?.input_snapshot) return { reason: 'not_readable' };
+    const checks = require('./agent-decision-send-checks');
+    const snap = send.input_snapshot;
+    const promptVersion = send.prompt_version || null;
+    const body = row.reply_english;
+    const decision = {
+      id: `translation-trial:${trialId}`, customer_id: customerId, prompt_version: promptVersion,
+      suggested_message: body, inbound_message: row.inbound_english,
+      input_snapshot: { ...snap, sms: { body: row.inbound_english } },
+    };
+    // the billing fingerprint BEFORE the full recheck, as verifyAgentDecisionForSend takes it: the boundary
+    // check refuses if anything changes after
+    decision.billing_fingerprint = await checks.billingFingerprintForSend({ decision, outgoingBody: body });
+    const reason = await checks.agentDecisionSendBlockReason({ decision, outgoingBody: body });
+    if (reason) return { reason };
+    // ...and the same facts again at the true provider boundary, from the snapshot (the snapshot-carrying
+    // forms the auto-send executor uses): the route still awaits link, claim, consent and policy steps.
+    const getBody = () => body;
+    return {
+      reason: null,
+      providerPreSendCheck: checks.composeProviderPreSendChecks(
+        checks.etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: snap.live_eta_snapshot || null, factsGeneratedAt: snap.facts_generated_at || null, techNames: Array.isArray(snap.tech_names) ? snap.tech_names : [], promptVersion, getBody }),
+        checks.labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: snap.label_facts_snapshot || null, inboundMessage: row.inbound_english, promptVersion, getBody }),
+        checks.openLoopsProviderPreSendCheck({ commitmentIds: snap.visit_loop_commitment_ids || [], customerId, status: snap.visit_loop_status || null, factsGeneratedAt: snap.facts_generated_at || null }),
+        checks.amountsProviderPreSendCheck({ decision, getBody }),
+      ),
+    };
   } catch (err) {
     logger.warn(`[sms-translation] send recheck failed: ${err.code || err.name || 'error'}`);
-    return 'recheck_failed';
+    return { reason: 'recheck_failed' };
   }
 }
 
@@ -1178,7 +1197,7 @@ async function inboxAssistFor(customerId, now = new Date(), phone = null, dbi = 
 
 module.exports = {
   runTranslationTrial,
-  inboxAssistFor, claimTranslationReplyForSend, translationReplyFactsBlockReason,
+  inboxAssistFor, claimTranslationReplyForSend, translationReplySendChecks,
   inboxAssistEnabled,
   needsTranslation,
   trialEnabled,

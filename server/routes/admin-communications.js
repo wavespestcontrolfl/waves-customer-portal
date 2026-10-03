@@ -670,10 +670,13 @@ router.post('/sms', async (req, res, next) => {
     let translationClaim = translationTrialId ? 'stale' : null;
     // Its facts are re-read first, with the Agent Review send checks and before the lock as those run: an
     // offered time that is gone, a balance that changed, a technician no longer on the way.
+    // The same facts are read once more at the provider boundary (translationProviderPreSendCheck, below).
+    let translationProviderPreSendCheck;
     if (translationTrialId) {
-      const factsReason = await require('../services/sms-translation').translationReplyFactsBlockReason({ trialId: translationTrialId, customerId: trustedCustomerId });
-      if (factsReason) {
-        logger.info(`[communications] translated reply refused at send: ${String(factsReason).slice(0, 80)}`);
+      const sendChecks = await require('../services/sms-translation').translationReplySendChecks({ trialId: translationTrialId, customerId: trustedCustomerId });
+      translationProviderPreSendCheck = sendChecks.providerPreSendCheck;
+      if (sendChecks.reason) {
+        logger.info(`[communications] translated reply refused at send: ${String(sendChecks.reason).slice(0, 80)}`);
         return res.status(409).json({ error: 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
       }
     }
@@ -1198,7 +1201,8 @@ router.post('/sms', async (req, res, next) => {
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),
-      } : {}),
+      // a translation card's reply: the same boundary checks, from the trial's stored snapshot
+      } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —

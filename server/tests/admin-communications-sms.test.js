@@ -107,8 +107,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // each recheck test controls what is "currently offered" without a DB.
 jest.mock('../services/availability', () => ({ getAvailableSlots: jest.fn() }));
 const mockTranslationClaim = jest.fn(async () => 'ok');
-const mockTranslationFacts = jest.fn(async () => null);
-jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a), translationReplyFactsBlockReason: (...a) => mockTranslationFacts(...a) }));
+const mockTranslationFacts = jest.fn(async () => ({ reason: null }));
+jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a), translationReplySendChecks: (...a) => mockTranslationFacts(...a) }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
@@ -437,7 +437,7 @@ describe('admin communications SMS route', () => {
   });
 
   test('a suggested reply whose facts changed is refused with 409 before the thread lock, and nothing is sent', async () => {
-    mockTranslationFacts.mockResolvedValueOnce('open-times stale (slot_taken)');
+    mockTranslationFacts.mockResolvedValueOnce({ reason: 'open-times stale (slot_taken)' });
     mockTranslationClaim.mockClear();
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/sms`, {
@@ -448,6 +448,20 @@ describe('admin communications SMS route', () => {
       expect((await res.json()).error).toMatch(/facts in this suggested reply have changed/);
       expect(mockTranslationClaim).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a suggested reply that passes carries the trial\'s fact checks to the provider boundary', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    mockTranslationFacts.mockResolvedValueOnce({ reason: null, providerPreSendCheck });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM1', deliveryOutcome: 'accepted' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Su visita es el martes.', providerPreSendCheck }));
     });
   });
 
