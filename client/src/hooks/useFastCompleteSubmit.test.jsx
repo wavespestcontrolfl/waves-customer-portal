@@ -48,6 +48,42 @@ beforeEach(() => { globalThis.indexedDB = new IDBFactory(); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('useFastCompleteSubmit durable attempts', () => {
+  it('keeps existing callers without scope on their in-memory submission path', async () => {
+    globalThis.indexedDB = undefined;
+    const request = vi.fn().mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ base: scope.base, request }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Legacy caller'); });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(view.result.current.storageWarning).toBe('');
+    expect(view.result.current.done.summary).toBe('Legacy caller');
+  });
+
+  it('clears a rejected row after storage recovers before sending corrected input', async () => {
+    const deviceDatabase = globalThis.indexedDB;
+    const request = vi.fn().mockImplementationOnce(async () => {
+      globalThis.indexedDB = undefined;
+      throw Object.assign(new Error('Correct the report.'), { status: 422 });
+    }).mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Original'); });
+    const original = JSON.parse(request.mock.calls[0][1].body);
+    const corrected = { ...photoBody, technicianNotes: 'Corrected report' };
+    await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(view.result.current.error).toContain('Could not clear');
+    globalThis.indexedDB = deviceDatabase;
+    corrected.technicianNotes = 'Further correction after blocked send';
+    await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
+    expect(request).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(request.mock.calls[1][1].body);
+    expect(sent).toMatchObject(corrected);
+    expect(sent.idempotencyKey).not.toBe(original.idempotencyKey);
+    expect(view.result.current.done.summary).toBe('Corrected');
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
   it('restores an uncertain photo completion without auto-submit, then retries the exact body, key, and summary', async () => {
     const uncertain = Object.assign(new Error('Connection dropped.'), { status: undefined });
     const firstRequest = vi.fn().mockRejectedValue(uncertain);
@@ -151,6 +187,21 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
   });
 
+  it.each([401, 403, 408, 425, 429])('retains exact recovery through temporary request rejection %s', async (status) => {
+    const body = { idempotencyKey: 'auth-retry-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body, summary: 'Saved report' });
+    const request = vi.fn().mockRejectedValueOnce(Object.assign(new Error('Request rejected'), { status }))
+      .mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    await act(async () => { await view.result.current.retry(); });
+    expect(view.result.current.retryPending).toBe(true);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(body);
+    await act(async () => { await view.result.current.retry(); });
+    expect(request.mock.calls[1][1].body).toBe(request.mock.calls[0][1].body);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
   it('keeps a recovered attempt until the technician explicitly discards it', async () => {
     await putFastCompletionAttempt('svc-1', 'tech-a', {
       body: { idempotencyKey: 'discard-key', ...photoBody },
@@ -207,6 +258,26 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect(view.result.current.failure).toBe('terminal');
     expect(view.result.current.error).toContain('prepared in a different tab');
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toMatchObject({ body: newer });
+  });
+
+  it.each([400, 409])('allows in-memory correction or prompt dismissal without storage (%s)', async (status) => {
+    globalThis.indexedDB = undefined;
+    const request = vi.fn().mockRejectedValueOnce(Object.assign(new Error('Review input'), {
+      status, code: status === 409 ? 'report_rules_review' : 'invalid_input',
+    })).mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, confirmable: true }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Original'); });
+    if (status === 409) {
+      expect(view.result.current.prompt.code).toBe('report_rules_review');
+      await act(async () => { await view.result.current.dismissPrompt(); });
+      expect(view.result.current.prompt).toBeNull();
+    }
+    const corrected = { ...photoBody, technicianNotes: 'Corrected in memory' };
+    await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(request.mock.calls[1][1].body)).toMatchObject(corrected);
+    expect(view.result.current.done.summary).toBe('Corrected');
   });
 
   it('warns before sending when persistence fails, then sends only after another explicit tap', async () => {
