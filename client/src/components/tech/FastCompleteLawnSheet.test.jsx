@@ -104,7 +104,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       if (answer instanceof Error) throw answer;
       return answer;
     }
-    if (path.endsWith('/tech-tips')) return tips;
+    if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
     if (path.includes('/lawn-assessment/service/')) {
       if (lookup instanceof Error) throw lookup;
@@ -919,6 +919,87 @@ describe('a product the plan lists twice', () => {
     expect(skipped.every((id) => id === id.toLowerCase())).toBe(true);
     expect(body.techTips).toEqual({ ids: ['tip-a'], custom: null });
     expect(body.products.every((p) => p.targets.length === 0)).toBe(true);
+  });
+});
+
+// ── tips from the lawn library (owner 2026-09-29, scope round 3c) ──────────
+// The sheet offers the same searchable tip picker as the pest sheet. The server
+// ranks the lawn list by the visit's confirmed assessment, so the sheet reads
+// it again once the tech confirms, and a tip already picked stays picked.
+describe('tips from your technician', () => {
+  const tipRead = (path) => path.endsWith('/tech-tips');
+  const lib = (labels) => ({ available: true, groups: [{ id: 'lawn', tips: labels.map((label) => ({ id: `tip-${label.toLowerCase().replace(/\W+/g, '-')}`, label, copy: `Copy ${label}.`, keywords: [label.toLowerCase()] })) }] });
+
+  test('offers the search box and finds a tip by keyword', async () => {
+    tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
+    await openSheet();
+    const search = await screen.findByLabelText('Search tips');
+    fireEvent.change(search, { target: { value: 'sedge' } });
+    expect(screen.getByRole('button', { name: /Sedge/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
+  });
+
+  test('reads the list again once the assessment is confirmed, and keeps the tip already picked', async () => {
+    tips = lib(['Mow high', 'Dollarweed']);
+    await openSheet();
+    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
+    expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
+    tips = lib(['Dollarweed', 'Mow high']);
+    await confirmAssessment();
+    // the open, the analysis settling, the confirm settling
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
+    await waitFor(() => {
+      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
+      expect(names[0]).toMatch(/Dollarweed/);
+    });
+    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('a failed re-read keeps the tips on screen', async () => {
+    tips = lib(['Mow high']);
+    await openSheet();
+    await screen.findByRole('button', { name: /Mow high/ });
+    tips = new Error('network');
+    await confirmAssessment();
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
+    expect(screen.getByRole('button', { name: /Mow high/ })).toBeTruthy();
+  });
+
+  // Codex r1 P1: the server drops a pick when the tips gate is off, so an
+  // explicit "unavailable" answer must take the picker away.
+  test('a re-read that answers unavailable clears the tips', async () => {
+    tips = lib(['Mow high']);
+    await openSheet();
+    await screen.findByRole('button', { name: /Mow high/ });
+    tips = { available: false, groups: [] };
+    await confirmAssessment();
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
+  });
+
+  // Codex r3 P2: on a retake the server still sees the old confirmed row until
+  // /assess inserts the new one, so the read that matters is the one after the
+  // analysis settles, before any confirm.
+  test('a retake drops the old lift when the new analysis settles, not at confirm', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    tips = lib(['Dollarweed', 'Mow high']);
+    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: true, unusableReason: null } }) }) });
+    await screen.findByRole('button', { name: /Dollarweed/ });
+    const reads = () => requests.filter((r) => tipRead(r.path)).length;
+    const order = () => screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent.split(/Copy/)[0].trim());
+    expect(order()[0]).toMatch(/Dollarweed/);
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    // the server has no new row yet: a read here would still show the old lift
+    const afterRetake = reads();
+    tips = lib(['Mow high', 'Dollarweed']);
+    const input = await screen.findByLabelText('Add turf photos');
+    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
+    await screen.findByLabelText('Slot for photo 1');
+    expect(reads()).toBe(afterRetake);
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await screen.findByRole('button', { name: 'Confirm assessment' });
+    await waitFor(() => expect(reads()).toBe(afterRetake + 1));
+    await waitFor(() => expect(order()[0]).toMatch(/Mow high/));
   });
 });
 
