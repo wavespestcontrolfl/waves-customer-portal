@@ -11,7 +11,8 @@
  *      day: the accepted time must still be offered;
  *   3. the link's own move (one visit, or the series for a recurring visit's
  *      date move), pinned to the visit as the decide step read it. Under the move's locks the guard reads every fence again (the offer
- *      is still open, no move logged since it went out, no staff
+ *      is still open, the visit is as it was checked, nothing newer on the
+ *      conversation, no move logged since the offer went out, no staff
  *      schedule-change request, no unanswered reminder reply-1/2 offer) and
  *      writes "moved" on the decision and "accepted" on the offer in the
  *      move's own transaction: the visit moves and the record says so, or
@@ -29,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dateOnlyString } = require('../utils/datetime-et');
+const { phoneIdentitySql } = require('./sms-response-policy');
 
 const REASON_CODE = 'customer_request'; // reschedule_log.reason_code varchar(30)
 // reschedule_log.initiated_by varchar(20). Its own value, so the scheduling
@@ -78,7 +80,7 @@ async function closeClaim(dbh, decisionId, status, execution) {
  * The checks the move runs under its own locks, and the two writes that
  * commit with it. `expected` is the visit as the decide step checked it.
  */
-function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected }) {
+function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected, inboundSmsLogId, repliedAt }) {
   return async ({ trx }) => {
     const fences = require('./call-reschedule-apply');
     // The visit's own row lock: the portal request route holds it while it
@@ -98,6 +100,16 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
     const moved = await trx('reschedule_log').where({ scheduled_service_id: visitId })
       .where('created_at', '>', offer.sent_at).first('id');
     if (moved) throw guardError('moved_since_offer');
+    // Anything newer on this conversation, either way: the customer wrote
+    // again ("actually, leave it") or someone at Waves already answered. The
+    // decision read only the thread up to its own text.
+    const newer = await trx('sms_log')
+      .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN from_phone ELSE to_phone END")} = ?`, [offer.phone_last10])
+      .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN to_phone ELSE from_phone END")} = ?`, [offer.waves_line])
+      .where('created_at', '>', repliedAt)
+      .whereNot('id', inboundSmsLogId)
+      .first('id');
+    if (newer) throw guardError('newer_message');
     if (await fences.openPortalRequest(trx, customerId, visitId)) throw guardError('portal_request_open');
     if (await fences.pendingSmsOffer(trx, customerId, visitId, now)) throw guardError('reminder_offer_pending');
     const marked = await trx('sms_offer_decisions')
@@ -146,7 +158,7 @@ async function afterMove({ dbh, svc, date, window, technicianId, result, deps })
   }
 }
 
-async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, deps }) {
+async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now, deps }) {
   if (!repliedAt || new Date(now).getTime() - new Date(repliedAt).getTime() > MAX_REPLY_AGE_MS) return refusal('reply_too_old');
   const page = deps.reschedulePublic || require('../routes/reschedule-public')._internals;
   const svc = await page.loadById(offer.scheduled_service_id, dbh);
@@ -182,7 +194,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, 
     if (notice.violatesSelfServeNotice({ date: slot.date, startTime: window.start })) throw guardError('self_serve_notice');
   };
   const moveGuard = buildMoveGuard({
-    decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target,
+    decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target, inboundSmsLogId, repliedAt,
     expected: { date: dateOnlyString(svc.scheduled_date), start: hhmm(svc.window_start), end: hhmm(svc.window_end), status: svc.status },
   });
   // Customer-facing move: the offer was built under the travel-gap rule.
@@ -231,16 +243,16 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, 
  * → { executed: true, status: 'moved', date, start, end }
  *   or { executed: false, status?, reason }. Never throws.
  */
-async function executeMove({ decisionId, offer, slot, visit, repliedAt, now = new Date(), dbh = db, deps = {} } = {}) {
+async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now = new Date(), dbh = db, deps = {} } = {}) {
   if (!actMoveLive()) return { executed: false, reason: 'gate_off' };
-  if (!decisionId || offer?.kind !== 'move_visit' || !offer.scheduled_service_id || !slot?.date || !slot?.start || !visit) {
+  if (!decisionId || offer?.kind !== 'move_visit' || !offer.scheduled_service_id || !slot?.date || !slot?.start || !visit || !inboundSmsLogId) {
     return { executed: false, reason: 'missing_input' };
   }
   let claimed = false;
   try {
     claimed = await claimDecision(dbh, decisionId);
     if (!claimed) return { executed: false, reason: 'already_claimed' };
-    const outcome = await moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, deps });
+    const outcome = await moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now, deps });
     if (!outcome.executed) await closeClaim(dbh, decisionId, 'refused', { reason: outcome.reason, detail: outcome.detail || null });
     logger.info(`[sms-scheduling-act] decision ${decisionId} → ${outcome.executed ? 'moved' : `refused (${outcome.reason})`}`);
     return outcome;

@@ -57,7 +57,7 @@ function fakeDeps(over = {}) {
 }
 
 const run = (over = {}, deps = fakeDeps(), fake = fakeDb()) => act.executeMove({
-  decisionId: 'dec-1', offer: OFFER, slot: SLOT, visit: VISIT, repliedAt: REPLIED, now: NOW, dbh: fake.dbh, deps, ...over,
+  decisionId: 'dec-1', offer: OFFER, slot: SLOT, visit: VISIT, inboundSmsLogId: 'in-1', repliedAt: REPLIED, now: NOW, dbh: fake.dbh, deps, ...over,
 }).then((result) => ({ result, deps, fake }));
 
 afterEach(() => { delete process.env[GATE]; });

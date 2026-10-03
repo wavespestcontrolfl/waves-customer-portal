@@ -457,7 +457,7 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
       const act = require('./sms-scheduling-act');
       if (act.actMoveLive()) {
         // No `now`: the executor reads the clock itself, after the model's wait.
-        const done = await act.executeMove({ decisionId: recorded.id, offer, slot, visit: facts.visit, repliedAt: ctx.repliedAt, dbh });
+        const done = await act.executeMove({ decisionId: recorded.id, offer, slot, visit: facts.visit, inboundSmsLogId, repliedAt: ctx.repliedAt, dbh });
         return { ...recorded, executed: done.executed === true };
       }
     }

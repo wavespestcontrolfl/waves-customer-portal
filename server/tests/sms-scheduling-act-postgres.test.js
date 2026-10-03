@@ -18,6 +18,7 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
   const ROLLBACK = new Error('rollback');
   const NOW = new Date('2040-03-01T15:00:00Z');
   const SENT = new Date('2040-03-01T13:00:00Z');
+  const REPLIED = new Date('2040-03-01T14:59:00Z');
   const PHONE = '+19415550178';
   const TARGET = { date: '2040-03-06', start: '10:00', end: '12:00' };
 
@@ -52,16 +53,18 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     }).returning('id');
     const [inbound] = await trx('sms_log').insert({
       customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
-      message_body: 'Tuesday works', status: 'received', created_at: new Date('2040-03-01T14:59:00Z'),
+      message_body: 'Tuesday works', status: 'received', created_at: REPLIED,
       message_type: 'inbound', metadata: JSON.stringify({ source: 'location' }),
     }).returning('id');
     const offerId = offer.id || offer;
+    const inboundId = inbound.id || inbound;
     const [row] = await trx('sms_offer_decisions').insert({
-      sms_offer_id: offerId, inbound_sms_log_id: inbound.id || inbound, customer_id: customerId, mode: 'shadow',
+      sms_offer_id: offerId, inbound_sms_log_id: inboundId, customer_id: customerId, mode: 'shadow',
       action: 'accept_slot', slot_number: 1, outcome: 'would_move', refusals: '[]', execution_status: executionStatus,
     }).returning('id');
     const decisionId = row.id || row;
-    const guard = act.buildMoveGuard({ decisionId, offer: { id: offerId, sent_at: SENT }, visitId, customerId, now: NOW, target: TARGET,
+    const guard = act.buildMoveGuard({ decisionId, offer: { id: offerId, sent_at: SENT, phone_last10: PHONE.slice(-10), waves_line: '9415550199' },
+      visitId, customerId, now: NOW, target: TARGET, inboundSmsLogId: inboundId, repliedAt: REPLIED,
       expected: { date: '2040-03-05', start: '08:00', end: '10:00', status: 'confirmed' } });
     return { customerId, visitId, offerId, decisionId, guard };
   }
@@ -69,7 +72,12 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
   const refusalOf = (promise) => promise.then(() => null, (err) => err.refusal || err.message);
 
   test('every fence clear: the decision is marked moved and the offer accepted', () => inTrx(async (trx) => {
-    const { offerId, decisionId, guard } = await seed(trx);
+    const { customerId, offerId, decisionId, guard } = await seed(trx);
+    // Older messages, and a newer one on another Waves line, are not this conversation's.
+    await trx('sms_log').insert([
+      { customer_id: customerId, direction: 'outbound', from_phone: '+19415550199', to_phone: PHONE, message_body: 'offer', status: 'sent', created_at: SENT, message_type: 'manual' },
+      { customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550111', message_body: 'other line', status: 'received', created_at: new Date('2040-03-01T14:59:30Z'), message_type: 'inbound' },
+    ]);
     await guard({ trx });
     const decision = await trx('sms_offer_decisions').where({ id: decisionId }).first();
     expect(decision).toMatchObject({ execution_status: 'moved', mode: 'live', execution: TARGET });
@@ -93,6 +101,12 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
         original_date: '2040-03-05', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: new Date('2040-03-01T12:00:00Z'),
         notes: JSON.stringify({ option1: { date: '2040-03-07' }, option2: { date: '2040-03-08' } }) }),
     };
+    // The customer wrote again before the move committed.
+    cases.newer_message = (trx, s) => trx('sms_log').insert({ customer_id: s.customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
+      message_body: 'Actually leave it where it is', status: 'received', created_at: new Date('2040-03-01T14:59:40Z'), message_type: 'inbound' });
+    // Someone at Waves already answered on that line.
+    cases['newer_message (outbound)'] = (trx, s) => trx('sms_log').insert({ customer_id: s.customerId, direction: 'outbound', from_phone: '+19415550199', to_phone: PHONE,
+      message_body: 'Let me check Wednesday for you', status: 'sent', created_at: new Date('2040-03-01T14:59:50Z'), message_type: 'manual' });
     cases['visit_changed (status)'] = (trx, s) => trx('scheduled_services').where({ id: s.visitId }).update({ status: 'pending' });
     for (const [name, arrange] of Object.entries(cases)) {
       const reason = name.split(' ')[0];
