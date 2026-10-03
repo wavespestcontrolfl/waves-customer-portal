@@ -1396,6 +1396,10 @@ async function sendCustomerMessageCore(input) {
   // describes, read just before the handoff so an edit right after the send
   // can never pass as the offered state. Gate off, nothing is loaded.
   const offerVisitSnapshot = await captureOfferVisitSnapshotBeforeSend(input);
+  // The offer's sent_at is this moment, just before the handoff: a customer
+  // who answers while the provider step is still finishing its own logging
+  // must not look as if they replied before the offer existed.
+  const offerDispatchAt = new Date();
   providerOutcome = providerCoordinationBlock || (withProviderHandoff && !billingEmailLeg
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
@@ -1564,7 +1568,7 @@ async function sendCustomerMessageCore(input) {
   // the send checks approved; sendInput.body may have had its links rewritten.
   // Not awaited: the text is already out, and a slow database must not hold
   // the send result. A lost write is re-recorded by the ledger's backfill sweep.
-  void recordSmsOfferAfterSend(input, sendInput, providerOutcome, offerVisitSnapshot);
+  void recordSmsOfferAfterSend(input, sendInput, providerOutcome, offerVisitSnapshot, offerDispatchAt);
 
   return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,
@@ -1623,7 +1627,7 @@ async function captureOfferVisitSnapshotBeforeSend(input) {
   }
 }
 
-async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSendVisitSnapshot = null) {
+async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSendVisitSnapshot = null, dispatchAt = null) {
   try {
     const agentDecisionId = input?.metadata?.agentDecisionId;
     // Only a text the carrier took is an offer: the gate-, template- and
@@ -1640,7 +1644,7 @@ async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSen
       // The number the provider actually sent from (twilio.js's result), so
       // the offer's Waves line never depends on the best-effort log row.
       from: providerOutcome?.raw?.fromNumber || null,
-      sentAt: providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date(),
+      sentAt: dispatchAt || (providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date()),
       preSendVisitSnapshot,
     });
   } catch (err) {

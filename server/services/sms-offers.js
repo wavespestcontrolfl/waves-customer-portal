@@ -296,6 +296,7 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
 // nothing left to match a reply against.
 const BACKFILL_LOOKBACK_HOURS = OFFER_TTL_HOURS;
 const BACKFILL_BATCH = 200;
+const BACKFILL_SENT_AT_MARGIN_MS = 30000;
 // 10 pages = 2,000 decision sends in 48h, far above today's volume (~5 a day).
 const BACKFILL_MAX_PAGES = 10;
 
@@ -353,7 +354,10 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
         providerMessageId: r.twilio_sid,
         to: r.to_phone,
         from: r.from_phone,
-        sentAt: new Date(r.created_at),
+        // The log row is written after the provider took the text; the offer
+        // stood from a little before that (same reason the live path stamps
+        // the moment before its handoff).
+        sentAt: new Date(new Date(r.created_at).getTime() - BACKFILL_SENT_AT_MARGIN_MS),
         ignoreLinks: true,
         dbh,
       });

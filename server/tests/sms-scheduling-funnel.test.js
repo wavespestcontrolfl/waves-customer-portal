@@ -139,6 +139,7 @@ test('a would-move is scored only after its 48h, and only against a logged move 
   const out = summarizeDecisions(decisions, moves, new Date('2026-10-05T00:00:00Z'));
   expect(out).toEqual({
     total: 6,
+    move_offers_decided: 0,
     by_outcome: { would_move: 4, staff: 1, no_action: 1 },
     by_action: { accept_slot: 5, decline: 1 },
     refusals: { quote_not_in_text: 1 },
@@ -195,4 +196,20 @@ test('recall credits a correct decision on the original offer when a replacement
   // A would-move recorded only after the move is not a catch.
   expect(summarizeRecall(offers, [{ sms_offer_id: 'a', outcome: 'would_move', would_have: would, created_at: '2026-10-01T19:00:00Z' }], moves, new Date('2026-10-05T00:00:00Z')))
     .toEqual({ real_accepts: 1, caught: 0 });
+});
+
+test('scoring starts when the reply arrived, and the exit sample counts distinct visit-move offers', () => {
+  const { summarizeDecisions } = require('../services/sms-scheduling-funnel');
+  const would = JSON.stringify({ kind: 'move_visit', scheduled_service_id: 'v1', date: '2026-10-06', start: '10:00' });
+  const row = (over) => ({ sms_offer_id: 'o1', offer_kind: 'move_visit', action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would,
+    replied_at: '2026-10-01T15:00:00Z', created_at: '2026-10-01T15:20:00Z', ...over });
+  // Staff moved it at 15:10: after the reply, before the classifier's row at 15:20.
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T15:10:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const out = summarizeDecisions([
+    row(),
+    row({ outcome: 'staff', would_have: null }),
+    row({ sms_offer_id: 'o2', offer_kind: 'book_new', outcome: 'would_book', would_have: null }),
+    row({ sms_offer_id: 'o3', outcome: 'error', would_have: null }),
+  ], moves, new Date('2026-10-05T00:00:00Z'));
+  expect(out).toMatchObject({ total: 4, move_offers_decided: 1, would_move_matured: 1, would_move_matched: 1 });
 });

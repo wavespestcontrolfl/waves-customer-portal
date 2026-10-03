@@ -1581,7 +1581,9 @@ router.post('/sms', async (req, res) => {
     // and regardless of the scheduling regex: "Tuesday works" may not match it.
     // `customer` may be null: a reply from another number on the customer's
     // file resolves through the offer's own customer, then the on-file check.
-    if (Body && !smsReaction && !isAiNumber && numberConfig.type === 'location'
+    // Any customer-facing Waves line (an offer can go out from the main line
+    // or a tracking line too; a text with no open offer on its line is a no-op).
+    if (Body && !smsReaction && !isAiNumber
       && require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_DECIDE')) {
       void require('../services/sms-scheduling-decide').runShadowDecision({
         customer: customer || null,

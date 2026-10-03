@@ -449,7 +449,7 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
         portalRequestOpen: fresh.portalRequestOpen, reminderOfferPending: fresh.reminderOfferPending,
       });
     }
-    return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict });
+    return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict, visit: facts.visit });
   } catch (err) {
     // Code only, never the message: a Knex error embeds bound values.
     logger.warn(`[sms-scheduling-decide] not recorded: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
@@ -457,8 +457,50 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
   }
 }
 
-// Phase 4: one shadow row per (offer, text); a race to the same row records once.
-async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route, decision, verdict }) {
+const DECISION_COLUMNS = ['sms_offer_id', 'inbound_sms_log_id', 'customer_id', 'mode', 'model', 'prompt_version', 'action',
+  'slot_number', 'customer_quote', 'confidence', 'outcome', 'refusals', 'would_have', 'error'];
+
+// Explicit casts for the raw insert's parameters (anything else is text).
+const DECISION_COLUMN_TYPES = { sms_offer_id: 'uuid', inbound_sms_log_id: 'uuid', customer_id: 'uuid', slot_number: 'int', refusals: 'jsonb', would_have: 'jsonb' };
+
+/**
+ * A would-move is written by ONE statement that inserts only if, at that
+ * instant, the visit is still exactly as the checks read it, no move has been
+ * logged since the offer, and no staff schedule-change request is open: a
+ * compare-and-insert, so no edit can slip between the last check and the row.
+ * No row lock is taken (a locked visit would fail invoice settlement, which
+ * takes it NOWAIT). Returns the inserted id, or null when the comparison (or
+ * the one-row-per-text index) refused it.
+ */
+async function insertWouldMoveIfUnchanged(dbh, row, { offer, visit }) {
+  const shape = visitShape(visit);
+  const result = await dbh.raw(
+    `INSERT INTO sms_offer_decisions (${DECISION_COLUMNS.join(', ')})
+     SELECT ${DECISION_COLUMNS.map((c) => `?::${DECISION_COLUMN_TYPES[c] || 'text'}`).join(', ')}
+     WHERE EXISTS (
+         SELECT 1 FROM scheduled_services s
+         WHERE s.id = ? AND s.scheduled_date = ?::date AND s.status = ?
+           AND to_char(s.window_start, 'HH24:MI') IS NOT DISTINCT FROM ?
+           AND to_char(s.window_end, 'HH24:MI') IS NOT DISTINCT FROM ?)
+       AND NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = ? AND rl.created_at > ?)
+       AND NOT EXISTS (
+         SELECT 1 FROM service_requests sr
+         WHERE sr.customer_id = ? AND sr.category = 'schedule_change'
+           AND sr.status NOT IN ('resolved', 'closed', 'cancelled') AND sr.description LIKE ?)
+     ON CONFLICT DO NOTHING
+     RETURNING id`,
+    [
+      ...DECISION_COLUMNS.map((c) => row[c]),
+      offer.scheduled_service_id, shape.date, shape.status, shape.start, shape.end,
+      offer.scheduled_service_id, offer.sent_at,
+      offer.customer_id, `Appointment ${offer.scheduled_service_id}:%`,
+    ],
+  );
+  return result?.rows?.[0]?.id || null;
+}
+
+// Phase 4: one shadow row per text; a race to the same row records once.
+async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route, decision, verdict, visit = null }) {
   const row = {
     sms_offer_id: offer.id,
     inbound_sms_log_id: inboundSmsLogId,
@@ -475,14 +517,29 @@ async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route,
     would_have: verdict.would_have ? JSON.stringify(verdict.would_have) : null,
     error: verdict.outcome === 'error' ? String(result?.ok ? 'malformed_answer' : (result?.reason || 'no_result')).slice(0, 60) : null,
   };
-  const [inserted] = await dbh('sms_offer_decisions').insert(row)
+  let id = null;
+  let outcome = verdict.outcome;
+  let refusals = verdict.refusals;
+  if (outcome === 'would_move') {
+    id = await insertWouldMoveIfUnchanged(dbh, row, { offer, visit });
+    if (!id) {
+      // Not inserted: either this text already has its row, or the visit
+      // changed under the last check. The second is recorded as a refusal.
+      if (await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id')) return { recorded: false, reason: 'already_decided' };
+      outcome = 'staff';
+      refusals = ['visit_changed_during_decide'];
+      Object.assign(row, { outcome, refusals: JSON.stringify(refusals) });
+    }
+  }
+  if (!id) {
     // One row per text (sms_offer_decisions_one_per_inbound) and per
     // (offer, text): a race on either records once.
-    .onConflict().ignore()
-    .returning('id');
-  if (!inserted) return { recorded: false, reason: 'already_decided' };
-  logger.info(`[sms-scheduling-decide] offer ${offer.id} → ${verdict.outcome}${verdict.refusals.length ? ` (${verdict.refusals.join(',')})` : ''}`);
-  return { recorded: true, id: inserted.id || inserted, outcome: verdict.outcome };
+    const [inserted] = await dbh('sms_offer_decisions').insert(row).onConflict().ignore().returning('id');
+    if (!inserted) return { recorded: false, reason: 'already_decided' };
+    id = inserted.id || inserted;
+  }
+  logger.info(`[sms-scheduling-decide] offer ${offer.id} → ${outcome}${refusals.length ? ` (${refusals.join(',')})` : ''}`);
+  return { recorded: true, id, outcome };
 }
 
 // The AI assistant line answers its own texts; the webhook skips it too.
@@ -496,7 +553,7 @@ const SWEEP_MAX_PAGES = 10;
  * Replies the webhook could not decide because their offer was not recorded
  * yet (the customer answered before the post-send ledger write committed, or
  * while it waited for the ledger backfill): every customer text from the last
- * 48h, at least two minutes old, sent to a Waves location line, with no
+ * 48h, at least two minutes old, sent to any Waves line but the AI line, with no
  * decision row, from a phone that held an offer when it arrived. Each goes
  * through runShadowDecision, which is idempotent per text. Runs right after
  * the offer backfill on its cron. Never throws.
@@ -526,7 +583,6 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .whereRaw("NULLIF(TRIM(sl.message_body), '') IS NOT NULL")
         .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
         .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))
-        .whereRaw("sl.metadata->>'source' = 'location'")
         .whereRaw(`REGEXP_REPLACE(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g') NOT IN (${AI_NUMBER_DIGITS.map(() => '?').join(', ')})`, AI_NUMBER_DIGITS)
         .whereNotExists(function decidedAlready() {
           this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');

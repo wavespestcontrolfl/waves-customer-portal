@@ -156,7 +156,9 @@ function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt
   for (const { at, slot, offers: carriers } of accepts.values()) {
     const hit = carriers.some((offer) => (byOffer.get(String(offer.id)) || []).some((d) => {
       if (d.outcome !== 'would_move') return false;
-      if (d.created_at && new Date(d.created_at).getTime() > at) return false;
+      // The reply (not the classifier's row) must precede the move.
+      const repliedAt = d.replied_at || d.created_at;
+      if (repliedAt && new Date(repliedAt).getTime() > at) return false;
       const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
       return would.date === slot.date && would.start === slot.start;
     }));
@@ -167,14 +169,20 @@ function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt
 
 function summarizeDecisions(decisions, movesByVisit = new Map(), observedAt = new Date()) {
   const observedMs = new Date(observedAt).getTime();
-  const out = { total: decisions.length, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0 };
+  const out = { total: decisions.length, move_offers_decided: 0, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0 };
+  // The exit bar's sample: distinct visit-move offers with a real decision
+  // (several texts on one offer, booking offers and errors do not add to it).
+  out.move_offers_decided = new Set(decisions
+    .filter((d) => d.offer_kind === 'move_visit' && d.outcome !== 'error' && d.sms_offer_id)
+    .map((d) => String(d.sms_offer_id))).size;
   for (const d of decisions) {
     out.by_outcome[d.outcome] = (out.by_outcome[d.outcome] || 0) + 1;
     if (d.action) out.by_action[d.action] = (out.by_action[d.action] || 0) + 1;
     const refusals = typeof d.refusals === 'string' ? JSON.parse(d.refusals) : (d.refusals || []);
     for (const r of refusals) out.refusals[r] = (out.refusals[r] || 0) + 1;
     if (d.outcome !== 'would_move') continue;
-    const t0 = new Date(d.created_at).getTime();
+    // From the reply's arrival: staff can act before the classifier's row lands.
+    const t0 = new Date(d.replied_at || d.created_at).getTime();
     if (t0 + FOLLOW_WINDOW_MS > observedMs) continue;
     out.would_move_matured += 1;
     const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
@@ -259,6 +267,16 @@ function parseReportInstant(value, fallback, now = new Date()) {
   return parsed;
 }
 
+// A decision with the moment its text ARRIVED (replied_at: scoring starts
+// there, not when the detached classifier finished) and its offer's kind.
+function decisionRows(dbh) {
+  return dbh('sms_offer_decisions as d')
+    .leftJoin('sms_log as sl', 'sl.id', 'd.inbound_sms_log_id')
+    .leftJoin('sms_offers as o', 'o.id', 'd.sms_offer_id')
+    .select('d.sms_offer_id', 'd.action', 'd.outcome', 'd.refusals', 'd.would_have', 'd.created_at',
+      'sl.created_at as replied_at', 'o.kind as offer_kind');
+}
+
 // The logged moves of every visit a would-move named or a visit-move offer
 // was for, from the earliest of those on.
 async function loadMovesForScoring(dbh, decisions, offers) {
@@ -268,7 +286,7 @@ async function loadMovesForScoring(dbh, decisions, offers) {
     if (d.outcome !== 'would_move') continue;
     const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
     if (would.scheduled_service_id) ids.add(String(would.scheduled_service_id));
-    first = Math.min(first, new Date(d.created_at).getTime());
+    first = Math.min(first, new Date(d.replied_at || d.created_at).getTime());
   }
   for (const o of offers) {
     if (o.kind !== 'move_visit' || !o.scheduled_service_id) continue;
@@ -304,8 +322,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     .select('customer_id', 'message_body as body', 'created_at');
   const hasDecisions = await dbh.schema.hasTable('sms_offer_decisions');
   const decisions = hasDecisions
-    ? await dbh('sms_offer_decisions').where('created_at', '>=', from).where('created_at', '<', to)
-      .select('sms_offer_id', 'action', 'outcome', 'refusals', 'would_have', 'created_at')
+    ? await decisionRows(dbh).where('d.created_at', '>=', from).where('d.created_at', '<', to)
     : null;
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers
@@ -315,8 +332,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   // Recall follows each offer in the window to its decisions, wherever they
   // fall in time (a reply can land after the report's end).
   const offerDecisions = (hasDecisions && offers?.length)
-    ? await dbh('sms_offer_decisions').whereIn('sms_offer_id', offers.map((o) => o.id))
-      .select('sms_offer_id', 'outcome', 'would_have', 'created_at')
+    ? await decisionRows(dbh).whereIn('d.sms_offer_id', offers.map((o) => o.id))
     : [];
   const movesByVisit = await loadMovesForScoring(dbh, decisions || [], offers || []);
   const customerIds = [...new Set([

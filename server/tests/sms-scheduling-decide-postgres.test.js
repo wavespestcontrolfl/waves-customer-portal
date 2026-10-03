@@ -172,6 +172,52 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(llm.dispatch).not.toHaveBeenCalled();
   }));
 
+  describe('a visit move', () => {
+    const VISIT_DATE = '2040-03-05';
+    async function seedMove(trx) {
+      const { customerId, offerId, inboundId } = await seed(trx);
+      const visitId = randomUUID();
+      await trx('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Pest Control Service',
+        status: 'confirmed', scheduled_date: VISIT_DATE, window_start: '08:00', window_end: '10:00' });
+      await trx('sms_offers').where({ id: offerId }).update({
+        kind: 'move_visit', scheduled_service_id: visitId, service_key: null,
+        visit_snapshot: JSON.stringify({ scheduled_service_id: visitId, date: VISIT_DATE, start: '08:00', end: '10:00', status: 'confirmed', pre_send: true }),
+      });
+      const customer = await trx('customers').where({ id: customerId }).first();
+      const llm = { dispatch: jest.fn(async () => ({ ok: true, json: { action: 'accept_slot', slot_number: 1, customer_quote: 'Tuesday works', confidence: 'high' } })) };
+      return { visitId, inboundId, args: { customer, inboundBody: 'Tuesday works', inboundSmsLogId: inboundId, fromPhone: PHONE, now: NOW, dbh: trx, llm } };
+    }
+
+    test('an unchanged visit records would_move through the compare-and-insert', () => inTrx(async (trx) => {
+      const { visitId, args } = await seedMove(trx);
+      const result = await decide.runShadowDecision({ ...args, slotRecheck: async () => ({ ok: true }) });
+      expect(result).toMatchObject({ recorded: true, outcome: 'would_move' });
+      const row = await trx('sms_offer_decisions').where({ id: result.id }).first();
+      expect(row.would_have).toMatchObject({ kind: 'move_visit', scheduled_service_id: visitId, date: '2040-03-06', start: '10:00', from: { date: VISIT_DATE, start: '08:00', end: '10:00' } });
+    }));
+
+    test('an edit that lands after the last check is refused by the insert itself', () => inTrx(async (trx) => {
+      const { visitId, inboundId, args } = await seedMove(trx);
+      // The picker recheck is the last wait before the final fences; an Edit-form change (no log row) lands after them.
+      const real = decide.runShadowDecision;
+      const result = await real({ ...args, slotRecheck: async () => ({ ok: true }), dbh: new Proxy(trx, {
+        apply(target, thisArg, argv) { return target(...argv); },
+        get(target, prop) {
+          if (prop !== 'raw') return target[prop];
+          return async (...rawArgs) => {
+            if (String(rawArgs[0]).includes('INSERT INTO sms_offer_decisions')) {
+              await trx('scheduled_services').where({ id: visitId }).update({ scheduled_date: '2040-03-09' });
+            }
+            return target.raw(...rawArgs);
+          };
+        },
+      }) });
+      expect(result).toMatchObject({ recorded: true, outcome: 'staff' });
+      expect(await trx('sms_offer_decisions').where({ inbound_sms_log_id: inboundId }).first('outcome', 'refusals'))
+        .toEqual({ outcome: 'staff', refusals: ['visit_changed_during_decide'] });
+    }));
+  });
+
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {
     const { customerId, inboundId } = await seed(trx);
     const customer = await trx('customers').where({ id: customerId }).first();

@@ -48,7 +48,8 @@ function printReport(since, until, f) {
   if (f.decisions) {
     const fmt = (o) => Object.keys(o).sort().map((k) => `${k} ${o[k]}`).join(', ') || 'none';
     lines.push(
-      `  Decide step (shadow) decisions     ${f.decisions.total}`,
+      `  Decide step (shadow) decisions     ${f.decisions.total} texts`,
+      `    distinct visit-move offers       ${f.decisions.move_offers_decided} (the exit bar's sample: 40 needed)`,
       `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
       `    refused because                  ${fmt(f.decisions.refusals)}`,
       `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
