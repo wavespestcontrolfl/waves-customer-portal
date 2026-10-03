@@ -604,6 +604,17 @@ describe('verifyReplyText — public-surface safety net', () => {
     for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words', 'we appreciate the kind words and your rating', 'we are grateful for the kind words']) {
       expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
     }
+    // The allowlist needs an acknowledgment lead-in: adverse or counterfactual
+    // copy is refused, and the two affirmative idioms pass (codex #5788 r5).
+    for (const line of ['your kind words were unwanted', 'we regret your kind comments', 'it would have been kind of you to leave a comment', "we don't appreciate the kind words"]) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
+    for (const line of ["we can't thank you enough for the kind words and rating", "we couldn't be more grateful for the kind words and rating"]) {
+      expect(verify(good(`Hello there, ${line}.`), g)).toBeNull();
+    }
+    // The whole phrase in the review sources a staff-directed "kind words".
+    const kindWords = grounding({ text: 'Marcus had kind words for our family and was very helpful.', topics: [], account: null });
+    expect(verify(good('Hi Dana, we are glad Marcus had kind words for your family and was helpful.'), kindWords)).toBeNull();
     // A referral or recommendation is a separate act, not the review (codex #5788 r4).
     expect(verify(good('Hello there, thank you for your kind referral. We are glad to help.'), g)).toBe('unlisted_experience_claim');
     // Staff "kind words" is refused even when the review itself says "kind" (codex #5788 r4).

@@ -762,25 +762,27 @@ function checkServiceClaims(ctx) {
 // object, or null when every experience claim (and the interaction gate) is
 // clear.
 // "kind" in a thank-you aimed at the reviewer is not a claim (owner
-// 2026-10-03). The AFFIRMATIVE shapes that pass: "kind of you", "your kind
-// <words|review|note|feedback|comments|remarks|message>" (all names for the
-// review itself: a referral or recommendation is a separate act and is not
-// listed), and "<thanks|appreciate|grateful|thankful> ... the kind words" in
-// one clause. Any other "kind" (staff, the service, a negated "not kind of
-// you") still needs the reviewer's own words, and "kind words" outside these
-// shapes is refused even when the review says "kind": "Marcus had kind words
-// for you" invents an interaction (codex #5788 r1-r4).
-const KIND_YOUR_BEFORE_RE = /\byour\s+$/;
-const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,24}\b(?:the|those|these|such)\s+$/;
+// 2026-10-03). This is an ALLOWLIST of two acknowledgment shapes, each read
+// inside one clause; everything else falls through to the ordinary provenance
+// check, so adverse or counterfactual copy ("your kind words were unwanted",
+// "it would have been kind of you") is refused like any unsourced claim:
+//   1. <thank you|thanks|appreciate|grateful|thankful> ... <the|your|those|
+//      these|such> kind <words|review|note|feedback|comments|remarks|message>
+//      (names for the review itself: a referral is a separate act).
+//   2. <that is|that was|it is|it was|so|very|really|how> kind of you.
+// A negated occurrence passes only in the two affirmative idioms "can't thank
+// you enough" and "couldn't be more grateful / thankful" (codex #5788 r1-r5).
+const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,30}\b(?:the|your|those|these|such)\s+$/;
 const KIND_REVIEW_NOUN_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message)\b/;
+const KIND_OF_YOU_BEFORE_RE = /\b(?:that\s+is|that's|that\s+was|it\s+is|it's|it\s+was|so|very|really|how)\s+$/;
+const KIND_AFFIRMATIVE_IDIOM_RE = /\b(?:can't|cannot|can\s+not|couldn't|could\s+not)\s+thank\s+you\s+enough\b|\b(?:couldn't|could\s+not)\s+be\s+more\s+(?:grateful|thankful)\b/;
 const KIND_WORDS_RE = /^kind\s+words\b/;
 function isReviewerThanksKind(bodyLower, idx, bodyNeg) {
-  if (isNegatedAt(idx, bodyNeg)) return false;
   const after = bodyLower.slice(idx);
-  if (/^kind\s+of\s+you\b/.test(after)) return true;
-  const before = bodyLower.slice(Math.max(0, idx - 60), idx);
-  if (KIND_YOUR_BEFORE_RE.test(before)) return KIND_REVIEW_NOUN_RE.test(after);
-  return KIND_ACK_BEFORE_RE.test(before) && KIND_WORDS_RE.test(after);
+  const before = bodyLower.slice(Math.max(0, idx - 80), idx);
+  if (/^kind\s+of\s+you\b/.test(after)) return KIND_OF_YOU_BEFORE_RE.test(before) && !isNegatedAt(idx, bodyNeg);
+  if (!KIND_REVIEW_NOUN_RE.test(after) || !KIND_ACK_BEFORE_RE.test(before)) return false;
+  return !isNegatedAt(idx, bodyNeg) || KIND_AFFIRMATIVE_IDIOM_RE.test(before);
 }
 function checkExperienceClaims(ctx) {
   const {
@@ -797,7 +799,11 @@ function checkExperienceClaims(ctx) {
     const flat = t.replace(/[- ]+/g, ' ');
     if (t === 'kind') {
       if (isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
-      if (KIND_WORDS_RE.test(bodyLower.slice(termIdx))) return reject('unlisted_experience_claim', 'kind words');
+      // "kind words" outside the allowlist needs the WHOLE phrase un-negated in
+      // the review: a bare "kind" there must not source "Marcus had kind words
+      // for you". With the phrase present, the ordinary checks below decide.
+      if (KIND_WORDS_RE.test(bodyLower.slice(termIdx))
+        && allOccurrencesNegated(reviewLower, 'kind words', reviewNeg) !== false) return reject('unlisted_experience_claim', 'kind words');
     }
     const support = (() => {
       const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
