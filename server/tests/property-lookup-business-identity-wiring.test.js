@@ -409,6 +409,16 @@ describe('an answered lookup whose Places re-check fails', () => {
     expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'COMMERCIAL_SCOPE_UNRESOLVED', statusCode: 409 }));
   });
 
+  test('a reply that finds no business at the number this time keeps the question open too', async () => {
+    for (const places of [[], [placeAt({ number: '300' })]]) {
+      placesReply = () => ({ ok: true, status: 200, json: async () => ({ places }) });
+      const p = (await run({ occupancyAnswer: 'suite' })).enriched;
+      expect(p.serviceScopeDecision).toBe('scope_unresolved');
+      expect(p.occupancyAnswer).toBeNull();
+      expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'COMMERCIAL_SCOPE_UNRESOLVED' }));
+    }
+  });
+
   test('with no answer sent, a failed Places call is still no signal at all', async () => {
     const p = (await run()).enriched;
     for (const key of NEW_KEYS) expect(p).not.toHaveProperty(key);

@@ -35,6 +35,7 @@ const {
   buildBusinessScopeContext,
   effectiveSuiteUnitKey,
   UNAVAILABLE_IDENTITY,
+  businessIdentified,
   normalizeOccupancyAnswer,
   assertScopeAnswered,
 } = require('../services/property-lookup/business-scope');
@@ -260,7 +261,8 @@ function businessIdentityKeySuffix(options) {
 // no deadline); with too little left the leg is skipped. Fail-open: any miss
 // is null and the lookup proceeds exactly as before — except when the CSR
 // already answered the scope question: then a miss is UNAVAILABLE_IDENTITY,
-// which keeps the question open (no price) instead of dropping the answer.
+// which keeps the question open (no price) instead of dropping the answer;
+// so is a reply that no longer finds a business at the number.
 // Never throws.
 async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, budgetMs = null }) {
   if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return null;
@@ -270,7 +272,11 @@ async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, 
     if (!eligible || options.cacheOnly === true) return null;
     if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return miss;
     const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, BUSINESS_IDENTITY_TIMEOUT_MS);
-    return (await identifyBusinessAtAddress({ address, lat, lng, timeoutMs })) || miss;
+    const identity = await identifyBusinessAtAddress({ address, lat, lng, timeoutMs });
+    // An answer is about a business an earlier lookup found. A reply that
+    // finds none this time (empty, or nobody at the number) cannot carry it
+    // either, so it is the same miss as no reply.
+    return miss && !businessIdentified(identity) ? miss : identity;
   } catch (err) {
     logger.warn('[property-lookup] business identity leg failed', { reason: err?.name || 'error' });
     return miss;
