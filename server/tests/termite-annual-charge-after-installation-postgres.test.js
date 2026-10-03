@@ -231,9 +231,9 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     if (fixture) await fixture.destroy();
   });
 
-  function load({ method = 'default', chargeImpl } = {}) {
+  function load({ method = 'default', chargeImpl, notifyAdminImpl } = {}) {
     const { db } = fixture;
-    const notifyAdmin = jest.fn(async () => ({ id: randomUUID(), deduped: false }));
+    const notifyAdmin = jest.fn(notifyAdminImpl || (async () => ({ id: randomUUID(), deduped: false })));
     const resolvedMethod = method === 'default'
       ? {
         stripePaymentMethodId: 'pm_saved', paymentMethodRowId: randomUUID(), methodType: 'card', funding: 'debit', source: 'saved',
@@ -502,5 +502,26 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect(bellTitles(notifyAdmin).filter((title) => title === 'Termite annual plan — signed, not installed, not charged')).toHaveLength(1);
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect((await chargeState(db)).status).toBe('awaiting_installation');
+  });
+
+  test('a never-installed alert that fails to land is not recorded: the next sweep rings it', async () => {
+    let fail = true;
+    const { atSigning, sweep, db } = load({
+      notifyAdminImpl: async () => { if (fail) throw new Error('notification store down'); return { id: randomUUID(), deduped: false }; },
+    });
+    await atSigning();
+    await db('estimates').where({ id: ids.estimateId }).update({
+      annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [
+        JSON.stringify({ deferred_at: new Date(Date.now() - 15 * 86400e3).toISOString() }),
+      ]),
+    });
+
+    expect((await sweep()).neverInstalledAlerted).toBe(0);
+    expect((await chargeState(db)).never_installed_alerted_at).toBeUndefined();
+
+    fail = false;
+    expect((await sweep()).neverInstalledAlerted).toBe(1);
+    expect((await chargeState(db)).never_installed_alerted_at).toEqual(expect.any(String));
+    expect((await sweep()).neverInstalledAlerted).toBe(0);
   });
 });

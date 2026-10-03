@@ -139,8 +139,10 @@ async function ringBell(kind, ctx) {
       dedupeKey: `termite-annual-signature-charge:${ctx.estimateId}:${kind}`,
       metadata: { estimateId: ctx.estimateId, invoiceId: ctx.invoiceId, reason: ctx.reason },
     });
+    return true;
   } catch (err) {
     logger.error(`[termite-annual-charge] bell failed for estimate ${ctx.estimateId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -597,20 +599,22 @@ async function installedAndOwed({ conn, estimateId, invoiceId }) {
 }
 
 // One office alert for a plan signed NEVER_INSTALLED_ALERT_DAYS ago whose
-// installation is still not completed. The stamp is written first, guarded
-// on the waiting status, so two sweeps never both ring.
+// installation is still not completed. The alert lands FIRST and the stamp
+// is written only after it did: a failed or interrupted alert leaves the
+// plan unstamped, so the next sweep rings again. Two sweeps racing both
+// reach the bell, and its dedupeKey keeps that to one alert.
 async function alertNeverInstalled({ estimateId, invoiceId, conn = db }) {
-  const stamped = await conn('estimates')
+  const state = await readChargeState(conn, estimateId);
+  if (state?.status !== AWAITING_INSTALLATION || state.never_installed_alerted_at) return false;
+  if (!(await ringBell('never_installed', { estimateId, invoiceId, afterInstall: true }))) return false;
+  await conn('estimates')
     .where({ id: estimateId })
     .whereRaw("annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
-    .whereRaw("annual_plan_signature_charge ->> 'never_installed_alerted_at' IS NULL")
     .update({
       annual_plan_signature_charge: conn.raw('annual_plan_signature_charge || ?::jsonb', [
         JSON.stringify({ never_installed_alerted_at: new Date().toISOString() }),
       ]),
     });
-  if (stamped !== 1) return false;
-  await ringBell('never_installed', { estimateId, invoiceId, afterInstall: true });
   return true;
 }
 
