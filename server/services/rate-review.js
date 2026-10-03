@@ -1701,15 +1701,20 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
         FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
         LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
         WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${ADDON_LINE_IS_PLAN_SQL}
-          AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys})) AS non_live_addons
+          AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys})) AS non_live_addons,
+      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
+        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+        WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${DATING_ROW_SQL} AND NOT ${PLAN_ROW_SQL}) AS live_standalone_lines
     FROM customers c WHERE c.id = ANY(?::uuid[])
-  `, [today, today, today, customerIds]);
+  `, [today, today, today, today, customerIds]);
   const ids = new Set(customerIds.map(String));
   const out = new Map();
   for (const r of rows) {
     if (!ids.has(String(r.customer_id))) continue;
     // a recurring add-on on a non-live visit (a cancelled pest visit that carried a palm add-on) is program history too
-    const lines = [...(Array.isArray(r.non_live_lines) ? r.non_live_lines : []), ...(Array.isArray(r.non_live_addons) ? r.non_live_addons : [])].map(String);
+    // a LIVE upcoming standalone recurring row (recurring evidence, not a plan row — so not in the
+    // book and not in the history) is a program too
+    const lines = [...(Array.isArray(r.non_live_lines) ? r.non_live_lines : []), ...(Array.isArray(r.non_live_addons) ? r.non_live_addons : []), ...(Array.isArray(r.live_standalone_lines) ? r.live_standalone_lines : [])].map(String);
     out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLivePrograms: [...new Set(lines.flatMap(programsForNonLiveLine))] });
   }
   return out;

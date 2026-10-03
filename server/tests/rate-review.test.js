@@ -883,7 +883,9 @@ describe('anniversary and tenure', () => {
     expect(body).toMatch(/COALESCE\(scheduled_service_addons\.service_category_snapshot, asv\.category, 'other'\)/);
     // recurring add-ons on non-live visits are program history too (minus the one-time signup-fee key)
     expect(body).toMatch(/AND \$\{ADDON_LINE_IS_PLAN_SQL\}\n\s+AND COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)\) AS non_live_addons/);
-    expect(body).toMatch(/\[today, today, today, customerIds\]/); // three date bindings, in order
+    // a live upcoming standalone recurring row (not a plan row: outside the book) is a program the gate must see
+    expect(body).toMatch(/\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \? AND \$\{DATING_ROW_SQL\} AND NOT \$\{PLAN_ROW_SQL\}\) AS live_standalone_lines/);
+    expect(body).toMatch(/\[today, today, today, today, customerIds\]/); // four date bindings, in order
     expect(P.programsForNonLiveLine('tree_shrub|palm_injection')).toEqual(['palm']);
     expect(P.programsForNonLiveLine('tree_shrub|tree_shrub_bimonthly')).toEqual(['tree_shrub']);
     expect(P.programsForNonLiveLine('tree_shrub|')).toEqual(['tree_shrub']);
