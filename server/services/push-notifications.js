@@ -4,7 +4,7 @@ const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
-const { gateEnvValue, adminMfaLive, adminMfaEnforceLive } = require('../config/feature-gates');
+const { gateEnvValue } = require('../config/feature-gates');
 const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
@@ -384,6 +384,7 @@ class PushNotificationService {
 // under GATE_ADMIN_MFA_ENFORCE neither does an admin still owed enrollment.
 // Gate off = the query is unchanged.
 function staffMfaPushFilter(query) {
+  const { adminMfaLive, adminMfaEnforceLive } = require('./staff-mfa');
   if (!adminMfaLive()) return query;
   const scoped = query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
   if (!adminMfaEnforceLive()) return scoped;

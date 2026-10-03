@@ -18,7 +18,21 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const { isInfrastructureError } = require('./vendor-credentials');
-const { adminMfaLive, adminMfaEnforceLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+// The gate readers, resolved at call time through the module object. Every
+// staff auth check (and the staff push lookup) runs through these, so a
+// caller whose environment replaces feature-gates with a partial stub (many
+// unrelated suites do) reads "off" instead of throwing inside auth.
+function adminMfaLive() {
+  return typeof featureGates.adminMfaLive === 'function' && featureGates.adminMfaLive() === true;
+}
+
+function adminMfaEnforceLive() {
+  return adminMfaLive()
+    && typeof featureGates.adminMfaEnforceLive === 'function'
+    && featureGates.adminMfaEnforceLive() === true;
+}
 
 const TOTP_PERIOD_SECONDS = 30;
 const TOTP_DIGITS = 6;
@@ -491,6 +505,8 @@ async function status(tech, decoded) {
 }
 
 module.exports = {
+  adminMfaEnforceLive,
+  adminMfaLive,
   LOCKOUT_MS,
   MAX_FAILED_ATTEMPTS,
   PENDING_SETUP_TTL_MS,

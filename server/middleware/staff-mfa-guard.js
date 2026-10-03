@@ -6,7 +6,7 @@
 // or 429 while dark; the route re-runs it.
 const { noStore } = require('./no-store');
 const { notFoundBody } = require('./errors');
-const { adminMfaLive } = require('../config/feature-gates');
+const { adminMfaLive } = require('../services/staff-mfa');
 
 const loginMfaPreParserGuard = [
   noStore,

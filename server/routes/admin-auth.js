@@ -30,7 +30,7 @@ const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar
 const staffMfa = require('../services/staff-mfa');
 const { noStore } = require('../middleware/no-store');
 const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
-const { adminMfaLive } = require('../config/feature-gates');
+const { adminMfaLive } = staffMfa;
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
