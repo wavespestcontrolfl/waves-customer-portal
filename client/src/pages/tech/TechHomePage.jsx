@@ -951,9 +951,10 @@ export default function TechHomePage({ section = 'today' }) {
   return (
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
-        // The field workspace's Today page shows schedule changes in the page
-        // (TechScheduleChanges), not as floating cards over it.
-        inlineScheduleChanges={fieldWorkspace}
+        // The field workspace's Today overview shows schedule changes in the
+        // page (TechScheduleChanges); Tools, More and an open visit do not
+        // render it, so those keep the floating cards (pre-push audit P1).
+        inlineScheduleChanges={fieldWorkspace && section === 'today' && !selectedVisitKey}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
