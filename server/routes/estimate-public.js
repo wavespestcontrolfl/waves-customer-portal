@@ -702,7 +702,11 @@ async function releaseHoldsIfStillParked(estimate) {
   return db.transaction(async (trx) => {
     const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!row) return { released: 0 };
-    const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true });
+    // A Bermuda-suppression estimate (gate off) is never priced: its park was decided with suppressionGated, so
+    // the recheck uses the same semantics, or the gate-disabled pricing path throws and the hold is never released.
+    const suppressionGated = !!(require('../services/pricing-engine/v1-legacy-mapper').estimateDataCarriesBermudaSuppression(row.estimate_data)
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+    const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true, suppressionGated });
     if (state?.state !== 'contact_review') return { released: 0 };
     return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
   });
