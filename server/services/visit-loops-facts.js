@@ -450,6 +450,12 @@ function missedWindowStart(originalWindow) {
   return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
 }
 // Was this logged miss followed up? (owner 10-02, #5610: the office rebooks a miss.)
+// "Performed" follows completion-record-invariants (aged_incomplete_visit_records):
+// a COMPLETED service record, never an 'incomplete' one, and a completed status or
+// tracker whose only record is incomplete is an incomplete closeout — work still
+// owed (Codex #5610 r8).
+const incompleteCloseout = (r) => (r.status === 'completed' || r.track_state === 'complete')
+  && r.incomplete_record === true && r.recorded !== true;
 // 1. The logged row itself, while it still holds the frozen scope (same property,
 //    same catalog service — a row staff repurposed is no evidence): rebooked in
 //    place (new_date), moved off the missed slot, under way, completed, or performed
@@ -478,7 +484,7 @@ async function noshowFollowedUp(conn, customerId, noshow) {
   };
   const rowPresent = Boolean(noshow.scheduled_service_id && noshow.ss_status_present);
   // live = a live/done status AND a tracker that is not cancelled (track_state leads a lagging status)
-  if (rowPresent && LIVE_OR_DONE.includes(noshow.status) && noshow.track_state !== 'cancelled') {
+  if (rowPresent && LIVE_OR_DONE.includes(noshow.status) && noshow.track_state !== 'cancelled' && !incompleteCloseout(noshow)) {
     if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
       && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
     const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
@@ -512,8 +518,10 @@ async function noshowFollowedUp(conn, customerId, noshow) {
   const generatedElsewhere = (r) => [r.parent_service_id, r.followup_source_service_id]
     .some((id) => id != null && String(id) !== missedRowId);
   const replacements = ((await query.select('service_id', 'service_type', 'status', 'track_state', 'source_action', 'customer_confirmed',
-    'parent_service_id', 'followup_source_service_id')) || [])
-    .filter((r) => r.track_state !== 'cancelled' && !generatedElsewhere(r) && !isUnreviewedDispatchOwned(r));
+    'parent_service_id', 'followup_source_service_id',
+    conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id AND sr.status = 'completed') AS recorded"),
+    conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id AND sr.status = 'incomplete') AS incomplete_record"))) || [])
+    .filter((r) => r.track_state !== 'cancelled' && !incompleteCloseout(r) && !generatedElsewhere(r) && !isUnreviewedDispatchOwned(r));
   if (!replacements.length) return false;
   const key = await scopeKey(replacements);
   return Boolean(key.missed) && replacements.some((r) => key.of(r) === key.missed);
@@ -538,7 +546,8 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
         'ss.service_id as ss_service_id', 'ss.service_type as ss_service_type', 'ss.property_id as ss_property_id',
         'ss.source_action as ss_source_action', 'ss.customer_confirmed as ss_customer_confirmed',
         conn.raw('(ss.id IS NOT NULL) AS ss_status_present'),
-        conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'))) || [];
+        conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'completed') AS recorded"),
+        conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'incomplete') AS incomplete_record"))) || [];
     for (const noshow of noshows) {
       if (await noshowFollowedUp(conn, customerId, noshow)) continue;
       const startHms = missedWindowStart(noshow.original_window);

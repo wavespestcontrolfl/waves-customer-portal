@@ -749,6 +749,21 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ original_window: null, window_start: '14:00:00' })])).out.missedVisit).toBeNull();
   });
 
+  test('an incomplete closeout (completed status / tracker, only an incomplete record) is work still owed, never a follow-up (Codex #5610 r8)', async () => {
+    // the logged row closed out incomplete: still open, and it takes the replacement lookup
+    for (const over of [{ status: 'completed', incomplete_record: true }, { track_state: 'complete', incomplete_record: true }]) {
+      expect((await run([noshow(over)])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    }
+    // a completed record alongside it is performed work
+    expect((await run([noshow({ status: 'completed', incomplete_record: true, recorded: true })])).out.missedVisit).toBeNull();
+    // closed out incomplete + a live follow-up generated FROM it: cleared by the replacement lookup
+    const fu = { service_id: null, service_type: 'Pest Control', status: 'confirmed', track_state: null, source_action: null, customer_confirmed: null, parent_service_id: null, followup_source_service_id: 'visit-1' };
+    expect((await run([noshow({ status: 'completed', incomplete_record: true })], [fu])).out.missedVisit).toBeNull();
+    // a replacement that was itself closed out incomplete does not count
+    const doneBadly = { ...fu, followup_source_service_id: null, status: 'completed', incomplete_record: true, recorded: false };
+    expect((await run([noshow({ status: 'no_show' })], [doneBadly])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+  });
+
   test('a page of followed-up misses never hides an older open one', async () => {
     const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
     const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);
