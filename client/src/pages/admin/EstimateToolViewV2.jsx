@@ -3235,6 +3235,8 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
+      // Same address, same service property: the link stays.
+      propertyId: f.propertyId,
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
