@@ -1,10 +1,9 @@
 // GATE_TS_WATCH_LIST config: the owner's DRAFT seasonal watch list
 // (ts-fast-complete-scope appendix), encoded once. Synthetic data only.
 const {
-  ITEMS, MONTHS, YEAR_ROUND, EXTENTS, CATEGORY, normalizeWatchKey, watchListForMonth,
+  ITEMS, MONTHS, YEAR_ROUND, EXTENTS, normalizeWatchKey, watchListForMonth,
   normalizeWatchSignals, watchListPromptBlock, validMonth,
 } = require('../config/tree-shrub-watch-list');
-const { KEY_TO_SCORE } = require('../services/service-report/tree-shrub-tech-findings');
 
 // The draft table, phrase by phrase, and the one entry each phrase is.
 const PHRASE_KEY = {
@@ -87,17 +86,14 @@ describe('the table matches the draft month by month', () => {
 });
 
 describe('entries', () => {
-  test('stable snake_case keys, a label, a signal, a finding category, a boolean referOnly', () => {
-    const categories = Object.keys(KEY_TO_SCORE);
+  test('stable snake_case keys, a label, a signal, a boolean referOnly', () => {
     for (const [key, item] of Object.entries(ITEMS)) {
       expect(key).toMatch(/^[a-z]+(_[a-z]+)*$/);
       expect(item.key).toBe(key);
       expect(item.label).toEqual(expect.any(String));
       expect(item.signal).toMatch(/^Possible /);
-      expect(categories).toContain(item.category);
       expect(typeof item.referOnly).toBe('boolean');
     }
-    expect(Object.values(CATEGORY).sort()).toEqual(categories.sort());
   });
   test('refer-only is exactly trunk conk, palm weevil / crown decline and declining palms', () => {
     expect(Object.values(ITEMS).filter((item) => item.referOnly).map((item) => item.key).sort())

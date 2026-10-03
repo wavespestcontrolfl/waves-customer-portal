@@ -10,47 +10,38 @@
  *
  * Pure and frozen. An item is ONE entry however many months it appears in. A
  * key is stable and never renamed (it is stored on the service record).
- * `category` is one of the five photo-read finding keys. `referOnly` items are
- * "photo + note, then call the office": the sheet never takes an extent for
- * them. The read names an item only as a SIGNAL ("possible scale"); a
+ * `referOnly` items are "photo + note, then call the office": the sheet never
+ * takes an extent for them. The read names an item only as a SIGNAL ("possible scale"); a
  * technician's Seen makes it a finding.
  *
  * Hard rule from the draft: three diagnosis-only disease names are never named
  * anywhere in this file or any string derived from it. A test pins that.
  */
 
-const CATEGORY = Object.freeze({
-  FOLIAGE: 'foliage_fullness',
-  COLOR: 'leaf_color_vigor',
-  PEST: 'pest_activity',
-  DISEASE: 'disease_leaf_spot',
-  STRESS: 'water_heat_mechanical_stress',
-});
-
-const item = (key, label, signal, category, referOnly = false) => Object.freeze({
-  key, label, signal, category, referOnly,
+const item = (key, label, signal, referOnly = false) => Object.freeze({
+  key, label, signal, referOnly,
 });
 
 const ITEM_LIST = [
-  item('scale', 'Scale', 'Possible scale', CATEGORY.PEST),
-  item('whitefly', 'Whitefly', 'Possible whitefly', CATEGORY.PEST),
-  item('aphids', 'Aphids', 'Possible aphids', CATEGORY.PEST),
-  item('spider_mites', 'Spider mites', 'Possible spider mites', CATEGORY.PEST),
-  item('caterpillars', 'Caterpillars', 'Possible caterpillars', CATEGORY.PEST),
-  item('sooty_mold', 'Sooty mold', 'Possible sooty mold', CATEGORY.PEST),
-  item('bed_weeds', 'Bed weeds', 'Possible bed weeds', CATEGORY.FOLIAGE),
-  item('cold_freeze_damage', 'Cold or freeze damage', 'Possible cold or freeze damage', CATEGORY.STRESS),
-  item('chlorosis', 'Chlorosis', 'Possible chlorosis', CATEGORY.COLOR),
-  item('leaf_spot', 'Leaf spot / bacterial spot', 'Possible leaf spot', CATEGORY.DISEASE),
-  item('heat_stress', 'Heat stress', 'Possible heat stress', CATEGORY.STRESS),
-  item('heat_drought_decline', 'Heat / drought decline', 'Possible heat or drought decline', CATEGORY.STRESS),
-  item('root_rot', 'Root or collar rot', 'Possible root or collar rot', CATEGORY.DISEASE),
-  item('palm_weevil_crown_decline', 'Palm weevil / crown decline signs', 'Possible palm weevil or crown decline signs', CATEGORY.PEST, true),
-  item('declining_palms', 'Declining palms', 'Possible declining palms', CATEGORY.FOLIAGE, true),
-  item('palm_potassium_deficiency', 'Palm potassium deficiency', 'Possible potassium deficiency', CATEGORY.COLOR),
-  item('palm_magnesium_deficiency', 'Palm magnesium deficiency', 'Possible magnesium deficiency', CATEGORY.COLOR),
-  item('palm_fronds_dying_one_side', 'Fronds dying down one side', 'Possible fronds dying down one side', CATEGORY.FOLIAGE),
-  item('trunk_conk_base', 'Trunk conk at the base', 'Possible trunk conk at the base', CATEGORY.DISEASE, true),
+  item('scale', 'Scale', 'Possible scale'),
+  item('whitefly', 'Whitefly', 'Possible whitefly'),
+  item('aphids', 'Aphids', 'Possible aphids'),
+  item('spider_mites', 'Spider mites', 'Possible spider mites'),
+  item('caterpillars', 'Caterpillars', 'Possible caterpillars'),
+  item('sooty_mold', 'Sooty mold', 'Possible sooty mold'),
+  item('bed_weeds', 'Bed weeds', 'Possible bed weeds'),
+  item('cold_freeze_damage', 'Cold or freeze damage', 'Possible cold or freeze damage'),
+  item('chlorosis', 'Chlorosis', 'Possible chlorosis'),
+  item('leaf_spot', 'Leaf spot / bacterial spot', 'Possible leaf spot'),
+  item('heat_stress', 'Heat stress', 'Possible heat stress'),
+  item('heat_drought_decline', 'Heat / drought decline', 'Possible heat or drought decline'),
+  item('root_rot', 'Root or collar rot', 'Possible root or collar rot'),
+  item('palm_weevil_crown_decline', 'Palm weevil / crown decline signs', 'Possible palm weevil or crown decline signs', true),
+  item('declining_palms', 'Declining palms', 'Possible declining palms', true),
+  item('palm_potassium_deficiency', 'Palm potassium deficiency', 'Possible potassium deficiency'),
+  item('palm_magnesium_deficiency', 'Palm magnesium deficiency', 'Possible magnesium deficiency'),
+  item('palm_fronds_dying_one_side', 'Fronds dying down one side', 'Possible fronds dying down one side'),
+  item('trunk_conk_base', 'Trunk conk at the base', 'Possible trunk conk at the base', true),
 ];
 
 const ITEMS = Object.freeze(Object.fromEntries(ITEM_LIST.map((entry) => [entry.key, entry])));
@@ -141,7 +132,6 @@ Return ONLY this JSON object and nothing else, with no scores, no observations, 
 }
 
 module.exports = {
-  CATEGORY,
   ITEMS,
   MONTHS,
   YEAR_ROUND,
