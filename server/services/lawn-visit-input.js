@@ -7,6 +7,10 @@ const shotList = require('./lawn-photo-shots');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const PROMPT_VERSION = 'lawn-visit-v1';
+// The variant a shot-list capture (GATE_LAWN_SHOT_LIST) is read under: the same
+// prompt plus the shot guide and the shot-key zone enum. Its own version so a
+// replay never mixes the two modes (lawn report rebuild P19a).
+const SHOT_LIST_PROMPT_VERSION = `${PROMPT_VERSION}-shot-list`;
 const MAX_VISIT_PHOTOS = 6;
 const MAX_OUTPUT_TOKENS = 16384;
 // Owner ruling 2026-09-24: three named slots, all optional (no photo-count
@@ -205,8 +209,11 @@ function contextLines(context = {}) {
   return lines;
 }
 
-function buildUserText(photoCount, context = {}) {
-  const head = `Assess the lawn in the ${photoCount} numbered photo${photoCount === 1 ? '' : 's'} of this visit.`;
+// `shotList: true` (a shot-list capture) adds which minimum shots the set lacks,
+// from the photos' shot keys (`zones`, null = untagged). Off: exactly as before.
+function buildUserText(photoCount, context = {}, { shotList: shotListOn = false, zones = [] } = {}) {
+  const base = `Assess the lawn in the ${photoCount} numbered photo${photoCount === 1 ? '' : 's'} of this visit.`;
+  const head = shotListOn ? `${base}\n\n${shotList.missingShotsText(zones)}` : base;
   const lines = contextLines(context);
   if (!lines.length) return head;
   return `${head}
@@ -336,25 +343,51 @@ function visitPhotoError(photo, shotListOn) {
   return null;
 }
 
-// The composed system prompt and the response schema, digested once. The
-// prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
+// The shot-list variant of the prompt and schema (shot-list captures only):
+// the zone sentence points at the guide, the guide follows the photos section,
+// and a finding's zone enum is the shot keys. The legacy SYSTEM_PROMPT and
+// RESPONSE_SCHEMA above are untouched, so gate-off reads stay byte-identical.
+const ZONE_SENTENCE = '(front / close_up / trouble)';
+const FINDINGS_HEADING = '\n# FINDINGS (evidence-first)';
+if (!SYSTEM_PROMPT.includes(ZONE_SENTENCE) || SYSTEM_PROMPT.split(FINDINGS_HEADING).length !== 2) {
+  throw new Error('lawn-visit-input: shot-list prompt anchors moved');
+}
+const SHOT_LIST_SYSTEM_PROMPT = SYSTEM_PROMPT
+  .replace(ZONE_SENTENCE, '(see the SHOT GUIDE)')
+  .replace(FINDINGS_HEADING, () => `\n${shotList.shotGuideText()}\n${FINDINGS_HEADING}`);
+const SHOT_LIST_RESPONSE_SCHEMA = JSON.parse(JSON.stringify(RESPONSE_SCHEMA));
+SHOT_LIST_RESPONSE_SCHEMA.properties.findings.items.properties.zone = enumOf([...shotList.SHOT_KEYS, 'unknown']);
+
+// The composed system prompt and the response schema, digested once per mode.
+// The prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
 // FALSE_PRECISION_RULE): editing one changes what the
 // model sees without a PROMPT_VERSION bump here, so the context hash seeds
 // with what was actually sent, not only the version label.
-const PROMPT_DIGEST = crypto.createHash('sha256').update(SYSTEM_PROMPT).update('\n').update(JSON.stringify(RESPONSE_SCHEMA)).digest('hex');
+const digestOf = (system, schema) => crypto.createHash('sha256').update(system).update('\n').update(JSON.stringify(schema)).digest('hex');
+const PROMPT_DIGEST = digestOf(SYSTEM_PROMPT, RESPONSE_SCHEMA);
+const SHOT_LIST_PROMPT_DIGEST = digestOf(SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA);
+
+// Everything a call needs that differs by capture mode: the version label, the
+// system prompt, the schema and the digest the context hash seeds with.
+function promptFor({ shotList: shotListOn = false } = {}) {
+  return shotListOn
+    ? { version: SHOT_LIST_PROMPT_VERSION, system: SHOT_LIST_SYSTEM_PROMPT, schema: SHOT_LIST_RESPONSE_SCHEMA, digest: SHOT_LIST_PROMPT_DIGEST }
+    : { version: PROMPT_VERSION, system: SYSTEM_PROMPT, schema: RESPONSE_SCHEMA, digest: PROMPT_DIGEST };
+}
 
 // sha256 of everything the model saw: prompt version, the composed prompt
 // and schema (PROMPT_DIGEST), the context lines' inputs, and each photo's
 // bytes with its position, zone and media type. The eval replays by
 // assessment id and compares hashes to prove it rebuilt the same input.
-function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) {
+function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false } = {}) {
   const c = visionContext || {};
+  const prompt = promptFor({ shotList: shotListOn });
   const hash = crypto.createHash('sha256');
-  hash.update(PROMPT_VERSION).update('\n').update(PROMPT_DIGEST).update('\n');
+  hash.update(prompt.version).update('\n').update(prompt.digest).update('\n');
   // The rendered user text too: its safety instructions and context
   // formatting change what the model sees without a version bump, and the
   // context values alone would not tell.
-  hash.update(crypto.createHash('sha256').update(buildUserText(photos.length, c)).digest('hex')).update('\n');
+  hash.update(crypto.createHash('sha256').update(buildUserText(photos.length, c, shotListOn ? { shotList: true, zones: photoZones } : undefined)).digest('hex')).update('\n');
   hash.update(JSON.stringify({
     season: c.season ?? null, month: c.month ?? null, region: c.region ?? null, grassType: c.grassType ?? null,
     turfHeightIn: c.turfHeightIn ?? null, irrigation: c.irrigation ?? null,
@@ -368,5 +401,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, promptFor, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };

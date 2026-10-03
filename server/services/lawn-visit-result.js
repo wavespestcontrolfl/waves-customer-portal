@@ -1,8 +1,9 @@
 /** Normalize lawn visit evidence and keep unrated photos out of customer delivery. */
 const Ajv = require('ajv');
 const { RESPONSE_SCHEMA, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
-const { normalizeFindings, safeConditionLabel } = require('./lawn-diagnostic-report');
+const { normalizeFindings, safeConditionLabel, SUMMARY_CAUSE_RE } = require('./lawn-diagnostic-report');
 const { normalizeGrassType } = require('./lawn-grass-context');
+const shotList = require('./lawn-photo-shots');
 
 const UNAVAILABLE_OBSERVATIONS = 'Visual analysis unavailable';
 
@@ -60,6 +61,28 @@ function zoneFromRefs(photoRefs, photoZones = []) {
   return zones.size === 1 ? [...zones][0] : 'unknown';
 }
 
+// Shot-list captures only (lawn report rebuild P19a): the two rules the prompt
+// asks for but the server does not leave to the model, applied to the
+// normalized findings. Pure, over a finding's cited photos' shot keys (null =
+// untagged, which counts as an overview).
+//   - localized: it cites photos and every one is a detail shot (close_up,
+//     blade_crown, trouble), so it speaks for one spot, never the whole lawn.
+//   - named-cause cap: a finding naming a specific disease, insect or weed
+//     (the report lane's governed-cause lexicon) with no blade_crown or trouble
+//     photo among its cited photos stays at low confidence at most; its
+//     customer label follows through the naming gate.
+const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
+function withShotEvidence(findings, photoZones) {
+  return findings.map((finding) => {
+    const zones = finding.photo_refs.map((ref) => photoZones[ref - 1]);
+    const localized = zones.length > 0 && zones.every(shotList.isDetailShot);
+    const namesCause = safeConditionLabel(finding.name) !== NO_STRESS_LABEL && SUMMARY_CAUSE_RE.test(String(finding.name || ''));
+    const capped = namesCause && !zones.some(shotList.supportsNamedCause) && CONFIDENCE_RANK[finding.confidence] > CONFIDENCE_RANK.low;
+    if (!capped) return { ...finding, localized };
+    return { ...finding, localized, confidence: 'low', confidence_cap: 'named_cause_without_close_up', label: safeConditionLabel(finding.name, 'low') };
+  });
+}
+
 function containerShape(schema) {
   if (schema.type === 'object') {
     return { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
@@ -99,11 +122,13 @@ function ratesEveryPhoto(list, photoCount) {
   return rated.size === photoCount;
 }
 
-function normalizeAssessment(json, photoCount, photoZones = []) {
+// `shotListOn` (a shot-list capture, decided by the caller) adds the two
+// server-side evidence rules above to each finding; off, nothing is added.
+function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shotListOn = false } = {}) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
   const photoQuality = normalizePhotoQuality(json.photo_quality, photoCount);
   const usable = new Set(photoQuality.filter((row) => CUSTOMER_VISIBLE_QUALITY.has(row.quality)).map((row) => row.photo));
-  const findings = normalizeFindings(rawFindings).map((finding, index) => {
+  const normalized = normalizeFindings(rawFindings).map((finding, index) => {
     const raw = rawFindings[index] || {};
     const photoRefs = uniqueInts(raw.photo_refs, photoCount);
     // A finding the model itself says the photos cannot settle carries no
@@ -143,6 +168,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       source: 'model',
     };
   });
+  const findings = shotListOn ? withShotEvidence(normalized, photoZones) : normalized;
   const severities = {};
   for (const key of STRESS_SIGNALS) severities[key] = normalizeSignal(json.severities[key], SEVERITY_LEVELS);
   severities.thatch_visibility = normalizeSignal(json.severities.thatch_visibility, THATCH_LEVELS);

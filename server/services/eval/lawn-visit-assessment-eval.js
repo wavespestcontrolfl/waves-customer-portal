@@ -273,6 +273,8 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     costUsd: legsCostUsd(legs),
     unpricedLegs: unpricedLegCount(legs),
     contextHash: analysis.contextHash || null,
+    // The prompt variant this replay ran under (shot-list captures read their own).
+    ...(analysis.promptVersion ? { promptVersion: analysis.promptVersion } : {}),
   };
   if (analysis.status !== 'complete') {
     return { ...base, derived: null, adjusted: null, deltas: null, undeterminable: SCORE_KEYS.slice(), causeNamedBelowModerate: [], findings: [], severities: null, observations: analysis.observations || null };
@@ -303,6 +305,9 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
       urgency: finding.urgency, photo_refs: finding.photo_refs, zone: finding.zone, can_determine: finding.can_determine,
       cannot_determine_reason: finding.cannot_determine_reason, observed_evidence: finding.observed_evidence, negative_evidence: finding.negative_evidence,
       confirmation_step: finding.confirmation_step,
+      // Set only on a shot-list replay (the server-side evidence rules).
+      ...(finding.localized !== undefined ? { localized: finding.localized } : {}),
+      ...(finding.confidence_cap ? { confidence_cap: finding.confidence_cap } : {}),
     })),
     severities: analysis.severities,
     grassType: analysis.grassType || null,
@@ -491,7 +496,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
           log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);
           break;
         }
-        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
+        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
     }
