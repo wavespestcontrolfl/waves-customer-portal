@@ -15,10 +15,13 @@
  * later card flags.
  *
  * No code leaves: the state says only WHETHER codes are on file
- * (`structured.has_codes`), and every free-text field passes
- * redactAccessCodes (which ends with the sensitive-identifier pass) and a
- * mask over every run of three or more digits before it is built
- * (redactForState).
+ * (`structured.has_codes`), and every free-text field passes redactForState:
+ * a sentence about getting in is replaced by a marker naming the access
+ * nouns it mentioned, and any other token holding a digit is masked.
+ *
+ * property_preferences is the primary home's row, so a visit stamped at
+ * another address (stamped-address.js) is left out: its pets, codes and
+ * notes would be another property's.
  *
  * The state is a function of the visit and of facts dated before it, never of
  * "now": texts stop at the visit's own start (stateCutoff) and history counts
@@ -33,8 +36,9 @@ const { visitAccessShadowLive, typedDecisionsClefLive } = require('../../config/
 
 const PACKAGE_ID = 'visit_access.v1';
 const SUBJECT_TYPE = 'scheduled_services';
-const TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show'];
-const MAX_VISITS = 80;
+// Visits asked per pass; the rest wait for the next hourly pass. Visits whose
+// state is already answered cost reads only and never count against it.
+const MAX_ASKED_VISITS = 80;
 const WORKERS = 2;
 const MAX_TEXTS = 8;
 const TEXT_CHARS = 260;
@@ -46,16 +50,52 @@ const DEFAULT_START = '08:00';
 
 const compact = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
-// Every digit run a code could be (three or more, with any # or * beside it)
-// is masked AFTER the keyword-aware passes, so a bare "1234#" in a text never
-// reaches a provider. It also masks house numbers, phone numbers and years:
-// none of them answers these questions.
-const DIGIT_RUN_RE = /[#*]?\d[\d#*-]{1,}\d[#*]?|[#*]\d+|\d+[#*]/g;
+// Two passes, sentence by sentence, after redactAccessCodes:
+//  1. A sentence about getting in (completion-comms-context isAccessSentence:
+//     a code, a keypad, working a gate or door) never leaves as written. A
+//     credential can be any word ("use BLUE at the keypad", "four five four
+//     five"), so no token mask is safe there; the sentence becomes a marker
+//     naming only the access nouns it mentioned, which is what the questions
+//     need.
+//  2. In every other sentence, a token holding a digit is masked unless it is
+//     a one- or two-digit number, an ordinal, a clock time or a day/month
+//     date. That also masks house numbers, phone numbers and years: none of
+//     them answers these questions.
+const ACCESS_NOUNS = [
+  ['code', /\b(?:codes?|pins?|pass(?:code|word|phrase)s?|combos?|combinations?)\b/i],
+  ['key', /\bkeys?\b/i],
+  ['keypad', /\bkeypads?\b/i],
+  ['lockbox', /\block\s*box(?:es)?\b/i],
+  ['gate', /\bgates?\b/i],
+  ['garage', /\bgarages?\b/i],
+  ['door', /\bdoors?\b/i],
+  ['lock', /\b(?:locks?|deadbolts?|padlocks?)\b/i],
+  ['alarm', /\balarms?\b/i],
+  ['remote', /\b(?:fobs?|remotes?|openers?)\b/i],
+];
+const PLAIN_NUMBER_RE = /^(?:\d{1,2}|\d+(?:st|nd|rd|th)|\d{1,2}(?::\d{2})?(?:am|pm)?|\d{1,2}\/\d{1,2})$/i;
+// "Garage is blue", "lockbox: sesame": an access point followed at once by
+// is / = / : / - states its credential, whatever the word.
+const ACCESS_POINT_STATED_RE = /\b(?:codes?|pins?|pass(?:code|word|phrase)s?|combos?|combinations?|keypads?|lock\s*box(?:es)?|gates?|garages?|doors?|locks?|alarms?)\s*(?:is|are|=|:|-)(?:\s|$)/i;
+function redactSentence(sentence, isAccessSentence) {
+  if (isAccessSentence(sentence) || ACCESS_POINT_STATED_RE.test(sentence)) {
+    const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(sentence)).map(([name]) => name);
+    return nouns.length ? `[access detail withheld: mentions ${nouns.join(', ')}]` : '[access detail withheld]';
+  }
+  return sentence.replace(/\S+/g, (word) => {
+    const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
+    return /\d/.test(token) && !PLAIN_NUMBER_RE.test(token) ? `${lead}[redacted]${trail}` : word;
+  });
+}
 function redactForState(text) {
   // redactAccessCodes ends with the sensitive-identifier pass (SSN, card, CVV).
   const { redactAccessCodes } = require('../context-aggregator');
-  const passed = redactAccessCodes(String(text || ''));
-  return passed.replace(DIGIT_RUN_RE, (run) => (run.replace(/\D/g, '').length >= 3 || /[#*]/.test(run) ? '[redacted]' : run));
+  const { isAccessSentence } = require('../completion-comms-context');
+  return redactAccessCodes(String(text || ''))
+    .split(/(?<=[.!?])\s+|\n+/)
+    .filter((sentence) => sentence.trim())
+    .map((sentence) => redactSentence(sentence, isAccessSentence))
+    .join(' ');
 }
 
 function dayString(value) {
@@ -103,6 +143,7 @@ function labelled(label, value, max) {
 async function buildVisitAccessState(svc, dbh) {
   const day = dayString(svc && svc.scheduled_date);
   if (!svc || !svc.id || !svc.customer_id || !day) return null;
+  if (require('../stamped-address').stampedAddressDiverges(svc)) return null;
   const { detectServiceLine } = require('../service-report/service-line-configs');
   const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
   const { isSmsReaction } = require('../sms-intent');
@@ -112,7 +153,7 @@ async function buildVisitAccessState(svc, dbh) {
   const prefs = await dbh('property_preferences').where({ customer_id: svc.customer_id }).first(
     'pet_count', 'pet_details', 'pets_secured_plan', 'contact_preference', 'away_mode_until', 'side_gate_access',
     'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
-    'access_notes', 'parking_notes', 'special_instructions',
+    'access_notes', 'parking_notes', 'special_instructions', 'chemical_sensitivities', 'chemical_sensitivity_details',
   ) || null;
 
   // Completed visits on days BEFORE this one: the count, and the newest on
@@ -151,6 +192,7 @@ async function buildVisitAccessState(svc, dbh) {
     labelled('Pets', prefs && prefs.pet_details, NOTE_CHARS),
     labelled('Pets secured plan', prefs && prefs.pets_secured_plan, NOTE_CHARS),
     labelled('Side gate', prefs && prefs.side_gate_access, 200),
+    prefs && prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
     labelled('Visit note', svc.notes, NOTE_CHARS),
   ].filter(Boolean).join('\n').slice(0, NOTES_TEXT_CHARS);
 
@@ -163,6 +205,7 @@ async function buildVisitAccessState(svc, dbh) {
       contact_preference: (prefs && prefs.contact_preference) || null,
       away_mode: Boolean(prefs && prefs.away_mode_until && dayString(prefs.away_mode_until) >= day),
       side_gate: Boolean(prefs && String(prefs.side_gate_access || '').trim()),
+      chemical_sensitivity: Boolean(prefs && prefs.chemical_sensitivities),
     },
     notes_text: notes || null,
     recent_texts: recentTexts.length ? recentTexts.map((line) => `- ${line}`).join('\n') : null,
@@ -175,7 +218,12 @@ async function buildVisitAccessState(svc, dbh) {
   };
 }
 
-const VISIT_COLUMNS = ['s.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes'];
+const VISIT_COLUMNS = [
+  's.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes',
+  // stampedAddressDiverges' row keys.
+  's.service_address_line1', 's.service_address_zip', 's.service_address_city',
+  'c.address_line1 as customer_address_line1', 'c.zip as customer_zip', 'c.city as customer_city',
+];
 
 // One visit: ask every live provider that has not already answered THIS
 // state, then record each answer with the others' answers beside it.
@@ -198,6 +246,8 @@ async function shadowVisit(svc, { dbh, providers, out }) {
   const done = (provider) => questionIds.every((id) => existing.some((row) => row.provider === provider && row.question_id === id && settled(row)));
   const due = providers.filter((provider) => !done(provider));
   if (!due.length) { out.unchanged += 1; return; }
+  if (out.askedVisits >= MAX_ASKED_VISITS) { out.deferred += 1; return; }
+  out.askedVisits += 1;
 
   const legs = (await Promise.all(due.map(async (provider) => {
     out.asked += 1;
@@ -212,15 +262,18 @@ async function shadowVisit(svc, { dbh, providers, out }) {
     }
   }))).filter(Boolean);
 
-  // A provider that already answered this exact state is still a sibling:
-  // its stored answers ride beside the new leg's, so the pair's cohort is
-  // decided on both.
-  const stored = providers.filter((provider) => !due.includes(provider)).map((provider) => ({
-    provider,
-    answers: Object.fromEntries(existing
-      .filter((row) => row.provider === provider && row.subject_hash === built.subjectHash)
-      .map((row) => [row.question_id, typeof row.jev_answer === 'string' ? JSON.parse(row.jev_answer) : row.jev_answer])),
-  }));
+  // Any provider's rows for this exact state are siblings: one that answered
+  // on an earlier pass, or one since switched off. Rows for an OLDER state
+  // (a switched-off provider's, once the state moved) are not: their answers
+  // are about text that no longer stands.
+  const asked = new Set(legs.map((leg) => leg.provider));
+  const stored = [...new Set(existing.filter((row) => row.subject_hash === built.subjectHash && !asked.has(row.provider)).map((row) => row.provider))]
+    .map((provider) => ({
+      provider,
+      answers: Object.fromEntries(existing
+        .filter((row) => row.provider === provider && row.subject_hash === built.subjectHash)
+        .map((row) => [row.question_id, typeof row.jev_answer === 'string' ? JSON.parse(row.jev_answer) : row.jev_answer])),
+    }));
 
   for (const leg of legs) {
     try {
@@ -241,26 +294,28 @@ async function shadowVisit(svc, { dbh, providers, out }) {
     }
   }
 
-  // A retried leg's rows were written with the stored sibling's answers beside
-  // them; the stored sibling's own rows must land in the same cohort, or a
-  // case where the two differ would queue one side only. No model call: the
-  // cohort is recomputed from the answers on record, with the recorder's own
-  // rule and draw, onto unreviewed rows that are not held out.
-  if (legs.length && stored.length) {
+  // The cohort of every row for THIS state is then settled from the answers
+  // on record, with the recorder's own rule and draw and no model call. It
+  // covers what the recorder's lone-write rule cannot see from here: a stored
+  // sibling whose pair just arrived (a retry), and a new answer that would
+  // otherwise copy the cohort of a switched-off provider's row for an older
+  // state. Unreviewed rows that are not held out only.
+  if (legs.length) {
     const { sampleFor, stableDraw } = require('./shadow-recorder');
-    for (const sibling of stored) {
+    const current = [...legs, ...stored];
+    for (const mine of current) {
       for (const id of questionIds) {
-        const answer = sibling.answers[id];
+        const answer = mine.answers[id];
         if (!answer) continue;
-        const key = { capability: pkg.capability, package_id: pkg.id, provider: sibling.provider, subject_type: SUBJECT_TYPE, subject_id: svc.id, question_id: id };
-        const others = legs.map((leg) => leg.answers[id]).filter(Boolean);
+        const key = { capability: pkg.capability, package_id: pkg.id, provider: mine.provider, subject_type: SUBJECT_TYPE, subject_id: svc.id, question_id: id };
+        const others = current.filter((other) => other.provider !== mine.provider).map((other) => other.answers[id]).filter(Boolean);
         const cohort = sampleFor(answer, built.baselines[id], () => stableDraw(key), others);
         try {
           await dbh(TABLE).where(key).where({ subject_hash: built.subjectHash, label_status: 'unreviewed' })
             .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
             .update({ sampled_for: cohort });
         } catch (err) {
-          logger.warn(`[typed-decisions] visit access (${sibling.provider}) cohort refresh failed: ${err.message}`);
+          logger.warn(`[typed-decisions] visit access (${mine.provider}) cohort refresh failed: ${err.message}`);
         }
       }
     }
@@ -271,23 +326,25 @@ async function shadowVisit(svc, { dbh, providers, out }) {
  * Today's and tomorrow's open visits (Eastern), each asked once per state.
  * Gate off returns before any read. Never throws.
  *
- * @returns {Promise<{considered:number, asked:number, recorded:number, unchanged:number, skipped:number, failed:number, skippedReason?:string}>}
+ * `deferred` counts visits left for the next pass once MAX_ASKED_VISITS were asked.
+ *
+ * @returns {Promise<{considered:number, asked:number, recorded:number, unchanged:number, skipped:number, failed:number, deferred:number, skippedReason?:string}>}
  */
 async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
-  const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0 };
+  const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0, deferred: 0, askedVisits: 0 };
   if (!visitAccessShadowLive()) return { ...out, skippedReason: 'gate_off' };
   try {
     const conn = dbh || require('../../models/db');
     const { etDateString, addETDays } = require('../../utils/datetime-et');
     const { isInternalTestCustomerId } = require('../internal-test-customers');
+    const { UPCOMING_SERVICE_STATUSES } = require('../visit-context/statuses');
     const days = [etDateString(now), etDateString(addETDays(now, 1))];
     const visits = (await conn('scheduled_services as s')
       .join('customers as c', 's.customer_id', 'c.id')
       .whereNull('c.deleted_at')
       .whereIn('s.scheduled_date', days)
-      .whereNotIn('s.status', TERMINAL_STATUSES)
+      .whereIn('s.status', UPCOMING_SERVICE_STATUSES)
       .orderBy('s.scheduled_date', 'asc').orderBy('s.id', 'asc')
-      .limit(MAX_VISITS)
       .select(VISIT_COLUMNS))
       .filter((svc) => !isInternalTestCustomerId(svc.customer_id));
     out.considered = visits.length;
@@ -316,7 +373,7 @@ function renderVisitAccessState(state) {
   const s = state.structured || {};
   return [
     `Service line: ${state.service_line || 'unknown'}. Completed visits before this one: ${state.visit_count}.`,
-    `On file: pets ${s.pet_count}; codes ${s.has_codes ? 'yes' : 'no'}; contact preference ${s.contact_preference || 'none'}; away mode ${s.away_mode ? 'yes' : 'no'}; side gate noted ${s.side_gate ? 'yes' : 'no'}.`,
+    `On file: pets ${s.pet_count}; codes ${s.has_codes ? 'yes' : 'no'}; contact preference ${s.contact_preference || 'none'}; away mode ${s.away_mode ? 'yes' : 'no'}; side gate noted ${s.side_gate ? 'yes' : 'no'}; chemical sensitivity ${s.chemical_sensitivity ? 'yes' : 'no'}.`,
     `Notes:\n${state.notes_text || '(none)'}`,
     `Customer texts since the last visit on this line:\n${state.recent_texts || '(none)'}`,
     `Last technician note:\n${state.last_tech_notes || '(none)'}`,
@@ -325,7 +382,7 @@ function renderVisitAccessState(state) {
 
 // The live state of a visit for the review route: null when it is gone.
 async function liveVisitAccess(scheduledServiceId, dbh) {
-  const svc = await dbh('scheduled_services as s').where('s.id', scheduledServiceId).first(VISIT_COLUMNS);
+  const svc = await dbh('scheduled_services as s').join('customers as c', 's.customer_id', 'c.id').where('s.id', scheduledServiceId).first(VISIT_COLUMNS);
   if (!svc) return null;
   const built = await buildVisitAccessState(svc, dbh);
   if (!built) return null;
