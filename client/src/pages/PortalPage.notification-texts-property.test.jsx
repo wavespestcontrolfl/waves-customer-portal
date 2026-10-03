@@ -90,9 +90,9 @@ describe('Appointment texts per saved property', () => {
     view.unmount();
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: propertyPrefs.map((p) => ({ ...p, contactReportTexts: true })) });
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
-    expect(await screen.findByText(/These people receive appointment texts and a text with the service report link after each visit for this property/)).toBeInTheDocument();
+    expect(await screen.findByText(/These people receive appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit for this property/)).toBeInTheDocument();
   });
-  it('a house whose profile cannot send the report text does not promise it, though another house can', async () => {
+  it('each house reads its own flag', async () => {
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{ ...propertyPrefs[0], contactReportTexts: true }, propertyPrefs[1]] });
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
     expect(await screen.findByText(/These people receive appointment texts for this property/)).toBeInTheDocument();

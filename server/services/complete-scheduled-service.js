@@ -14058,8 +14058,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
           } else {
             // Before the route-local writes below: one that throws jumps to
-            // the accepted-send recovery, which calls this again.
-            await notifyContactsOfReport();
+            // the accepted-send recovery, which calls this again. Only for a
+            // TEXT: an account holder on the App channel got no text, so the
+            // contacts get none (the stated trigger).
+            if (smsResult.channel !== 'push') await notifyContactsOfReport();
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               completionSmsDeliveryUnverifiedAt: null,
@@ -14154,7 +14156,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           record.structured_notes = unverifiedNotes;
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
-          await notifyContactsOfReport();
+          if (e.providerOutcome?.provider !== 'push') await notifyContactsOfReport();
           const snap = completionSmsAcceptedSnapshot || {};
           if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
           // The normal result never arrived to switch the snapshot to push:

@@ -4473,9 +4473,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
   // What an on-location contact is told they get. The server says when the
   // report text is on (GATE_CONTACT_REPORT_TEXT).
-  // Per entry: a profile with its own visit-complete texts off sends none.
+  // The report text follows the account holder's own visit-complete text, so
+  // the wording carries that condition.
   const contactTextsFor = (entry) => (entry?.contactReportTexts === true
-    ? 'appointment texts and a text with the service report link after each visit'
+    ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
     : 'appointment texts');
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts

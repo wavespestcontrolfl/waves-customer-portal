@@ -378,7 +378,9 @@ describe('the approved wording and the hooks', () => {
     expect(source).toMatch(/if \(reportToken && smsMetadata\.report_url\) contactReportUrl = smsMetadata\.report_url;/);
     expect(source).toMatch(/if \(!contactReportUrl\) return;/);
     expect(source.match(/await notifyContactsOfReport\(/g)).toHaveLength(3);
-    expect(source).toMatch(/\} else if \(providerAccepted\) \{\s+await notifyContactsOfReport\(\);/);
+    // Only for a text: an App-channel completion notice queues none.
+    expect(source).toMatch(/if \(smsResult\.channel !== 'push'\) await notifyContactsOfReport\(\);/);
+    expect(source).toMatch(/\} else if \(providerAccepted\) \{\s+if \(e\.providerOutcome\?\.provider !== 'push'\) await notifyContactsOfReport\(\);/);
   });
 
   test('the combined-stop summary queues it on sent (before its finalize write) and on a send-window hold', () => {
@@ -418,10 +420,12 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
   });
 });
 
-describe('the portal card promises the report text only when it can go out', () => {
-  test('gate on AND the profile has a phone AND its own visit-complete text is on', () => {
+describe('the portal card mentions the report text under the gate, with the condition in its wording', () => {
+  test('the server flag is the gate; the card says "when your own visit-complete texts are on"', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes/notifications.js'), 'utf8');
-    expect(source).toMatch(/contactReportTextLive\(\)\s+&& !!String\(profile\?\.phone \|\| ''\)\.trim\(\)\s+&& !!prefs && prefs\.sms_enabled !== false && prefs\.service_completed !== false;/);
-    expect(source.match(/contactReportTexts: contactReportTextsOn\(/g)).toHaveLength(2);
+    expect(source).toMatch(/function contactReportTextsOn\(\) \{\s+return require\('\.\.\/config\/feature-gates'\)\.contactReportTextLive\(\);/);
+    expect(source.match(/contactReportTexts: contactReportTextsOn\(\),/g)).toHaveLength(2);
+    const card = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/PortalPage.jsx'), 'utf8');
+    expect(card).toMatch(/appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit/);
   });
 });
