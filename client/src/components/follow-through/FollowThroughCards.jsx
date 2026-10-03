@@ -35,7 +35,8 @@ const EMPTY_TEXT = { true: 'Loading follow-through…', false: 'No follow-throug
 //   of tech tabs polls far less often than the office queue; onSummary reports
 //   whether the cards loaded enabled, their open/overdue counts, and whether
 //   more pages remain, so a host can fold them into its own summary.
-// `openCall` = the viewer may open the call behind a promise (admin-only).
+// `openCall` = the viewer may place a call and open the call behind a promise
+// (admin-only: the call bridge and call records are owner-only routes).
 export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs = DEFAULT_POLL_MS, openCall = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -147,9 +148,9 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
       {r.owner_name && r.owner_active === false && <Text tone="alert">Assigned to {r.owner_name}, who is no longer active — take this over</Text>}
       {snoozed.includes(r) && <Text tone="muted">Snoozed until {when(r.snoozed_until)}</Text>}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({
+        {openCall && <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({
           to: phone(r), customerId: r.customer_id || undefined, relatedCommitmentId: r.id, expected_at: r.updated_at,
-        }) }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
+        }) }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>}
         <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
         <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'dismiss', expected_at: r.updated_at }))}>Dismiss</Button>
         <Select aria-label={`Snooze callback for ${who(r)}`} value="" disabled={!!busy} onChange={(e) => {

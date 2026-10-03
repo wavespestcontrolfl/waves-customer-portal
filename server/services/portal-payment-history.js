@@ -42,7 +42,7 @@ const invoiceNumberOf = descriptionInvoiceNumberOf;
 
 // The Waves receipt (token) for each visible payment's invoice, indexed by
 // every linkage a payment row can carry.
-async function receiptIndexFor(customerId, visiblePayments) {
+async function receiptIndexFor(customerId, visiblePayments, database = db) {
   // Same UUID shape-filter the balance path already applies below: historic
   // rows can carry a non-UUID metadata.invoice_id, and invoices.id is a uuid
   // column — an unfiltered whereIn makes Postgres throw on the cast, and the
@@ -64,7 +64,7 @@ async function receiptIndexFor(customerId, visiblePayments) {
   const receiptTokenByNumber = new Map();
   if (invoiceIds.length || intentIds.length || chargeIds.length || invoiceNumbers.length) {
     try {
-      const invoiceRows = await db('invoices')
+      const invoiceRows = await database('invoices')
         .where({ customer_id: customerId })
         // A payer-billed invoice still hangs off the homeowner's customer
         // row, and its receipt is a PERMANENT bearer token exposing the AP
@@ -90,6 +90,8 @@ async function receiptIndexFor(customerId, visiblePayments) {
         if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
       });
     } catch (err) {
+      if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+        || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
       // Best-effort: a receipt-link lookup failure must not break the
       // payment history itself.
       logger.warn(`[billing] receipt token lookup failed for customer ${customerId}: ${err.message}`);
@@ -98,7 +100,11 @@ async function receiptIndexFor(customerId, visiblePayments) {
   return { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber };
 }
 
-async function listPortalPayments(customerId, { limit: requestedLimit = 50, cursor: requestedCursor = 0 } = {}) {
+async function listPortalPayments(customerId, {
+  limit: requestedLimit = 50,
+  cursor: requestedCursor = 0,
+  database = db,
+} = {}) {
   const service = await StripeService;
 
   // Third-party Bill-To: a payment against a payer-billed invoice belongs to
@@ -112,7 +118,7 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
   // ONE shared payer predicate (services/payer-linkage.js, also used by the SMS payment facts): every linkage the receipt
   // resolution below understands, the payer_billed withdrawal stamp, statement-accrued children, and the direct ledger stamps
   // (payments.payer_id / metadata.payer_id).
-  const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(customerId);
+  const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(customerId, database, { propagateCancellation: database !== db });
   // `total` counts exactly the rows pagination will serve: the same
   // hold-deferral exclusion and the same payer predicate. The direct payer
   // stamps (payments.payer_id, metadata.payer_id) are SQL, so the common
@@ -123,13 +129,13 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
     .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
   let total;
   if (payerInvoiceIds.size === 0) {
-    const countRow = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(db('payments')
+    const countRow = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .count('* as count')
       .first();
     total = Number(countRow?.count || 0);
   } else {
-    const rows = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(db('payments')
+    const rows = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
     total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
@@ -145,7 +151,7 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
   let nextCursor = null;
   let exhausted = false;
   for (let scan = 0; scan < 10 && !exhausted && nextCursor == null; scan += 1) {
-    const batch = await service.getPaymentHistory(customerId, batchSize, rawCursor);
+    const batch = await service.getPaymentHistory(customerId, batchSize, rawCursor, database);
     if (!batch.length) {
       exhausted = true;
       break;
@@ -184,7 +190,7 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
     return (p.description || '').includes('WaveGuard Monthly');
   };
 
-  const { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber } = await receiptIndexFor(customerId, visiblePayments);
+  const { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber } = await receiptIndexFor(customerId, visiblePayments, database);
 
   return {
     payments: visiblePayments.map(p => ({

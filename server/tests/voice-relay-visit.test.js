@@ -260,6 +260,39 @@ describe('get_today_eta', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  // Sandy P1: 50 of 52 benchmark attempts ended this call with nothing — the
+  // refusal named no next step. A recognised contact is told to save a
+  // follow-up for THEM; a looked-up third party still gets the bare refusal.
+  test('contact-slot match → the refusal also says to save a follow-up for this caller, identical with or without a visit', async () => {
+    const ctx = { customerId: CUSTOMER_ID, customerTier: 'redacted' };
+    primeDb({ scheduled_services: [VISIT_TODAY] });
+    const withVisit = await executeTool('get_today_eta', {}, ctx);
+    primeDb({ scheduled_services: [] });
+    const withoutVisit = await executeTool('get_today_eta', {}, ctx);
+    expect(withVisit).toBe(withoutVisit); // still no oracle
+    expect(withVisit).toMatch(/save a follow-up for THIS caller with capture_lead/);
+    expect(withVisit).toMatch(/only after capture_lead confirms/);
+    // Benchmark 10-03: told to save a follow-up, the agent asked for name,
+    // address and email first and the call ended unsaved. The number is known.
+    expect(withVisit).toMatch(/in THIS SAME turn/);
+    expect(withVisit).toMatch(/do NOT ask for a name, address or email first/);
+    expect(withVisit).toMatch(/Never promise that Waves will contact the account holder/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a looked-up third-party account gets the bare refusal: no capture, no follow-up', async () => {
+    const ctx = { customerId: 'c-other', customerTier: 'full', callerAttested: true, resolveLookupRef: (r) => (String(r).toUpperCase() === 'C1' ? 'c-9001' : null) };
+    const out = await executeTool('get_today_eta', { customer_ref: 'C1' }, ctx);
+    expect(out).toMatch(/Do NOT say whether a visit is or is not on today's schedule/i);
+    expect(out).not.toMatch(/capture|follow.?up/i);
+  });
+
+  test('a ref that resolves back to the caller\'s own contact-slot account is still the recognised contact', async () => {
+    const ctx = { customerId: CUSTOMER_ID, customerTier: 'redacted', resolveLookupRef: () => CUSTOMER_ID };
+    const out = await executeTool('get_today_eta', { customer_ref: 'C1' }, ctx);
+    expect(out).toMatch(/save a follow-up for THIS caller with capture_lead/);
+  });
+
   test('contact-slot match (tier redacted) → get_service_report is refused outright', async () => {
     primeDb({ service_records: [] });
     const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'redacted' });

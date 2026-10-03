@@ -22,8 +22,18 @@
 # can block a Railway deploy (verified locally: "Batch 1 run: 917 migrations").
 name: tests
 
+# A PR run starts when the PR opens and, after that, only when someone asks:
+# a push alone starts nothing. Measured 2026-10-03 on 213 PR runs: 56% were on
+# heads a Codex round then replaced, and jobs waited 8 to 20 minutes for a
+# runner behind them. The request is a label change (any label, added or
+# removed: `labeled` / `unlabeled`), by convention a toggle of `run-ci`. The
+# run tests the PR's head merged into the current base, exactly as before.
+# `reopened` stays so close-and-reopen still forces a run.
+# The merge bar is unchanged: `tests` must be green on the head being merged,
+# and a head nobody asked a run for has no `tests` checks at all.
 on:
   pull_request:
+    types: [opened, reopened, labeled, unlabeled]
   push:
     branches: [main]
 
@@ -85,6 +95,12 @@ jobs:
         env:
           PEST_FORECAST_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand --no-coverage tests/pest-forecast-history-postgres.test.js
+      - name: Portal chat durable-turn PostgreSQL tests
+        working-directory: server
+        env:
+          PORTAL_CHAT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/portal-chat-reliability-postgres.test.js
+
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -186,7 +202,7 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
@@ -196,7 +212,7 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js tests/admin-customers-payer-linked-invoices-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:
@@ -228,7 +244,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-merge-linked-invoice-fence-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
       - name: Booking capacity commit transaction tests
         working-directory: server
         env:
@@ -239,6 +255,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
+      - name: Report blog search ranking tests
+        working-directory: server
+        env:
+          REPORT_BLOG_SEARCH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The server-unit
@@ -494,6 +515,10 @@ jobs:
           retention-days: 7
 
   native-android:
+    # `gates` reports whether the PR touches anything the mobile builds read
+    # (see its "mobile scope" step). Fails open: no answer still builds.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -517,6 +542,10 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon
 
   native-ios:
+    # Same scope rule as native-android. macOS runners are capped at 5 at a
+    # time on this plan, so a build nobody needs is the costliest one to queue.
+    needs: gates
+    if: ${{ !cancelled() && needs.gates.outputs.mobile != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -558,12 +587,48 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      mobile: ${{ steps.mobile-scope.outputs.mobile }}
     steps:
       - uses: actions/checkout@v4
         with:
           # Full history: the changed-files lint diffs against the PR base's
           # merge-base, which a shallow clone doesn't have.
           fetch-depth: 0
+      - name: Mobile scope (do the iOS and Android builds need to run?)
+        id: mobile-scope
+        # The mobile builds compile the web app (client/, shared/, the root
+        # lockfile) and scripts/mobile. They are skipped ONLY when every file
+        # the PR changes sits in a directory they never read. Anything else
+        # builds both apps: another directory, a root file, an empty or
+        # unreadable diff, a push to main. First step after checkout, so the
+        # answer exists even when a later gate fails.
+        #
+        # server/ is such a directory except for the files the bundle pulls in
+        # through shared/ or client source (today one JSON,
+        # server/services/estimate-one-time-copy.json). They are read from the
+        # code, never listed here: a change to one builds, and if the bundle
+        # ever reaches server CODE (whose own imports this step cannot
+        # follow), every server change builds.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          mobile=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # --no-renames: a rename is listed as its old path AND its new one, so
+            # moving a build input into a skip-safe directory still builds.
+            if files=$(git diff --name-only --no-renames "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
+              inputs=$(git grep -hoE '\.\./server/[A-Za-z0-9_./-]+' -- shared client/vite.config.js client/src ':(exclude,glob)client/src/**/*.test.*' | sed -E 's#^(\.\./)+##' | sort -u || true)
+              safe='^(server|docs|\.claude|ops|video|wiki)/'
+              if printf '%s\n' "$inputs" | grep -qvE '\.json$|^$'; then safe='^(docs|\.claude|ops|video|wiki)/'; fi
+              outside=$(printf '%s\n' "$files" | grep -vE "$safe" || true)
+              hit=""
+              if [ -n "$inputs" ]; then hit=$(printf '%s\n' "$files" | grep -xF -f <(printf '%s\n' "$inputs") || true); fi
+              if [ -z "$outside" ] && [ -z "$hit" ]; then mobile=false; fi
+            fi
+          fi
+          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "mobile builds needed: $mobile"
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'

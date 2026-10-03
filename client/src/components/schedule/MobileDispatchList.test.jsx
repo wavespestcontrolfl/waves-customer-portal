@@ -352,3 +352,28 @@ describe('MobileDispatchList open hours with two techs', () => {
     expect(onCreateSlot).toHaveBeenLastCalledWith(expect.objectContaining({ windowStart: '10:00', techId: undefined }));
   });
 });
+
+describe('MobileDispatchList drive legs', () => {
+  it('shows the drive in and out of each stop, and nothing for a missing leg', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, firstStop: true, driveFromPrevMin: null, driveToNextMin: 14 },
+          { ...SERVICE, id: 'svc-2', windowStart: '10:00', windowEnd: '11:00', driveFromPrevMin: 14, driveToNextMin: null },
+          { ...SERVICE, id: 'svc-3', windowStart: '13:00', windowEnd: '14:00', lastStop: true, driveFromPrevMin: 9, driveToNextMin: null },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('First stop')).toBeInTheDocument();
+    expect(screen.getByText('~14 min to next')).toBeInTheDocument();
+    expect(screen.getByText('~14 min from last stop')).toBeInTheDocument();
+    expect(screen.getByText('~9 min from last stop')).toBeInTheDocument();
+    expect(screen.getByText('Last stop')).toBeInTheDocument();
+    // svc-2's leg out has no coordinates: no chip, never "~0 min".
+    expect(screen.queryByText(/~0 min/)).toBeNull();
+    expect(screen.getAllByText(/min to next$/)).toHaveLength(1);
+  });
+});

@@ -4146,6 +4146,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // regardless of the flag; syncPrimaryAddress is a no-op when no primary
       // row exists.
       let emailSync = null;
+      let applySessionRelease = null;
       try {
         await db.transaction(async (trx) => {
           // Membership-affecting edits participate in the customer-comms
@@ -4274,12 +4275,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // pre-transaction read: a payer cleared by another edit and
           // restored by this stale request is still a change while a
           // self-pay send is in flight.
+          // The write this route is about to make, for the visit-linked invoices' before/after owner
+          // (an unchanged payer, even resubmitted by the full form, moves nothing).
+          const customerPayerPending = updates.payer_id !== undefined
+            ? { customerPatch: { customerId: req.params.id, payer_id: updates.payer_id || null } } : null;
           if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(lockedBefore.payer_id ?? '')) {
-            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx)) {
+            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx, { pending: customerPayerPending })) {
               throw Object.assign(new Error('A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.'), {
                 statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
               });
             }
+          } else if (updates.payer_id !== undefined) {
+            // Unchanged payer: nothing to refuse, but remember each linked invoice's owner so the
+            // withdrawal below acts only on what moves.
+            await require('../services/visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: req.params.id }, customerPayerPending);
           }
           // Assigning a DEFAULT payer must first release any unconfirmed
           // combined pay-page session on this customer's invoices (codex
@@ -4289,7 +4298,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id);
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4298,6 +4307,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             if (payerRelease.inFlight > 0) {
               throw new Error('A combined bank payment for this customer is still in flight — retry the payer change after it settles or fails');
             }
+            // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
+            applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // A Bill-To edit that can make a withdrawn combined-visit invoice
@@ -4376,6 +4387,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               { before: lockedBefore, after: lockedAfter }, trx
             );
           }
+          // Every refusal has passed: only now do the planned session cancels (external, not rollback-able) run.
+          if (applySessionRelease) await applySessionRelease();
         });
       } catch (e) {
         if (e && e.churnBlocked) return res.status(409).json(e.payload);

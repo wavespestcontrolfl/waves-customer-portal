@@ -37,6 +37,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useVisitPrepPhotoState } from "../../hooks/useVisitPrepPhotoUrls";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
@@ -6883,7 +6884,9 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
 // (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
 const fmtAmount = formatMeasuredAmount;
 
-function JobCardOrderButton({ productId, name, order, D, compact = false }) {
+// serviceId: the visit this job card is for. The server accepts a technician's
+// restock request only from one of their own current visits.
+export function JobCardOrderButton({ productId, name, order, serviceId, D, compact = false }) {
   const [state, setState] = useState("idle");
   const [msg, setMsg] = useState("");
   const submit = async () => {
@@ -6892,7 +6895,7 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
       try {
         const data = await adminFetch(`/admin/inventory/waveguard-forecast/${productId}/restock-request`, {
           method: "POST",
-          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
+          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}`, scheduledServiceId: serviceId || undefined }),
         });
         setState("done");
         setMsg(data?.existing ? "Already on the order list" : "Added to the order list");
@@ -6937,7 +6940,7 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
   );
 }
 
-function JobCardProduct({ p, D }) {
+function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
   const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
@@ -6977,7 +6980,7 @@ function JobCardProduct({ p, D }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} D={D} compact />
+        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
       </div>
     </JobCardCollapsible>
   );
@@ -7155,7 +7158,7 @@ function JobCardTank({ tank, serviceId, D }) {
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
-            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
+            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} serviceId={serviceId} D={D} compact />
           </div>
         )}
       </div>
@@ -7192,6 +7195,66 @@ export function JobCardCustomerRequest({ request, D }) {
   );
 }
 
+// The customer's own texts from the 14 days up to the visit's day (same
+// gate). null = the history could not be read — said so, never shown as
+// "no texts".
+export function JobCardCustomerTexts({ texts, D }) {
+  if (texts === undefined || (Array.isArray(texts) && texts.length === 0)) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Customer texts (last 14 days)</div>
+      {texts === null
+        ? <div style={{ color: D.muted }}>Text history unavailable right now.</div>
+        : texts.map((t, i) => (
+          <div key={i}><span style={{ color: D.muted }}>{t.date}: </span>{`\u201C${t.text}\u201D`}</div>
+        ))}
+    </div>
+  );
+}
+
+const JOB_CARD_PREP_TOPICS = { pest: "Pest", lawn: "Lawn", tree_shrub: "Tree & shrub", other: "Something else" };
+const JOB_CARD_PREP_LOCATIONS = {
+  front_yard: "Front yard", back_yard: "Back yard", side_yard: "Side yard", inside_home: "Inside home",
+  garage_lanai: "Garage / lanai", garden_beds: "Garden beds", other: "Other",
+};
+// Photos the customer sent before the visit. Thumbnails come from the
+// ownership-scoped GET /admin/schedule/:id/visit-prep-photos through the
+// Visit Brief's own link hook: refreshed before the one-hour links expire,
+// withheld on resume once stale. A failed fetch is said, with a Retry; the
+// topic, place and note always show.
+export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFetch }) {
+  const photoSignature = (submissions || []).flatMap((s) => s.photoIds || []).join(",");
+  const { urls, failed, retry } = useVisitPrepPhotoState(serviceId, !!photoSignature, request, photoSignature, { retryOnFailure: true });
+  if (!submissions?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Photos the customer sent</div>
+      {failed && (
+        <div style={{ color: D.muted, marginBottom: 6 }}>
+          Photos unavailable right now.{" "}
+          <button type="button" onClick={retry} style={{ background: "none", border: "none", padding: 0, color: D.text, textDecoration: "underline", cursor: "pointer", fontSize: 14 }}>Retry</button>
+        </div>
+      )}
+      {submissions.map((s, i) => {
+        const where = [JOB_CARD_PREP_LOCATIONS[s.locationOnProperty], JOB_CARD_PREP_TOPICS[s.topic]].filter(Boolean).join(" · ");
+        return (
+          <div key={i} style={{ marginBottom: 8 }}>
+            {where && <div style={{ color: D.muted }}>{where}</div>}
+            {s.note && <div>{`\u201C${s.note}\u201D`}</div>}
+            {s.photoIds?.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                {s.photoIds.map((id, n) => (urls[id]
+                  ? <a key={id} href={urls[id]} target="_blank" rel="noopener noreferrer"><img src={urls[id]} alt={`Customer photo ${n + 1}`} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 2, border: `1px solid ${D.border}` }} /></a>
+                  : <div key={id} aria-label={`Customer photo ${n + 1} ${failed ? "unavailable" : "loading"}`} style={{ width: 64, height: 64, borderRadius: 2, border: `1px solid ${D.border}` }} />))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7207,6 +7270,8 @@ function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
       <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
+      <JobCardCustomerTexts texts={card.notes?.customerTexts} D={D} />
+      <JobCardPrepPhotos serviceId={card.serviceId} submissions={card.notes?.prepPhotos} D={D} />
       {card.notes?.chemicalSensitivity && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
       )}
@@ -7235,7 +7300,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
+      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}

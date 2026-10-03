@@ -95,3 +95,17 @@ it("dismisses with Escape and returns focus to the row actions trigger", () => {
   expect(menu.open).toBe(false);
   expect(trigger).toHaveFocus();
 });
+
+// The call bridge is owner-only: the page passes onCall only for an admin, so a
+// technician's row menu has no "Call via Waves" item but keeps Messages.
+it("offers Call via Waves only when the page supplies a call handler", () => {
+  const customer = { id: "fixture-c", firstName: "Casey", lastName: "Sample", phone: "+15555550101" };
+  const onCall = vi.fn();
+  const first = render(<CustomerDirectoryTable customers={[customer]} onCall={onCall} />);
+  fireEvent.click(screen.getByRole("button", { name: "Call via Waves" }));
+  expect(onCall).toHaveBeenCalledWith(expect.objectContaining({ id: "fixture-c" }));
+  first.unmount();
+  render(<CustomerDirectoryTable customers={[customer]} />);
+  expect(screen.queryByRole("button", { name: "Call via Waves" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Messages/ })).toBeInTheDocument();
+});

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ensureStackingFresh, useDiscountStackingState } from '../../hooks/useDiscountStacking';
@@ -1183,7 +1184,7 @@ describe('GitHub review round 1 on PR #4656', () => {
   // percentageDiscountDollars helper for its own percentage branch
   // UNCONDITIONALLY ("not itself gated... whether or not
   // GATE_DISCOUNT_STACKING is live" — see that function's own comment;
-  // also documented in this repo's CLAUDE.md: "The corrected cent-exact
+  // also documented in this repo's docs/gates-and-env.md: "The corrected cent-exact
   // rounding... is live regardless of the gate"). previewLineDiscount
   // (this component's own base per-line preview, used whenever no
   // appointment-level discount rides the group) still did the OLD plain
@@ -3287,5 +3288,59 @@ describe('GitHub round 7 P2 :1383 (Codex, blocked push 11 on PR #4656) — stale
     expect(source).not.toMatch(/setStaleStackingNotice\s*\(/);
     expect(source).not.toMatch(/retryStaleStacking\s*=/);
     expect(source).not.toMatch(/\{\s*staleStackingNotice\b/);
+  });
+});
+
+// Technician allow-list (owner 2026-10-02): the address ask is read from
+// /admin/triage, an owner-only route (derived from a call). A technician login
+// neither looks it up when the customer is picked nor re-checks it at submit.
+describe('address ask by role', () => {
+  function renderBookingAs(role) {
+    const scheduledDate = futureDate();
+    return render(
+      <MemoryRouter>
+        <Routes>
+          <Route element={<Outlet context={{ user: { role } }} />}>
+            <Route
+              path="*"
+              element={(
+                <CreateAppointmentModal
+                  defaultCustomer={CUSTOMER}
+                  defaultDate={scheduledDate}
+                  defaultWindowStart="09:00"
+                  onClose={vi.fn()}
+                  onCreated={vi.fn()}
+                  onChange={vi.fn()}
+                />
+              )}
+            />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+  const triageCalls = (fetcher) => fetcher.mock.calls.filter(([url]) => String(url).includes('/admin/triage'));
+
+  it('never requests the triage address ask for a technician, even when booking', async () => {
+    const { fetcher } = installModalFetch();
+    renderBookingAs('technician');
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(triageCalls(fetcher)).toHaveLength(0);
+  });
+
+  it('still looks up and rechecks the address ask for an admin', async () => {
+    const { fetcher } = installModalFetch();
+    renderBookingAs('admin');
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    // One lookup when the customer is staged, one recheck right before the POST.
+    expect(triageCalls(fetcher).length).toBeGreaterThanOrEqual(2);
   });
 });

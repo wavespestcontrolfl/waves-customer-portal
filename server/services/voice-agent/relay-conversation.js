@@ -1133,6 +1133,7 @@ class RelayConversation {
     // classifyRelayEvent's `kind` so a call row alone can tell "we never saw
     // an agent_speaking_end frame" from "we saw one and it had these keys".
     this._eventShapesByKind = new Map();
+    this._speakerStatesSeen = new Set();
     // Every classified relay-event kind, counted — the RECEIVED half of the
     // trustworthy-measurement pair below (SUBSCRIBED is the other half). A
     // received event is proof of subscription no lookup can override.
@@ -1512,6 +1513,19 @@ class RelayConversation {
       // set are still two distinct things a payload drift could break.
       this._eventShapesByKind.set(ev.kind, ev.shape);
       logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
+    }
+    // A speaker frame's value is a state label (on/off), never speech. Each
+    // new short all-letters label is logged once per call, on its own and
+    // not under the per-kind dedupe above: an unknown end label ("disabled")
+    // classifies as a start, a kind already seen, and would otherwise stay
+    // hidden. Capped so a drifting payload cannot flood the log.
+    if (/_speaking_/.test(ev.kind) && typeof frame.value === 'string' && /^[a-z]{1,8}$/i.test(frame.value)) {
+      const label = frame.value.toLowerCase();
+      const seenKey = `${ev.kind}:${label}`;
+      if (!this._speakerStatesSeen.has(seenKey) && this._speakerStatesSeen.size < 16) {
+        this._speakerStatesSeen.add(seenKey);
+        logger.info(`[voice-relay] relay speaker state seen callSid=${maskSid(this.callSid)} kind=${ev.kind} value=${label}`);
+      }
     }
     const t = now();
     switch (ev.kind) {
@@ -2721,6 +2735,11 @@ class RelayConversation {
         const { isOfficeOpenAt } = require('./relay-context');
         return isOfficeOpenAt(convo._officeHours, new Date());
       },
+      // What a recognised contact has told us on THIS call about how to reach
+      // them (relay-tools capture_lead): kept across captures so a later one
+      // cannot drop an earlier callback number or contact restriction.
+      getContactFollowUp: () => ({ ...(convo._contactFollowUp || {}) }),
+      noteContactFollowUp: (fields = {}) => { convo._contactFollowUp = { ...fields }; },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
       noteEstimateFields: (fields = {}) => {
         const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
@@ -2975,6 +2994,8 @@ class RelayConversation {
     // fields win over the earlier ones.
     this._holdOpenForRetry ??= state.holdOpen || null;
     this._estimateFields = { ...state.estimateFields, ...this._estimateFields };
+    // Earlier legs first, this leg's own captures on top.
+    this._contactFollowUp = require('./relay-segments').mergeContactFollowUp(state.contactFollowUp, this._contactFollowUp);
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
@@ -3873,6 +3894,7 @@ class RelayConversation {
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, ...v })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
+          contactFollowUp: this._contactFollowUp || null,
           startedAt: this._startedAt,
           lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
@@ -4400,7 +4422,37 @@ class RelayConversation {
     // a caller who explained everything before the drop and hung up right
     // after the reconnect must not produce a "No transcript captured" lead.
     const callerTurns = [...((this._resume && this._resume.callerTurns) || []), ...this._userTurns];
-    const write = createLeadFromExtraction(
+    // ⭐ A RECOGNISED CONTACT'S HANGUP RINGS THE OFFICE, NEVER A LEAD (owner
+    // ruling 2026-10-03; the same rule capture_lead applies). The verified
+    // number sits in a secondary slot on a customer's account, so the floor's
+    // artifact is the bell tied to that customer. Only a bell that RESOLVED as
+    // not raised starts the lead write below — never a race between the two —
+    // and the whole chain rides the same close deadline as the lead write.
+    const recognised = this._callerContext;
+    const recognisedContact = this._callerVerified === true && recognised && recognised.customer && recognised.customer.id && recognised.tier !== 'full';
+    const ringOffice = () => require('./relay-alert').alertOfficeContactFollowUp({
+      customerId: recognised.customer.id,
+      callbackPhone: callerPhone,
+      // The caller's own words lead the bell (the lead-shaped floor summary
+      // opens with boilerplate a person would read first).
+      summary: callerTurns.length ? scrubForStorage(callerTurns.join(' | ')).slice(0, 600) : 'Hung up before saying what they needed',
+      callSid: this.callSid,
+      // Fence key only for a CLAIMED session (see toolCtx.sessionKey).
+      sessionKey: this.sessionKey,
+    }).then((belled) => {
+      // A superseded socket's floor latches nothing and writes nothing — the
+      // replacement owns this call's artifact (never a fallback lead here).
+      if (belled === 'superseded') {
+        logger.error(`[voice-relay] capture-floor superseded callSid=${this.callSid} — nothing latched`);
+        return true;
+      }
+      if (!belled) return false;
+      this.leadCaptured = true;
+      this._noLeadCreated = true;
+      logger.info(`[voice-relay] capture-floor rang the office for a recognised contact (no lead) callSid=${maskSid(this.callSid)} reason=${reason || 'end'}`);
+      return true;
+    });
+    const writeLead = () => createLeadFromExtraction(
       {
         call_summary: floorSummary(callerTurns, scrubForStorage),
         requested_service: null,
@@ -4467,6 +4519,7 @@ class RelayConversation {
         return false;
       },
     );
+    const write = recognisedContact ? ringOffice().then((belled) => belled || writeLead()) : writeLead();
     // Keep the eventual outcome observable after the close deadline.
     const landed = await withTimeout(write, WRITE_DRAIN_TIMEOUT_MS, null);
     this._captureFloorWrite = landed === null ? write : null;

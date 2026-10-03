@@ -88,7 +88,7 @@ const SERVICE = {
 async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
   // The first render pays the sheet's cold import; a slow machine gets time.
-  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 5000 });
+  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
 }
 
 function addProduct(name, amount, how = null) {
@@ -103,7 +103,7 @@ function addProduct(name, amount, how = null) {
 async function generate(note = NOTE) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-  await screen.findByText('Report the customer will see', {}, { timeout: 5000 });
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 
 const recordCard = () => screen.getByRole('region', { name: 'Bed bug record heard from you' });
@@ -149,7 +149,7 @@ describe('the lane record on the sheet', () => {
     // The file's first full flow pays the sheet's cold start: under CI load
     // it ran past the 5 s default (PR #5690's client job), as the sibling
     // FastCompleteSheet.test.jsx's first full flow does.
-  }, 15000);
+  }, 20000);
 
   test('one place goes on every product as its application area', async () => {
     const request = makeRequest({ laneFacts: { ...READ, areas: [READ.areas[0]] } });
