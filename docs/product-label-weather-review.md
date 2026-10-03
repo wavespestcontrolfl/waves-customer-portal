@@ -70,10 +70,39 @@ URL, client-supplied fact, or model-supplied verification stamp can activate.
 Extraction is limited to five requests per admin per ten minutes; pending current
 candidates are reused without another model call.
 
+## Rate review (dark: `GATE_LABEL_RATE_REVIEW`)
+
+The same flow reviews application-rate directions, on its own routes
+(`/:id/label-rate-review`), its own column (`products_catalog.label_rate_review`)
+and its own gate, which also needs `GATE_LABEL_PIPELINE`. `product-label-review.js`
+holds the one flow; `product-label-rates.js` holds what differs: the prompt, the
+direction schema, validation and the reader.
+
+A direction is one label passage: use site, target pests, method, the passage
+quoted verbatim and the physical PDF page. It holds no amount field of any kind
+(no number, unit code or extracted rate text), so nothing stored can differ from
+what the label prints. The amount, its units and any limits are in the quote.
+
+Approval is admin-only, needs the same identity and source-page confirmation,
+and rechecks the latest PPLS filename and checksum. It writes only
+`label_rate_review` plus a critical audit event (`product_label_rate.*`). It
+does **not** write `label_verified_at`, any catalog rate column, protocols or
+pricing. `label_verified_at` is not a label-provenance signal (planning rates
+carry it), which is why rate evidence has its own record.
+
+Nothing consumes approved directions for a dose in this change.
+The mix tool reads the amount out of the approved quote in code (never the
+model) and refuses what it cannot read.
+`reviewedRates(product, sourceStatus)` is the reader for the later mix tool: it
+returns the directions only for an approved review whose product identity
+(name, registration, formulation) is unchanged and whose EPA source is current,
+and `null` when there is no review or the gate is off. A weather-column edit
+does not retire a rate review.
+
 ## Remaining drawer work
 
-Application-rate review and any catalog/protocol rate fan-out remain separate
-from this weather scope. The Protocol/SOP changes, dispatch strips, Score, Truck,
+Catalog/protocol rate fan-out and the Intelligence Bar mix tool that reads
+approved directions remain separate. The Protocol/SOP changes, dispatch strips, Score, Truck,
 and property memory map are subsequent lanes. Score weights, truck-count policy,
 and field-measurement precedence still require owner decisions.
 
