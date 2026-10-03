@@ -145,6 +145,7 @@ describe('buildBusinessScopeContext', () => {
     expect(ctx.profileFields).toEqual({
       serviceScopeDecision: SCOPE.UNRESOLVED,
       serviceScopeQuestion: OCCUPANCY_QUESTION,
+      occupancyAnswer: null,
       businessIdentity: {
         name: 'Example Nail Bar', type: 'salon_spa', matchedBy: 'street_number', tenantsAtNumber: 1, unitKey: 'business:places/EXAMPLE1',
       },
@@ -168,6 +169,19 @@ describe('buildBusinessScopeContext', () => {
     expect(ctx.category).toBe('RESIDENTIAL');
     expect(ctx.decision).toBeNull();
     expect(ctx.flags).toEqual([]);
+  });
+});
+
+describe('unresolvedScopeError', () => {
+  const { unresolvedScopeError, assertScopeAnswered } = require('../services/property-lookup/business-scope');
+  test('only an unanswered scope_unresolved profile is refused; the error is a fail-closed 409 with the question', () => {
+    const err = unresolvedScopeError({ serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: OCCUPANCY_QUESTION });
+    expect(err).toMatchObject({ statusCode: 409, code: 'COMMERCIAL_SCOPE_UNRESOLVED', failClosed: true, metadata: { question: OCCUPANCY_QUESTION } });
+    expect(() => assertScopeAnswered({ serviceScopeDecision: 'scope_unresolved' })).toThrow(/whole building/);
+    for (const profile of [null, {}, { serviceScopeDecision: 'commercial_suite' }, { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'building' }]) {
+      expect(unresolvedScopeError(profile)).toBeNull();
+      expect(() => assertScopeAnswered(profile)).not.toThrow();
+    }
   });
 });
 
