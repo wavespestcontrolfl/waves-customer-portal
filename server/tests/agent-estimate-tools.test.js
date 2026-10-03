@@ -120,9 +120,9 @@ const INPUT = {
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
-    { serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Taurus SC', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Alpine WSG', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Atticus Talak', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Gentrol IGR', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
@@ -620,7 +620,7 @@ describe('Agent Estimate draft tool', () => {
 
   test('uses live stock instead of a model-asserted available inventory row', async () => {
     mockExecuteProcurementTool.mockResolvedValueOnce({
-      products: [{ id: 'product-pest', name: 'Demand CS', on_hand: 0, unit: 'oz' }],
+      products: [{ id: 'product-pest', name: 'Taurus SC', on_hand: 0, unit: 'oz' }],
     });
     const { database } = makeDatabase();
     mockDb.mockImplementation(database);
@@ -629,12 +629,12 @@ describe('Agent Estimate draft tool', () => {
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
       inventoryReview: [{
-        serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 99,
+        serviceKey: 'pest', productName: 'Taurus SC', status: 'in_stock', onHand: 99,
       }],
     });
 
     expect(result.lane).toBe('yellow');
-    expect(result.lane_reasons).toContain('Demand CS: unavailable (0 on hand)');
+    expect(result.lane_reasons).toContain('Taurus SC: unavailable (0 on hand)');
     expect(result.inventoryReview[0]).toEqual(expect.objectContaining({
       onHand: 0,
       status: 'unavailable',
@@ -671,13 +671,13 @@ describe('Agent Estimate draft tool', () => {
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
       inventoryReview: [{
-        serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8,
+        serviceKey: 'pest', productName: 'Taurus SC', status: 'in_stock', onHand: 8,
       }],
     });
 
     expect(result.lane_reasons).toEqual(expect.arrayContaining([
       'inventory review for pest is missing protocol product: Alpine WSG',
-      'inventory review for pest is missing protocol product: Advion WDG Granular',
+      'inventory review for pest is missing protocol product: Atticus Talak or Atticus Talak 7.9 F',
     ]));
   });
 

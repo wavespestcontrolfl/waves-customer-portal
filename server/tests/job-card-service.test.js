@@ -1996,7 +1996,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, true]);
     for (const raw of [
       'Distance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)',
-      'Non-repellent treatment (interior + exterior) for ghost or trailing ants',
+      'Non-repellent treatment (interior) for ghost or trailing ants',
       'Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)',
     ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, false]);
   });
