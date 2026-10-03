@@ -25926,6 +25926,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       try {
         const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category');
         const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        const promptWritesAlias = CompletionRecap.promptAliasTest(fullUserMessage);
         catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         for (const row of catalogRows) {
           // By its name or its short display name. A registered alias the
@@ -25933,7 +25934,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           // (mentionedText): aliases are staff shorthand, matched whole.
           const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
             .filter((label) => CompletionRecap.containsProductName(fullUserMessage, [{ name: label }], { wholeWord: true }));
-          const named = mentioned.length > 0;
+          // Its alias written out counts as naming it for its actives.
+          const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
           mentionedCatalogNames.push(...mentioned);
           // Its actives too: a draft must not swap the named product for
           // its active ingredient; and an active the prompt names on its own

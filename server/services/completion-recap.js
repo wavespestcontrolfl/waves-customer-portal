@@ -437,6 +437,15 @@ function catalogPlainTests(rows, genericTokens) {
     || (i > 0 && isPlain(`${tokens[i - 1]}${token}`)));
   return { isPlain, whollyPlain };
 }
+const aliasLabel = (alias) => String(alias || '').split(':').pop().trim();
+// Returns a test: does the prompt write this alias out, in any case?
+function promptAliasTest(promptText) {
+  const promptHay = ` ${screenTokens(promptText).join(' ')} `;
+  return (alias) => {
+    const tokens = screenTokens(aliasLabel(alias));
+    return tokens.length > 0 && promptHay.includes(` ${tokens.join(' ')} `);
+  };
+}
 // Every label the catalog knows a product by.
 function catalogScreenLabels(rows) {
   const named = [];
@@ -454,7 +463,7 @@ function catalogScreenLabels(rows) {
     // acidifier"), so an alias is matched only as written, capitals and
     // all, or by its brand word; a note before a colon is dropped.
     for (const alias of new Set(Array.isArray(row?.aliases) ? row.aliases : [])) {
-      const label = String(alias || '').split(':').pop().trim();
+      const label = aliasLabel(alias);
       if (label && !labels.has(label)) named.push({ name: row.name, label, alias: true });
     }
   }
@@ -518,8 +527,9 @@ function catalogBrandEntry({ name, label, alias }, plain, promptHay) {
   }
   // The brand word is the name's first word, or its second when a maker's
   // name comes first ("Talak" in "Atticus Talak", "Polyzone" in "Suspend
-  // Polyzone").
-  entry.brands = tokens.slice(0, 2).filter((token) => token.length >= 4 && !plain.isPlain(token));
+  // Polyzone"). An alias gives its first word only: what follows may be a
+  // protocol note ("Topchoice fall app", "Headway ONLY if severe").
+  entry.brands = tokens.slice(0, alias ? 1 : 2).filter((token) => token.length >= 4 && !plain.isPlain(token));
   entry.pairs = capitalizedPairs(label, plain.whollyPlain);
   if (alias) {
     entry.exact = screenAsWritten(label);
@@ -691,6 +701,7 @@ module.exports = {
   deterministicRecap,
   generateRecap,
   normalizeOutcome,
+  promptAliasTest,
   sanitizeRecap,
   smsRecap,
   SMS_RECAP_MAX_CHARS,

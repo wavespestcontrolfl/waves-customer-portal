@@ -372,6 +372,19 @@ test('gate on: an alias the note itself writes out is screened in any case', asy
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
+test('gate on: the active ingredients of a product the note names by alias are screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ id: 'prod-5', name: 'Hydretain Liquid', active_ingredient: 'Humectant blend' }];
+  mockAliasRows = [{ product_id: 'prod-5', alias_name: 'Moisture Manager' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We applied a humectant blend. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Applied moisture manager to dry spots. Treated the thresholds (alias actives case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
 test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'In2Care Mosquito Station', active_ingredient: 'Beauveria bassiana; Pyriproxyfen' }];
