@@ -6,8 +6,8 @@ const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys:
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 const mockLock = { held: false, fail: false };
 jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => { if (mockLock.fail) throw new Error('advisory lock query failed'); return mockLock.held ? { skipped: true, reason: 'lease_held' } : fn(); } }));
-const mockBell = { allowed: true };
-jest.mock('../services/notification-bell-policy', () => ({ ...jest.requireActual('../services/notification-bell-policy'), bellAllowed: async () => mockBell.allowed }));
+const mockBell = { allowed: true, policyOn: true };
+jest.mock('../services/notification-bell-policy', () => ({ ...jest.requireActual('../services/notification-bell-policy'), bellAllowed: async () => mockBell.allowed, isBellPolicyEnabled: () => mockBell.policyOn }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -285,6 +285,16 @@ describe('syncLowRatingReviewAlerts', () => {
       expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
       expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R1}`], 'review answered', expect.any(Object));
     } finally { mockBell.allowed = true; }
+  });
+
+  test('with the bell policy itself off, a stale saved override silences nothing', async () => {
+    mockBell.allowed = false;
+    mockBell.policyOn = false;
+    try {
+      const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 1, reviewer_name: 'Pat', customer_id: null }] });
+      await syncLowRatingReviewAlerts({ conn });
+      expect(mockEpisodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+    } finally { mockBell.allowed = true; mockBell.policyOn = true; }
   });
 
   test('the category rings by default and the owner can silence it', () => {

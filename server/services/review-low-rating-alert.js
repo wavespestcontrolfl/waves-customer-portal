@@ -190,7 +190,10 @@ async function reconcile(conn, now, out) {
     // category override is only read on a fresh insert), and standing items
     // close below (Codex #5659 r6).
     const bellPolicy = require('./notification-bell-policy');
-    const silenced = !(await bellPolicy.bellAllowed({ category: CATEGORY }));
+    // Only while the bell policy itself is on, as NotificationService.create
+    // reads it: with GATE_ADMIN_BELL_POLICY off a stale saved override never
+    // silences anything (Codex #5659 r7).
+    const silenced = bellPolicy.isBellPolicyEnabled() && !(await bellPolicy.bellAllowed({ category: CATEGORY }));
     const reviews = silenced ? [] : (await needsAnswerQuery(conn, since)).filter(eligible);
     // ALERT_EPISODES killed (Codex #5659 r5): the shared kill switch's contract
     // is no close pass and no reopen, the emitter's plain deduped raise. Each
