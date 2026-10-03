@@ -289,6 +289,9 @@ describe('the dispatcher\'s two decisions', () => {
     expect(mockEvaluateThreshold).toHaveBeenCalledWith('cust-1', 'confirmed_miss', expect.anything(), { logId: 'log-1' });
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     expect(mockEvaluateThreshold).toHaveBeenCalledTimes(1);
+    // it runs inside the decision's transaction (under the row lock), so the task
+    // commits with the confirmation and a later "Not a miss" finds it
+    expect(typeof mockEvaluateThreshold.mock.calls[0][2].transaction).toBe('function');
     // a failed evaluation never fails the decision
     mockTables.reschedule_log = [logRow({ customer_id: 'cust-1' })];
     mockEvaluateThreshold.mockRejectedValueOnce(new Error('db down'));

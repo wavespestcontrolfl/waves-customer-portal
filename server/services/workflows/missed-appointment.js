@@ -40,8 +40,19 @@ class MissedAppointment {
     // in one transaction that holds the visit's row lock and rechecks the occurrence
     // (logSkip). The nightly check stays lock-free on the caller's connection.
     if (reason === 'manual_no_show' && conn === db) {
-      const logged = await db.transaction((t) => this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true }));
-      return logged ? this.evaluateThreshold(logged.customerId, reason, db, { logId: logged.logId }) : null;
+      // The outreach evaluation runs in the same transaction (a savepoint, so its
+      // failure never loses the row): its task commits with the confirmed row, and
+      // a later "Not a miss" always finds it to withdraw.
+      return db.transaction(async (t) => {
+        const logged = await this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true });
+        if (!logged) return null;
+        try {
+          return await t.transaction((sp) => this.evaluateThreshold(logged.customerId, reason, sp, { logId: logged.logId }));
+        } catch (err) {
+          logger.warn(`MissedAppointment: outreach evaluation failed for ${scheduledServiceId}: ${err.message}`);
+          return null;
+        }
+      });
     }
     const logged = await this.logSkip(scheduledServiceId, reason, conn, { occurrence, scanned });
     if (logged === STALE_CANDIDATE) return { action: 'stale_candidate' };

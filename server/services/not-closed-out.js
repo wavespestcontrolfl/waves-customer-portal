@@ -227,16 +227,13 @@ function loggedSlot(log) {
  */
 async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
-  let newlyConfirmedFor = null;
-  const result = await db.transaction(async (t) => {
+  return db.transaction(async (t) => {
     const { visit, log } = await lockVisitThenLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
-    if (!log.miss_confirmed_at) newlyConfirmedFor = log.customer_id || null;
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
     if (log.resolved_at) {
       if (!isSameNoShowOccurrence(visit, { date: log.original_date, window: log.original_window })) {
-        newlyConfirmedFor = null;
         return { ok: false, reason: 'visit_moved_on' };
       }
       await t('reschedule_log').where({ id: logId })
@@ -266,19 +263,20 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
         }
       }
     }
+    // The repeated-miss outreach task counts person-confirmed misses only while the
+    // queue is on (missed-appointment.js evaluateThreshold), so a first confirmation
+    // is when it is evaluated — HERE, under the row lock, so the task commits with
+    // the confirmation and a later "Not a miss" (which waits on the same lock)
+    // always finds it to withdraw. In a savepoint: never fails the decision.
+    if (!log.miss_confirmed_at && log.customer_id && queueEnabled()) {
+      try {
+        await t.transaction((sp) => require('./workflows/missed-appointment').evaluateThreshold(log.customer_id, 'confirmed_miss', sp, { logId }));
+      } catch (err) {
+        logger.warn(`[not-closed-out] outreach evaluation failed for a confirmed miss: ${err.message}`);
+      }
+    }
     return { ok: true };
   });
-  // The repeated-miss outreach task counts person-confirmed misses only while the
-  // queue is on (missed-appointment.js evaluateThreshold), so a first confirmation
-  // is when it is evaluated. After the commit; never fails the decision.
-  if (result.ok && newlyConfirmedFor && queueEnabled()) {
-    try {
-      await require('./workflows/missed-appointment').evaluateThreshold(newlyConfirmedFor, 'confirmed_miss', db, { logId });
-    } catch (err) {
-      logger.warn(`[not-closed-out] outreach evaluation failed after a confirmed miss: ${err.message}`);
-    }
-  }
-  return result;
 }
 
 // A person settled one flagged row. Close the visit's card when no other flagged

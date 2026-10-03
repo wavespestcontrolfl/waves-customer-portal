@@ -34,6 +34,7 @@ function fakeConn(service) {
     return chain;
   };
   conn.raw = (sql) => sql;
+  conn.transaction = (fn) => fn(conn);
   return { conn, inserts, locks };
 }
 
