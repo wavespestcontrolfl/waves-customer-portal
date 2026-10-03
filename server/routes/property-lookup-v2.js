@@ -236,8 +236,8 @@ async function stampLookupAttempt(address, status, reason = null, attemptId) {
 // export, and a keying failure just means "no coalescing".
 const inFlightLookups = new Map();
 
-// The CSR's occupancy answer as a lookup option: nothing unless it is one of
-// the two answers.
+// Staff's occupancy answer as a lookup option: nothing unless it is one of
+// the three answers (suite / building / none).
 function occupancyOption(value) {
   const occupancyAnswer = normalizeOccupancyAnswer(value);
   return occupancyAnswer ? { occupancyAnswer } : {};
@@ -266,7 +266,9 @@ function businessIdentityKeySuffix(options) {
 // Never throws.
 async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, budgetMs = null }) {
   if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return null;
-  const miss = options.occupancyAnswer ? UNAVAILABLE_IDENTITY : null;
+  // 'none' (not this business) needs no business to apply to.
+  const answered = options.occupancyAnswer === 'suite' || options.occupancyAnswer === 'building';
+  const miss = answered ? UNAVAILABLE_IDENTITY : null;
   try {
     const eligible = detectCategory(record, aiAnalysis) === 'COMMERCIAL' || !hasCountyEvidence(record);
     if (!eligible || options.cacheOnly === true) return null;
@@ -1266,7 +1268,7 @@ router.post('/property-lookup', async (req, res) => {
     // routes (public-property-lookup.js, public-quote.js) never pass it.
     // wholeProperty: the operator's association (HOA / common-area) job at an
     // office "Suite" address — size the whole property, never the suite.
-    // occupancy ('suite' | 'building'): the CSR's answer to "just your space
+    // occupancy ('suite' | 'building' | 'none'): staff's answer to "just your space
     // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();

@@ -447,10 +447,6 @@ function buildTurfRequestProfile(baseProfile, form) {
   const dims = formDimensions(form);
   const profile = {
     ...baseProfile,
-    // The listed business name is shown on this screen only. Google's Places
-    // policies allow storing a place ID and nothing else, so the name never
-    // rides into the pricing call or the saved estimate.
-    ...(baseProfile.businessIdentity ? { businessIdentity: { ...baseProfile.businessIdentity, name: null } } : {}),
     homeSqFt: dims.homeSqFt,
     lotSqFt: dims.lotSqFt,
     stories: dims.stories,
@@ -472,6 +468,16 @@ function buildTurfRequestProfile(baseProfile, form) {
   // The translator reads `homeSqFt || squareFootage`: a legacy profile's
   // alias must not re-price a cleared Home Sq Ft box (codex r1 P1 #4871).
   delete profile.squareFootage;
+  // Nothing derived from Google Places rides into pricing or the saved
+  // estimate: the listed business and its suggestion are shown on this
+  // screen only, and flags the lookup took from Places stay behind. Staff's
+  // own answer (occupancyAnswer) and the scope fields the server's guard
+  // reads stay.
+  delete profile.businessIdentity;
+  delete profile.serviceScopeSuggestion;
+  if (Array.isArray(profile.fieldVerifyFlags)) {
+    profile.fieldVerifyFlags = profile.fieldVerifyFlags.filter((flag) => flag?.source !== "google_places");
+  }
   // Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
   // read clamped to that parcel — is only as good as that lot. Once the Lot
   // box no longer holds it (cleared or corrected), it must not price
@@ -2626,9 +2632,19 @@ export default function EstimateToolViewV2({
   // back carrying it. Until then (in flight, or failed) the profile on screen
   // is still sized for the OLD scope, so pricing stays blocked.
   const [scopePending, setScopePending] = useState(null);
+  // A profile with no business verdict at all (a whole-property lookup skips
+  // the business check) has no scope to wait for, so nothing is pending.
+  // "Not this business" leaves no scope decision, so any answer is applied
+  // once the profile carries it back as occupancyAnswer.
+  const hasScopeVerdict = !!(
+    enrichedProfile?.businessIdentity
+    || enrichedProfile?.serviceScopeDecision
+    || enrichedProfile?.occupancyAnswer
+  );
   const scopeAnswerPending = !!scopePending
     && scopePending.address === form.address.trim()
-    && enrichedProfile?.occupancyAnswer !== scopePending.answer;
+    && hasScopeVerdict
+    && enrichedProfile.occupancyAnswer !== scopePending.answer;
   const scopeQuestion = scopeUnresolved
     ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION)
     : (scopeAnswerPending ? SCOPE_QUESTION : scopeConflict);
@@ -5160,9 +5176,9 @@ export default function EstimateToolViewV2({
               <ScopeQuestionPrompt
                 profile={enrichedProfile}
                 question={scopeQuestion}
-                // While the question is open no answer stands (the server
-                // could not apply it), so neither button reads as chosen.
-                answer={!scopeQuestion && occupancyRef.current.address === form.address.trim() ? occupancyRef.current.answer : ""}
+                // Only the answer the server applied reads as chosen; while
+                // the question is open none stands.
+                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
                 busy={lookupStatus.type === "loading"}
                 onAnswer={answerScope}
               />

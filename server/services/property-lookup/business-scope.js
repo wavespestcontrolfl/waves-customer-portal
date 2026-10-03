@@ -12,10 +12,13 @@
  * clock — the lookup (routes/property-lookup-v2.js) and the estimator engine
  * both consume the same verdict so they cannot disagree.
  *
- * Owner rulings carried here: ambiguous occupancy asks "Are we treating just
- * your space or the whole building?" and NO price until it is answered; a
- * suite is priced by the suite's size, never the building's; neighbors alone
- * never decide a suite (a stand-alone outparcel has neighbors too).
+ * Owner rulings carried here: Google Places only SUGGESTS. Its listing never
+ * changes the profile by itself: the lookup asks "Are we treating just your
+ * space or the whole building?" and there is NO price until staff answer
+ * (suite / building / none — "not this business"). Only a staff answer makes
+ * the lookup commercial, sets the business's type and decides the scope, so
+ * everything that is saved is what staff confirmed. A suite is priced by the
+ * suite's size, never the building's.
  */
 
 const SCOPE = Object.freeze({
@@ -25,8 +28,10 @@ const SCOPE = Object.freeze({
 });
 
 const OCCUPANCY_QUESTION = 'Are we treating just your space or the whole building?';
-const BUSINESS_DETECTION_SOURCE = 'google_places_business';
-const OCCUPANCY_ANSWERS = Object.freeze(['suite', 'building']);
+// The detection source of a lookup staff confirmed as the listed business.
+const BUSINESS_DETECTION_SOURCE = 'staff_confirmed_business';
+// 'none' = staff say the customer is not the listed business.
+const OCCUPANCY_ANSWERS = Object.freeze(['suite', 'building', 'none']);
 
 function normalizeOccupancyAnswer(value) {
   const v = String(value || '').trim().toLowerCase();
@@ -48,12 +53,15 @@ function matchedBy(identity, typedSubpremise) {
   return (typedSubpremise || identity.matched.subpremise) ? 'subpremise' : 'street_number';
 }
 
-function suiteEvidence({ identity, typedSubpremise, countyPartBuildingEvidence, occupancyAnswer }) {
-  return Boolean(typedSubpremise)
-    || Boolean(identity.matched?.subpremise)
-    || Number(identity.tenantsAtNumber) >= 2
-    || countyPartBuildingEvidence === true
-    || occupancyAnswer === 'suite';
+// What the signals point to, shown to staff as a hint next to the question
+// and never applied: one space of a shared building, a stand-alone building,
+// or nothing either way. Neighbors alone never suggest a suite (a
+// stand-alone outparcel has neighbors too).
+function suggestScope({ identity, typedSubpremise, countyPartBuildingEvidence, countyRecordPresent }) {
+  if (typedSubpremise || identity.matched?.subpremise || Number(identity.tenantsAtNumber) >= 2
+    || countyPartBuildingEvidence === true) return 'suite';
+  if (countyRecordPresent && Number(identity.neighbors) === 0) return 'building';
+  return null;
 }
 
 /**
@@ -64,8 +72,9 @@ function suiteEvidence({ identity, typedSubpremise, countyPartBuildingEvidence, 
  *   countyRecordPresent         — a county/cadastral record vouches for the address
  *   ownUnitFolio                — a non-aggregated condo: the record already measures the unit
  *   association                 — an association/common-area job (never one suite)
- *   occupancyAnswer             — the CSR's answer: 'suite' | 'building' | null
- * @returns {{decision: string, question: string|null}|null} null = no change
+ *   occupancyAnswer             — staff's answer: 'suite' | 'building' | 'none' | null
+ * @returns {{decision: string|null, question: string|null, suggestion: string|null}|null}
+ *   null = no business scope applies; decision null = staff said "not this business"
  */
 function resolveBusinessScope({
   identity = null,
@@ -78,17 +87,14 @@ function resolveBusinessScope({
 } = {}) {
   if (!businessIdentified(identity) || association || ownUnitFolio) return null;
   const answer = normalizeOccupancyAnswer(occupancyAnswer);
-  // The CSR's explicit answer outranks every derived signal.
-  if (answer === 'building') return { decision: SCOPE.BUILDING, question: null };
-  if (suiteEvidence({ identity, typedSubpremise, countyPartBuildingEvidence, occupancyAnswer: answer })) {
-    return { decision: SCOPE.SUITE, question: null };
-  }
-  // A county record that describes the building, with no multi-tenant
-  // evidence and nobody else around: a stand-alone building.
-  if (countyRecordPresent && Number(identity.neighbors) === 0) {
-    return { decision: SCOPE.BUILDING, question: null };
-  }
-  return { decision: SCOPE.UNRESOLVED, question: OCCUPANCY_QUESTION };
+  if (answer === 'building') return { decision: SCOPE.BUILDING, question: null, suggestion: null };
+  if (answer === 'suite') return { decision: SCOPE.SUITE, question: null, suggestion: null };
+  if (answer === 'none') return { decision: null, question: null, suggestion: null };
+  return {
+    decision: SCOPE.UNRESOLVED,
+    question: OCCUPANCY_QUESTION,
+    suggestion: suggestScope({ identity, typedSubpremise, countyPartBuildingEvidence, countyRecordPresent }),
+  };
 }
 
 // ── Lookup-facing helpers ───────────────────────────────────────────
@@ -101,15 +107,6 @@ function businessUnitKey(identity) {
   if (identity?.tenantPlaceKey) return `business:tenants:${identity.tenantPlaceKey}`;
   return null;
 }
-
-const SUBTYPE_LABELS = Object.freeze({
-  restaurant_food_service: 'a restaurant or food business',
-  salon_spa: 'a salon or spa',
-  medical_office: 'a medical or dental office',
-  veterinary_clinic: 'a veterinary clinic',
-  school_daycare: 'a school or daycare',
-  office_retail: 'a business',
-});
 
 const GENERIC_SUBTYPES = new Set(['', 'other', 'office_retail']);
 
@@ -134,17 +131,18 @@ function recordBlocksCommercialFlip(recordPricingType) {
 }
 
 /**
- * The classification half: a matched business flips a non-commercial lookup
- * to COMMERCIAL (source google_places_business), and a generic commercial
- * subtype is refined to the business's type. Pure; the caller supplies the
- * base verdicts it already computed.
+ * The classification half, applied ONLY once staff confirmed the customer is
+ * the listed business (`confirmed`: the suite or building answer): a
+ * non-commercial lookup becomes COMMERCIAL (source staff_confirmed_business)
+ * and a generic commercial subtype is refined to the business's type. With
+ * no confirmation the base verdicts stand. Pure.
  */
 function applyBusinessClassification({
-  identity, baseCategory, baseSubtype, recordPricingType = null,
+  identity, baseCategory, baseSubtype, recordPricingType = null, confirmed = false,
 }) {
   const type = identity?.matched?.type || identity?.ambiguousType || null;
   const base = { category: baseCategory, subtype: baseSubtype, flipped: false, refined: false };
-  if (!businessIdentified(identity) || !type) return base;
+  if (!confirmed || !businessIdentified(identity) || !type) return base;
   if (baseCategory === 'COMMERCIAL') {
     const refine = GENERIC_SUBTYPES.has(String(baseSubtype || '')) && type !== 'office_retail';
     return refine ? { ...base, subtype: type, refined: true } : base;
@@ -153,16 +151,9 @@ function applyBusinessClassification({
   return { category: 'COMMERCIAL', subtype: type, flipped: true, refined: false };
 }
 
-function classificationFlags(classification) {
-  if (!classification.flipped) return [];
-  const label = SUBTYPE_LABELS[classification.subtype] || SUBTYPE_LABELS.office_retail;
-  return [{
-    field: 'propertyType',
-    // Deliberately no business name: flag text reaches shared surfaces.
-    reason: `Commercial: Google lists ${label} at this address — confirm`,
-    priority: 'MEDIUM',
-  }];
-}
+// Marks a flag as resting on the Places listing, so storage and the pricing
+// call can drop it (nothing from Places is saved).
+const PLACES_FLAG_SOURCE = 'google_places';
 
 function scopeFlags(scope) {
   if (!scope) return [];
@@ -171,27 +162,29 @@ function scopeFlags(scope) {
       field: 'squareFootage',
       reason: `${scope.question} Square footage is not priced until this is answered — the building's and the satellite's size are not this business's space.`,
       priority: 'HIGH',
+      source: PLACES_FLAG_SOURCE,
     }];
   }
   if (scope.decision === SCOPE.SUITE) {
     return [{
       field: 'squareFootage',
-      reason: 'Sized as ONE suite from the business at this address (its type, not the building) — confirm the space\'s square footage on site.',
+      reason: 'Sized as ONE suite, as staff answered (by the business type, not the building) — confirm the space\'s square footage on site.',
       priority: 'MEDIUM',
     }];
   }
   return [];
 }
 
-// The admin-only profile keys; {} unless a business was identified, so a
-// gate-off profile gains none. The business NAME rides here only, never a
-// flag (flag text reaches shared surfaces).
+// The admin-only profile keys; {} unless a business scope applies, so a
+// gate-off profile gains none. `businessIdentity` and the suggestion are for
+// THIS response's screen only — storage and the pricing call drop them.
 function adminProfileFields(identity, scope, typedSubpremise, occupancyAnswer) {
-  if (!businessIdentified(identity)) return {};
+  if (!scope) return {};
   return {
-    serviceScopeDecision: scope?.decision || null,
-    serviceScopeQuestion: scope?.question || null,
-    // The CSR's answer rides the profile into the estimate inputs, so the
+    serviceScopeDecision: scope.decision,
+    serviceScopeQuestion: scope.question,
+    serviceScopeSuggestion: scope.suggestion,
+    // Staff's answer rides the profile into the estimate inputs, so the
     // pricing boundary and the save-time recompute both see it.
     occupancyAnswer: normalizeOccupancyAnswer(occupancyAnswer),
     businessIdentity: {
@@ -222,10 +215,11 @@ function unconfirmedScopeContext(baseCategory, baseSubtype) {
     question: OCCUPANCY_QUESTION,
     unitKey: null,
     source: (base) => base,
-    flags: [{ field: 'squareFootage', reason: UNCONFIRMED_SCOPE_REASON, priority: 'HIGH' }],
+    flags: [{ field: 'squareFootage', reason: UNCONFIRMED_SCOPE_REASON, priority: 'HIGH', source: PLACES_FLAG_SOURCE }],
     profileFields: {
       serviceScopeDecision: SCOPE.UNRESOLVED,
       serviceScopeQuestion: OCCUPANCY_QUESTION,
+      serviceScopeSuggestion: null,
       occupancyAnswer: null,
     },
   };
@@ -245,24 +239,26 @@ function buildBusinessScopeContext({
   occupancyAnswer = null,
 }) {
   if (identity?.unavailable === true) return unconfirmedScopeContext(baseCategory, baseSubtype);
+  // A record that positively says "residence" is never asked about: a house
+  // with a home business pinned at its number is still a house.
+  const askable = baseCategory === 'COMMERCIAL' || !recordBlocksCommercialFlip(recordPricingType);
+  const scope = askable ? resolveBusinessScope({ ...scopeSignals, identity, occupancyAnswer }) : null;
+  const confirmed = scope?.decision === SCOPE.SUITE || scope?.decision === SCOPE.BUILDING;
   const classification = applyBusinessClassification({
-    identity, baseCategory, baseSubtype, recordPricingType,
+    identity, baseCategory, baseSubtype, recordPricingType, confirmed,
   });
-  const scope = classification.category === 'COMMERCIAL'
-    ? resolveBusinessScope({ ...scopeSignals, identity, occupancyAnswer })
-    : null;
   return {
-    active: businessIdentified(identity),
+    active: Boolean(scope),
     category: classification.category,
     subtype: classification.subtype,
     flipped: classification.flipped,
     decision: scope?.decision || null,
     question: scope?.question || null,
-    unitKey: businessIdentified(identity) ? businessUnitKey(identity) : null,
-    // The detection source a flipped lookup reports; a record-typed
+    unitKey: scope ? businessUnitKey(identity) : null,
+    // The detection source a staff-confirmed flip reports; a record-typed
     // commercial lookup keeps its own source.
     source: (base) => (classification.flipped ? BUSINESS_DETECTION_SOURCE : base),
-    flags: [...classificationFlags(classification), ...scopeFlags(scope)],
+    flags: scopeFlags(scope),
     profileFields: adminProfileFields(identity, scope, scopeSignals.typedSubpremise, occupancyAnswer),
   };
 }
@@ -275,7 +271,7 @@ function effectiveSuiteUnitKey(typedUnitKey, businessScope) {
 }
 
 // The pricing-boundary refusal for a profile whose scope is still the open
-// question: a 409 the calculation route returns and the save-time recompute
+// question (any listed business staff have not answered about): a 409 the calculation route returns and the save-time recompute
 // rethrows (failClosed). An answered profile (the lookup re-run with the
 // CSR's occupancy answer, or the answer stamped on the profile) passes.
 // Returns the error to throw, or null.
@@ -304,6 +300,7 @@ module.exports = {
   assertScopeAnswered,
   OCCUPANCY_QUESTION,
   UNAVAILABLE_IDENTITY,
+  PLACES_FLAG_SOURCE,
   BUSINESS_DETECTION_SOURCE,
   normalizeOccupancyAnswer,
   businessIdentified,

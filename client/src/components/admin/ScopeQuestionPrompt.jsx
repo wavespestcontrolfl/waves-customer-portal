@@ -27,28 +27,31 @@ function businessLine(identity) {
   return null;
 }
 
-// Which button reads as chosen: the CSR's answer, else the scope the lookup
-// decided by itself (so staff can see it and change it).
-function chosenScope(answer, decision) {
-  if (answer) return answer;
-  if (decision === "commercial_suite") return "suite";
-  if (decision === "entire_commercial_building") return "building";
-  return "";
-}
+// What the lookup would guess, shown as a hint only. It is never a pressed
+// button: only staff's own answer is.
+const SUGGESTION_HINTS = {
+  suite: "Looks like one space of a shared building.",
+  building: "Looks like a stand-alone building.",
+};
+
+const ANSWERS = [
+  { value: "suite", label: "Just their space" },
+  { value: "building", label: "The whole building" },
+  { value: "none", label: "Not this business" },
+];
 
 /**
  * Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): shown in
  * the admin estimate tool when the lookup found a business at the address.
- * While `question` is set the estimate cannot be priced; answering re-runs
- * the lookup with the answer. When the lookup decided the scope by itself
- * (several tenants at the number = one suite) the two buttons still show, so
- * staff quoting the whole building can change it.
+ * Google only suggests; `answer` is the staff answer the profile carries
+ * (suite, building or none) and is the only thing that reads as chosen. While
+ * `question` is set the estimate cannot be priced; answering re-runs the
+ * lookup with the answer.
  */
 export default function ScopeQuestionPrompt({ profile, question, answer, busy, onAnswer }) {
   const line = businessLine(profile?.businessIdentity);
-  if (!question && !line) return null;
-  const decision = profile?.serviceScopeDecision || "";
-  const chosen = chosenScope(answer, decision);
+  if (!question && !line && !answer) return null;
+  const hint = answer ? null : SUGGESTION_HINTS[profile?.serviceScopeSuggestion];
   return (
     <section
       aria-label="Scope question"
@@ -61,28 +64,21 @@ export default function ScopeQuestionPrompt({ profile, question, answer, busy, o
         </>
       )}
       {question && <p className="m-0 mt-1 font-medium">{question}</p>}
-      {(question || answer || decision) && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+      {hint && <p className="m-0 mt-1 text-12 text-zinc-600">{hint}</p>}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {ANSWERS.map((a) => (
           <Button
+            key={a.value}
             size="sm"
-            variant={chosen === "suite" ? "primary" : "secondary"}
+            variant={answer === a.value ? "primary" : "secondary"}
             disabled={busy}
-            aria-pressed={chosen === "suite"}
-            onClick={() => onAnswer("suite")}
+            aria-pressed={answer === a.value}
+            onClick={() => onAnswer(a.value)}
           >
-            Just their space
+            {a.label}
           </Button>
-          <Button
-            size="sm"
-            variant={chosen === "building" ? "primary" : "secondary"}
-            disabled={busy}
-            aria-pressed={chosen === "building"}
-            onClick={() => onAnswer("building")}
-          >
-            The whole building
-          </Button>
-        </div>
-      )}
+        ))}
+      </div>
     </section>
   );
 }

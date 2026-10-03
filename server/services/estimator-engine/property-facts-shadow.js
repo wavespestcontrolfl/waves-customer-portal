@@ -14,7 +14,6 @@ const {
   selectPropertyFactsV2,
   deriveLegacyFields,
 } = require('../property-lookup/property-facts-v2');
-const { businessSuiteSignals } = require('./business-scope-engine');
 
 function positive(value) {
   const n = Number(value);
@@ -560,7 +559,7 @@ function buildMeasurementEvidence({
  * Run V2 selection in shadow and diff it against the V1 arbitration.
  * Returns null when there is nothing to select from. Never throws.
  */
-function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, propertyFacts, address, businessScope }) {
+function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, propertyFacts, address }) {
   try {
     const isCommercial = intent?.is_commercial === true;
     const tenant = propertyFacts?.tenant === true;
@@ -577,24 +576,20 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
     try {
       unitScopeSuites = require('./unit-scope-model').unitScopeGuardrailsEnabled();
     } catch { /* predicate unavailable — stay on prior behavior */ }
+    const unitSignal = hasUnitSignal({
+      tenant,
+      address: address || propertyRecord?.formattedAddress,
+      extraction,
+      enhanced: unitScopeSuites,
+    });
     const subpremiseSignalForScope = hasSubpremiseSignal({
       address: address || propertyRecord?.formattedAddress,
       extraction,
     });
-    // A business the lookup identified as one suite (GATE_LOOKUP_BUSINESS_IDENTITY)
-    // counts as unit occupancy + part-building evidence; unchanged otherwise.
-    const { unitSignal, partBuilding } = businessSuiteSignals({
-      unitSignal: hasUnitSignal({
-        tenant,
-        address: address || propertyRecord?.formattedAddress,
-        extraction,
-        enhanced: unitScopeSuites,
-      }),
-      partBuilding: hasPartBuildingEvidence({
-        subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
-        landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
-      }),
-    }, businessScope);
+    const partBuilding = hasPartBuildingEvidence({
+      subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
+      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+    });
     const condoRecord = condoRecordOccupancy({
       condoRecord: isCondoRecord({
         aggregated, propertyType,

@@ -38,7 +38,7 @@ jest.mock('../services/commercial-suite-size', () => {
   };
 });
 
-const { performPropertyLookup, _private } = require('../routes/property-lookup-v2');
+const { performPropertyLookup, translateV2CallToV1Input, _private } = require('../routes/property-lookup-v2');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { saveLookup } = require('../services/property-lookup/lookup-cache');
 
@@ -112,7 +112,19 @@ afterEach(() => {
 });
 
 const run = (options = {}) => performPropertyLookup(ADDRESS, { persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true, ...options });
-const NEW_KEYS = ['serviceScopeDecision', 'serviceScopeQuestion', 'businessIdentity'];
+const NEW_KEYS = ['serviceScopeDecision', 'serviceScopeQuestion', 'serviceScopeSuggestion', 'occupancyAnswer', 'businessIdentity'];
+const QUESTION = 'Are we treating just your space or the whole building?';
+const withoutNewKeys = (profile) => {
+  const rest = { ...profile, fieldVerifyFlags: (profile.fieldVerifyFlags || []).filter((f) => f.source !== 'google_places') };
+  for (const key of NEW_KEYS) delete rest[key];
+  return rest;
+};
+const gateOffBaseline = async (options) => {
+  delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY;
+  const profile = (await run(options)).enriched;
+  process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+  return profile;
+};
 
 describe('gate off (the default)', () => {
   test('no Places request, no new profile field, nothing about a business on the profile', async () => {
@@ -149,72 +161,88 @@ describe('gate off (the default)', () => {
 describe('gate on', () => {
   beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
 
-  test('trigger case: scope_unresolved, the question, and NO priced size', async () => {
-    const result = await run();
-    const p = result.enriched;
+  test('trigger case, unanswered: Places only suggests. The profile is the gate-off profile plus the open question, and pricing is refused', async () => {
+    const baseline = await gateOffBaseline();
+    const p = (await run()).enriched;
     expect(placesFetch).toHaveBeenCalledTimes(1);
     // The request centers on the geocode point.
     expect(JSON.parse(placesFetch.mock.calls[0][1].body).locationRestriction.circle).toEqual({
       center: { latitude: 27.4, longitude: -82.5 }, radius: 60,
     });
     expect(p.serviceScopeDecision).toBe('scope_unresolved');
-    expect(p.serviceScopeQuestion).toBe('Are we treating just your space or the whole building?');
-    // Not the whole building's, not the satellite-guessed 9,000 sq ft.
-    expect(p.homeSqFt).toBe(0);
-    expect(p.footprint).toBe(0);
-    expect(p.suiteSize).toBeUndefined();
-    expect(p.unitScopedLookup).toBe(true);
-    // Classified commercial by the business verdict, flagged.
-    expect(p.category).toBe('COMMERCIAL');
-    expect(p.isCommercial).toBe(true);
-    expect(p.commercialDetectionSource).toBe('google_places_business');
-    expect(p.commercialSubtype).toBe('salon_spa');
-    const high = p.fieldVerifyFlags.find((f) => f.priority === 'HIGH' && /whole building/.test(f.reason));
-    expect(high).toMatchObject({ field: 'squareFootage' });
-    const medium = p.fieldVerifyFlags.find((f) => f.field === 'propertyType' && f.priority === 'MEDIUM');
-    expect(medium.reason).toBe('Commercial: Google lists a salon or spa at this address — confirm');
+    expect(p.serviceScopeQuestion).toBe(QUESTION);
+    expect(p.serviceScopeSuggestion).toBeNull();
+    expect(p.occupancyAnswer).toBeNull();
+    // Nothing the listing says is applied: classification and sizes are the gate-off ones.
+    expect(withoutNewKeys(p)).toEqual(baseline);
+    expect(String(p.commercialDetectionSource)).not.toMatch(/business/);
+    const asks = p.fieldVerifyFlags.filter((f) => f.source === 'google_places');
+    expect(asks).toEqual([expect.objectContaining({ field: 'squareFootage', priority: 'HIGH' })]);
+    expect(asks[0].reason).toContain(QUESTION);
+    expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'COMMERCIAL_SCOPE_UNRESOLVED', statusCode: 409 }));
   });
 
-  test('the business NAME stays out of every flag; it rides only the admin businessIdentity field', async () => {
+  test('the business NAME and type stay out of every flag; they ride only the admin businessIdentity field', async () => {
     const p = (await run()).enriched;
-    expect(JSON.stringify(p.fieldVerifyFlags)).not.toMatch(/Example Nail Bar/);
+    expect(JSON.stringify(p.fieldVerifyFlags)).not.toMatch(/Example Nail Bar|salon/i);
     expect(p.businessIdentity).toMatchObject({
       name: 'Example Nail Bar', type: 'salon_spa', matchedBy: 'street_number', tenantsAtNumber: 1,
     });
   });
 
-  test('occupancy "suite": the suite path, sized by the business type default (salon 1,200)', async () => {
+  test('staff answer "suite": commercial, the business type, the suite path sized by the type default (salon 1,200)', async () => {
     const p = (await run({ occupancyAnswer: 'suite' })).enriched;
     expect(p.serviceScopeDecision).toBe('commercial_suite');
     expect(p.serviceScopeQuestion).toBeNull();
+    expect(p.occupancyAnswer).toBe('suite');
+    expect(p.category).toBe('COMMERCIAL');
+    expect(p.isCommercial).toBe(true);
+    expect(p.commercialSubtype).toBe('salon_spa');
+    expect(p.commercialDetectionSource).toBe('staff_confirmed_business');
     expect(p.homeSqFt).toBe(1200);
     expect(p.footprint).toBe(1200);
     expect(p.suiteSize).toMatchObject({ value: 1200, source: 'suite_type_default' });
     expect(p.fieldVerifyFlags.some((f) => f.field === 'squareFootage' && f.priority === 'MEDIUM')).toBe(true);
-    expect(p.fieldVerifyFlags.some((f) => f.priority === 'HIGH' && /whole building/.test(f.reason))).toBe(false);
+    expect(p.fieldVerifyFlags.some((f) => f.source === 'google_places')).toBe(false);
+    const { unresolvedScopeError } = require('../services/property-lookup/business-scope');
+    expect(unresolvedScopeError(p)).toBeNull();
   });
 
-  test('occupancy "building": building scope, the building size is the size, no suite sizing', async () => {
+  test('staff answer "building": building scope, the building size is the size, no suite sizing', async () => {
     const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
     const p = (await run({ occupancyAnswer: 'building' })).enriched;
     expect(p.serviceScopeDecision).toBe('entire_commercial_building');
+    expect(p.category).toBe('COMMERCIAL');
     expect(p.homeSqFt).toBe(9000);
     expect(p.suiteSize).toBeUndefined();
     expect(p.unitScopedLookup).toBe(false);
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
   });
 
-  test('a typed "Ste 3" plus a matched business is a suite with no question', async () => {
-    const result = await performPropertyLookup('100 Example Plaza Dr Ste 3, Examplecity, FL 00000', {
-      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true,
-    });
-    const p = result.enriched;
-    expect(p.serviceScopeDecision).toBe('commercial_suite');
+  test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
+    const baseline = await gateOffBaseline();
+    const p = (await run({ occupancyAnswer: 'none' })).enriched;
+    expect(p.occupancyAnswer).toBe('none');
+    expect(p.serviceScopeDecision).toBeNull();
     expect(p.serviceScopeQuestion).toBeNull();
+    expect(p.businessIdentity).toMatchObject({ name: 'Example Nail Bar' });
+    expect(withoutNewKeys(p)).toEqual(baseline);
+    const { unresolvedScopeError } = require('../services/property-lookup/business-scope');
+    expect(unresolvedScopeError(p)).toBeNull();
+  });
+
+  test('a typed "Ste 3" plus a matched business only suggests a suite; staff answering makes it one', async () => {
+    const typed = (options = {}) => performPropertyLookup('100 Example Plaza Dr Ste 3, Examplecity, FL 00000', {
+      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true, ...options,
+    });
+    const asked = (await typed()).enriched;
+    expect(asked).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
+    const p = (await typed({ occupancyAnswer: 'suite' })).enriched;
+    expect(p.serviceScopeDecision).toBe('commercial_suite');
     expect(p.homeSqFt).toBe(1200);
   });
 
-  test('a typed Ste 999 with tenants only in other suites: still a shared-building suite, sized by the generic bucket, never the neighbors\' type', async () => {
+  test('a typed Ste 999 with tenants only in other suites: a suggested suite; answered, sized by the generic bucket, never the neighbors\' type', async () => {
     placesReply = () => ({
       ok: true,
       json: async () => ({
@@ -224,51 +252,59 @@ describe('gate on', () => {
         ],
       }),
     });
-    const result = await performPropertyLookup('100 Example Plaza Dr Ste 999, Examplecity, FL 00000', {
-      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true,
+    const typed = (options = {}) => performPropertyLookup('100 Example Plaza Dr Ste 999, Examplecity, FL 00000', {
+      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true, ...options,
     });
-    const p = result.enriched;
+    expect((await typed()).enriched).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
+    const p = (await typed({ occupancyAnswer: 'suite' })).enriched;
     expect(p.serviceScopeDecision).toBe('commercial_suite');
     expect(p.commercialSubtype).toBe('office_retail');
     expect(p.homeSqFt).toBe(1500);
     expect(p.businessIdentity.type).toBe('office_retail');
   });
 
-  test('a matched place that carries its own subpremise is a suite with nothing typed', async () => {
+  test('a matched place that carries its own subpremise suggests a suite with nothing typed', async () => {
     placesReply = () => ({ ok: true, json: async () => ({ places: [placeAt({ subpremise: '103' })] }) });
     const p = (await run()).enriched;
-    expect(p.serviceScopeDecision).toBe('commercial_suite');
+    expect(p).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
     expect(p.businessIdentity.matchedBy).toBe('subpremise');
   });
 
-  test('a multi-tenant street number is a suite (tenants at the number), typed by their shared type', async () => {
+  test('a multi-tenant street number suggests a suite; answered, it is typed by the tenants\' shared type', async () => {
     placesReply = () => ({
       ok: true,
       json: async () => ({ places: [placeAt({ id: 'places/EXAMPLE1' }), placeAt({ id: 'places/EXAMPLE2', name: 'Example Hair', primaryType: 'hair_salon' })] }),
     });
-    const p = (await run()).enriched;
+    const asked = (await run()).enriched;
+    expect(asked).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
+    expect(asked.businessIdentity).toMatchObject({ matchedBy: 'ambiguous_tenants', tenantsAtNumber: 2, type: 'salon_spa' });
+    const p = (await run({ occupancyAnswer: 'suite' })).enriched;
     expect(p.serviceScopeDecision).toBe('commercial_suite');
-    expect(p.businessIdentity).toMatchObject({ matchedBy: 'ambiguous_tenants', tenantsAtNumber: 2, type: 'salon_spa' });
+    expect(p.commercialSubtype).toBe('salon_spa');
     expect(p.homeSqFt).toBe(1200);
   });
 
-  test('a freestanding business with a county record and no part-building evidence is building scope: the county size stands', async () => {
+  test('a freestanding business with a county record suggests the building and still asks; answered, the county size stands', async () => {
     lookupPropertyFromAITrio.mockImplementation(async () => freestandingCountyRecord());
-    const p = (await run()).enriched;
+    const asked = (await run()).enriched;
+    expect(asked).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'building' });
+    // An open question on a commercial lookup prices no size.
+    expect(asked.homeSqFt).toBe(0);
+    const p = (await run({ occupancyAnswer: 'building' })).enriched;
     expect(p.serviceScopeDecision).toBe('entire_commercial_building');
     expect(p.homeSqFt).toBe(4000);
     expect(p.suiteSize).toBeUndefined();
     expect(p.fieldVerifyFlags.some((f) => /whole building/.test(f.reason))).toBe(false);
   });
 
-  test('a freestanding business with neighbors around it is still asked, never silently a suite', async () => {
+  test('a freestanding business with neighbors around it is asked with no suggestion, never silently a suite', async () => {
     lookupPropertyFromAITrio.mockImplementation(async () => freestandingCountyRecord());
     placesReply = () => ({
       ok: true,
       json: async () => ({ places: [placeAt(), placeAt({ id: 'places/EXAMPLE2', name: 'Example Deli', primaryType: 'restaurant', number: '110' })] }),
     });
     const p = (await run()).enriched;
-    expect(p.serviceScopeDecision).toBe('scope_unresolved');
+    expect(p).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: null });
     expect(p.homeSqFt).toBe(0);
   });
 
@@ -303,8 +339,8 @@ describe('gate on', () => {
     }));
     const p = (await run()).enriched;
     expect(p.category).toBe('RESIDENTIAL');
-    expect(p.serviceScopeDecision).toBeNull();
-    expect(p.fieldVerifyFlags.some((f) => /Google lists/.test(f.reason))).toBe(false);
+    for (const key of NEW_KEYS) expect(p).not.toHaveProperty(key);
+    expect(p.fieldVerifyFlags.some((f) => f.source === 'google_places')).toBe(false);
   });
 });
 
@@ -371,17 +407,28 @@ describe('the stored lookup snapshot', () => {
   const { enrichedSnapshotForStorage } = jest.requireActual('../services/property-lookup/lookup-cache');
   beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
 
-  test('the profile a fresh lookup returns names the business; the snapshot stored for it does not', async () => {
+  test('unanswered: the stored snapshot carries no listing, no suggestion, no open question and no flag resting on the listing', async () => {
     const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
     expect(result.enriched.businessIdentity).toMatchObject({ name: 'Example Nail Bar' });
     const [, saved] = saveLookup.mock.calls[0];
     const stored = enrichedSnapshotForStorage(saved.enriched);
-    expect(stored).not.toHaveProperty('businessIdentity');
-    expect(JSON.stringify(stored)).not.toMatch(/Example Nail Bar|nail_salon|places\/EXAMPLE1/);
-    // Our own decision stays for lead history and the replay harness.
-    expect(stored).toMatchObject({ serviceScopeDecision: 'scope_unresolved', category: 'COMMERCIAL' });
+    for (const key of NEW_KEYS) expect(stored).not.toHaveProperty(key);
+    expect(stored.fieldVerifyFlags.some((f) => f.source === 'google_places')).toBe(false);
+    expect(JSON.stringify(stored)).not.toMatch(/Example Nail Bar|nail_salon|salon_spa|places\/EXAMPLE1|whole building/);
+    expect(stored).toEqual(withoutNewKeys(saved.enriched));
     // The live response is not mutated by storing it.
     expect(saved.enriched.businessIdentity).toMatchObject({ name: 'Example Nail Bar' });
+    expect(saved.enriched.serviceScopeDecision).toBe('scope_unresolved');
+  });
+
+  test('answered: the snapshot keeps what staff confirmed (decision, answer, type) and still not the listing', async () => {
+    await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true, occupancyAnswer: 'suite' });
+    const [, saved] = saveLookup.mock.calls[0];
+    const stored = enrichedSnapshotForStorage(saved.enriched);
+    expect(stored).toMatchObject({ serviceScopeDecision: 'commercial_suite', occupancyAnswer: 'suite', commercialDetectionSource: 'staff_confirmed_business' });
+    expect(stored).not.toHaveProperty('businessIdentity');
+    expect(stored).not.toHaveProperty('serviceScopeSuggestion');
+    expect(JSON.stringify(stored)).not.toMatch(/Example Nail Bar|nail_salon/);
   });
 
   test('a profile with no business identity is stored as it is', () => {

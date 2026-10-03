@@ -583,8 +583,8 @@ function verifyEvidenceQuotes(intent, context) {
 }
 
 // The red verdicts decided from facts stamped before pricing, in order: an
-// unanswered business scope (GATE_LOOKUP_BUSINESS_IDENTITY: no price until
-// the CSR says "just your space or the whole building"), then the category
+// unconfirmed business scope (GATE_LOOKUP_BUSINESS_IDENTITY: no price until
+// staff confirm "just your space or the whole building"), then the category
 // conflict (read only with unit-scope guardrails on).
 function scopeRedVerdict(propertyFacts, guardrailsOn) {
   const unresolved = scopeUnresolvedVerdict(propertyFacts);

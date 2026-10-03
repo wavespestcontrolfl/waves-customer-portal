@@ -353,13 +353,26 @@ const EVIDENCE_BACKFILL_KEYS = {
   _commercialSuiteSize: 'TRUE',
 };
 
-// The profile as it may be stored. The business a Places lookup listed at the
-// address (GATE_LOOKUP_BUSINESS_IDENTITY: name, type, tenant count) is shown
-// for one request and never kept: Google's Places policies allow storing a
-// place ID and nothing else. The scope decision is our own and stays.
+// The profile as it may be stored. Google's Places policies allow storing a
+// place ID and nothing else, and Places only suggests (owner 2026-10-03), so
+// what a Places listing put on the profile for one screen is dropped: the
+// listed business, the suggested scope, the flags resting on the listing
+// and, while staff have not answered, the open question itself. What staff
+// answered (the decision and the answer) is theirs and stays.
 function enrichedSnapshotForStorage(enriched) {
-  if (!enriched || typeof enriched !== 'object' || !('businessIdentity' in enriched)) return enriched;
-  const { businessIdentity: _dropped, ...rest } = enriched;
+  if (!enriched || typeof enriched !== 'object') return enriched;
+  if (!('businessIdentity' in enriched) && !('serviceScopeDecision' in enriched)) return enriched;
+  const {
+    businessIdentity: _identity, serviceScopeSuggestion: _suggestion, ...rest
+  } = enriched;
+  if (!rest.occupancyAnswer) {
+    delete rest.serviceScopeDecision;
+    delete rest.serviceScopeQuestion;
+    delete rest.occupancyAnswer;
+  }
+  if (Array.isArray(rest.fieldVerifyFlags)) {
+    rest.fieldVerifyFlags = rest.fieldVerifyFlags.filter((f) => f?.source !== 'google_places');
+  }
   return rest;
 }
 
