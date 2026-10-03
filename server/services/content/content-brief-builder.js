@@ -510,7 +510,11 @@ class ContentBriefBuilder {
     // regardless), SERP profiling competitor-brand keywords burns API spend
     // for data the router must ignore, and a stray customer-cluster topic
     // match could misclassify the FAQ policy for a consumer-protection post.
-    const operatorPinned = interceptSeeder.isOperatorIntercept(opp);
+    // A "Suggest a post" row shares the bucket but nobody authored it: its
+    // signals are gathered like any mined topic's, so the router's SERP
+    // safety demotions and the quality gate's SERP check see its intent
+    // (GitHub Codex P1 on ba9bed50fc).
+    const operatorPinned = interceptSeeder.isOperatorIntercept(opp) && !isBlogSearchSuggestion(opp);
     const signals = operatorPinned
       ? { serp_profile: null, customer_signal: null, conversion_feedback: null }
       : await this._gatherSignals(opp, { skipSerp });
@@ -987,6 +991,10 @@ class ContentBriefBuilder {
         // operator_intercept bucket, so downstream price policy needs this
         // to tell them apart after the content_briefs round-trip.
         intercept: Boolean(opportunity.signal_metadata?.intercept_brief),
+        // "Suggest a post" provenance (report-blog-suggestion.js): the quality
+        // gate waives GSC evidence for it (a new topic has no traffic) but not
+        // SERP evidence, and never treats it as operator-authored.
+        ...(isBlogSearchSuggestion(opportunity) ? { suggested: true, suggested_at: opportunity.signal_metadata?.suggested_at || null } : {}),
         // Fallback covers rows mined BEFORE seasonal_rising started writing
         // the canonical key — without it those queued rows keep failing
         // gsc_signal_attached until they are re-mined.

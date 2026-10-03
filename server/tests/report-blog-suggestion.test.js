@@ -209,6 +209,17 @@ describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
     }
   });
 
+  test('a name among the words a search drops is refused: a capital past the first word, or "will" past it (GitHub Codex P1 on ba9bed50fc)', async () => {
+    for (const phrase of ['ants lawn Will', 'ants lawn will', 'ants In the lawn']) {
+      const knex = queueKnex();
+      expect(await suggestReportBlogPost(knex, { phrase, actorId: 'admin-1' })).toEqual({ error: 'not_a_topic' });
+      expect(knex.calls).toEqual([]);
+    }
+    for (const phrase of ['will ants come back after treatment', 'Will ants come back', 'ghost ants in the kitchen', 'Standing water']) {
+      expect(phraseProblem(normalizePhrase(phrase), phrase)).toBeNull();
+    }
+  });
+
   test('only text is a phrase: an object or a list is refused before anything is read (GitHub Codex P2 on 45144528b8)', async () => {
     for (const phrase of [{ topic: 'standing water' }, ['standing', 'water'], 42, null]) {
       const knex = queueKnex();

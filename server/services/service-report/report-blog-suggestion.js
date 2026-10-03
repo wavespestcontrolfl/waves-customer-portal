@@ -9,10 +9,14 @@
  * search as a topic. It becomes one opportunity_queue row the existing
  * autonomous chain claims, writes, gates and publishes:
  *  - bucket 'operator_intercept' with signal_metadata.operator_pinned: the
- *    one bucket the chain takes without search-traffic evidence (the router
- *    pin, the brief builder, the quality gate's SERP/GSC exemption and the
- *    runner's skipSerp all key on it); any other bucket would be written and
- *    then skipped for having no GSC or SERP signal;
+ *    one bucket the chain takes without search-traffic history (the
+ *    router's pinned action and the quality gate's GSC waiver key on it).
+ *    Nobody authored its brief, so unlike a manifest intercept it is
+ *    SERP-profiled: the router's public-health, navigational and
+ *    do_not_publish demotions stop it as they stop any mined topic, the gate
+ *    still requires SERP evidence, and a list-shaped topic keeps the
+ *    listicle contract (isBlogSearchSuggestion; GitHub Codex P1 on
+ *    ba9bed50fc);
  *  - action new_supporting_blog, the phrase as its query, no page, no city
  *    (the facts gate is then not applicable), the service and specialty
  *    topic inferred from the phrase as the GSC miner infers them (the FAQ
@@ -101,11 +105,28 @@ async function namesACustomer(knex, phrase, customerId = null) {
   return Boolean(match);
 }
 
+// The words a search drops (filler words, single letters) are never checked
+// against the site's words, so a name among them would pass unread (GitHub
+// Codex P1 on ba9bed50fc): one typed with a capital anywhere but the start
+// reads as a name ("ants lawn Will"), and "will", the one filler word that is
+// also a common first name, stands only as a question's first word ("will
+// ants come back").
+function droppedWordName(typed) {
+  const { searchTerms } = require('./report-blog-post');
+  const words = String(typed).trim().split(/[^A-Za-z0-9]+/).filter(Boolean);
+  return words.some((word, i) => {
+    const lower = word.toLowerCase();
+    if (lower === 'will' && i > 0) return true;
+    return i > 0 && /[A-Z]/.test(word) && !searchTerms(lower).length;
+  });
+}
+
 // Why a phrase cannot be a topic, or null. `typed` is the phrase as the
 // person typed it.
 function phraseProblem(phrase, typed = phrase) {
   const { searchTerms } = require('./report-blog-post');
   if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !PLAIN_PHRASE_RE.test(phrase) || !searchTerms(phrase).length) return 'not_a_topic';
+  if (droppedWordName(typed)) return 'not_a_topic';
   const { isTransactionalQuery } = require('../content/scoring-config');
   if (isTransactionalQuery(phrase)) return 'not_a_topic';
   const { geoBlockReason } = require('../content/topic-targeting-gate');
