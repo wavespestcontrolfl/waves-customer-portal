@@ -178,6 +178,12 @@ describe('listRecent: whether THIS outcome went out', () => {
     const out = await listWith([draftRow({ id: 10, outcome: 'drafted', body: 'Hi there' })], [request({ id: 'rr-9', customer_id: 'cust-9', custom_body: 'Hi there' })]);
     expect(out.drafts[0].sentAt).toEqual(new Date('2026-10-02T15:04:00Z'));
     expect(mockEvidence).toHaveBeenCalledWith('rr-9', 'cust-9');
+    // a failed first attempt followed by a successful same-body retry (the draft is reused the same day) is sent
+    const retried = await listWith([draftRow({ id: 12, outcome: 'drafted', body: 'Hi there' })], [
+      request({ id: 'rr-a', custom_body: 'Hi there' }),
+      request({ id: 'rr-b', custom_body: 'Hi there', created_at: new Date('2026-10-02T15:20:00Z'), sms_sent_at: new Date('2026-10-02T15:21:00Z') }),
+    ]);
+    expect(retried.drafts[0].sentAt).toEqual(new Date('2026-10-02T15:21:00Z'));
     // no evidence and no stamp: not sent
     expect((await listWith([draftRow({ id: 11, outcome: 'drafted', body: 'Hi there' })], [request({ custom_body: 'Hi there' })])).drafts[0].sentAt).toBeNull();
   });
