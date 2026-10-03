@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/rate-review-comms.js',
+    snippet: "const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');",
+    reason: 'handleSmsDeliveryFailure: keyed by twilio_sid (the failed text Twilio is reporting) and reads only the customer id — a send reservation never has a sid until it is promoted to a real send, so no placeholder can be read as a message.',
+  },
+  {
     file: 'services/contact-report-text.js',
     snippet: "const existing = await trx('sms_log')",
     reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',

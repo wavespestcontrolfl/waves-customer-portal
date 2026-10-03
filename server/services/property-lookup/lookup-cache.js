@@ -552,6 +552,9 @@ async function saveLookup(address, result, attemptId) {
   // Never cache a failed lookup — a transient outage must not become a
   // 180-day "no data" answer.
   if (!result?.propertyRecord) return;
+  // A context-only record (parent parcel, no facts: every fact provider
+  // failed or found nothing) is the same failed lookup with a note attached.
+  if (result.propertyRecord._contextOnly === true) return;
   // Same rule for partial lookups: no geocode means no satellite imagery and
   // no vision pass — a cached no-geometry row would skip both for the whole
   // TTL (neither the estimator UI nor the public route sends refresh).

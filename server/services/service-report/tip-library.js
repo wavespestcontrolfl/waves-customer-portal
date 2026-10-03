@@ -130,12 +130,14 @@ const LAWN_LABEL_FINDINGS = Object.freeze({
   'drought stress': ['drought'],
 });
 
-// Finding keys from one assessment run's technician review. Only a finding
-// the technician KEPT counts (a rejected one has keep: false), and a
-// technician-added detail counts unless it rules the condition out. A run
-// not yet reviewed has neither list and gives nothing.
-function lawnFindingsFromRun(run) {
-  if (!run) return [];
+// The rows of one assessment run's technician review that count: only a
+// finding the technician KEPT (a rejected one has keep: false), and a
+// technician-added detail unless it rules the condition out (negated). A run
+// not yet reviewed has neither list and gives nothing. Shared by the tip
+// ranking (lawnFindingsFromRun) and the report's "What the photos showed"
+// block (lawn-photo-findings.js) so both read the review the same way.
+function keptRunRows(run) {
+  if (!run) return { reviewed: [], added: [] };
   const list = (value) => {
     let rows = value;
     if (typeof rows === 'string') {
@@ -143,12 +145,17 @@ function lawnFindingsFromRun(run) {
     }
     return Array.isArray(rows) ? rows : [];
   };
-  const kept = [
-    ...list(run.reviewed_findings).filter((row) => row && row.keep !== false),
-    ...list(run.added_details).filter((row) => row && row.negated !== true),
-  ];
+  return {
+    reviewed: list(run.reviewed_findings).filter((row) => row && row.keep !== false),
+    added: list(run.added_details).filter((row) => row && row.negated !== true),
+  };
+}
+
+// Finding keys from one assessment run's technician review (keptRunRows).
+function lawnFindingsFromRun(run) {
+  const { reviewed, added } = keptRunRows(run);
   const found = new Set();
-  for (const row of kept) {
+  for (const row of [...reviewed, ...added]) {
     const keys = Object.prototype.hasOwnProperty.call(LAWN_LABEL_FINDINGS, row.label) ? LAWN_LABEL_FINDINGS[row.label] : [];
     for (const key of keys) found.add(key);
   }
@@ -1127,6 +1134,7 @@ module.exports = {
   LAWN_LABEL_FINDINGS,
   lawnFindingsFromAssessment,
   lawnFindingsFromRun,
+  keptRunRows,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,

@@ -2402,6 +2402,49 @@ visit's assessment carries the marker, so a legacy visit keeps its stored PDF.
 With the gate off, or on a visit without the marker, the payload and the
 signature are byte-identical to before.
 
+`GATE_LAWN_REPORT_PHOTO_FINDINGS` (dark; effective only while
+`GATE_LAWN_REPORT_PHOTO_SET` is also live and a `photoSet` exists), "What the
+photos showed" (`reportV2.photoFindings`): `[{ label, photos: [{ url, label }],
+confirm? }]`, at most 4 findings. The key exists only where a block was built
+and is an empty list when every finding is hidden by its card; it is never on
+`lawnAssessment`. Off, the payload and the PDF cache key are byte-identical to
+`GATE_LAWN_REPORT_PHOTO_SET` alone, and the run is never read. On, it is built
+only from the visit's CURRENT confirmed assessment's reviewed run
+(`lawn_assessment_runs.reviewed_at` set), from `reviewed_findings` the technician
+kept (the same keep rule as the tip ranking, `keptRunRows` in `tip-library.js`).
+Only SYMPTOM labels print, from the explicit allowlist `PHOTO_FINDING_LABELS`
+(capitalized by code): weed pressure, thinning turf, color and nutrient stress,
+color stress, general lawn stress, a lawn condition we are monitoring. Named
+causes (chinch bug, caterpillar, grub, large patch, gray leaf spot, dollar spot,
+fungal activity), "drought stress", "overwatering signal" and "no major visible
+stress" never print here. A finding also prints only while the report's own
+category card for that topic reads `watch` or `needs_attention`
+(`reportV2.diagnosis`: weed pressure reads `weed_pressure`, thinning turf
+`coverage`, the two color labels `color_vigor`, the two generic labels
+`damage_disease_signals`); a healthy, strong, tracking, unknown or missing card
+leaves it out, and the cap of four applies after that check. Most severe first
+(stored order inside a severity). `photos` are the photos the finding cites
+(`photo_refs` mapped through the run's `photo_ids`), at most 3, each reusing a
+URL and label of `photoSet`; a cited photo that is not in the set has no
+thumbnail, and a finding with no link prints with none. `confirm` appears only
+for a finding the technician marked `can_determine: false`, as the one fixed
+sentence "The photos from this visit cannot confirm this. A {blade close-up |
+trouble spot} photo would let us confirm it.", naming a cause-supporting shot
+(shared shot list `supportsCause`) that neither the finding's photos nor the rest
+of the visit's set contain; if the data cannot name one, there is no sentence.
+Stored free text (`observed_evidence`, `cannot_determine_reason`,
+`confirmation_step`, `customer_wording`, `name`) is never read. The block is
+outside the lead's word budget. It is opt-in per render: only the `/data` render,
+the direct PDF route and the PDF queue read the run, `/ask` never does. All or
+nothing: a failed run read omits the block and counts into
+`imageResolutionFailures` (so that PDF is not cached), and so does a built block
+that never reaches `reportV2`. The PDF cache signature gains `:pf=<hash>`
+(findings, their photo numbers, the run's photo order) only for a visit with a
+printable selection, so other visits keep their key. The web report and the PDF
+(`ServiceReportDocument`) print the same block; thumbnails link on the web and
+never in print or the browser's print of the live page. The server probe
+(`collectRenderedImageUrls`) checks the thumbnails beside the set.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
@@ -2834,7 +2877,13 @@ Content-Disposition; no view-analytics writes on this route),
 32-hex token format gate, 60 req/min rate limit, privacy headers
 `no-store`/`noindex`/`no-referrer`, generic 404; payload is first name +
 the price change only — no address/email/PII; view counted for the
-delivery record),
+delivery record; an annual rate review notice adds `review` — the
+letter frozen at send: service line name, old/new rate per application
+or per prepaid year, effective date, the per-line reason from stored
+ranking facts and the owner's cost block, still no address/email/PII;
+a rate-review notice not stamped delivered (a draft, a send in flight,
+or a send whose outcome is uncertain) is a generic 404, never counted
+or flipped to viewed),
 `/api/public/products` (read-only export; returns only active +
 customer_visibility=public + content_status=approved_for_public products;
 excludes pricing, vendor, SKU, dilution, MOA, inventory fields),

@@ -17,6 +17,7 @@ const {
 } = require('../services/autopay-eligibility');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
@@ -28,6 +29,48 @@ function getStripe() {
   if (!stripeConfig.secretKey) return null;
   _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
   return _stripe;
+}
+
+// Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-applied
+// rate change shows on the billing card as the upcoming rate and the next
+// charge at it. The charge comes from the one surcharge authority for the
+// method Auto Pay will charge, over the account's whole debit — never
+// base-rate arithmetic; only the monthly dues have an exact next charge
+// (amount + date); no Auto Pay method, a pause covering that date, or any
+// other lane = nothing to announce (nextCharge null). Gate off or
+// nothing pending = no field (byte-identical payload); a read failure omits
+// the field, never the card.
+async function rateChangesField(customerId, { autopayEnabled, method, funding, customer, monthlyBilling }) {
+  try {
+    const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
+    if (!changes.length) return {};
+    // An annual-prepay invoice still awaiting payment: the dues cron skips the account
+    // (getPaymentPendingCustomerIds), so no monthly charge is announced. Unreadable = none.
+    const prepayPending = await require('../services/annual-prepay-renewals')
+      .getPaymentPendingCustomerIds(undefined, undefined, { throwOnError: true })
+      .then((ids) => [...ids].map(String).includes(String(customerId)), () => true);
+    const out = { rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
+      const at = chargeDate ? new Date(`${chargeDate}T16:00:00Z`) : null;
+      // Announced only when that debit will really run on this method: the
+      // account still bills monthly dues (the lane the cron charges), Auto
+      // Pay is on, no prepay invoice is pending, no pause covers the date (the cron's isPaused), service is
+      // not paused after failed payments (the cron skips service_paused_at) and
+      // the method is not a card expired by then (charge() refuses it).
+      const runs = monthlyBilling && autopayEnabled && method && chargeCents > 0 && at
+        && !prepayPending && !customer.service_paused_at && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
+      const charge = runs ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
+      return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
+    }) };
+    // The card's own "Next charge" is the same debit when the dates meet:
+    // it must state the new amount too, never two totals for one charge.
+    const nextDay = dateOnlyString(customer.next_charge_date);
+    const sameDebit = out.rate_changes.map((c) => c.nextCharge).filter((c) => c && nextDay && c.date === nextDay).pop();
+    if (sameDebit) Object.assign(out, { next_charge_amount: sameDebit.total, next_charge_base_amount: sameDebit.base, next_charge_surcharge_amount: sameDebit.surcharge });
+    return out;
+  } catch (err) {
+    logger.warn(`[customer-autopay] upcoming rate changes read failed: ${err.message}`);
+    return {};
+  }
 }
 
 async function resolveAutopayCardFunding(paymentMethod) {
@@ -82,7 +125,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
-        'ach_status',
+        'ach_status', 'service_paused_at',
       )
       .first();
 
@@ -207,6 +250,8 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
+      // A cancelled account's read-only session: no upcoming rate (its service has ended).
+      ...(cancelledRead ? {} : await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer, monthlyBilling: !nonMonthlyBilling })),
     });
   } catch (err) { next(err); }
 });
