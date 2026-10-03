@@ -137,11 +137,17 @@ function getServiceContact(customer) {
 // primary account holder as a coherent identity (phone AND name together —
 // never the primary's phone addressed with the contact's name). Email
 // callers keep getServiceContact, which stays ungated.
-function getServiceContactSmsRecipient(customer) {
+// `heldPhoneKeys` (optional Set of last-10 keys): slot phones whose own
+// opt-in ask is not confirmed yet. A send path never calls this directly:
+// it goes through recipient-optin.js resolveServiceContactSmsRecipient,
+// which reads those keys and passes them here.
+function getServiceContactSmsRecipient(customer, { heldPhoneKeys = null } = {}) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
+  const svcKey = svcPhone.replace(/\D/g, '').slice(-10);
   if (svcPhone && (!serviceContactsConsented(customer)
-    || unconsentedSlotPhoneKeys(customer).has(svcPhone.replace(/\D/g, '').slice(-10)))) {
+    || unconsentedSlotPhoneKeys(customer).has(svcKey)
+    || (heldPhoneKeys && heldPhoneKeys.has(svcKey) && !samePhone(svcPhone, customer.phone)))) {
     return { ...getPrimaryContact(customer), role: 'primary' };
   }
   return getServiceContact(customer);

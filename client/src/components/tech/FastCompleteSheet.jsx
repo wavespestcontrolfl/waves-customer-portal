@@ -70,12 +70,10 @@ import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, productUnits, seededAmount, stockHolds,
+  amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
-import { isMlUnit, submittedAmount } from '../../lib/measure-units';
+import { submittedAmount } from '../../lib/measure-units';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
-import { WarningIcon } from './FastCompleteProductPicker';
-import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
@@ -94,17 +92,18 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
-  SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
-  visitChangedSinceSchedule,
+  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton,
+  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import {
-  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillMicBar, VoiceFillReview, useVoiceFillSheet,
-} from './FastCompleteVoiceFill';
-import { Button, Field, Input, ActionFeedback, cn } from '../ui';
-import '../../styles/tech-workflow.css';
 
-const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
+// Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
+export { isSendableRateUnit };
+import {
+  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillMicBar, VoiceFillReview, useNoteClip, useProductVoiceFill, useVoiceFillSheet,
+} from './FastCompleteVoiceFill';
+import { Button, Field, Input, ActionFeedback } from '../ui';
+import '../../styles/tech-workflow.css';
 
 // How the SPRAY products went down. Spot treatment needs no measured area;
 // a perimeter spray records its linear feet (the application record's area
@@ -140,15 +139,6 @@ const LANE_METHOD_CHOICES = [
 // them: the mosquito lane's own (a methodless liquid is a barrier mist),
 // every other lane the pest line, bed bug's indoors.
 const laneProductLine = (lane) => ({ serviceLine: lane === 'mosquito' ? 'mosquito' : 'pest', interiorLane: lane === 'bed_bug_treatment' });
-// A rate goes on the record only in a unit /complete accepts: the server's
-// own list (shared/rate-units.json, read by inventory-units.js), matched
-// trimmed and case-blind as it matches them, less its mL units, which this
-// sheet never shows (owner ruling 2026-09-27) — a rate the tech can't see
-// is not one they confirmed. Any other unit (a catalog oddity such as
-// "percent_solution") leaves the row without a rate rather than have the
-// server refuse the whole visit.
-const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
-export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
 // With no method of its own in the catalog, the shared pest resolver calls
 // anything outside a bait category a spray, which then follows the How row.
 // A product's form — its name, category or catalog formulation — says
@@ -483,22 +473,6 @@ function useFastCompleteContext({
   return { ...ctx, refreshStock };
 }
 
-// A catalog row with the stock on hand a fresh read has for it.
-function withFreshStock(product, fresh) {
-  const row = fresh.get(String(product.id));
-  return row ? { ...product, inventory_on_hand: row.inventory_on_hand, inventory_unit: row.inventory_unit } : product;
-}
-
-// The photo manager opens over the sheet. While it is up the sheet is inert
-// and hidden from assistive tech, the way the photo manager treats its own
-// marks dialog; `version` moves on each close so the count is read again.
-function usePhotoManager() {
-  const [state, setState] = useState({ isOpen: false, version: 0 });
-  const open = useCallback(() => setState((prev) => ({ ...prev, isOpen: true })), []);
-  const close = useCallback(() => setState((prev) => ({ isOpen: false, version: prev.version + 1 })), []);
-  return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
-}
-
 // The sheet's title before and after the save: the report flow names a
 // regular visit as a service; the re-service sheet keeps its words.
 const SHEET_TITLES = {
@@ -608,7 +582,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
 }
@@ -1025,7 +999,7 @@ const NO_PRODUCT_HOLDS = {
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const noProduct = mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.';
@@ -1040,6 +1014,12 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
     ...(stage === 'complete' ? sendHoldsFor(mode)({ active, ...sendInputs }) : []),
+    // Voice fill: a product row it set waits on the tech's ✓, and what it could
+    // not settle is still open (the list sits under the report).
+    ...(stage === 'complete' && voiceHolds ? [
+      [voiceHolds.confirms > 0, 'Confirm the products I filled.'],
+      [voiceHolds.checks > 0, 'Check what I couldn\'t fill.'],
+    ] : []),
   ].find(([missing]) => missing) || [];
   return { reason, stockRow, fix };
 }
@@ -1335,7 +1315,7 @@ function useReportDraft({ request, base, mode = null }) {
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
@@ -1343,13 +1323,18 @@ function useReportDraft({ request, base, mode = null }) {
     // A typed read is judged beside the record's present values (never
     // stored on the server).
     const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true } : { note };
-    const heard = await request(`${base}/${read.endpoint}`, { method: 'POST', body: JSON.stringify(body) }).catch(() => null);
+    // `extraRead` (voice fill): the note's products, read beside its facts; the
+    // answer goes to `signature` and `buildPayload`, which land it on the rows.
+    const [heard, extra] = await Promise.all([
+      request(`${base}/${read.endpoint}`, { method: 'POST', body: JSON.stringify(body) }).catch(() => null),
+      extraRead ? extraRead() : null,
+    ]);
     const facts = read.factsOf(heard);
     if (sequence !== sequenceRef.current) return;
     // The signature of what the report is written from, read included (a
     // lane visit's record fills from the read).
-    const draftSignature = signature(facts);
-    const payload = buildPayload(facts);
+    const draftSignature = signature(facts, extra);
+    const payload = buildPayload(facts, extra);
     let written = null;
     let failure = null;
     try {
@@ -1492,7 +1477,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, isMobile,
+  onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled = false,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1532,6 +1517,15 @@ function ReportFlowForm({
   const report = useReportDraft({ request, base, mode });
   const { draft, writing } = report;
   const [step, setStep] = useState('visit');
+  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL) on a pest visit: the products the
+  // note names are read when the report is written and land as rows the tech
+  // confirms. A lane or typed visit keeps its own read.
+  const pestVoiceFill = voiceFillEnabled === true && !mode;
+  const voiceOps = useMemo(() => ({
+    ...VOICE_SHEET_OPS,
+    makeRow: (product, extras) => productRow(product, { serviceType: service.serviceType, added: true, ...extras }),
+  }), [service.serviceType]);
+  const productVoice = useProductVoiceFill({ enabled: pestVoiceFill, request, serviceId: service.id, products, ctx, ops: voiceOps });
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
   const traceAvailable = trace.enabled && service.traceEligible !== false;
@@ -1549,6 +1543,7 @@ function ReportFlowForm({
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
+    voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
 
   // "Update inventory or remove it": once the stock is updated, the tech
@@ -1570,19 +1565,28 @@ function ReportFlowForm({
   const write = (fresh) => {
     if (writing || generateMissing.reason) return;
     setStep('report');
+    // The rows the report is written from: with voice fill, the rows as the
+    // note's products leave them (landed once, when the read answers).
+    let filledRows = null;
+    const rowsFor = (facts, productFill) => {
+      if (!productVoice.read) return rows;
+      filledRows = filledRows || productVoice.settle(productFill, reportSprayMethod(facts), form.note);
+      return filledRows;
+    };
     // A lane or typed read first fills the record (only what is empty and
     // unpicked), and the report is written from the filled record.
     report.write({
-      buildPayload: (facts) => {
+      buildPayload: (facts, productFill) => {
         const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
-        const payload = writerPayload({ service, visit: ctx.visit, form, rows, facts: heard, ratingAllowed, photos: visitPhotos.photos, promiseMarks });
+        const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, ratingAllowed, photos: visitPhotos.photos, promiseMarks });
         return { ...payload, ...writerExtras };
       },
       note: form.note,
       // A typed read is judged beside the record's present values.
       current: recordState.current,
       scoreSet: recordState.scoreSet,
-      signature: (facts) => writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
+      signature: (facts, productFill) => writerSignature(form, rowsFor(facts, productFill), promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
+      extraRead: productVoice.read ? () => productVoice.read(form.note) : null,
       fresh,
     });
   };
@@ -1666,6 +1670,7 @@ function ReportFlowForm({
         trace={stepTrace}
         traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
         pestHeard={!mode}
+        productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
@@ -1720,6 +1725,8 @@ function ReportFlowForm({
       onFullForm={onFullForm}
       isMobile={isMobile}
       onAddProduct={addProduct}
+      productVoice={productVoice}
+      noteClipEnabled={pestVoiceFill}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
         // A photo change in hand (a description open, a change saving, a
@@ -1737,7 +1744,7 @@ function ReportFlowForm({
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
-  blogPost, pestHeard, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
+  blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
   onBackFromPrompt,
 }) {
   const { draft, writing, writeError } = report;
@@ -1788,6 +1795,9 @@ function ReportStep({
             onWriteAgain={() => { setEditing(false); onWrite(true); }}
           />
         )}
+        {/* Voice fill: the product rows the note filled, each waiting on the tech's
+            ✓; a wrong one is changed back on the visit (Products, Edit). */}
+        {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {showDraft && laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
@@ -1803,6 +1813,7 @@ function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
+  productVoice, noteClipEnabled = false,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -1812,6 +1823,9 @@ function VisitStep({
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
     [setForm],
   );
+  // Voice fill: the note's mic records and our own transcriber answers the words
+  // (heard with the sheet's product names). Off, the mic is as it was.
+  const noteClip = useNoteClip({ enabled: noteClipEnabled, request, serviceId: service?.id, onText: appendNote });
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -1835,7 +1849,7 @@ function VisitStep({
           {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
               waits while a photo's description is open or a change is
               saving, so one microphone records at a time. */}
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || !!photoHold}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip}>
             {noteBoxPhotos ? (
               <TechNoteBoxPhotos
                 serviceId={service.id}
@@ -1851,9 +1865,12 @@ function VisitStep({
               />
             ) : null}
           </VisitNote>
+          {noteClip.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{noteClip.error}</p>}
+          <VoiceFillReview voice={productVoice} locked={locked} />
           {productsOpen ? (
             <ProductsSection
               products={products}
+              heardLines={<ProductHeardLines voice={productVoice} rows={products.rows} />}
               method={sprayMethod}
               stickyPicks
               editAmounts={editAmounts}
@@ -2026,38 +2043,22 @@ function ProductsSection({ products, heardLines = null, method, editAmounts, loc
 // tracked stock at zero shows on the tile; Complete holds for it when the
 // server would refuse the amount against that stock (stockHolds).
 function ProductTile({ tileRef, row, editorId, locked, onClick }) {
-  const outOfStock = row.active && isOutOfStock(row.product);
   const amount = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   const state = row.added
     ? { 'aria-expanded': !!editorId, 'aria-controls': editorId || undefined }
     : { 'aria-pressed': row.active };
   return (
-    <Button
-      ref={tileRef}
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
-        'tech-visit-product--off': !row.active,
-        'tech-visit-product--added': row.added,
-        'tech-visit-product--editing': !!editorId,
-        'tech-visit-product--stock': outOfStock,
-      })}
+    <ProductTileButton
+      tileRef={tileRef}
+      row={row}
+      detail={amount}
+      off={!row.active}
+      added={row.added}
+      editing={!!editorId}
+      ariaProps={state}
       disabled={locked}
       onClick={onClick}
-      {...state}
-    >
-      {/* Two lines on the tile (the amount never wraps apart from its unit);
-          one name for assistive tech: "Taurus SC — 4 fl oz". */}
-      <span className="tech-visit-product-name">{row.name}</span>
-      <span className="sr-only"> — </span>
-      <span className="tech-visit-product-amount">{amount}</span>
-      {outOfStock && (
-        <>
-          {' '}
-          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
-        </>
-      )}
-    </Button>
+    />
   );
 }
 
@@ -2087,10 +2088,6 @@ function AddedProductEditor({ id, row, method, stickyPicks, locked, onChange, on
   );
 }
 
-const methodLabel = (value) => {
-  const text = String(value || '').replace(/_/g, ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
-};
 
 // How an added product went down. A spray follows the visit's How until the
 // tech picks another way; a product with its own catalog method (a bait, a
@@ -2206,54 +2203,3 @@ function PhotosSection({ serviceId, request, photos, locked }) {
   );
 }
 
-// "Edit amounts": every product's amount in its own measure's units, and
-// its rate. A label rate in mL is neither shown nor recorded (owner ruling
-// 2026-09-27): rowRate leaves such a row without a rate unit.
-function AmountRow({ row, rate, onChange }) {
-  const inputId = useId();
-  const rateId = useId();
-  const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
-  return (
-    <div className="tech-visit-amount-block">
-      <div className="tech-visit-amount-row">
-        <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
-        <Input
-          id={inputId}
-          className="tech-visit-control"
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step="any"
-          value={row.totalAmount ?? ''}
-          // amountPicked: the tech's own entry, even when it equals the seeded amount
-          onChange={(e) => onChange({ totalAmount: e.target.value, amountPicked: true })}
-        />
-        <select
-          className="ui-control tech-visit-control"
-          aria-label={`Unit for ${row.name}`}
-          value={row.amountUnit}
-          onChange={(e) => onChange({ amountUnit: e.target.value, amountPicked: true })}
-        >
-          {UNIT_CHOICES[row.dimension].map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-        </select>
-      </div>
-      {rate.rateUnit ? (
-        <div className="tech-visit-amount-row">
-          <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
-          <Input
-            id={rateId}
-            className="tech-visit-control"
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="any"
-            value={rate.rate ?? ''}
-            onChange={(e) => onChange({ rateInput: e.target.value })}
-          />
-          <span className="tech-visit-amount-label">{unitLabel(rate.rateUnit)}</span>
-        </div>
-      ) : null}
-      {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
-    </div>
-  );
-}

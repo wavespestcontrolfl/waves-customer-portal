@@ -990,6 +990,11 @@ function initScheduledJobs() {
         // shadow decision now (GATE_SMS_SCHEDULING_DECIDE; gate off, no read).
         const replies = await require('./sms-scheduling-decide').sweepUndecidedReplies();
         if (replies.recorded > 0) logger.info(`[sms-offer-ledger-backfill] decided ${replies.recorded} waiting replies`);
+        // A text move whose customer notice never started (the process exited
+        // right after the move committed) is finished here.
+        const effects = await require('./sms-scheduling-act').finishMoveEffects();
+        if (effects.finished > 0) logger.info(`[sms-offer-ledger-backfill] finished ${effects.finished} move notices`);
+        if (effects.error) throw new Error('sms move effects sweep unhealthy');
         if (replies.errors > 0) throw new Error(`sms reply decide sweep unhealthy: errors=${replies.errors} scanned=${replies.scanned}`);
         // A failed scan or write must fail job health, not read as a green tick.
         if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
@@ -4383,6 +4388,27 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Pre-visit brief sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Visit access and safety flags, shadow leg (GATE_VISIT_ACCESS_FLAGS=shadow
+  // on top of GATE_TYPED_DECISIONS): today's and tomorrow's open visits, each
+  // asked once per state, so a repeat pass over an unchanged route is database
+  // reads only. Hourly across the booking day so a same-day add or a new
+  // customer text is picked up; :34 is clear of the :19/:49 brief sweep.
+  cron.schedule('34 5-19 * * *', async () => {
+    try {
+      await runExclusive('visit-access-shadow', async () => {
+        const VisitAccess = require('./typed-decisions/visit-access-shadow');
+        // Retention runs whatever the gate says: stored states are dropped on
+        // schedule even after the shadow is switched off.
+        await VisitAccess.pruneVisitAccessStates();
+        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        const result = await VisitAccess.runVisitAccessSweep();
+        logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
+      });
+    } catch (err) {
+      logger.error(`Visit access shadow failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -8090,13 +8116,22 @@ function initScheduledJobs() {
           try {
             // A promotion to a street-level hold can land after the candidate scan above: re-read the hold
             // under the visit row lock (the promoter's own lock) right before recording, and skip if held.
-            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx));
-            if (guarded.held) continue;
+            // The same lock re-checks the candidate itself (`scanned`): a visit closed or moved since
+            // the scan is not flagged.
+            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx, { scanned: svc }));
+            if (guarded.held || (guarded.result && guarded.result.action === 'stale_candidate')) continue;
             flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
           }
         }
+        // An open flagged row whose card insert failed once has no other way back onto the office queue.
+        // Likewise a flagged row whose visit closed or moved while its settlement failed.
+        const repaired = await require('./not-closed-out').reconcileOpenRows();
+        if (repaired.raised || repaired.settled) logger.info(`Missed appointment check: ${repaired.raised} missing queue card(s) raised, ${repaired.settled} flagged row(s) settled from the visit`);
+        // And the repeated-miss outreach task: a failed raise or withdrawal is repaired here.
+        const outreach = await missedAppointment.reconcileOutreach();
+        if (outreach.raised || outreach.withdrawn) logger.info(`Missed appointment check: outreach task(s) ${outreach.raised} raised, ${outreach.withdrawn} withdrawn on repair`);
         logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
       });

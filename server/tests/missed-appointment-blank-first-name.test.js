@@ -23,6 +23,7 @@ function fakeConn(customer) {
     return chain;
   };
   wrapped.raw = (sql) => sql;
+  wrapped.isTransaction = true; // the caller's transaction: the count and the task write share it
   return { conn: wrapped, inserts };
 }
 

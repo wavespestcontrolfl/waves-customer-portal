@@ -81,6 +81,23 @@ describe('Appointment texts per saved property', () => {
     }
     expect(api.updatePropertyNotificationPrefs).not.toHaveBeenCalled();
   });
+  // GATE_CONTACT_REPORT_TEXT: the server says when contacts also get the
+  // report text, and the card says so only then.
+  it('says contacts get the report text only when the server turns it on', async () => {
+    const view = render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
+    expect(await screen.findByText(/These people receive appointment texts for this property/)).toBeInTheDocument();
+    expect(screen.queryByText(/service report link/)).not.toBeInTheDocument();
+    view.unmount();
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: propertyPrefs.map((p) => ({ ...p, contactReportTexts: true })) });
+    render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
+    expect(await screen.findByText(/These people receive appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit for this property/)).toBeInTheDocument();
+  });
+  it('each house reads its own flag', async () => {
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{ ...propertyPrefs[0], contactReportTexts: true }, propertyPrefs[1]] });
+    render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
+    expect(await screen.findByText(/These people receive appointment texts for this property/)).toBeInTheDocument();
+    expect(screen.queryByText(/service report link/)).not.toBeInTheDocument();
+  });
   it('the PRIMARY house reads the profile row copy', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
     expect(await screen.findByText(/Your primary residence gets every alert/)).toBeInTheDocument();

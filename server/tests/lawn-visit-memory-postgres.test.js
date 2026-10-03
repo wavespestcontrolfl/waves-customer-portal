@@ -14,7 +14,7 @@
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 
 const {
-  freezeLawnVisitMemory, resolveVisitMemoryForRender, selectPriorVisit, storedVisitMemoryFor,
+  freezeLawnVisitMemory, resolveVisitMemoryForRender, selectPriorVisit, storedVisitMemoryFor, recordPairedRecheck,
 } = require('../services/service-report/lawn-visit-memory');
 
 const URL = process.env.LAWN_VISIT_MEMORY_TEST_DATABASE_URL || process.env.DATABASE_URL;
@@ -126,5 +126,67 @@ describeIfDb.each([['jsonb'], ['text']])('lawn visit memory freeze (postgres, st
     });
     expect(out).toEqual({ sinceLast: null, unfrozen: false });
     expect(storedVisitMemoryFor(await notes(), 'as-C').sinceLast).toBeNull();
+  });
+  // P19b: the paired-photo recheck is written onto an ALREADY FROZEN entry by a
+  // compare-and-set UPDATE. Real SQL, both column types.
+  describe('recordPairedRecheck (P19b)', () => {
+    const photo = (verdict) => ({ verdict, source: 'photo_pair', whatChanged: ['color'], pairs: ['front'], promptVersion: 'p' });
+    const withPrior = (over = {}) => entry('as-C', 'This Visit', {
+      sinceLast: { v: 1, priorAssessmentId: 'as-P', priorDate: '2026-08-01', applied: [], checks: [{ key: 'weeds', status: 'watch' }, { key: 'water', status: 'needs_attention' }] },
+      ...over,
+    });
+
+    test('writes the recheck on the matching check and the pair verdicts once; every other byte of the record is untouched', async () => {
+      const frozen = withPrior();
+      await freezeLawnVisitMemory('s1', frozen, knex);
+      await freezeLawnVisitMemory('s1', entry('as-Z', 'Other Visit'), knex);
+      const pairs = [{ zone: 'front', verdict: 'better', whatChanged: ['color'] }];
+      await expect(recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('better') }, photoPairs: pairs }, knex))
+        .resolves.toEqual({ written: ['weeds'], photoPairs: true });
+      const n = await notes();
+      expect(n.timeOnSiteAdjusted).toBe(true);
+      expect(n.lawnVisitMemory['as-Z']).toEqual(entry('as-Z', 'Other Visit'));
+      const stored = n.lawnVisitMemory['as-C'];
+      expect(stored.applied).toEqual(frozen.applied);
+      expect(stored.sinceLast.checks).toEqual([{ key: 'weeds', status: 'watch', recheck: photo('better') }, { key: 'water', status: 'needs_attention' }]);
+      expect(stored.sinceLast.photoPairs).toEqual(pairs);
+    });
+
+    test('first writer wins per check: a second photo read, or one after an office decision, changes nothing', async () => {
+      await freezeLawnVisitMemory('s1', withPrior(), knex);
+      await recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('better') }, photoPairs: [{ zone: 'front', verdict: 'better', whatChanged: [] }] }, knex);
+      await expect(recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('worse') }, photoPairs: [{ zone: 'back', verdict: 'worse', whatChanged: [] }] }, knex))
+        .resolves.toEqual({ written: [], photoPairs: false });
+      let stored = (await notes()).lawnVisitMemory['as-C'];
+      expect(stored.sinceLast.checks[0].recheck.verdict).toBe('better');
+      expect(stored.sinceLast.photoPairs).toEqual([{ zone: 'front', verdict: 'better', whatChanged: [] }]);
+      // an office decision already on the other check is kept
+      const rec = (await notes());
+      rec.lawnVisitMemory['as-C'].sinceLast.checks[1].recheck = { verdict: 'same', source: 'office_review' };
+      await knex('service_records').where({ id: 's1' }).update({ structured_notes: JSON.stringify(rec) });
+      await expect(recordPairedRecheck('s1', 'as-C', { rechecks: { water: photo('worse') } }, knex)).resolves.toEqual({ written: [], photoPairs: false });
+      stored = (await notes()).lawnVisitMemory['as-C'];
+      expect(stored.sinceLast.checks[1].recheck).toEqual({ verdict: 'same', source: 'office_review' });
+    });
+
+    test('never creates an entry: no entry, or an entry with no sinceLast, writes nothing', async () => {
+      await expect(recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('better') } }, knex)).resolves.toBeNull();
+      await freezeLawnVisitMemory('s1', entry('as-C', 'No Prior'), knex);
+      await expect(recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('better') } }, knex)).resolves.toBeNull();
+      const n = await notes();
+      expect(n.lawnVisitMemory['as-C']).toEqual(entry('as-C', 'No Prior'));
+      expect(Object.keys(n.lawnVisitMemory)).toEqual(['as-C']);
+    });
+
+    test('two writers racing on one entry both land (compare-and-set re-reads), each check written exactly once', async () => {
+      await freezeLawnVisitMemory('s1', withPrior(), knex);
+      const results = await Promise.all([
+        recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: photo('better') } }, knex),
+        recordPairedRecheck('s1', 'as-C', { rechecks: { water: photo('worse') } }, knex),
+      ]);
+      expect(results.every(Boolean)).toBe(true);
+      const checks = (await notes()).lawnVisitMemory['as-C'].sinceLast.checks;
+      expect(checks.map((c) => c.recheck && c.recheck.verdict)).toEqual(['better', 'worse']);
+    });
   });
 });

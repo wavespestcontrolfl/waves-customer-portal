@@ -156,8 +156,11 @@ async function createAlertOnce({ type, severity, techId, jobId, payload, trx, ex
   if (trx) {
     const result = await doWrite(trx);
     if (result.created && result.row) {
-      if (trx.executionPromise) {
-        trx.executionPromise.then(() => emitAlert(result.row)).catch(() => {
+      // Outermost commit, not a savepoint release (same rule resolveAlert follows,
+      // codex #3590 r14): a caller may run this insert in a savepoint.
+      const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+      if (commitPromise) {
+        commitPromise.then(() => emitAlert(result.row)).catch(() => {
           // Outer rollback. Suppress the emit so no phantom alert reaches dispatch.
         });
       } else {
@@ -343,6 +346,8 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   async function doWrite(t) {
     const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
+      // decision-only cards are never swept away: closing one records nothing
+      .whereNotIn('type', DECISION_ONLY_ALERT_TYPES)
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,
@@ -401,6 +406,12 @@ const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
   'skipped',
   'no_show',
 ]);
+
+// Cards that are settled ONLY by a recorded decision on the card itself (their
+// own routes), never by the generic Resolve or the queue's Clear: closing one of
+// these without a decision would drop the visit from the worklist with nothing
+// recorded and nothing to bring it back (services/not-closed-out.js).
+const DECISION_ONLY_ALERT_TYPES = Object.freeze(['visit_not_closed_out']);
 
 // Alert types in the "overdue family" — both fire on a slipping
 // window, just from different scopes (assigned vs unassigned).
@@ -461,6 +472,7 @@ module.exports = {
   autoResolveOverdueAlertsForJob,
   OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
   OVERDUE_ALERT_TYPES,
+  DECISION_ONLY_ALERT_TYPES,
   EVENT,
   EVENT_RESOLVED,
   ROOM,
