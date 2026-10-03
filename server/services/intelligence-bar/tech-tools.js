@@ -58,7 +58,8 @@ Use for: "what products did we use on the Henderson property last time?", "servi
   {
     name: 'get_product_info',
     description: `Look up product information: active ingredient, MOA group, label rate, mixing instructions, target pests, safety notes.
-Use for: "what's the label rate for Demand CS?", "mixing ratio for Bifen IT", "what MOA group is Celsius?"`,
+Use for: "what's the label rate for Demand CS?", "mixing ratio for Bifen IT", "what MOA group is Celsius?"
+If it returns candidates, ask which product is meant. If it returns rate_note, give no rate.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -419,9 +420,46 @@ async function getServiceHistory(input, techId = null) {
 // A unit whose base is mL ("ml", "ml/gal", "ml/inch dbh").
 const isMlUnit = (unit) => normalizeInventoryUnit(baseQuantityUnit(unit)) === 'ml';
 
+// Several catalog rows can share a name fragment ("Alpine", "Advion"), and
+// retired rows stay in the table, so the first ILIKE hit could be the wrong
+// product or a retired one with no rate. An exact name wins; one active match
+// is used; several come back as candidates for the model to ask about, never
+// a guess.
+const MAX_PRODUCT_CANDIDATES = 8;
+
+function pickProduct(rows, productName) {
+  const target = String(productName || '').trim().toLowerCase();
+  const active = rows.filter((row) => row.active !== false);
+  const exact = active.find((row) => String(row.name || '').trim().toLowerCase() === target);
+  if (exact) return { product: exact };
+  if (active.length === 1) return { product: active[0] };
+  if (active.length > 1) {
+    return {
+      result: {
+        ambiguous: true,
+        message: `Several products match "${productName}". Ask which one before giving any rate or mix.`,
+        candidates: active.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+      },
+    };
+  }
+  if (rows.length) {
+    return {
+      result: {
+        error: `"${productName}" is not in the active product catalog. Check the current label before applying.`,
+        retired_matches: rows.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+      },
+    };
+  }
+  return { result: { error: `Product "${productName}" not found` } };
+}
+
 async function getProductInfo(productName, { forTech = false } = {}) {
-  const product = await db('products_catalog').whereILike('name', `%${productName}%`).first();
-  if (!product) return { error: `Product "${productName}" not found` };
+  const rows = await db('products_catalog')
+    .whereILike('name', `%${productName}%`)
+    .orderBy('name')
+    .limit(20);
+  const { product, result } = pickProduct(rows || [], productName);
+  if (!product) return result;
 
   // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
   // instead of recalling them from training memory. Null fields are omitted so
@@ -468,6 +506,10 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     container_size: product.container_size,
     default_rate: mlLabelRate ? null : product.default_rate,
     default_unit: mlLabelRate ? null : product.default_unit,
+    // A blank rate must never invite a number from memory.
+    rate_note: mlLabelRate || product.default_rate == null || product.default_rate === ''
+      ? 'No rate on file. Check the current label before mixing.'
+      : undefined,
     sku: product.sku,
     safety,
   };

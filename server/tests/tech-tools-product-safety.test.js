@@ -3,14 +3,21 @@
 // of training memory — and must omit absent fields so a blank never reads as
 // "none required".
 
+// mockRow is the single catalog match most tests need; mockRows, when set,
+// is the whole ILIKE result.
 let mockRow = null;
+let mockRows = null;
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => ({
-    whereILike: () => ({ first: () => Promise.resolve(mockRow) }),
+    whereILike: () => ({
+      orderBy: () => ({ limit: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])) }),
+    }),
   }));
   return fn;
 });
+
+beforeEach(() => { mockRows = null; });
 
 const { executeTechTool } = require('../services/intelligence-bar/tech-tools');
 
@@ -127,5 +134,63 @@ describe('get_product_info label rate', () => {
     const result = await productInfo();
     expect(result.default_rate).toBe('5-10');
     expect(result.default_unit).toBe('ml/gal');
+  });
+});
+
+// A shared name fragment must never resolve to whichever row came first:
+// an exact name wins, one active match is used, several come back as
+// candidates to ask about, and retired rows are never answered from.
+describe('get_product_info product match', () => {
+  const ask = (name) => executeTechTool('get_product_info', { product_name: name }, { techId: 'tech-1', techName: null });
+
+  test('several active matches come back as candidates with no product data', async () => {
+    mockRows = [
+      { name: 'Advion Ant Bait Gel', active: true, default_rate: '0.1-1', default_unit: 'g/spot' },
+      { name: 'Advion Cockroach Gel', active: false },
+      { name: 'Advion WDG Granular', active: true },
+    ];
+    const result = await ask('Advion');
+    expect(result.ambiguous).toBe(true);
+    expect(result.candidates).toEqual(['Advion Ant Bait Gel', 'Advion WDG Granular']);
+    expect(result.default_rate).toBeUndefined();
+  });
+
+  test('an exact name wins over other active matches', async () => {
+    mockRows = [
+      { name: 'Alpine WSG', active: true, default_rate: '10-30', default_unit: 'g/gal' },
+      { name: 'Alpine WSG Insecticide Kit', active: true },
+    ];
+    const result = await ask('alpine wsg');
+    expect(result.name).toBe('Alpine WSG');
+    expect(result.default_rate).toBe('10-30');
+  });
+
+  test('one active match is used even when retired rows also match', async () => {
+    mockRows = [
+      { name: 'Advion Cockroach Gel Bait', active: false, default_rate: '0.5', default_unit: 'g/spot' },
+      { name: 'Advion Evolution Cockroach Gel Bait', active: true, default_rate: '0.5', default_unit: 'g/spot' },
+    ];
+    const result = await ask('Cockroach Gel');
+    expect(result.name).toBe('Advion Evolution Cockroach Gel Bait');
+  });
+
+  test('only retired matches: no product data, sent to the label', async () => {
+    mockRows = [{ name: 'Talstar P', active: false, default_rate: '1', default_unit: 'fl_oz/gal' }];
+    const result = await ask('Talstar P');
+    expect(result.error).toMatch(/not in the active product catalog/);
+    expect(result.retired_matches).toEqual(['Talstar P']);
+    expect(result.default_rate).toBeUndefined();
+  });
+
+  test('no match at all is a plain not-found', async () => {
+    mockRows = [];
+    expect(await ask('Nothing')).toEqual({ error: 'Product "Nothing" not found' });
+  });
+
+  test('a product with no rate carries a rate note; one with a rate does not', async () => {
+    mockRows = [{ name: 'Atticus Talak 7.9 F', active: true, default_rate: null }];
+    expect((await ask('Talak')).rate_note).toBe('No rate on file. Check the current label before mixing.');
+    mockRows = [{ name: 'Sample CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' }];
+    expect((await ask('Sample CS')).rate_note).toBeUndefined();
   });
 });
