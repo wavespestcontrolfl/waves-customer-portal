@@ -112,6 +112,16 @@ describe('callWorkersAIDecision images', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
+  test('the limit is in UTF-8 bytes: accented state text counts double', async () => {
+    const image = urlOf(rawBytes(90 * 1024, 8));
+    const accented = { note: 'é'.repeat(20000) };
+    const body = JSON.stringify({ images: [image], state: accented, questions: QUESTIONS });
+    expect(body.length).toBeLessThanOrEqual(CLEF_IMAGES_BUDGET_BYTES);
+    expect(Buffer.byteLength(body, 'utf8')).toBeGreaterThan(CLEF_IMAGES_BUDGET_BYTES);
+    expect(await callWorkersAIDecision({ model: 'clef-flash', state: accented, questions: QUESTIONS, images: [image] })).toEqual({ ok: false, reason: 'cloudflare_images_too_large' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   test('entries that are not image data URLs, or a non-array, are refused before any network call', async () => {
     for (const images of ['data:image/jpeg;base64,AAAA', ['https://example.test/a.jpg'], [42], ['data:text/plain;base64,AAAA'], ['data:image/jpeg;base64,not base64!'], ['data:image/jpeg;base64,A'], ['data:image/jpeg;base64,AA='], ['data:image/jpeg;base64,AB==']]) {
       expect(await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images })).toEqual({ ok: false, reason: 'cloudflare_bad_images' });

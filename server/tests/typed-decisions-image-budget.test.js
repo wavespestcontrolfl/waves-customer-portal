@@ -134,6 +134,12 @@ describe('fitImagesForClef', () => {
     expect([meta.width, meta.height]).toEqual([200, 400]);
   });
 
+  test('clefBodyOverhead counts UTF-8 bytes, not characters', () => {
+    const plain = clefBodyOverhead({ note: 'e'.repeat(1000) }, {});
+    const accented = clefBodyOverhead({ note: 'é'.repeat(1000) }, {});
+    expect(accented - plain).toBe(1000);
+  });
+
   test('the budget is for the whole batch: four large images share it', async () => {
     const bigs = await Promise.all([1, 2, 3, 4].map(() => jpegOf(900, 700).toBuffer()));
     const budgetBytes = 300 * 1024;

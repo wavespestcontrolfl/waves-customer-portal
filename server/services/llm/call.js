@@ -522,11 +522,12 @@ const clefLedgerText = (stateText, plan) => (plan.note ? `${stateText ?? ''}\n${
 const clefBody = (plan, images, state, questions) => (plan.present ? { images, state, questions } : { state, questions });
 // The refusal for an image request, checked before any network call: a bad
 // entry, more than four images, or a SERIALIZED body (images + state +
-// questions) over the provider's measured limit.
+// questions) over the provider's measured limit, in UTF-8 bytes (what goes
+// on the wire; accented transcript text is two bytes a character).
 function clefImagesRefusal(plan, bodyText, images) {
   if (!plan.present) return null;
   if (plan.bad) return 'cloudflare_bad_images';
-  if (images.length > CLEF_MAX_IMAGES || bodyText.length > CLEF_IMAGES_BUDGET_BYTES) return 'cloudflare_images_too_large';
+  if (images.length > CLEF_MAX_IMAGES || Buffer.byteLength(bodyText, 'utf8') > CLEF_IMAGES_BUDGET_BYTES) return 'cloudflare_images_too_large';
   return null;
 }
 

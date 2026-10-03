@@ -90,7 +90,8 @@ async function encodeRung(raster, quality) {
 // `"images":[...]` framing: what the image budget must leave room for.
 function clefBodyOverhead(state, questions) {
   try {
-    return JSON.stringify({ images: [], state, questions }).length;
+    // UTF-8 bytes, not characters: the provider limit is on the wire body.
+    return Buffer.byteLength(JSON.stringify({ images: [], state, questions }), 'utf8');
   } catch {
     return Infinity;
   }
