@@ -18,6 +18,10 @@ class PortalTurnDeadlineError extends Error {
   }
 }
 
+function logUnexpectedFailure(err, message, fields) {
+  if (err?.code !== 'PORTAL_CHAT_DEADLINE') logger.error(message, fields);
+}
+
 function parseJson(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
@@ -433,6 +437,7 @@ async function finishRequest(context) {
 }
 
 async function recoverCommittedResult(context) {
+  if (!context) return null;
   const remembered = context.committedResult();
   if (remembered) return remembered;
   try {
@@ -485,7 +490,12 @@ async function waitForClaim({ row, attemptId, leaseExpiresAt, workDeadlineAt, wo
   while (Date.now() < workDeadlineAt) {
     claim = await claimRequest(row, attemptId, leaseExpiresAt, root);
     if (claim.kind !== 'busy') return claim;
-    await delay(Math.min(RETRY_POLL_MS, Math.max(1, workDeadlineAt - Date.now())), workSignal);
+    try {
+      await delay(Math.min(RETRY_POLL_MS, Math.max(1, workDeadlineAt - Date.now())), workSignal);
+    } catch (err) {
+      if (err?.code !== 'PORTAL_CHAT_DEADLINE') throw err;
+      break;
+    }
   }
   return claim;
 }
@@ -499,6 +509,7 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
   const workTimer = setTimeout(() => workController.abort(), Math.max(1, workDeadlineAt - Date.now()));
   const hardTimer = setTimeout(() => hardController.abort(), Math.max(1, hardDeadlineAt - Date.now()));
   let turn = null;
+  let resolvedResult = null;
   const root = {
     assertActive(stage) {
       if (hardController.signal.aborted || Date.now() >= hardDeadlineAt) throw new PortalTurnDeadlineError(stage);
@@ -550,10 +561,12 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     let result;
     try {
       result = await turn.waitFor(() => processTurn(turn), 'portal chat turn');
+      // Keep the successfully resolved value before its receipt checkpoint.
+      // If that UPDATE fails or loses its acknowledgement, recovery first
+      // prefers any durable response and then returns this exact result.
+      resolvedResult = structuredClone({ ...result, requestId });
     } catch (err) {
-      if (err?.code !== 'PORTAL_CHAT_DEADLINE') {
-        logger.error(`[portal-chat] turn failed: ${err.message}`, { customerId, requestId });
-      }
+      logUnexpectedFailure(err, `[portal-chat] turn failed: ${err.message}`, { customerId, requestId });
       result = await recoverCommittedResult(turn)
         || fallbackResult(requestId, TIMEOUT_REPLY, turn.fallbackExtras());
     }
@@ -561,11 +574,10 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     return await finishRequest(turn);
   } catch (err) {
     if (err?.status === 409) throw err;
-    if (err?.code !== 'PORTAL_CHAT_DEADLINE') {
-      logger.error(`[portal-chat] request coordination failed: ${err.message}`, { customerId, requestId });
-    }
-    const committed = turn ? await recoverCommittedResult(turn) : null;
+    logUnexpectedFailure(err, `[portal-chat] request coordination failed: ${err.message}`, { customerId, requestId });
+    const committed = await recoverCommittedResult(turn);
     return committed
+      || resolvedResult
       || fallbackResult(requestId, TIMEOUT_REPLY, { ...turn?.fallbackExtras(), retryable: true });
   } finally {
     clearTimeout(workTimer);
