@@ -5520,9 +5520,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const carriedNumberOnWinner = (onlySlot) => carryActive && [1, 2, 3].some((n) =>
       (onlySlot === undefined || n === onlySlot)
       && phone10(winner[ATOMIC_FIELD_GROUPS[n].fields[1]]) === phoneCarry.phone_key);
-    if (carryActive && ((carriedSlotFrozen && carriedNumberOnWinner())
+    // The kept customer's own phone fields are SMS-resolved WITHOUT the slot hold
+    // (unconsented_slot_phone_keys guards contact slots only): a carried number moved into
+    // `phone` / `secondary_phone` is still on the customer, so the undo must not lift its
+    // hold and reactivate the other record around it (codex #5737 r4).
+    const carriedNumberOnWinnerOwnPhone = carryActive
+      && [winner.phone, winner.secondary_phone].some((v) => phone10(v) === phoneCarry.phone_key);
+    if (carryActive && (carriedNumberOnWinnerOwnPhone
+      || (carriedSlotFrozen && carriedNumberOnWinner())
       || [1, 2, 3].some((n) => n !== phoneCarry.slot && carriedNumberOnWinner(n)))) {
-      refuse("The merged-in phone number is still saved on the kept customer in a contact that was edited since the merge (or in another contact slot), and undoing now would lift its text hold. Remove that number from the kept customer's contacts, then revert");
+      refuse("The merged-in phone number is still saved on the kept customer (as its own phone, in a contact that was edited since the merge, or in another contact slot), and undoing now would lift its text hold. Remove that number from the kept customer, then revert");
     }
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;

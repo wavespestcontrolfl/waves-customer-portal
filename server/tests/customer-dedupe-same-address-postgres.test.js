@@ -330,6 +330,19 @@ maybeDescribe('same-address merge carries the phone, holds consent, and the undo
       await expect(undo(journalId)).rejects.toMatchObject({ statusCode: 409 });
     });
 
+    test.each(['phone', 'secondary_phone'])('number moved into the kept customer\'s own %s: 409, nothing written, hold intact (codex #5737 r4)', async (col) => {
+      const { winnerId, loserId, loserPhone, journalId } = await mergedPair();
+      await db('customers').where({ id: winnerId }).update({
+        service_contact_name: null, service_contact_phone: null, service_contact_role: null, [col]: loserPhone,
+      });
+      const before = await db('customers').where({ id: winnerId }).first();
+      await expect(undo(journalId)).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/still saved on the kept customer/) });
+      const after = await db('customers').where({ id: winnerId }).first();
+      expect(after[col]).toBe(loserPhone);
+      expect(prefsOf(after)).toEqual(prefsOf(before));
+      expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
+    });
+
     test('number removed by the admin: the undo goes through, the emptied slot is left alone, the orphaned hold is dropped', async () => {
       const { winnerId, loserId, loserPhone, journalId } = await mergedPair();
       await db('customers').where({ id: winnerId }).update({ service_contact_name: null, service_contact_phone: null, service_contact_role: null });
