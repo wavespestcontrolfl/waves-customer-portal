@@ -3,8 +3,8 @@
 // 2026-10-03). DISPLAY ONLY: the straight-line estimate (driveMin, no paid
 // routing call), nothing written, no stop reordered.
 //
-// Order is the one the day list shows: window start, then the tie-proximity
-// displayOrder when present, then route_order. Rows of one physical stop (a
+// Order is the one the day list shows: the tie-proximity displayOrder when
+// stamped, else window start, then route_order. Rows of one physical stop (a
 // visit group, or two services at the same coordinates) share their legs and
 // never get a leg between each other. A cancelled or skipped row is not a
 // stop. A missing coordinate yields null on its legs — never a 0 that would
@@ -29,8 +29,10 @@ function samePlace(a, b) {
 }
 
 function stopOrder(a, b) {
+  // The tie-proximity order is the tech's whole displayed route (a 09:30
+  // stop can run before a 09:00 one), so it wins outright when stamped.
+  if (a.displayOrder != null && b.displayOrder != null) return a.displayOrder - b.displayOrder;
   return (minutesOf(a.windowStart) - minutesOf(b.windowStart))
-    || ((a.displayOrder ?? Infinity) - (b.displayOrder ?? Infinity))
     || ((a.routeOrder ?? Infinity) - (b.routeOrder ?? Infinity));
 }
 

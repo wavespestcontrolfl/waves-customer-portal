@@ -45,4 +45,17 @@ describe('attachDriveLegs', () => {
     expect(by.b).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null });
     expect(by.c.driveFromPrevMin).toBeNull();
   });
+
+  it('follows the tie-proximity display order over window start', () => {
+    const services = [
+      stop('nine', '09:00', B, { displayOrder: 1 }),
+      stop('nine-thirty', '09:30', A, { displayOrder: 0 }),
+      stop('noon', '12:00', C, { displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by['nine-thirty']).toMatchObject({ firstStop: true, driveToNextMin: driveMin(A, B) });
+    expect(by.nine).toMatchObject({ firstStop: false, driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
+    expect(by.noon.lastStop).toBe(true);
+  });
 });
