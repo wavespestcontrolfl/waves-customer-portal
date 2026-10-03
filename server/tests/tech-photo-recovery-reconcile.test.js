@@ -94,7 +94,7 @@ describe('POST /:id/photos/reconcile', () => {
     updates.length = 0;
     updateError = null;
     for (const k of Object.keys(tables)) delete tables[k];
-    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-09-01' }];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }];
     tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest' }];
     tables.service_report_pdf_jobs = [];
     tables.tree_shrub_assessments = [];
@@ -272,7 +272,7 @@ describe('POST /:id/photos/reconcile — parked photo summary', () => {
     updates.length = 0;
     updateError = null;
     for (const k of Object.keys(tables)) delete tables[k];
-    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1' }];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }];
     tables.service_report_pdf_jobs = [];
     tables.tree_shrub_assessments = [];
     mockEnqueue.mockResolvedValue({ ok: true, queued: true, job: { status: 'queued' } });
@@ -353,7 +353,7 @@ describe('POST /:id/photos/reconcile — distinct expected image hashes', () => 
     updates.length = 0;
     updateError = null;
     for (const k of Object.keys(tables)) delete tables[k];
-    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1' }];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'completed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }];
     tables.service_report_pdf_jobs = [];
     tables.tree_shrub_assessments = [];
   });

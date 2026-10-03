@@ -10,7 +10,7 @@ const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'),
 describe('Charge Now deferred annual-prepay guard (source pins)', () => {
   const guard = src.indexOf("pafDeferredPrepayCoversVisit(svc, db, { throwOnError: true })");
   const coveredBlock = src.indexOf("annualPrepayCoversVisit(svc)) {\n      return res.status(409)");
-  const mint = src.indexOf('const applyPrepaidCredit = async (invoice) => {');
+  const mint = src.indexOf('const applyPrepaidCredit = async (invoice');
 
   test('the strict deferred read runs before the stamped-coverage block and the mint', () => {
     expect(guard).toBeGreaterThan(0);

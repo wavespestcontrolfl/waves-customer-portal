@@ -41,6 +41,7 @@
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { useFieldPortalClass } from '../../components/tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
@@ -48,6 +49,7 @@ import TechFieldHome from './TechFieldHome';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
+import { useTechBasePath } from '../../components/tech/techBasePath';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
@@ -55,6 +57,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
+import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -62,10 +65,11 @@ import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
+import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
@@ -139,28 +143,69 @@ function isFastCompleteReportEligible(service) {
 // and so does a visit that completes through a project (its profile says
 // so, a project is already linked, or the profile could not be read).
 function isLaneReportEligible(service) {
-  const profile = service?.completionProfile;
   return service?.laneVoiceFillEnabled === true
     && service?.fastCompleteReportEnabled === true
-    && service?.completionProfileLookupFailed !== true
+    && completesOnOwnRecord(service);
+}
+// A visit the report-flow sheet may complete on its own record: open, its
+// profile read, and not completing through a project.
+function completesOnOwnRecord(service) {
+  const profile = service?.completionProfile;
+  return service?.completionProfileLookupFailed !== true
     && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
+// visit whose form the reader reads (cockroach, the roach knockdowns, flea,
+// pest inspection, mosquito event, wildlife trapping, rodent exclusion,
+// sanitation and inspection; the schedule row's `typedReportFlowEnabled`)
+// opens the one-screen sheet in the report flow, its own record read from
+// the note, in place of the Dispatch typed form. Off, it opens the typed
+// form as before, and so does a visit closed out as a whole visit (its
+// packet completes every service on it), a visit that completes through a
+// project, a row whose profile or form could not be read, or a closed visit.
+// A station visit (termite or rodent bait stations, a trap check) opens the
+// sheet only once the tech's station map (station-map-v1) is known to be off:
+// with it on, the typed form records a check for every station and the sheet
+// carries no map (Codex P1 on #5638).
+function isTypedReportEligible(service, { stationMapOff = false } = {}) {
+  const type = service?.completionProfile?.findingsType;
+  return service?.typedReportFlowEnabled === true
+    && !!type && service?.findingsSchema?.type === type
+    && (stationMapOff || !Object.hasOwn(STATION_TYPE_PROGRAM, type))
+    && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
+    && completesOnOwnRecord(service);
+}
+// The inspection credit a typed inspection visit offers on the sheet, as the
+// office form offers it (SchedulePage isInspectionVisit): an inspection
+// profile, or the typed rodent and termite inspection keys, while the
+// schedule row says a credit is available. The server re-checks.
+function offersInspectionCredit(service) {
+  const profile = service?.completionProfile;
+  return (profile?.category === 'inspection' || ['rodent_inspection', 'termite_inspection'].includes(profile?.serviceKey))
+    && service?.inspectionCreditAvailable === true;
 }
 const laneKeyOf = (service) => resolveSpecialtyServiceKey({
   serviceKey: service?.completionProfile?.serviceKey,
   serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
 });
 
-// What the sheet reads of the report flow from the row: whether it runs, and
-// for a lane visit its lane, read from the note, and no trace on the sheet
-// (an outline trace stays on the full form).
-function reportFlowFields(service) {
+// What the sheet reads of the report flow from the row: whether it runs, for
+// a lane visit its lane and for a typed visit its form (each read from the
+// note), and no trace on the sheet for either (a trace stays on the full
+// form).
+function reportFlowFields(service, { stationMapOff = false } = {}) {
   const laneFlow = isLaneReportEligible(service);
+  const typedFlow = isTypedReportEligible(service, { stationMapOff });
   return {
-    reportFlow: isFastCompleteReportEligible(service) || laneFlow,
+    reportFlow: isFastCompleteReportEligible(service) || laneFlow || typedFlow,
     laneFlow,
     laneKey: laneFlow ? laneKeyOf(service) : null,
-    traceEligible: service.traceEligible !== false && !laneFlow,
+    typedFlow,
+    typedType: typedFlow ? service.completionProfile.findingsType : null,
+    typedSchema: typedFlow ? service.findingsSchema : null,
+    inspectionCredit: typedFlow && offersInspectionCredit(service),
+    traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
   };
 }
 
@@ -193,8 +238,11 @@ function isLawnReserviceFastCompleteEligible(service) {
 // the recap modal (no findings/billing gate) nor project creation (server
 // 422s appointment-managed types) is the right surface.
 function usesDispatchCompletion(service) {
-  return !!service?.completionProfile?.findingsType
-    || !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
+  return !!service?.completionProfile?.findingsType || closesOutAsVisit(service);
+}
+// A visit closed out as a whole (every service on it in one packet).
+function closesOutAsVisit(service) {
+  return !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling
@@ -329,22 +377,25 @@ const ON_SITE_ELIGIBLE = new Set(['en_route']);
 // an underlying feature. Dropped from QUICK_ACTIONS until those
 // surfaces actually exist (matches the /tech/messages drop in #355).
 const QUICK_ACTIONS = [
-  { icon: '📅', label: "Today's Route", path: '/tech' },
+  { icon: '📅', label: "Today's Route", path: '' },
   // Estimator routes into the admin pipeline builder — owner-only under the
   // 2026-08-25 role lockdown, hidden for technician logins.
-  { icon: '📋', label: 'Field Estimator', path: '/tech/estimate', adminOnly: true },
-  { icon: '🌱', label: 'Lawn Diagnostic', path: '/tech/lawn-diagnostic' },
-  { icon: '📸', label: 'Social Post', path: '/tech/social-post' },
-  { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
+  { icon: '📋', label: 'Field Estimator', path: '/estimate', adminOnly: true },
+  { icon: '🌱', label: 'Lawn Diagnostic', path: '/lawn-diagnostic' },
+  { icon: '📸', label: 'Social Post', path: '/social-post' },
+  { icon: '📖', label: 'Protocols & SOPs', path: '/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
 
 export default function TechHomePage({ section = 'today' }) {
+  const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
+  const base = useTechBasePath();
   const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
+  const staffIdForDevice = staff?.id ? String(staff.id) : '';
   const staffRef = useRef(staff);
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -425,6 +476,10 @@ export default function TechHomePage({ section = 'today' }) {
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
+  // The tech's station map: a station visit opens the sheet only once the
+  // flag has loaded and is off (isTypedReportEligible).
+  const stationMap = useFeatureFlagReady('station-map-v1');
+  const stationMapOff = stationMap.ready && !stationMap.enabled;
   // The verified profile's name first: the greeting and the timecard
   // signature pre-fill must not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
@@ -435,7 +490,7 @@ export default function TechHomePage({ section = 'today' }) {
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
   const currentTechId = staff?.id || null;
-  // TechLayout refreshes this from /admin/auth/me on every load, so the
+  // The admin shell refreshes this from /admin/auth/me on every load, so the
   // stored role tracks the server; hiding is UX only — the estimate APIs
   // enforce owner-only server-side regardless.
   const currentRole = staff?.role || null;
@@ -509,6 +564,11 @@ export default function TechHomePage({ section = 'today' }) {
       if (seq === scheduleSeq.current) { setLoading(false); setRefreshing(false); }
     }
   }, [fetchTechLine]);
+
+  // Recap clips kept on this device past the draft retention window are
+  // abandoned (the visit left the route): sweep them here, since a tech who
+  // stays in this page never runs the admin schedule's full sweep.
+  useEffect(() => { pruneRecapClipDrafts().catch(() => {}); }, []);
 
   useEffect(() => {
     fetchSchedule();
@@ -832,13 +892,15 @@ export default function TechHomePage({ section = 'today' }) {
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
   // a lawn re-service under its gate, or a tree & shrub visit under its gate and
-  // the tech's flag, opens its Fast Complete sheet first; everything else is the
-  // deep link, as before.
+  // the tech's flag, opens its Fast Complete sheet first, and a typed visit the
+  // reader reads opens the report-flow sheet; everything else is the deep
+  // link, as before.
   const openTypedVisit = useCallback((service) => {
     if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
     else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
+    else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
     else openTypedCompletion(service);
-  }, []);
+  }, [stationMapOff]);
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
@@ -858,7 +920,7 @@ export default function TechHomePage({ section = 'today' }) {
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
-    navigate(`/tech?visit=${encodeURIComponent(stop.key)}`);
+    navigate(`${base}?visit=${encodeURIComponent(stop.key)}`);
   };
   const closeFieldVisit = () => {
     if (navigationBusy) return;
@@ -871,13 +933,13 @@ export default function TechHomePage({ section = 'today' }) {
     else openProjectOrLane(service);
   };
   const fieldTools = [
-    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`/tech/protocols${visitSearch}`) },
-    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`/tech/lawn-diagnostic${visitSearch}`) },
+    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
+    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
     { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
-    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate('/tech/estimate') }] : []),
-    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`/tech/social-post${visitSearch}`) }] : []),
+    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
+    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
-  if (!fieldWorkspace && section !== 'today') return <Navigate to="/tech" replace />;
+  if (!fieldWorkspace && section !== 'today') return <Navigate to={base} replace />;
 
   return (
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
@@ -905,8 +967,8 @@ export default function TechHomePage({ section = 'today' }) {
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
-            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
-            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
+            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
+            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
@@ -928,7 +990,7 @@ export default function TechHomePage({ section = 'today' }) {
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
                 {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture
-                  service={selectedVisit.primary} request={techRequest}
+                  service={selectedVisit.primary} request={techRequest} staffId={staffIdForDevice}
                   recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
                   onRecoveryChange={notifyRecapRecoveryChange}
                 />}
@@ -1012,7 +1074,7 @@ export default function TechHomePage({ section = 'today' }) {
         marginBottom: 20,
       }}>
         {QUICK_ACTIONS
-          .filter((action) => action.path !== '/tech/social-post' || socialPostEnabled)
+          .filter((action) => action.path !== '/social-post' || socialPostEnabled)
           .filter((action) => !action.adminOnly || currentRole === 'admin')
           .map((action) => (
           <button
@@ -1021,7 +1083,7 @@ export default function TechHomePage({ section = 'today' }) {
               if (action.action === 'create-project') {
                 handleProjectQuickAction();
               }
-              else if (action.path) navigate(action.path);
+              else if (action.path !== undefined) navigate(`${base}${action.path}`);
             }}
             style={{
               background: DARK.card,
@@ -1128,7 +1190,7 @@ export default function TechHomePage({ section = 'today' }) {
               const addr = nextStop.address;
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
-            <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
+            <ActionBtn label="Protocol" icon="📖" onClick={() => navigate(`${base}/protocols`)} />
             <ActionBtn label="Quick Move" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
             <ActionBtn
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
@@ -1173,7 +1235,7 @@ export default function TechHomePage({ section = 'today' }) {
         {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
         {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
           <TechRecapCapture
-            service={nextStop} request={techRequest}
+            service={nextStop} request={techRequest} staffId={staffIdForDevice}
             recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
             onRecoveryChange={notifyRecapRecoveryChange}
           />
@@ -1267,13 +1329,16 @@ export default function TechHomePage({ section = 'today' }) {
 
       {continueProjectId && createPortal(
         <div
+          className={fieldPortalClass || undefined}
           /* Portaled to document.body at zIndex 50 so the stack lands right
              (Codex P2): the overlay mounts AFTER #root, so it paints above
-             the TechLayout bottom nav (also z-50, inside #root) — and
+             the shell bottom nav (also z-50, inside #root) — and
              ProjectDetail's confirmations use the shared Dialog portal
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
-          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          /* Inside Waves Admin the fixed sidebar is z-100: sit above it but below
+             the shared Dialog layer (120) so confirmations still paint on top. */
+          style={{ position: 'fixed', inset: 0, zIndex: base === '/tech' ? 50 : 105, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
           onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders
@@ -1365,7 +1430,7 @@ export default function TechHomePage({ section = 'today' }) {
             // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
-            ...reportFlowFields(fastCompleteService),
+            ...reportFlowFields(fastCompleteService, { stationMapOff }),
             // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).

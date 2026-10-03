@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const { detectServiceLine } = require('./service-line-configs');
+const { techFindingsCopyLive } = require('./tree-shrub-tech-findings');
 const { resolveApplicatorFdacsId } = require('./report-data');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { formatTechnicianForCustomer } = require('../../utils/technician-name');
@@ -102,9 +103,18 @@ function reportPdfStorageKey(serviceRecordId, { visibilitySignature = '' } = {})
 
 // Older tree reports can contain hidden photo scores promoted to "healthy".
 // Scope the content-version miss to tree/shrub PDFs; other lines keep their key.
+//
+// GATE_TS_TECH_FINDINGS_COPY changes what a tree/shrub PDF renders (the
+// technician's decisions, the palm-crown rule), so while it is on the key
+// carries it plus a content revision: flipping the gate misses incompatible
+// stored PDFs, and gate off keeps today's exact signature (no mass
+// invalidation while dark). Bump TS_TECH_FINDINGS_PDF_REVISION whenever that
+// copy changes what the PDF shows.
+const TS_TECH_FINDINGS_PDF_REVISION = 1;
 function treeShrubReviewPdfSignature(service = {}) {
   const line = service.service_line || detectServiceLine(service.service_type);
-  return line === 'tree_shrub' ? '-tsreview2' : '';
+  if (line !== 'tree_shrub') return '';
+  return `-tsreview2${techFindingsCopyLive() ? `-tsfind${TS_TECH_FINDINGS_PDF_REVISION}` : ''}`;
 }
 
 // Time-on-site correction key component (codex P2 #3152): nulling

@@ -2246,6 +2246,7 @@ function EstimatePipelineViewV2({
                                     body: JSON.stringify({
                                       to: e.customerPhone,
                                       fromNumber: "+19412975749",
+                                      customerIdHint: e.customerId || undefined,
                                     }),
                                   },
                                 );
@@ -3254,6 +3255,7 @@ export function MobileEstimateRow({
                 body: JSON.stringify({
                   to: estimate.customerPhone,
                   fromNumber: "+19412975749",
+                  customerIdHint: estimate.customerId || undefined,
                 }),
               });
               if (!r?.success)

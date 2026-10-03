@@ -1149,6 +1149,29 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
     expect(JSON.stringify(res.data)).not.toContain('/pay/');
   });
 
+  // A deferred year whose charge failed after the first visit delivered its
+  // pay link: a retry of a card-lane accept still shows it (GitHub Codex #5567 r18).
+  test('a deferred year whose charge failed shows its pay link on a card-lane retry', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-paf-2',
+      token: 'tok-paf-2-x0123456789abc',
+      status: 'accepted',
+      customer_id: 'cust-9',
+      accepted_service_mode: 'recurring',
+      price_locked_at: new Date(),
+      estimate_data: { recurringCardLaneAccepted: true, prepayAutoChargeJob: { status: 'delivered_fallback', deferred_to_first_visit: true, invoice_id: 'inv-paf2' } },
+    });
+    resetStore(accepted);
+    db.__state.tables.annual_prepay_terms = [{ id: 'apt-paf2', source_estimate_id: 'est-paf-2', prepay_invoice_id: 'inv-paf2', created_at: new Date() }];
+    db.__state.tables.invoices = [{
+      id: 'inv-paf2', token: 'paf2tok', total: '684.00', status: 'sent', payer_id: null, created_at: new Date(),
+      title: 'Annual prepay', notes: 'Auto-generated from accepted estimate #est-paf-2. Annual prepay.',
+    }];
+    const res = await putAccept('tok-paf-2-x0123456789abc');
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.data)).toContain('/pay/paf2tok');
+  });
+
   // GATE_PAF_PREPAY: a year whose charge waits for the first visit is not owed
   // now — a retry must not hand out its /pay link, and says it is charged
   // after that visit.
@@ -4023,6 +4046,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
     expect(jobOf()).toMatchObject({
       status: 'awaiting_first_visit', deferred_to_first_visit: true, invoice_id: 'inv-prepay-1', authorized_total_cents: quote.totalCents,
+      authorized_invoice_total_cents: Math.round(Number(db.__state.quotedBase) * 100),
       consent_variant_version: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
     });
     expect(require('../services/payment-method-consents').recordConsent)

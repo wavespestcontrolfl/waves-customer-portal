@@ -71,13 +71,16 @@ function saveTrace(baseUrl, extra = {}) {
   });
 }
 
+// Current visit for the technician access window (#5568 sweep).
+const TODAY_ET = require('../utils/datetime-et').etDateString();
+
 describe('treatment-zone save bound to the loaded property', () => {
   beforeEach(() => {
     mockFirst.mockReset();
     mockSave.mockReset();
     jest.spyOn(traceEligibility, 'traceCaptureBlockPayload').mockResolvedValue(null);
     mockFirst.mockImplementation(async () => ({
-      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: 'prop-2',
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: TODAY_ET, service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: 'prop-2',
     }));
     mockSave.mockResolvedValue({ id: 'zone-1', linear_ft: 120 });
   });
@@ -130,7 +133,7 @@ describe('treatment-zone save bound to the loaded property', () => {
 
   test('a visit with no property matches a sheet that loaded none', async () => {
     mockFirst.mockImplementation(async () => ({
-      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: null,
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: TODAY_ET, service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: null,
     }));
     await withServer(async (baseUrl) => {
       expect((await saveTrace(baseUrl, { expectedPropertyId: null })).status).toBe(200);

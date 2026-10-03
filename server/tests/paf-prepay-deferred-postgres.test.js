@@ -305,94 +305,138 @@ postgres('annual prepay charged after the first visit', () => {
     // narrow visit row) still sees it, through the prediction verdict too.
     const renewals = require('../services/annual-prepay-renewals');
     const narrow = { id: f.parentId, customer_id: f.customerId, service_type: 'Quarterly Pest Control' };
-    expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: new Set() })).toBe(true);
-    // A paid year cancelled to end at term rides out its window (coveredTermsAsOf).
+    const prefilter = await renewals.deferredPrepayHoldCustomerIds(trx, [f.customerId]);
+    expect(prefilter.has(String(f.customerId))).toBe(true);
+    expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: prefilter })).toBe(true);
+    // A paid year cancelled to end at term rides out its window (coveredTermsAsOf),
+    // board prediction included (pre-push audit).
     await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
     expect(await covers(f.parentId)).toBe(true);
+    const cancelledPrefilter = await renewals.deferredPrepayHoldCustomerIds(trx, [f.customerId]);
+    expect(await renewals.annualCoverageVerdictForPrediction(narrow, trx, { deferredCustomerIds: cancelledPrefilter })).toBe(true);
     // A year voided after the fact no longer covers the stamped visit.
     await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
     expect(await covers(f.parentId)).toBe(false);
   });
 
-  describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
-    async function completeWithText(f, visitId, visitOutcome = 'completed') {
-      const techId = randomUUID();
-      const catalogId = randomUUID();
-      await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
-      await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
-      await trx('scheduled_services').where({ id: visitId })
-        .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
-      const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
-      send.mockClear();
-      send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
-      const { completeScheduledService } = require('../services/complete-scheduled-service');
-      await completeScheduledService({ serviceId: visitId, idempotencyKey: randomUUID(),
-        actor: { techRole: 'admin', technicianId: techId, technician: null },
-        body: { customerRecap: 'done', visitOutcome, products: [], areasTreated: [], sendCompletionSms: true, requestReview: false } });
-      return send.mock.calls.map((c) => c[0]?.body || '').join('\n');
-    }
+  it('a closeout that finishes after the year was charged and activated is stamped and bills nothing (Codex r14)', async () => {
+    const f = await deferredAccept({ jobPatch: { status: 'paid' } });
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'active' });
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBe(f.termId);
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
+  });
 
-    it('the visit that releases the year says it is being charged now', async () => {
-      const f = await deferredAccept();
-      const text = await completeWithText(f, f.parentId);
-      expect(text).toMatch(/Your Waves annual plan payment of \$480\.00 is being charged to your card on file now - receipt to follow\./);
-      expect(text).not.toMatch(/nothing due today/);
-    });
+  it('a resumed closeout whose year stopped covering it drops its stamp (Codex r17)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const key = randomUUID();
+    const input = { serviceId: f.parentId, idempotencyKey: key,
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } };
+    await completeScheduledService(input);
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBe(f.termId);
+    // The closeout's side effects are resumed after the year was voided.
+    await trx('service_completion_attempts').where({ service_id: f.parentId })
+      .update({ status: 'side_effects_pending', updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+    await completeScheduledService(input);
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
 
-    it('account credit that lowers the charge makes the amount a ceiling (R1)', async () => {
-      const f = await deferredAccept();
-      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 100 });
-      const text = await completeWithText(f, f.parentId);
-      expect(text).toMatch(/payment of up to \$480\.00 is being charged/);
-    });
+  it('a resumed closeout now paid another way drops its stamp (Codex r18)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const input = { serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } };
+    await completeScheduledService(input);
+    await trx('service_completion_attempts').where({ service_id: f.parentId })
+      .update({ status: 'side_effects_pending', updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+    await trx('scheduled_services').where({ id: f.parentId }).update({ prepaid_method: 'cash', prepaid_amount: 120 });
+    await completeScheduledService(input);
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
 
-    it('account credit that covers the year keeps the "nothing due" text', async () => {
-      const f = await deferredAccept();
-      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 1000 });
-      const text = await completeWithText(f, f.parentId);
-      expect(text).not.toMatch(/being charged/);
-      expect(text).toMatch(/nothing (is )?due today/);
-    });
+  it('a quiet backfill closeout never takes the deferred hold (Codex r19)', async () => {
+    const f = await deferredAccept();
+    const renewals = require('../services/annual-prepay-renewals');
+    const spy = jest.spyOn(renewals, 'pafDeferredHoldingTerm');
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60, scheduled_date: day(-3) });
+    // The backfilled visit sits inside the waiting year's window.
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ term_start: day(-10) });
+    expect(await covers(f.parentId)).toBe(true);
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false, backfill: true } });
+    const record = await trx('service_records').where({ scheduled_service_id: f.parentId }).first('structured_notes');
+    const notes = typeof record?.structured_notes === 'string' ? JSON.parse(record.structured_notes) : (record?.structured_notes || {});
+    expect(notes.backfill).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+    // …and it keeps its normal open review invoice (pre-push audit).
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toHaveLength(1);
+    spy.mockRestore();
+  });
 
-    it('a second held visit done before the release pass keeps the regular text', async () => {
-      const f = await deferredAccept();
-      const facts = async (id) => require('../services/paf-prepay-release')
-        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
-      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
-      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
-      await perform(f.parentId, f.customerId);
-      expect(await facts(f.childId)).toBeNull();
-    });
+  it('a reopened held visit closed again as paid another way loses its stamp (Codex r16)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId, prepaid_method: 'cash', prepaid_amount: 120,
+      technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
 
-    it('the announcement is reserved for one visit, and a year already paid gets none (Codex r9)', async () => {
-      const facts = async (id) => require('../services/paf-prepay-release')
-        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
-      const f = await deferredAccept();
-      await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
-      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
-      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
-      expect(await facts(f.childId)).toBeNull();
-      const paid = await deferredAccept({ invoiceStatus: 'paid' });
-      await trx('scheduled_services').where({ id: paid.parentId }).update({ paf_held_term_id: paid.termId });
-      expect(await facts(paid.parentId)).toBeNull();
-      const unstamped = await deferredAccept();
-      expect(await facts(unstamped.parentId)).toBeNull();
-    });
-
-    it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
-      const removed = await deferredAccept();
-      await trx('payment_methods').where({ id: removed.pmId }).del();
-      expect(await completeWithText(removed, removed.parentId)).not.toMatch(/being charged/);
-      const optedOut = await deferredAccept();
-      await trx('autopay_log').insert({ customer_id: optedOut.customerId, event_type: 'autopay_disabled', created_at: new Date() });
-      expect(await completeWithText(optedOut, optedOut.parentId)).not.toMatch(/being charged/);
-    });
-
-    it('a later visit of a year already released keeps the regular text', async () => {
-      const f = await deferredAccept({ jobPatch: { status: 'pending' } });
-      const text = await completeWithText(f, f.childId);
-      expect(text).not.toMatch(/being charged/);
-    });
+  it('a reopened visit completed again re-decides its stamp, never trusting a stale one (Codex r15)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Mosquito Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    // Stamped by an earlier closeout, then reopened and moved off the sold
+    // coverage (a service the term does not cover).
+    await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId, service_type: 'Mosquito Control',
+      technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
   });
 
   describe('releasing the charge after the first performed visit', () => {
@@ -550,6 +594,36 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await release()).toMatchObject({ released: 1 });
     });
 
+    it('a crashed closeout that already stamped its visit still reaches the office when the year dies (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.parentId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running',
+        updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
+    it('a visit reopened and closed again as inspection only no longer counts as performed (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('service_records').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
+        service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
+        structured_notes: JSON.stringify({ visitOutcome: 'inspection_only' }), created_at: new Date(Date.now() + 1000) });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('an abandoned closeout attempt past the stale window never blocks the release (Codex r15)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'pending',
+        updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+      expect(await release()).toMatchObject({ released: 1 });
+    });
+
     it('a year voided while a held closeout is still finishing waits for it (pre-push audit P1)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -695,6 +769,119 @@ postgres('annual prepay charged after the first visit', () => {
       expect((await jobOf(f)).status).not.toBe('paid');
     });
 
+    it('a first visit reopened after the release sends the job back to wait, never a charge or pay link (Codex r13)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ status: 'confirmed' });
+      const charge = require('../services/stripe').chargeInvoiceWithSavedCard;
+      await require('../services/recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+      expect(charge).not.toHaveBeenCalled();
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit' });
+      expect((await jobOf(f)).released_for_visit_id).toBeNull();
+      expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    it('a first visit reopened between the preflight and the charge lock requeues the job, never a pay link (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(
+        Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }));
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true, requirePerformedVisit: true, requireHeldTermId: f.termId }));
+      // (authorized_invoice_total_cents caps the pre-credit bill when the job carries it.)
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', released_for_visit_id: null });
+      expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    it('a released first visit re-closed as declined before the charge sends the job back to wait (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('service_records').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
+        service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
+        structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), created_at: new Date(Date.now() + 1000) });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('a year settled before any visit whose payment came back is never charged before a visit (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', released_for_visit_id: null } });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', charge_returned: true });
+    });
+
+    it('a released visit re-closed without the held stamp sends the job back to wait (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      // Reopened and closed again paid another way: completion cleared the stamp.
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: null, prepaid_method: 'cash', prepaid_amount: 120 });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('a released year whose term was cancelled is never charged and reaches the office (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled' });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
+    it('the deferred charge caps the pre-credit bill total and checks only the account payer (Codex r18, r19)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_invoice_total_cents: TOTAL_CENTS } });
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId) => {
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+        return { ok: true };
+      });
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ maxAuthorizedInvoiceTotalCents: TOTAL_CENTS, selfPayAccountScope: true }));
+    });
+
+    it('a deferred year whose account gains a payer is re-routed at account scope by the recovery handler (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      // An account payer only (the held visit itself is self-pay).
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('payer'), { code: 'PAYER_BILLED_GUARD' }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
+    it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'pending' });
+      const charge = require('../services/stripe').chargeInvoiceWithSavedCard;
+      await require('../services/recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+      expect(charge).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
     it('a failed R2 alert is raised on the next pass; none is raised once the year is paid', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -744,6 +931,11 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a returned bank debit goes to the pay link and the office alert, never a re-debit', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'processing' } });
+      // Released by the performed first visit, then charged by bank debit.
+      await perform(f.parentId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
       // The payment-failed webhook reopened the invoice.
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
       await sweep();
@@ -771,8 +963,36 @@ postgres('annual prepay charged after the first visit', () => {
       closeSpy.mockRestore();
     });
 
+    it('a failed-charge year whose visit was re-closed paid another way never sends the office to bill it (Codex r18)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      // Reopened and closed again paid another way: completion cleared the stamp.
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: null, prepaid_method: 'cash', prepaid_amount: 120 });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_before_visit' });
+    });
+
+    it('a failed-charge year still hands a later held visit to the office when the released one was paid another way (pre-push audit)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
+      await trx('scheduled_services').where({ id: f.childId }).update({ scheduled_date: day(0) });
+      await perform(f.childId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: null, prepaid_method: 'cash', prepaid_amount: 120 });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.childId });
+    });
+
     it('a year closed unpaid after a failed charge hands the held visits to the office', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
       await trx('estimates').where({ id: f.estimateId }).update({
         estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
       });
@@ -800,6 +1020,7 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a released year handed to a payer that then dies unpaid raises the unbilled-visits alert', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'skipped', reason: 'payer_billed' } });
+      await perform(f.parentId, f.customerId);
       await trx('estimates').where({ id: f.estimateId }).update({
         estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
       });
@@ -813,6 +1034,7 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a released bank debit that returns, then a voided year, still hands the held visit to the office (pre-push audit P1)', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'processing', released_for_visit_id: null } });
+      await perform(f.parentId, f.customerId);
       await trx('estimates').where({ id: f.estimateId }).update({
         estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
       });
@@ -821,11 +1043,29 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
     });
 
+    it('an after-visit year whose payer still resolves is stamped to the payer before delivery, never the homeowner (pre-push audit)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', deferred_to_first_visit: false, after_visit_attested: true } });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      payer.resolveForInvoice.mockImplementation(async () => ({ payerId: 7, snapshot: null }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
     it('a year routed to a payer, authorized for after the first visit, is never charged to the card once the payer is gone (pre-push audit P0)', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'pending', deferred_to_first_visit: false, after_visit_attested: true } });
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect((await jobOf(f)).status).not.toBe('paid');
+      // …and no authorization the customer never gave is recorded first.
+      expect(await trx('payment_method_consents').where({ customer_id: f.customerId })).toEqual([]);
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {
@@ -858,6 +1098,10 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
         invoice_number: `TEST-ADDON-${f.parentId.slice(0, 6)}`, token: randomUUID().replace(/-/g, ''), status: 'paid', paid_at: new Date(),
         total: 20, subtotal: 20, line_items: JSON.stringify([{ client_id: `scheduled_${f.parentId}_addon_${addonId}`, description: 'Wasp nest removal', amount: 20, quantity: 1, unit_price: 20 }]) });
+      // The add-ons are then edited: the editor deletes and reinserts the
+      // rows, so their ids change (GitHub Codex #5567 r15).
+      await trx('scheduled_service_addons').where({ id: addonId }).del();
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: f.parentId, service_name: 'Wasp nest removal', estimated_price: 20, base_price: 20 });
       const credit = require('../services/customer-credit');
       const creditSpy = jest.spyOn(credit, 'postCreditMovement');
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });

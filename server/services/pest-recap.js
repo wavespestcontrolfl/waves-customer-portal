@@ -302,7 +302,7 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
  * most-used list; only that sheet asks for it, so the recap modal (and the
  * sheet's stock re-read) never pay for the aggregate.
  */
-// Whether a trace saved on a lane visit would show on its report, judged as
+// Whether a trace saved on a lane or typed visit would show on its report, judged as
 // the report judges it (trace-eligibility.js): with the eligibility gate on,
 // the visit's own line (bed bug's indoor work and bee, wasp and mud dauber
 // nest work carry no map) or, when it carries none, an add-on line that
@@ -311,7 +311,23 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
 // a second lookup, and an add-on read that fails counts as shown: the
 // report's render fails closed, but here an unknown must keep the sheet's
 // trace holds (codex local r6 on #5629).
-async function laneTraceOnReport(svc, profile, lane, knex) {
+// The record the Fast Complete sheet reads from a visit's note, each resolved
+// as the completion resolves it: a specialty lane (GATE_LANE_VOICE_FILL,
+// visit-lane-facts.js voiceLaneFor) or a typed form (GATE_TYPED_VOICE_FILL,
+// visit-typed-facts.js sheetTypeFor, the profile's own findingsType when the
+// sheet reads it; never a combined visit, whose companion sections are
+// required at completion and the sheet has none). Neither for a visit that completes through a project,
+// nor when the profile could not be read (whether it does is then unknown).
+function sheetRecordFor(profile, svc) {
+  if (!profile || profile.projectBacked || profile.requiresProject) return { lane: null, typedType: null };
+  const gates = require('../config/feature-gates');
+  return {
+    lane: gates.laneVoiceFillLive() ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type }) : null,
+    typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
+  };
+}
+
+async function visitTraceOnReport(svc, profile, lane, knex) {
   const traceEligibility = require('./service-report/trace-eligibility');
   if (!traceEligibility.traceEligibilityGateOn()) return lane !== 'bed_bug_treatment';
   const satellite = (verdict) => !!verdict?.eligible && verdict.variant !== 'photo';
@@ -390,23 +406,23 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;
 
-  // Lane voice fill (GATE_LANE_VOICE_FILL): the specialty lane whose record
-  // the Fast Complete sheet reads from the note, resolved as the completion
-  // resolves it (visit-lane-facts.js voiceLaneFor), never for a visit that
-  // completes through a project, nor when the profile could not be read
-  // (whether it does is then unknown); null otherwise. The recap's own
-  // `eligible` stays pest control only.
-  const lane = profile && require('../config/feature-gates').laneVoiceFillLive() && !profile.projectBacked && !profile.requiresProject
-    ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type })
-    : null;
-  const traceOnReport = lane ? await laneTraceOnReport(svc, profile, lane, knex) : undefined;
+  // The record the Fast Complete sheet reads from the note (null for both:
+  // none). The recap's own `eligible` stays pest control only.
+  const { lane, typedType } = sheetRecordFor(profile, svc);
+  const traceOnReport = lane || typedType ? await visitTraceOnReport(svc, profile, lane, knex) : undefined;
 
   return {
     ok: true,
     eligible,
-    // Whether a saved trace would show on a lane visit's report, so the
-    // sheet holds only on a map the customer would see.
-    ...(lane ? { traceOnReport } : {}),
+    ...(typedType ? { typedType } : {}),
+    // Whether a saved trace would show on a lane or typed visit's report,
+    // so the sheet holds only on a map the customer would see.
+    ...(traceOnReport === undefined ? {} : { traceOnReport }),
+    // Typed voice fill (GATE_TYPED_VOICE_FILL, step 3 "after sending"): the
+    // sheet offers to book the follow-up a completion suggests (bed bug,
+    // flea, cockroach and the knockdowns), as the office's Schedule
+    // follow-up does.
+    followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
     lane,
     existingRecordLoadFailed,
     service: recapServiceIdentity(svc, profile),
@@ -1666,4 +1682,5 @@ module.exports = {
   recapVisitIdentityChanged,
   recapServiceIdentity,
   loadRecapCatalogProducts,
+  loadCommonProducts,
 };

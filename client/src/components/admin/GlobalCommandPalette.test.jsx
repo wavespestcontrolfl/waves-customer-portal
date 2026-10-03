@@ -554,3 +554,13 @@ describe('auto-growing composer', () => {
     expect(box).toHaveValue(long);
   });
 });
+
+describe('palette context casing (Codex #5573 r15)', () => {
+  it('detectContext lowercases the pathname before every lookup', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const src = readFileSync(resolve(process.cwd(), 'src/components/admin/GlobalCommandPalette.jsx'), 'utf8');
+    const fn = src.slice(src.indexOf('function detectContext('));
+    expect(fn.slice(0, 400)).toMatch(/const pathname = String\(rawPathname \|\| ""\)\.toLowerCase\(\);/);
+  });
+});

@@ -110,6 +110,7 @@ const {
   lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
+const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -3931,6 +3932,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(completionInput.body?.techTips)
       : { tips: [], dropped: [] };
+    // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
+    // keep / confirm / hide / edit decisions on the service record whether or
+    // not the signed preview is accepted below (a failed signature re-scores
+    // and drops them). Gate off or no decisions = null = nothing written.
+    const treeShrubTechFindingsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezeTechFindings(completionInput.body?.treeShrubReview)
+      : null;
     // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
     // is checked against the one link rule (report-blog-post.js) and its
     // title and live URL frozen, so the report shows the post the customer
@@ -4342,6 +4350,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: 400, body: {
         error: 'That blog post is not live on the Waves site right now. Pick another or remove it, then complete.',
         code: 'BLOG_POST_UNAVAILABLE',
+      } });
+    }
+    // GATE_TS_TECH_FINDINGS_COPY: an edited finding prints verbatim, so its
+    // wording passes the same customer-copy screen as a tech's own tip line.
+    const rejectedFindingEdit = claim.action === 'proceed' && treeShrubTechFindingsFreeze
+      ? rejectedTechFindingEdits(completionInput.body?.treeShrubReview)[0]
+      : null;
+    if (rejectedFindingEdit) {
+      logger.warn(`[ts-tech-findings] edit rejected on ${completionInput.serviceId}: ${rejectedFindingEdit.violations.join(', ')}`);
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('ts_finding_edit_rejected'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: `Your wording for "${rejectedFindingEdit.label}" needs to change before the report can print it (flagged: ${rejectedFindingEdit.violations.join(', ')}). Reword it, then complete.`,
+        code: 'TS_FINDING_EDIT_COPY_REJECTED',
+        treeShrubFinding: { key: rejectedFindingEdit.key, violations: rejectedFindingEdit.violations },
       } });
     }
     if (claim.action === 'proceed') {
@@ -6220,6 +6246,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treeShrubCloseout: treeShrubCloseoutSummary,
               treeShrubCloseoutWarnings,
             } : {}),
+            ...(treeShrubTechFindingsFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
@@ -9461,18 +9488,42 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // text all read that stamp, never the live hold, which the year's charge
     // and activation end.
     let deferredPrepayCovered = false;
-    if (!visitIsPayerBilled && !svc.prepaid_method) {
+    // A closeout (fresh or resumed) that is now payer-billed or paid another
+    // way is never held: clear a stamp an earlier run wrote, so it cannot
+    // release the year beside the payer's bill or the other payment (GitHub
+    // Codex #5567 r16, r18).
+    if ((visitIsPayerBilled || svc.prepaid_method) && svc.paf_held_term_id) {
+      await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+      svc.paf_held_term_id = null;
+    }
+    // A quiet backfill closeout never takes the deferred hold: it keeps its
+    // normal open review invoice, since a backfill neither releases the year
+    // nor reaches the cancelled-year handoff (GitHub Codex #5567 r19).
+    if (!visitIsPayerBilled && !svc.prepaid_method && !isBackfillCompletion) {
       try {
-        if (svc.paf_held_term_id) {
+        // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
+        // (first run, or a visit reopened and completed again, possibly
+        // repriced or moved off the sold coverage) re-decides and rewrites
+        // it (GitHub Codex #5567 r15).
+        if (svc.paf_held_term_id && resumingCommittedCompletion) {
           deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
-        } else {
-          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true });
-          if (heldTerm) {
-            await db('scheduled_services').where({ id: svc.id }).whereNull('paf_held_term_id')
-              .update({ paf_held_term_id: heldTerm.id });
-            svc.paf_held_term_id = heldTerm.id;
-            deferredPrepayCovered = true;
+          // The year stopped covering the visit before this resume (voided,
+          // refunded, dispute-suspended): the visit bills normally, so its
+          // stamp goes too, never left to release or recover the year
+          // (GitHub Codex #5567 r17).
+          if (!deferredPrepayCovered) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+            svc.paf_held_term_id = null;
           }
+        } else {
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
+            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
+          const heldTermId = heldTerm?.id || null;
+          if (String(svc.paf_held_term_id || '') !== String(heldTermId || '')) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: heldTermId });
+            svc.paf_held_term_id = heldTermId;
+          }
+          deferredPrepayCovered = !!heldTerm;
         }
       } catch (lookupErr) {
         logger.error(`[dispatch] deferred annual-prepay check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
@@ -9491,7 +9542,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
     const annualPrepayCovered = !visitIsPayerBilled
-      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db));
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion }));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
@@ -13515,20 +13566,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // paid template; the post-block recovery restores the separate
               // receipt the claim stood down.
             }
-            // GATE_PAF_PREPAY (owner ruling 2026-10-02, first visit only): when
-            // this performed visit releases a deferred year's charge, say the
-            // year is being charged now instead of "nothing due today".
-            // Disabled / missing template or no facts → the regular text below.
-            if (!body && annualPrepayCovered
-              && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)) {
-              const firstCharge = await require('../services/paf-prepay-release').firstChargeCompletionFacts(svc);
-              if (firstCharge) {
-                sentSmsType = 'service_complete_annual_prepay_first_charge';
-                body = await renderTemplate(sentSmsType, {
-                  ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
-                }, paidTemplateContext);
-              }
-            }
             if (!body && annualPrepayCovered) {
               sentSmsType = 'service_complete_annual_prepay';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
@@ -14700,3 +14737,4 @@ module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportA
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
+module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;

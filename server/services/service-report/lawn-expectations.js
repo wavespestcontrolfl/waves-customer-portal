@@ -1,7 +1,8 @@
 /**
  * Lawn expectations engine (lawn report rebuild, P10). Pure: no I/O, no DB,
- * no fetch, no gate. Ships DARK: nothing in customer output calls it yet (P14
- * wires the writer, P16 routes the deterministic copy), so there is no gate.
+ * no fetch, no gate. Ships DARK: the only customer-facing reader is P14's v6
+ * copy (lawn-copy-v6.js, GATE_LAWN_REPORT_COPY_V6), which prints approved rows'
+ * keyed `sentences` word for word; P16 will route the deterministic copy.
  *
  * Given today's applications, named issues, the visit date and the next-visit
  * date, it returns the approved expectation sentences and a byNextVisit view
@@ -231,13 +232,16 @@ function materializeRow(base, { causes, gapDays, celsiusYtdCount }) {
   const capped = Boolean(row.secondApp) && celsiusYtdCount >= row.secondApp.cap;
   const byNextVisit = nextVisitView(row, gapDays);
   const contactTrigger = lineAllowed(row.contactTrigger) ? row.contactTrigger : null;
-  const candidates = [
-    row.visibleChange,
-    ...row.limits,
-    row.secondApp && (capped ? row.secondApp.cappedLine : row.secondApp.line),
-    byNextVisit?.line,
-    contactTrigger,
-  ].filter(Boolean);
+  // Keyed so P14's writer can SELECT a sentence by (row id, key) and print its
+  // text verbatim; the order here is the order a row reads in.
+  const keyed = [
+    ['visibleChange', row.visibleChange],
+    ...row.limits.map((line, i) => [`limit${i + 1}`, line]),
+    ['secondApp', row.secondApp && (capped ? row.secondApp.cappedLine : row.secondApp.line)],
+    ['byNextVisit', byNextVisit?.line],
+    ['contactTrigger', contactTrigger],
+  ].filter(([, line]) => line);
+  const candidates = keyed.map(([, line]) => line);
   return {
     ...Object.fromEntries(ROW_OUTPUT_KEYS.map((key) => [key, row[key]])),
     windowSources: [...new Set([row.windows.first, row.windows.full].filter(Boolean).map((w) => w.source))],
@@ -245,6 +249,7 @@ function materializeRow(base, { causes, gapDays, celsiusYtdCount }) {
     byNextVisit,
     contactTrigger,
     lines: candidates.filter(lineAllowed),
+    sentences: keyed.filter(([, line]) => lineAllowed(line)).map(([key, text]) => ({ key, text })),
     droppedLines: candidates.filter((line) => !lineAllowed(line)),
   };
 }

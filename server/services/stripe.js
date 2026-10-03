@@ -1150,10 +1150,14 @@ const StripeService = {
     return res?.data || [];
   },
 
-  async retrievePaymentIntent(paymentIntentId, options = {}) {
+  // `options` = Stripe retrieve PARAMS (e.g. { expand: [...] }); `requestOptions` = Stripe REQUEST options
+  // (timeout, maxNetworkRetries, idempotencyKey, ...), the SDK's third argument. Existing callers pass
+  // neither/only params and keep the exact two-argument call.
+  async retrievePaymentIntent(paymentIntentId, options = {}, requestOptions = undefined) {
     if (!paymentIntentId) return null;
     const stripe = getStripe();
     if (!stripe) return null;
+    if (requestOptions) return stripe.paymentIntents.retrieve(paymentIntentId, options, requestOptions);
     return stripe.paymentIntents.retrieve(paymentIntentId, options);
   },
 
@@ -2138,7 +2142,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2264,6 +2268,13 @@ const StripeService = {
             throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
           }
         }
+        // Pre-credit invoice total ceiling (opt-in, the deferred annual prepay):
+        // the locked bill, tax and raw-total edits included, never above the
+        // approved amount, before any account credit can mask an increase.
+        if (maxAuthorizedInvoiceTotalCents != null
+          && Math.round(Number(lockedInvoice.total || 0) * 100) > Math.round(Number(maxAuthorizedInvoiceTotalCents))) {
+          throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
+        }
         // Full charge-base ceiling against the LOCKED row (balance-sweep
         // pre-push r2 P0): the subtotal cap above cannot see a retotal that
         // rides tax or a raw total edit, and a reversed account credit also
@@ -2388,7 +2399,33 @@ const StripeService = {
           // concurrent reopen, cancel or reschedule of the visit; any
           // lineage, recurring included. Opt-in.
           if (requireCompletedVisit && String(lockedSvc.status || '') !== 'completed') {
-            throw new Error('The visit is no longer completed. Review before charging.');
+            throw Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+          }
+          // Opt-in (the deferred annual prepay, GATE_PAF_PREPAY): the visit's
+          // CURRENT closeout must be a performed one, read under this same visit
+          // lock that a re-closeout's record insert serializes through.
+          if (requirePerformedVisit) {
+            const latestRecord = await trx('service_records').where({ scheduled_service_id: lockedSvc.id })
+              .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+            let latestNotes = latestRecord?.structured_notes;
+            if (typeof latestNotes === 'string') { try { latestNotes = JSON.parse(latestNotes); } catch { latestNotes = null; } }
+            const outcome = String(latestNotes?.visitOutcome || '');
+            if (!latestRecord || String(latestRecord.status || '') !== 'completed'
+              || ['inspection_only', 'customer_declined', 'incomplete'].includes(outcome)
+              || String(latestNotes?.backfill || '') === 'true') {
+              throw Object.assign(new Error('The visit\'s current closeout is not a performed visit. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+            }
+          }
+          // Opt-in (deferred annual prepay): the visit must still carry the
+          // year's held stamp a closeout wrote; a re-closeout paid another
+          // way, payer-billed or outside the coverage clears it.
+          if (requireHeldTermId != null) {
+            const heldRow = await trx('scheduled_services').where({ id: lockedSvc.id }).first('paf_held_term_id');
+            const heldTerm = await trx('annual_prepay_terms').where({ id: requireHeldTermId }).first('status', 'prepay_invoice_id');
+            if (String(heldRow?.paf_held_term_id || '') !== String(requireHeldTermId)
+              || !heldTerm || String(heldTerm.status || '') === 'cancelled' || String(heldTerm.prepay_invoice_id || '') !== String(invoiceId)) {
+              throw Object.assign(new Error('The visit is no longer held by this annual prepay. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+            }
           }
           // Cross-lane exclusion at the money move (hold-rail pre-push r13
           // P0): a /secure appointment-card row appearing on the visit —
@@ -2493,10 +2530,13 @@ const StripeService = {
             && String(lockedInvoice.scheduled_service_id || '') !== String(requireSelfPayScheduledServiceId)) {
             throw new Error('The invoice is no longer bound to this appointment. Review before charging.');
           }
+          // selfPayAccountScope (opt-in, the deferred annual prepay): the bill is
+          // the account's, so only an account payer re-routes it — a Bill-To
+          // edit on the locked visit never sends the whole year there.
           const resolvedPayer = await require('./payer').resolveForInvoice({
             database: trx,
             customerId: String(lockedSvc.customer_id),
-            scheduledServiceId: String(lockedSvc.id),
+            scheduledServiceId: selfPayAccountScope ? null : String(lockedSvc.id),
             throwOnError: true,
           });
           if (resolvedPayer?.payerId) {

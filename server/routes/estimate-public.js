@@ -13624,9 +13624,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // payer, or a payer the customer or visit resolves to now, keeps the
       // normal job, whose post-commit flow routes the bill to that payer.
       // An unreadable payer also keeps the normal job (it fails closed there).
+      // The year bill's pre-credit total as approved (GitHub Codex #5567 r18, r19):
+      // the deferred charge caps the locked invoice against it, so a later
+      // increase can never spend customer credit nobody approved.
+      let deferredAuthorizedInvoiceTotalCents = null;
       if (prepayDeferredToFirstVisitResult) {
         try {
-          const mintedPayer = await trx('invoices').where({ id: invoiceIdResult }).first('payer_id', 'customer_id');
+          const mintedPayer = await trx('invoices').where({ id: invoiceIdResult }).first('payer_id', 'customer_id', 'total');
+          // The whole pre-credit bill, tax included (GitHub Codex #5567 r19).
+          deferredAuthorizedInvoiceTotalCents = Math.round(Number(mintedPayer?.total || 0) * 100);
           const livePayer = mintedPayer?.payer_id ? null : await require('../services/payer').resolveForInvoice({
             database: trx,
             customerId: mintedPayer?.customer_id || null,
@@ -13674,7 +13680,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // attested (GitHub Codex #5567 r11): recovery re-records that
               // text only while it is still current.
               ...(prepayDeferredToFirstVisitResult
-                ? { consent_variant_version: String(req.body?.prepayChargeConsentVersion || '').trim() } : {}),
+                ? {
+                  consent_variant_version: String(req.body?.prepayChargeConsentVersion || '').trim(),
+                  ...(Number.isInteger(deferredAuthorizedInvoiceTotalCents) ? { authorized_invoice_total_cents: deferredAuthorizedInvoiceTotalCents } : {}),
+                } : {}),
               // First prepay visit — the recovery sweep re-runs the
               // promised inspection-credit redemption against THIS booking
               // before charging or delivering a pay link (Codex r9 P0: the
@@ -14487,7 +14496,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (deferredPmRowId) {
         try {
           const ConsentService = require('../services/payment-method-consents');
-          const consentMethodType = prepayChargePlan.method.methodType || 'card';
+          // Canonical tender (GitHub Codex #5567 r13): a legacy 'bank' /
+          // 'bank_account' row is a bank debit, and must snapshot the ACH text.
+          const consentMethodType = require('../services/autopay-eligibility').isBankMethodType(prepayChargePlan.method.methodType)
+            ? 'us_bank_account' : 'card';
           const already = await ConsentService.hasConsentSnapshotForVariant(
             customerId,
             prepayChargePlan.method.stripePaymentMethodId,
@@ -14632,13 +14644,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // payment attempt is being reconciled.
         prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
         invoicePayUrl = null;
-      } else if (prepayChargePlan?.afterFirstVisit && txResult.prepayDeferredToFirstVisit !== true) {
-        // The year was routed to a payer at approval, and that payer is gone
-        // now: the customer authorized a charge only AFTER the first visit,
-        // never now (pre-push audit P0). No charge here; the sweep refuses
-        // it too and hands the year to the office with the pay link.
-        prepayAutoCharge = { status: 'deferred', reason: 'after_visit_authorization' };
-        invoicePayUrl = null;
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing
         // to charge, and chargeInvoiceWithSavedCard would refuse the
@@ -14695,6 +14700,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         invoicePayUrl = null;
         logger.info(`[estimate-accept] prepay invoice ${invoiceId} fully covered by account credit at accept (estimate ${estimate.id})${coverageTermSynced ? '' : ' — term sync pending, sweep will retry'}`);
         }
+      } else if (prepayChargePlan?.afterFirstVisit && txResult.prepayDeferredToFirstVisit !== true) {
+        // The year was routed to a payer at approval, and that payer is gone
+        // now: the customer authorized a charge only AFTER the first visit,
+        // never now (pre-push audit P0). No charge here; the sweep refuses
+        // it too and hands the year to the office with the pay link. After
+        // the credit-covered settlement above (GitHub Codex #5567 r19).
+        prepayAutoCharge = { status: 'deferred', reason: 'after_visit_authorization' };
+        invoicePayUrl = null;
       } else if (prepayCreditUnresolved) {
         prepayAutoCharge = { status: 'deferred', reason: 'inspection_credit_unresolved' };
         invoicePayUrl = null;
@@ -20909,7 +20922,12 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending
+  // A deferred year whose charge failed after the first visit delivered its
+  // pay link (delivered_fallback): that link stays visible on a retry, even on
+  // a card-lane accept (GitHub Codex #5567 r18).
+  const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
+    && String(prepayJobStamp?.status || '') === 'delivered_fallback';
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
     && !prepayAwaitingFirstVisit && invoice.token
     ? `/pay/${invoice.token}`
     : null;
@@ -21409,7 +21427,8 @@ function buildAcceptNotificationCopy({
     if (prepayChargeOutcome === 'after_first_visit') {
       // GATE_PAF_PREPAY: nothing charged at approval by design — the saved
       // method is charged after the first visit is performed. No pay ask.
-      const bank = prepayChargeMethodType === 'us_bank_account' || prepayChargeMethodType === 'ach';
+      // Every bank alias, legacy 'bank' / 'bank_account' included (GitHub Codex #5567 r15).
+      const bank = require('../services/autopay-eligibility').isBankMethodType(prepayChargeMethodType);
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — ${bank ? 'saved bank account is debited' : 'card on file is charged'} after the first visit; nothing charged today.`,

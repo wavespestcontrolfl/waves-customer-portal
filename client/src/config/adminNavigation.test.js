@@ -29,7 +29,7 @@ describe("grouped workspaces", () => {
     const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));
     expect(groups).toHaveLength(12);
     expect(ids).toHaveLength(new Set(ids).size);
-    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates']));
+    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates', 'gateCodes']));
   });
 
   it("applies leaf roles and gates even beneath accessible parents", () => {
@@ -39,6 +39,15 @@ describe("grouped workspaces", () => {
     const adminIds = getAdminWorkspaceGroups('admin').flatMap(({ items }) => items.map(({ id }) => id));
     expect(adminIds).not.toContain('agentEstimate');
     expect(techIds).not.toEqual(expect.arrayContaining(['contracts', 'toolHealth', 'estimates']));
+    // The gate-code directory is a view of Customers but admin only on its own.
+    expect(techIds).not.toContain('gateCodes');
+    expect(adminIds).toContain('gateCodes');
+    // The nested route is Gate codes' alone: Customers is not active there too.
+    const gatePath = '/admin/customers/gate-codes';
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.gateCodes, gatePath)).toBe(true);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, gatePath)).toBe(false);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, '/admin/customers/abc')).toBe(true);
+    expect(getAdminWorkspaceSelection({ pathname: gatePath }).itemId).toBe('gateCodes');
   });
 
   it("resolves actual rendered tabs, proposal links, and redirected Schedule", () => {
@@ -65,8 +74,8 @@ describe("admin navigation registry", () => {
   it("uses the consolidated admin taxonomy", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
-      { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+      { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
       { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
@@ -75,9 +84,15 @@ describe("admin navigation registry", () => {
     ]);
   });
 
-  it("keeps the five task-focused mobile tabs", () => {
+  it("keeps the five task-focused mobile tabs per role (Today replaces Dashboard for technicians)", () => {
+    const tabsFor = (role) => ADMIN_MOBILE_TABS
+      .filter((item) => (!item.adminOnly || role === "admin") && (!item.technicianTab || role === "technician"))
+      .map(({ id }) => id);
+    expect(tabsFor("technician")).toEqual(["today", "schedule", "customers", "communications", "more"]);
+    expect(tabsFor("admin")).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
+    expect(ADMIN_MOBILE_TABS[0]).toMatchObject({ id: "today", path: "/admin/today", technicianTab: true });
     expect(
-      ADMIN_MOBILE_TABS.map(({ id, path, label }) => ({ id, path, label })),
+      ADMIN_MOBILE_TABS.filter(({ technicianTab }) => !technicianTab).map(({ id, path, label }) => ({ id, path, label })),
     ).toEqual([
       { id: "dashboard", path: "/admin/dashboard", label: "Dashboard" },
       { id: "schedule", path: "/admin/schedule", label: "Schedule" },
@@ -104,6 +119,13 @@ describe("admin navigation registry", () => {
 
     expect(new Set(mobileIds)).toEqual(new Set(desktopIds));
     expect(mobileIds).toEqual(expect.arrayContaining(["jobs", "contracts", "payers"]));
+  });
+
+  it("defines Today as a non-owner-only first Operations destination", () => {
+    expect(ADMIN_NAV_ITEMS.today).toMatchObject({ id: "today", path: "/admin/today", label: "Today" });
+    expect(ADMIN_NAV_ITEMS.today.adminOnly).toBeFalsy();
+    expect(ADMIN_DESKTOP_NAV_SECTIONS.find(({ section }) => section === "Operations").items[0].id).toBe("today");
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.today, "/admin/today/tools")).toBe(true);
   });
 
   it("uses canonical labels and routes on both navigation surfaces", () => {
@@ -245,6 +267,7 @@ describe("role scoping (adminOnly)", () => {
   // The technician-role day-to-day surface. Changing this set is a product
   // decision — update deliberately, with the owner's sign-off.
   const TECH_VISIBLE_IDS = [
+    "today",
     "schedule",
     "staff",
     "jobs",
@@ -280,12 +303,15 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
     // Owner-only pages nested under technician-allowed prefixes (codex P1).
     expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
+    expect(isPathAdminOnly("/admin/customers/gate-codes")).toBe(true);
     expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);
     // Dashboard's API is requireAdmin — owner-only despite being a mobile tab.
     expect(isPathAdminOnly("/admin/dashboard")).toBe(true);
     expect(isPathAdminOnly("/admin/schedule")).toBe(false);
+    expect(isPathAdminOnly("/admin/today")).toBe(false);
+    expect(isPathAdminOnly("/admin/today/tools")).toBe(false);
     expect(isPathAdminOnly("/admin/dispatch")).toBe(false);
     expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);
     expect(isPathAdminOnly("/admin/knowledge")).toBe(false);
@@ -301,5 +327,13 @@ describe("role scoping (adminOnly)", () => {
         blocked: false,
       });
     }
+  });
+});
+
+import { isPathAdminOnly as isPathAdminOnlyCase } from "./adminNavigation";
+describe("isPathAdminOnly casing (Codex #5573 r11)", () => {
+  it("a case-variant Today deep link stays technician-allowed", () => {
+    expect(isPathAdminOnlyCase("/ADMIN/TODAY/PROTOCOLS")).toBe(isPathAdminOnlyCase("/admin/today/protocols"));
+    expect(isPathAdminOnlyCase("/ADMIN/TODAY/PROTOCOLS")).toBe(false);
   });
 });

@@ -87,10 +87,66 @@ const SMS_RESCHEDULE = {
   },
 };
 
+// Evidence for three dark call gates (Clef second wave, idea 8, owner order
+// 2026-10-02): each question is the yes/no a gate acts on, recorded beside
+// that gate's OWN decision (call-self-audit.js gateCheckBaselines), so its
+// flip pack can show how often the rule and the models agree on real calls.
+// The gates' actions never change. Yes/no only: the Clef replay showed
+// multi-way choices are weak, so service clarity is one noul, not a choice.
+const CALL_GATE_CHECKS = {
+  id: 'call_gate_checks.v1',
+  capability: 'call_gate_checks',
+  version: 1,
+  description: 'Three yes/no checks behind dark call gates: unclear service (Assessment), a committed reschedule, an open Waves promise.',
+  stateShape: ['call_direction', 'duration_seconds', 'transcript'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the extraction's ambiguous_pest_or_service flag.
+    service_unclear: noul('Did the caller want service but leave it unclear WHICH service they need (pest, termite, lawn, mosquito, rodent, wildlife or other), so a technician would have to look before it could be named or priced?', {
+      true: 'They describe a problem or ask for help but the service cannot be named from the call (e.g. "something is eating my plants", "bugs, not sure what kind").',
+      false: 'The service is clear from the call, or no service was requested (billing, scheduling an existing visit, spam, voicemail with no request).',
+    }),
+    // GATE_CALL_RESCHEDULE_APPLY: the extraction's committed reschedule the caller accepted (reschedule_requested + agent_committed_booking + caller_accepted_slot + confirmed_start_at).
+    reschedule_committed: noul('Did Waves staff and the caller agree to move an existing, already booked visit to a specific new day and time?', {
+      true: 'An existing visit is moved and both sides settle on the new day and time on the call: staff commit to it and the caller accepts it.',
+      false: 'No existing visit is moved, the new time is only proposed or left open, it is a cancellation, or it is a first booking.',
+    }),
+    // GATE_PROMISE_CHASER_BELL: the extracted Waves commitments of the kinds the chaser acts on (followup-sla-watcher SLA_KINDS), party waves, not stale.
+    promise_open: noul('Did Waves staff promise the caller, for AFTER this call, to call back, to send a quote or estimate, or to set a time to come out?', {
+      true: 'Staff commit to one of those three follow-ups and the call itself does not complete it.',
+      false: 'None of those three is promised for after the call (other promises, such as sending a report, paperwork or a confirmation, do not count), or it was done during the call.',
+    }),
+  },
+};
+
+// Evidence for GATE_SMS_SPAM_CLASSIFIER (Clef second wave, idea 8): a text
+// from an UNKNOWN sender (the same messages its screen sees) recorded beside
+// the screen's regex marker (`rules`) and, when the classifier ran, its own
+// model verdict (`production`). Wording follows sms-solicitation-classifier's
+// prompt so the model and the gate judge the same thing. Same state shape as
+// the other SMS packages (an unknown sender's previous Waves text is usually
+// none), so the review route and the labeling tools need nothing new.
+const SMS_SOLICITATION = {
+  id: 'sms_solicitation.v1',
+  capability: 'sms_solicitation',
+  version: 1,
+  description: 'Is a text from an unknown sender a business pitching something to Waves (a solicitation)?',
+  stateShape: ['previous_waves_text', 'customer_text'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    is_solicitation: noul('Is the sender a business pitching something TO Waves (lead generation, marketing or ads, review tools, software, an AI receptionist, staffing, financing, insurance, or a contractor offering services or a partnership)?', {
+      true: 'A pitch, offer or sales outreach aimed at Waves as a business.',
+      false: 'Someone asking Waves for service, a quote, pricing or an appointment (even a business or property manager), a question about a job or bill, a wrong number, or a personal message.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
+  [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
+  [SMS_SOLICITATION.id]: SMS_SOLICITATION,
 });
 
 function packageFor(id) {

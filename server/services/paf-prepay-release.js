@@ -93,6 +93,14 @@ async function performedVisitCandidates(estimateId, customerId) {
     .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
     .where('s.status', 'completed')
     .where('r.status', 'completed')
+    // The visit's CURRENT closeout only: a fresh closeout writes a new record,
+    // so a visit reopened and closed again (inspection only, declined) is
+    // judged by that, never an older performed record (pre-push audit P0).
+    .whereRaw(`r.id = (
+      SELECT r2.id FROM service_records r2
+      WHERE r2.scheduled_service_id = s.id
+      ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1
+    )`)
     .whereRaw("COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])", [NOT_PERFORMED_OUTCOMES])
     // A quiet backfill closeout (backdated, every charge and send suppressed)
     // never releases a charge (waves-billing: backfill suppresses every money
@@ -101,24 +109,66 @@ async function performedVisitCandidates(estimateId, customerId) {
     // Completion's own billing must have finished first: a completion still
     // resuming its side effects decides the visit's bill from the deferred
     // hold, which a release (then an active term) would pull out from under it.
+    // An attempt abandoned past the stale window (a crash) no longer hides its
+    // visit: the same window planHasUnfinishedCompletion uses, so a held visit
+    // a crashed closeout already stamped still releases the year or reaches
+    // the office (pre-push audit P1).
     .whereNotExists(function unfinishedCompletion() {
       this.select(db.raw('1')).from('service_completion_attempts as a')
         .whereRaw('a.service_id = s.id')
-        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES);
+        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+        .where('a.updated_at', '>=', new Date(Date.now() - require('./completion-attempts').STALE_SIDE_EFFECTS_MS));
     })
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*');
 }
 
+// An attempt untouched past the completion-attempt stale window was abandoned
+// (a crash before it committed or finished): it never blocks the release
+// forever (GitHub Codex #5567 r15). A resumed one stamps its visit, and the
+// stamp or the activated-year check keeps it covered either way.
 async function planHasUnfinishedCompletion(estimateId, customerId) {
+  const staleCutoff = new Date(Date.now() - require('./completion-attempts').STALE_SIDE_EFFECTS_MS);
   const row = await db('service_completion_attempts as a')
     .join('scheduled_services as s', 's.id', 'a.service_id')
     .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
     .where('s.customer_id', customerId)
     .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
     .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+    .where('a.updated_at', '>=', staleCutoff)
     .first('a.id');
   return !!row;
+}
+
+// The released visit still stands as performed: completed, and its CURRENT
+// closeout record is a performed, non-backfill one (pre-push audit P0). The
+// sweep re-checks this before charging a job released earlier.
+async function visitStillPerformed(visitId, heldTermId = null) {
+  if (!visitId) return false;
+  const visit = await db('scheduled_services').where({ id: visitId }).first('status', 'paf_held_term_id');
+  if (String(visit?.status || '') !== 'completed') return false;
+  // …and still held by this year: a re-closeout paid another way, payer-billed
+  // or outside the coverage cleared the stamp (pre-push audit P0).
+  if (heldTermId != null && String(visit.paf_held_term_id || '') !== String(heldTermId)) return false;
+  const record = await db('service_records').where({ scheduled_service_id: visitId })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+  if (!record || String(record.status || '') !== 'completed') return false;
+  const notes = parseData(record.structured_notes) || {};
+  return !NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) && String(notes.backfill || '') !== 'true';
+}
+
+// The released / failed-charge visit, if it is still work the dead year held:
+// performed by its current closeout and still stamped with that year's term.
+// Any other performed visit the year still holds counts too: after a decline
+// later visits stay held, so the released one being paid another way does not
+// mean no work is owed (pre-push audit P1).
+async function stillHeldVisit(estimateId, invoiceId, visitId) {
+  const term = await db('annual_prepay_terms')
+    .where(invoiceId ? { prepay_invoice_id: invoiceId } : { source_estimate_id: estimateId }).first('id', 'customer_id')
+    || await db('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('id', 'customer_id');
+  if (!term) return null;
+  if (visitId && await visitStillPerformed(visitId, term.id)) return visitId;
+  return (await firstPerformedVisit(estimateId, term.customer_id, term.id))?.id || null;
 }
 
 async function releaseOne(row, now) {
@@ -278,11 +328,21 @@ async function reconcileJobAlerts(estimateId) {
       // hand the work to the unbilled-visits alert, like a cancel after the
       // visit.
       await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice was closed unpaid.');
+      // The customer comes from the held visit when the invoice row is gone,
+      // so the office alert links to the customer (GitHub Codex #5567 r16).
+      // Only a visit still performed and still stamped by this year is work to
+      // bill: one re-closed paid another way, payer-billed or outside the
+      // coverage is not (GitHub Codex #5567 r18).
+      const heldVisitId = await stillHeldVisit(estimateId, job.invoice_id, job.performed_visit_id || job.released_for_visit_id || null);
+      const heldCustomerId = job.customer_id
+        || (heldVisitId ? (await db('scheduled_services').where({ id: heldVisitId }).first('customer_id'))?.customer_id : null)
+        || null;
       await patchJob(estimateId, {
         charge_alert_closed_at: nowIso,
-        status: 'cancelled_after_visit',
+        status: heldVisitId ? 'cancelled_after_visit' : 'cancelled_before_visit',
         reason: `invoice_${invStatus || 'missing'}_after_failed_charge`,
-        performed_visit_id: job.performed_visit_id || job.released_for_visit_id || null,
+        performed_visit_id: heldVisitId,
+        ...(heldCustomerId ? { customer_id: heldCustomerId } : {}),
       }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'delivered_fallback'`));
     } else if (outcome === 'paid') {
       // Closed whether or not the raised stamp landed: a raise that persisted
@@ -325,10 +385,14 @@ async function reconcileJobAlerts(estimateId) {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
     const invStatus = String(invoice?.status || '').toLowerCase();
     if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
+      const releasedHeldId = await stillHeldVisit(estimateId, job.invoice_id, job.released_for_visit_id);
+      const releasedCustomerId = job.customer_id
+        || (await db('scheduled_services').where({ id: job.released_for_visit_id }).first('customer_id'))?.customer_id || null;
       await patchJob(estimateId, {
-        status: 'cancelled_after_visit',
+        status: releasedHeldId ? 'cancelled_after_visit' : 'cancelled_before_visit',
         reason: `invoice_${invStatus || 'missing'}_after_release`,
-        performed_visit_id: job.released_for_visit_id,
+        performed_visit_id: releasedHeldId,
+        ...(releasedCustomerId ? { customer_id: releasedCustomerId } : {}),
       }, (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [job.status]));
       return;
     }
@@ -470,97 +534,10 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
-// Completion text for the first visit of a deferred year (owner ruling
-// 2026-10-02): when THIS visit is the one that releases the year's charge —
-// held by the deferred year, and the job still waiting for its first visit —
-// the text says the year is being charged now. Returns { amount, methodLine }
-// or null (any other visit, or anything unreadable: the regular annual-prepay
-// text is the safe fallback).
-async function firstChargeCompletionFacts(svc, conn = db) {
-  try {
-    if (!svc || svc.prepaid_method || !svc.customer_id) return null;
-    let estimateId = svc.source_estimate_id || null;
-    if (!estimateId && svc.recurring_parent_id) {
-      const parent = await conn('scheduled_services')
-        .where({ id: svc.recurring_parent_id, customer_id: svc.customer_id }).first('source_estimate_id');
-      estimateId = parent?.source_estimate_id || null;
-    }
-    if (!estimateId) return null;
-    const row = await conn('estimates').where({ id: estimateId }).first('estimate_data');
-    const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
-    if (!job || job.deferred_to_first_visit !== true || job.status !== AWAITING) return null;
-    if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
-    // Held by THIS year: completion stamped the visit with the job's term just
-    // before the text (paf_held_term_id).
-    const term = await conn('annual_prepay_terms').where({ prepay_invoice_id: job.invoice_id || null }).first('id');
-    if (!term || String(svc.paf_held_term_id || '') !== String(term.id)) return null;
-    // First visit only: another held visit already performed (two visits done
-    // before a release pass) already carried the announcement.
-    const performedHeld = (await performedVisitCandidates(estimateId, svc.customer_id))
-      .filter((v) => String(v.paf_held_term_id || '') === String(term.id));
-    if (performedHeld.some((v) => String(v.id) !== String(svc.id))) return null;
-    // "Being charged now" only when the sweep's automatic charge will really
-    // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
-    // it on the pay link, Auto Pay was not turned off or paused since the
-    // approval, and no collections hold stops off-session charges. Otherwise
-    // the regular text — the customer hears about the pay link separately.
-    if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
-    if (job.authentication_required === true || job.charge_returned === true) return null;
-    const method = job.payment_method_row_id
-      ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('customer_id', 'stripe_payment_method_id', 'method_type')
-      : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('customer_id', 'stripe_payment_method_id', 'method_type');
-    if (!method || String(method.customer_id) !== String(svc.customer_id)) return null;
-    if (job.stripe_payment_method_id && method.stripe_payment_method_id !== job.stripe_payment_method_id) return null;
-    const customer = await conn('customers').where({ id: svc.customer_id }).first('autopay_paused_until', 'deleted_at');
-    if (!customer || customer.deleted_at) return null;
-    if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) > new Date()) return null;
-    const authorizedAt = job.authorized_at || job.created_at;
-    const optedOut = await conn('autopay_log')
-      .where({ customer_id: svc.customer_id, event_type: 'autopay_disabled' })
-      .modify((q) => { if (authorizedAt) q.where('created_at', '>', new Date(authorizedAt)); })
-      .first('id');
-    if (optedOut) return null;
-    if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(svc.customer_id, conn)) return null;
-    const bank = ['us_bank_account', 'ach'].includes(String(method.method_type || ''));
-    // The acknowledged total is a CEILING (owner R1): account credit the
-    // charge will draw lowers it. Credit that covers the year means nothing
-    // is charged, so the regular "nothing due today" text is the true one;
-    // credit that only lowers it makes the amount "up to" the ceiling.
-    const invoice = job.invoice_id
-      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
-      : null;
-    if (!invoice) return null;
-    // Still owed and not already moving (GitHub Codex #5567 r9): a year paid,
-    // processing, or dead before the release pass gets no new charge.
-    const invStatus = String(invoice.status || '').toLowerCase();
-    if (['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
-    const credit = require('./customer-credit');
-    let creditLowers = false;
-    if (await credit.autoApplyWouldApply(invoice, conn)) {
-      const balance = await credit.getBalance(invoice.customer_id, conn);
-      if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
-      creditLowers = true;
-    } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
-      return null;
-    }
-    // One announcement per year (GitHub Codex #5567 r9): reserve it on the
-    // job for THIS visit while it still waits. Two completions racing before
-    // a release pass both pass the reads above; only one wins the reservation.
-    // A retry of the same visit's closeout re-wins its own.
-    const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
-      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);
-    if (!reserved) return null;
-    const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
-  } catch (err) {
-    logger.warn(`[paf-prepay] first-charge completion facts unavailable for visit ${svc?.id}: ${err.message}`);
-    return null;
-  }
-}
-
 module.exports = {
   AWAITING,
-  firstChargeCompletionFacts,
+  planHasUnfinishedCompletion,
+  visitStillPerformed,
   STALE_DAYS,
   releaseDeferredPrepayCharges,
   reconcileAlerts,

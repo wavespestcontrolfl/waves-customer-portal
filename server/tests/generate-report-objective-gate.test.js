@@ -49,3 +49,15 @@ test('a treatment objective stays separate when actual work and observations per
   expect(text).toContain('Inspected the exterior wall.');
   expect(text).not.toMatch(/Work recorded:\n|Findings observed:\n/);
 });
+
+test('a technician without a visit id cannot run the writer; an admin keeps the id-less path (codex #5568 r6)', async () => {
+  const body = { serviceType: 'Termite Liquid Treatment', actionsCompleted: ['Inspected the exterior wall.'] };
+  const techRes = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
+  await handler({ techRole: 'technician', technicianId: 'tech-1', body }, techRes);
+  expect(techRes.statusCode).toBe(400);
+  expect(techRes.json).toHaveBeenCalledWith({ error: 'scheduledServiceId required' });
+  expect(mockProvider).not.toHaveBeenCalled();
+  const adminRes = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
+  await handler({ techRole: 'admin', body }, adminRes);
+  expect(adminRes.json).not.toHaveBeenCalledWith({ error: 'scheduledServiceId required' });
+});

@@ -328,7 +328,27 @@ const DECISION_LABELS = {
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
+  // Review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, owner rulings 2026-10-01).
+  payment_hold: "Held: the customer has an overdue bill or a recent payment reminder",
+  ask_dropped_payment_hold: "Ask dropped: payment hold outlasted its 3-day window",
+  ask_held_repeat: "Ask held: the drafted text repeated an earlier one",
 };
+// What a review-ask hold saw (decision.detail), in plain words.
+const HOLD_KIND_TEXT = {
+  overdue_invoice: "overdue bill",
+  payment_reminder_recent: "payment reminder in the last 3 days",
+  payment_lookup_unavailable: "billing could not be read",
+  cleared_after_window: "cleared after the window",
+};
+function holdDetailText(d) {
+  const x = d.detail;
+  if (!x) return null;
+  if (d.reason === "ask_held_repeat") {
+    return `Held text: "${x.heldBody || ""}" — repeats step ${Number(x.earlierStep) + 1}: "${x.earlierQuote || ""}"`;
+  }
+  if (x.hold) return `Hold: ${HOLD_KIND_TEXT[x.hold] || String(x.hold).replace(/_/g, " ")}${x.heldSince ? ` since ${fmtETWhen(x.heldSince)}` : ""}`;
+  return null;
+}
 const fmtETWhen = (d) =>
   new Date(d).toLocaleString("en-US", {
     timeZone: "America/New_York",
@@ -338,7 +358,8 @@ const fmtETWhen = (d) =>
     hour: "numeric",
     minute: "2-digit",
   });
-function decisionLine(seq, sequencesEnabled) {
+// Exported for its unit test.
+export function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
   // A stranded claim (null schedule the worker never re-selects) needs a hand
   // whether or not the gate is on — say so first (codex #4140 r6 P2).
@@ -393,6 +414,7 @@ function decisionLine(seq, sequencesEnabled) {
   return [
     whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null,
     label,
+    holdDetailText(d),
     capturedRequestText(seq, d),
     owner,
   ]
@@ -1643,7 +1665,7 @@ function Pipeline({
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({ to: c.phone }),
+                                  body: JSON.stringify({ to: c.phone, customerIdHint: c.id }),
                                 },
                               );
                               if (!r?.success)
@@ -2122,7 +2144,7 @@ function CustomerDrawer({
                     // client-side GBP number would 400.
                     const r = await adminFetch("/admin/communications/call", {
                       method: "POST",
-                      body: JSON.stringify({ to: c.phone }),
+                      body: JSON.stringify({ to: c.phone, customerIdHint: c.id }),
                     });
                     if (!r?.success) {
                       showToast(

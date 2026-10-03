@@ -186,6 +186,19 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
 const COMPLETE_SERVICE = 'server/services/complete-scheduled-service.js';
 const SCHEDULE_PAGE = 'client/src/pages/admin/SchedulePage.jsx'; // full Complete Service form (CompletionPanel)
 const FAST_COMPLETE_SHEET = 'client/src/components/tech/FastCompleteSheet.jsx';
+// The typed forms the Fast Complete sheet records (GATE_TYPED_VOICE_FILL;
+// services/visit-typed-facts.js VOICE_TYPES less SHEET_PENDING_TYPES, pinned
+// equal by visit-facts-contract.test.js): the fields on its record card go
+// out in structuredFindings, and a score the tech sets in activityScore.
+const FAST_COMPLETE_TYPED_FORMS = Object.freeze([
+  'cockroach', 'german_roach_knockdown', 'palmetto_roach_knockdown', 'flea', 'pest_inspection',
+  'mosquito_event', 'wildlife_trapping', 'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection',
+  'rodent_trapping', 'rodent_bait_station', 'termite_bait_station',
+]);
+// Why a typed field marked tapOnly in project-types.js (the state's notice
+// questions) is captured by a tap alone: voice fill never writes it
+// (services/visit-typed-facts.js voiceFieldsFor).
+const TAP_ONLY_REASON = 'The state\'s notice question is always a tap, never read from the notes (owner, Fast Complete mockup v8): a wrong answer is a compliance problem.';
 const SERVICE_PHOTOS = 'server/services/service-photos.js';
 const TURF_HEIGHT_SERVICE = 'server/services/turf-height-service.js';
 const LAWN_ASSESSMENT_ROUTE = 'server/routes/admin-lawn-assessment.js';
@@ -903,7 +916,8 @@ function typedFormFacts(typedForm, overrides = {}) {
   return typedFactFields(typedForm).map((field) => {
     const readers = typedFieldReaders(field, builder, extraReaders);
     const notes = typedFieldNotes(field, extraNotes, required);
-    const placement = typedFieldPlacement(field, required, requiredCompanion);
+    const placement = typedFieldPlacement(field, required, requiredCompanion, typedForm);
+    const tapOnlyReason = field.tapOnly ? TAP_ONLY_REASON : null;
     return {
       key: field.key,
       label: field.label,
@@ -915,7 +929,8 @@ function typedFormFacts(typedForm, overrides = {}) {
       // either, since a companion submission accepts the whole form
       // (fields.filter((f) => companion || !f.companionOnly)).
       applicability: field.companionOnly ? 'companion' : 'both',
-      capture: ['voice', 'tap'],
+      capture: tapOnlyReason ? ['tap'] : ['voice', 'tap'],
+      ...(tapOnlyReason ? { tapOnly: true, reason: tapOnlyReason } : {}),
       readers,
       ...placement,
       ...(notes.length ? { notes: notes.join(' ') } : {}),
@@ -1018,8 +1033,11 @@ function typedFieldNotes(field, extraNotes, required) {
  * when it actually differs from the primary value, so the common case (same
  * requiredness either way) stays a single field.
  */
-function typedFieldPlacement(field, required, requiredCompanion) {
+function typedFieldPlacement(field, required, requiredCompanion, typedForm) {
   const isCompanionOnly = field.companionOnly;
+  // The sheet's card shows the form's own fields, never one filled from the
+  // products or a pesticide compliance one.
+  const onSheet = FAST_COMPLETE_TYPED_FORMS.includes(typedForm) && !field.autoFilled && !field.pesticideOnly;
   const companionPath = `service_data.companionReportSnapshots[].values.${field.key}`;
   const storage = isCompanionOnly ? companionPath : `service_data.typedReportSnapshot.values.${field.key}`;
   const writers = isCompanionOnly
@@ -1028,6 +1046,7 @@ function typedFieldPlacement(field, required, requiredCompanion) {
       PROJECT_TYPES_FILE,
       via(COMPLETE_SERVICE, 'typedReportSnapshot'),
       via(SCHEDULE_PAGE, 'typedFindings'),
+      ...(onSheet ? [via(FAST_COMPLETE_SHEET, 'structuredFindings')] : []),
       via(COMPLETE_SERVICE, 'companionReportSnapshots'),
       via(SCHEDULE_PAGE, 'companionFindings'),
     ];
@@ -1113,6 +1132,8 @@ function typedActivityScoreFacts(typedForm) {
     writers: [
       via(COMPLETE_SERVICE, 'service_activity_scores'),
       via(SCHEDULE_PAGE, 'activityScore'),
+      // The sheet sends the score only where the tech sets it.
+      ...(FAST_COMPLETE_TYPED_FORMS.includes(typedForm) && !indicator.derive ? [via(FAST_COMPLETE_SHEET, 'activityScore')] : []),
       via(COMPLETE_SERVICE, 'companionReportSnapshots'),
       via(SCHEDULE_PAGE, 'companionFindings'),
       // A derive-mapped companion (ACTIVITY_INDICATORS.derive, e.g. flea,
@@ -1594,7 +1615,10 @@ const VISIT_FACTS_CONTRACT = {
   },
 
   termite_treatment: {
-    label: 'Termite treatment (typed termite_treatment form: spot, liquid, trenching, cartridge, setup)',
+    // Voice fill never reads termite_pretreatment (new construction, out of
+    // Fast Complete with the slab certificate; visit-typed-facts.js
+    // NOT_READ_SERVICE_KEYS).
+    label: 'Termite treatment (typed termite_treatment form: spot, liquid, trenching, rodding, foam; new-construction pre-treat never read from notes)',
     typedForm: 'termite_treatment',
     catalogKeys: ['termite_liquid', 'termite_trenching', 'termite_spot_treatment', 'termite_pretreatment', 'foam_drill', 'foam_recurring'],
     voiceFill: true,
@@ -1602,6 +1626,21 @@ const VISIT_FACTS_CONTRACT = {
       ...typedFormFacts('termite_treatment'),
       ...typedSharedCompletionFacts(),
       ...typedActivityScoreFacts('termite_treatment'),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  termite_inspection: {
+    label: 'Termite inspection (typed termite_inspection form: standalone, not WDO)',
+    typedForm: 'termite_inspection',
+    catalogKeys: ['termite_inspection'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('termite_inspection'),
+      ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('termite_inspection'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1716,5 +1755,6 @@ module.exports = {
   UNREGISTERED_INTERNAL_KEYS,
   TYPED_REPORT_BUILDERS,
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
+  FAST_COMPLETE_TYPED_FORMS,
   typedFactFields,
 };

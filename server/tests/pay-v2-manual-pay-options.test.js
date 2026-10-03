@@ -60,6 +60,17 @@ jest.mock('../services/completion-balance-sweep', () => ({
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const payRouter = require('../routes/pay-v2');
+// Codex round-65 P1: payPageZelleVisibility re-reads the invoice row just before answering. Unless a test routes 'invoices' itself,
+// that read returns the invoice under test (the GET's refreshed row, or the row handed to a direct visibility call) - unchanged.
+let liveInvoice = null;
+const setDbImpl = db.mockImplementation.bind(db);
+db.mockImplementation = (fn) => setDbImpl((table, ...rest) => {
+  const q = fn(table, ...rest);
+  if (table === 'invoices' && liveInvoice && q && typeof q.first === 'function' && q.__liveInvoice !== false) q.first = jest.fn(async () => liveInvoice);
+  return q;
+});
+const visibilityOf = payRouter.payPageZelleVisibility;
+payRouter.payPageZelleVisibility = (args = {}) => { if (args.invoice) liveInvoice = args.invoice; return visibilityOf(args); };
 const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
 
 function chain({ first } = {}) {
@@ -88,14 +99,15 @@ function invoiceData(overrides = {}) {
   };
 }
 
-async function getPayPage(data, { customerRow, refreshedData = data } = {}) {
+async function getPayPage(data, { customerRow, refreshedData = data, dbImpl = null } = {}) {
+  liveInvoice = refreshedData;
   InvoiceService.getByToken.mockReset()
     .mockResolvedValueOnce(data)
     .mockResolvedValueOnce(refreshedData);
-  db.mockImplementation((table) => {
+  db.mockImplementation(dbImpl || ((table) => {
     if (table === 'customers') return chain({ first: customerRow || { billing_mode: null, monthly_rate: null } });
     return chain({ first: null });
-  });
+  }));
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token' && l.route.methods.get);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const req = { params: { token: data.token } };
@@ -175,6 +187,23 @@ describe('GET /pay/:token manualPayOptions', () => {
     expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
   });
 
+  // Independent-review P1 (round 3, PR #5331): with ZELLE_RECIPIENT unset the
+  // route must never even reach isZelleTransferEligible's async probes — an
+  // unrelated reconciliation-check failure must not 500 this public,
+  // unauthenticated pay page just because Zelle isn't configured at all.
+  test('env unset ⇒ the page still succeeds even when the reconciliation check would throw — eligibility probes never run without a configured recipient', async () => {
+    const StripeService = require('../services/stripe');
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockClear();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).not.toHaveBeenCalled();
+    // The queued rejection must not leak into a later test either.
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockReset();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+  });
+
   test('env set ⇒ block rides on a collectible invoice', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
@@ -249,17 +278,25 @@ describe('GET /pay/:token manualPayOptions', () => {
   test('env set ⇒ block rides beside the page\'s own still-cancelable PaymentIntent', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
-    StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_fresh', status: 'requires_payment_method' });
-    const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
-    expect(body.manualPayOptions).toMatchObject({ zelle: { recipient: 'pay@example.com' }, amountDue: 150 });
-    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    // (both reads: the eligibility pass and the final pass's closing PaymentIntent guard - Codex round-68 P0)
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_fresh', status: 'requires_payment_method' });
+    try {
+      const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
+      expect(body.manualPayOptions).toMatchObject({ zelle: { recipient: 'pay@example.com' }, amountDue: 150 });
+      expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    } finally {
+      StripeService.retrievePaymentIntent.mockResolvedValue(null);
+    }
   });
 
-  test('env set ⇒ a non-fence error from the reconciliation check still propagates', async () => {
+  // Pre-push audit P1 (supersedes "still propagates"): the public page fails CLOSED, not 500.
+  test('env set ⇒ a non-fence error from the reconciliation check withholds Zelle and the page still serves', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
-    await expect(getPayPage(invoiceData({ status: 'overdue' }))).rejects.toThrow('db down');
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
   });
 
   test('env set ⇒ key absent on a combined-balance session (codex r2 P1)', async () => {
@@ -328,6 +365,327 @@ describe('GET /pay/:token manualPayOptions', () => {
       expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
     }
   });
+
+  // Independent-review P1 (round 5, finding 3): a payer assigned via the
+  // scheduled service or the customer default AFTER this invoice was
+  // created leaves invoices.payer_id null — only the LIVE resolution
+  // combinedEligibleSiblings runs finds it. That must deny Zelle, not read
+  // as "no previous balance, continue" the way a bare null return used to.
+  test('env set ⇒ key absent when the anchor LIVE-resolves to a payer (round 5 finding 3)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const { isEnabled } = require('../config/feature-gates');
+    const PayerService = require('../services/payer');
+    isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
+    require('../config/feature-gates').gates.payIncludeBalance = true;
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    try {
+      const { body } = await getPayPage(invoiceData());
+      expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(body, 'previousBalance')).toBe(false);
+    } finally {
+      isEnabled.mockImplementation(() => false);
+      delete require('../config/feature-gates').gates.payIncludeBalance;
+      PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    }
+  });
+});
+
+// The extracted contract itself (independent-review P1, round 5, findings 3
+// & 4): payPageZelleVisibility({ invoice }) → { visible, reason }, the ONE
+// function GET /:token and zelleInvoiceStillEligible (liveZelleFacts: draft
+// time and send time) all now call.
+describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
+  const { payPageZelleVisibility } = payRouter;
+
+  afterEach(() => {
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation(() => false);
+    delete require('../config/feature-gates').gates.payIncludeBalance;
+    require('../config/feature-gates').gates.autoApplyAccountCredit = false;
+    require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  test('not configured ⇒ { visible: false, reason: "not_configured" }, no lookup at all', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    const dbFn = require('../models/db');
+    dbFn.mockReset();
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'not_configured' });
+    expect(dbFn).not.toHaveBeenCalled();
+  });
+
+  test('eligible, no pending credit ⇒ visible true', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: true, reason: null, projectedCredit: 0 });
+  });
+
+  // Finding 4: the client-side "hides Zelle while creditPending" rule
+  // (PayPageV2.jsx), now expressed here so the SMS side asks the same
+  // question. This reason is what lets GET /:token keep populating
+  // manualPayOptions (creditPending: true) while every OTHER caller reads
+  // this exact case as not-visible.
+  test('a pending partial account credit withholds visibility with its own reason (round 5 finding 4)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: { billing_mode: null, monthly_rate: null, account_credits: 20, auto_apply_account_credit: true } });
+      return chain({ first: null });
+    });
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 20 });
+  });
+
+  test('a LIVE-resolved payer denies visibility (round 5 finding 3)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
+    require('../config/feature-gates').gates.payIncludeBalance = true;
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'payer_owned' });
+  });
+
+  // Codex round-6 pre-push audit P1: ONE always-run ownership step serves the
+  // pay page, the draft-time fetch and the send-time recheck, independent of
+  // payIncludeBalance (combinedEligibleSiblings returns null before resolving
+  // a payer when that flag is off, and on resolver errors).
+  describe('live payer ownership is checked for every caller, independent of payIncludeBalance', () => {
+    const PayerService = require('../services/payer');
+    beforeEach(() => {
+      PayerService.resolveForInvoice.mockClear();
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    });
+    const unstamped = () => invoiceData({ status: 'overdue' });
+
+    test('a payer_id- or payer_statement_id-stamped invoice is payer_owned', async () => {
+      for (const stamp of [{ payer_id: 'payer-1' }, { payer_statement_id: 'stmt-1' }]) {
+        await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', ...stamp }) })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+      }
+    });
+
+    test('payIncludeBalance OFF + an UNSTAMPED invoice that live-resolves to a payer ⇒ payer_owned', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+      await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+      expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+    });
+
+    test('resolver throws ⇒ payer_unverifiable (fail closed, never read as self-pay)', async () => {
+      PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('lookup down'));
+      await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
+    });
+
+    // Codex round-63 P0: the live resolver runs AGAIN after the credit / reconciliation / Stripe awaits
+    test('a Bill-To assignment that lands during the eligibility probes ⇒ payer_owned (ownership re-read last)', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null }).mockResolvedValue({ payerId: 'payer-1' });
+      try {
+        await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+        expect(PayerService.resolveForInvoice.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+      }
+    });
+
+    test('an invoice with no customer_id cannot be verified ⇒ payer_unverifiable', async () => {
+      await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', customer_id: null }) })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
+    });
+
+    test('no live payer ⇒ still eligible', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null });
+      await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: true, reason: null, projectedCredit: 0 });
+    });
+  });
+});
+
+// Codex round-10 P1: a credit lookup that ERRORS is unknown, never zero.
+describe('payPageZelleVisibility + GET: an erroring credit lookup fails closed', () => {
+  const { payPageZelleVisibility } = payRouter;
+  const PayerService = require('../services/payer');
+  const gates = require('../config/feature-gates').gates;
+  beforeEach(() => {
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    gates.autoApplyAccountCredit = true;
+  });
+  afterEach(() => { gates.autoApplyAccountCredit = false; delete process.env.ZELLE_RECIPIENT; });
+  const failingCustomers = () => db.mockImplementation((table) => {
+    if (table === 'customers') { const q = chain(); q.first = jest.fn(async () => { throw new Error('db down'); }); return q; }
+    return chain({ first: null });
+  });
+
+  test('visibility: credit lookup error ⇒ { visible: false, reason: "credit_unverifiable" }', async () => {
+    failingCustomers();
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) })).resolves.toEqual({ visible: false, reason: 'credit_unverifiable' });
+  });
+
+  test('visibility: credit lookup error in the PROJECTED-credit probe alone also fails closed', async () => {
+    let n = 0;
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        n += 1;
+        const q = chain();
+        q.first = jest.fn(async () => {
+          if (n >= 2) throw new Error('db down');
+          return { billing_mode: null, monthly_rate: null, account_credits: 5, auto_apply_account_credit: true };
+        });
+        return q;
+      }
+      return chain({ first: null });
+    });
+    // (owner ruling 2026-10-02: the final full pass reads customers too, so the failing read may land there - closed either way)
+    const verdict = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false });
+    expect(verdict.visible).toBe(false);
+    expect(['credit_unverifiable', 'eligibility_unverifiable']).toContain(verdict.reason);
+  });
+
+  test('GET /:token withholds manualPayOptions (key absent, page still served) when the credit lookup errors', async () => {
+    const dbImpl = (table) => {
+      if (table === 'customers') {
+        const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+        q.first = jest.fn(async (...cols) => {
+          if (cols.includes('account_credits')) throw new Error('db down');
+          return { billing_mode: null, monthly_rate: null };
+        });
+        return q;
+      }
+      return chain({ first: null });
+    };
+    const { body, status } = await getPayPage(invoiceData(), { dbImpl });
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+  });
+});
+
+// Pre-push audit P1: a THROWING eligibility probe fails closed (Zelle withheld) and never 500s the public page.
+describe('a throwing Zelle eligibility probe never fails the public pay page', () => {
+  const StripeService = require('../services/stripe');
+  const { warn } = require('../services/logger');
+  const { payPageZelleVisibility } = payRouter;
+  afterEach(() => {
+    delete process.env.ZELLE_RECIPIENT;
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockReset();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+  });
+
+  test('reconciliation check throws a non-suppression error => 200, manualPayOptions absent, only the invoice id logged', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(Object.assign(new Error('secret db detail'), { code: 'ECONNRESET' }));
+    warn.mockClear();
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+    const logged = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toMatch(/inv-1/);
+    expect(logged).not.toMatch(/secret db detail/);
+  });
+
+  test('payPageZelleVisibility resolves { visible: false, reason: eligibility_unverifiable } instead of throwing', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(new Error('db down'));
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false }))
+      .resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+  });
+
+  test('a HUNG probe is bounded: resolves not-visible instead of stalling the page', async () => {
+    jest.useFakeTimers();
+    try {
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      StripeService.assertNoInvoiceChargeReconciliationPending.mockImplementation(() => new Promise(() => {}));
+      db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+      const p = payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false });
+      await jest.advanceTimersByTimeAsync(9000);
+      await expect(p).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+// Codex round-13 P1: the projected-credit read happens ONCE per public GET (it rides the visibility verdict). Owner ruling 2026-10-02:
+// the final full pass re-reads coverage once more after the Stripe awaits - three reads, never more.
+describe('GET /pay/:token reads account credit no more than three times (coverage + one projection + the final pass)', () => {
+  const gates = require('../config/feature-gates').gates;
+  const PayerService = require('../services/payer');
+  beforeEach(() => {
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    gates.autoApplyAccountCredit = true;
+  });
+  afterEach(() => { gates.autoApplyAccountCredit = false; delete process.env.ZELLE_RECIPIENT; });
+
+  test('credit lookups on customers.account_credits: no fourth read; creditPending still flagged from the shared projection', async () => {
+    let creditReads = 0;
+    const dbImpl = (table) => {
+      const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+      if (table === 'customers') {
+        q.first = jest.fn(async (...cols) => {
+          if (cols.includes('account_credits')) { creditReads += 1; return { account_credits: 20, auto_apply_account_credit: true }; }
+          return { billing_mode: null, monthly_rate: null };
+        });
+      }
+      return q;
+    };
+    const { body } = await getPayPage(invoiceData(), { dbImpl });
+    expect(creditReads).toBeLessThanOrEqual(3);
+    expect(body.manualPayOptions).toMatchObject({ creditPending: true });
+  });
+});
+
+// GET /api/pay/:token — the same always-run ownership step withholds
+// manualPayOptions (key ABSENT, rest of the payload unchanged) whatever
+// payIncludeBalance says (owner-approved, PR #5331).
+describe('GET /pay/:token manualPayOptions payer ownership (flag off)', () => {
+  const PayerService = require('../services/payer');
+  const has = (body) => Object.prototype.hasOwnProperty.call(body, 'manualPayOptions');
+  beforeEach(() => {
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  });
+  afterEach(() => {
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    delete process.env.ZELLE_RECIPIENT;
+  });
+
+  test('flag off + an unstamped invoice that live-resolves to a payer ⇒ no manualPayOptions', async () => {
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    const { body } = await getPayPage(invoiceData());
+    expect(has(body)).toBe(false);
+  });
+
+  test('a stamped payer_id ⇒ no manualPayOptions', async () => {
+    const { body } = await getPayPage(invoiceData({ payer_id: 'payer-1' }));
+    expect(has(body)).toBe(false);
+  });
+
+  test('resolver throws ⇒ no manualPayOptions (fail closed), the rest of the payload still served', async () => {
+    PayerService.resolveForInvoice.mockRejectedValue(new Error('lookup down'));
+    const { body, status } = await getPayPage(invoiceData());
+    expect(status).toBe(200);
+    expect(has(body)).toBe(false);
+    expect(body.invoice_number || body.invoiceNumber || Object.keys(body).length).toBeTruthy();
+  });
+
+  test('no payer ⇒ manualPayOptions present', async () => {
+    const { body } = await getPayPage(invoiceData());
+    expect(has(body)).toBe(true);
+    expect(body.manualPayOptions.zelle.recipient).toBe('pay@example.com');
+  });
+
+  test('ZELLE_RECIPIENT unset ⇒ the resolver is never called for this (byte-identical payload)', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    PayerService.resolveForInvoice.mockClear();
+    const { body } = await getPayPage(invoiceData());
+    expect(has(body)).toBe(false);
+    expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+  });
 });
 
 // GATE_PAY_PAGE_FAQ — the FAQ accordion flag rides the same GET payload.
@@ -351,3 +709,166 @@ describe('GET /pay/:token payFaq (GATE_PAY_PAGE_FAQ)', () => {
     expect(rest).toEqual(off);
   });
 });
+
+// Codex round-65 P1: the invoice row is re-read just before visibility answers
+describe('payPageZelleVisibility re-reads the invoice row last', () => {
+  const { payPageZelleVisibility } = payRouter;
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  const withLiveRow = (row) => setDbImpl((table) => (table === 'invoices'
+    ? (row instanceof Error ? { where: () => ({ first: async () => { throw row; } }) } : chain({ first: row }))
+    : chain({ first: { billing_mode: null, monthly_rate: null } })));
+  test.each([
+    ['paid meanwhile', { status: 'paid' }, 'invoice_changed'],
+    ['a new PaymentIntent stamped', { stripe_payment_intent_id: 'pi_new' }, 'invoice_changed'],
+    ['re-amounted', { total: '175.00' }, 'invoice_changed'],
+  ])('%s => withheld', async (_label, change, reason) => {
+    const inv = invoiceData({ status: 'overdue' });
+    withLiveRow({ ...inv, ...change });
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason });
+  });
+  test('row gone => invoice_not_found; read throws => eligibility_unverifiable; unchanged => visible', async () => {
+    const inv = invoiceData({ status: 'overdue' });
+    withLiveRow(undefined);
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'invoice_not_found' });
+    withLiveRow(new Error('db down'));
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+    withLiveRow({ ...inv });
+    await expect(payPageZelleVisibility({ invoice: inv, creditWillCoverAnchor: false })).resolves.toMatchObject({ visible: true });
+  });
+});
+
+// Codex round-66 P1 / owner ruling 2026-10-02: the final full pass reruns the saved-method requirement with no caller override
+test('a saved-method requirement that appears during the probes withholds Zelle (the caller override is not trusted)', async () => {
+  process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  const inv = invoiceData({ status: 'overdue' });
+  // the caller's pre-await override says "not required"; the live customer row now says required - the final pass must read it
+  setDbImpl((table) => {
+    if (table === 'invoices') return chain({ first: inv });
+    if (table === 'customers') return chain({ first: { billing_mode: 'per_application', monthly_rate: 50 } });
+    return chain({ first: null });
+  });
+  const verdict = await visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false });
+  expect(verdict).toEqual({ visible: false, reason: 'invoice_changed' });
+  delete process.env.ZELLE_RECIPIENT;
+});
+
+// Codex round-67 P1: the projected (partial) credit is read LAST, from the fresh row - a credit that appears during the probes withholds
+test('a partial account credit that appears during the probes => credit_pending (never a stale projectedCredit of 0)', async () => {
+  process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  const gates = require('../config/feature-gates').gates;
+  gates.autoApplyAccountCredit = true;
+  const inv = invoiceData({ status: 'overdue' });
+  let creditReads = 0;
+  try {
+    setDbImpl((table) => {
+      if (table === 'invoices') return chain({ first: inv });
+      const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+      if (table === 'customers') {
+        q.first = jest.fn(async (...cols) => {
+          if (!cols.includes('account_credits')) return { billing_mode: null, monthly_rate: null };
+          creditReads += 1;
+          return { account_credits: creditReads >= 2 ? 20 : 0, auto_apply_account_credit: true };
+        });
+      }
+      return q;
+    });
+    const verdict = await visibilityOf({ invoice: inv, saveRequired: false });
+    expect(verdict).toMatchObject({ visible: false, reason: 'credit_pending' });
+    expect(verdict.projectedCredit).toBeGreaterThan(0);
+  } finally {
+    gates.autoApplyAccountCredit = false;
+    delete process.env.ZELLE_RECIPIENT;
+  }
+});
+
+// Codex round-68 P0s: the final pass closes with the active-collection guards, and a credit that grew to full coverage is never "pending"
+describe('the final pass: active collection and full coverage', () => {
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  test('a saved-card charge claim that starts after the first pass => withheld', async () => {
+    const StripeService = require('../services/stripe');
+    const inv = invoiceData({ status: 'overdue' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: inv }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    StripeService.assertNoInvoiceChargeReconciliationPending
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true });
+  });
+  test('the attached PaymentIntent moved to processing after the first pass => withheld', async () => {
+    const StripeService = require('../services/stripe');
+    const inv = invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_1' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: inv }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    StripeService.retrievePaymentIntent
+      .mockResolvedValueOnce({ id: 'pi_1', status: 'requires_payment_method' })
+      .mockResolvedValueOnce({ id: 'pi_1', status: 'processing' });
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+  });
+  test('a credit that grew to cover the whole invoice => credit_covers (never credit_pending)', async () => {
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    const inv = invoiceData({ status: 'overdue' });
+    let creditReads = 0;
+    try {
+      setDbImpl((table) => {
+        if (table === 'invoices') return chain({ first: inv });
+        const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+        if (table === 'customers') {
+          q.first = jest.fn(async (...cols) => {
+            if (!cols.includes('account_credits')) return { billing_mode: null, monthly_rate: null };
+            creditReads += 1;
+            // reads: first-pass coverage, final-pass coverage, then the projection - the credit grows only at the last one
+            return { account_credits: creditReads >= 3 ? 1000 : 0, auto_apply_account_credit: true };
+          });
+        }
+        return q;
+      });
+      await expect(visibilityOf({ invoice: inv, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'credit_covers' });
+      expect(creditReads).toBe(3);
+    } finally { gates.autoApplyAccountCredit = false; }
+  });
+});
+
+// Codex round-70 P0s: the PaymentIntent read comes first; the deposit-settlement and charge-claim fences are the LAST reads
+describe('the final pass ends with the DB fences', () => {
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  const inv = () => invoiceData({ status: 'overdue' });
+  const rows = (i) => setDbImpl((table) => (table === 'invoices' ? chain({ first: i }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+  test('a deposit received during the probes => deposit_pending', async () => {
+    const deposits = require('../services/estimate-deposits');
+    const i = inv(); rows(i);
+    deposits.assertInvoiceDepositSettlementReady.mockRejectedValueOnce(Object.assign(new Error('awaiting'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'deposit_pending' });
+    expect(deposits.assertInvoiceDepositSettlementReady).toHaveBeenLastCalledWith(expect.anything(), i, { lock: false });
+  });
+  test('an unexpected deposit-fence error fails closed', async () => {
+    const deposits = require('../services/estimate-deposits');
+    const i = inv(); rows(i);
+    deposits.assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+  });
+  test('order (Codex round-75 P0): the PaymentIntent read FIRST, then the fresh row, then deposit fence, then charge claim (last)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
+    const body = src.slice(src.indexOf('async function zelleFinalPass'), src.indexOf('const ZELLE_ELIGIBILITY_TIMEOUT_MS'));
+    const pi = body.indexOf('zelleDeniedByPaymentIntent(inv)');
+    const row = body.indexOf("dbh('invoices')");
+    const dep = body.indexOf('zelleDeniedByDepositSettlement(fresh, dbh)');
+    const claim = body.indexOf('zelleDeniedByChargeReconciliation(fresh, true, dbh)');
+    expect(pi).toBeGreaterThan(-1);
+    expect(row).toBeGreaterThan(pi); // no DB read precedes the slow Stripe await
+    expect(body.slice(0, pi)).not.toMatch(/dbh\(/);
+    expect(dep).toBeGreaterThan(row);
+    expect(claim).toBeGreaterThan(dep);
+    expect(body.slice(claim)).not.toMatch(/await (?!zelleDeniedByChargeReconciliation)/);
+  });
+  test('a PaymentIntent attached while the Stripe probe ran => invoice_changed', async () => {
+    const i = invoiceData({ status: 'overdue' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: { ...i, stripe_payment_intent_id: 'pi_new' } }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+  });
+});
+

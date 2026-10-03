@@ -1437,6 +1437,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // text; every other job under the v11 charge-now prepay text.
     const deferredToFirstVisit = job.deferred_to_first_visit === true;
     const jobConsentVariant = deferredToFirstVisit ? 'after_visit_prepay' : 'prepay_card';
+    // Payer scope for every payer resolution of this job: a deferred year is
+    // the ACCOUNT's bill (the charge's selfPayAccountScope), so enrollment,
+    // settlement checks and payer recovery resolve the account too, never one
+    // visit's Bill-To (GitHub Codex #5567 r19 pre-push).
+    const jobPayerScopeSsId = deferredToFirstVisit ? null : (job.payer_scope_scheduled_service_id || null);
     const resolve = async (status, extra = {}) => {
       try {
         // Atomic JSON-path merge — same rationale as the claim above.
@@ -1455,6 +1460,15 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         logger.warn(`[recurring-cof] prepay sweep stamp update failed for estimate ${row.id}: ${stampErr.message}`);
       }
     };
+    // A deferred job whose first visit no longer stands goes back to wait for
+    // the next release pass (GitHub Codex #5567 r13): release cleared, no
+    // charge, no pay link.
+    const requeueDeferred = (extra = {}) => resolve('awaiting_first_visit', {
+      resolved_at: null, resolved_by: null, claim_token: null, claimed_at: null,
+      released_at: null, released_for_visit_id: null,
+      payer_scope_scheduled_service_id: job.scheduled_service_id || null,
+      ...extra,
+    });
     const alertUncollected = async (title, body) => require('./notification-service').notifyAdmin(
       'billing', title, body,
       { link: job.invoice_id ? `/admin/invoices?invoice=${job.invoice_id}` : '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
@@ -1502,7 +1516,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           try {
             const coveragePayer = await require('./payer').resolveForInvoice({
               customerId: invoice.customer_id,
-              scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+              scheduledServiceId: jobPayerScopeSsId,
               throwOnError: true,
             });
             if (coveragePayer?.payerId && !invoice.payer_id) {
@@ -1710,6 +1724,54 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           continue;
         }
       }
+      // A year routed to a payer at approval, authorized for a charge only
+      // AFTER the first visit (pre-push audit P0/P1): before ANY consent
+      // record or enrollment, a payer that still resolves gets the bill; with
+      // the payer gone, the homeowner's card is never charged (nor a
+      // charge-now authorization recorded) — pay link and office alert.
+      if (job.after_visit_attested === true && !deferredToFirstVisit) {
+        const livePayer = await require('./payer').resolveForInvoice({
+          customerId: invoice.customer_id,
+          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          throwOnError: true,
+        });
+        if (livePayer?.payerId) {
+          // The shared payer-guard handler below re-resolves, returns any
+          // applied credit and STAMPS the payer before confirmed payer
+          // delivery (deferring if it can't) — never a delivery by an
+          // unstamped invoice (pre-push audit P0).
+          throw Object.assign(new Error('payer resolves for an after-visit year — re-routing to the payer'), { code: 'PAYER_BILLED_GUARD' });
+        }
+        throw new Error('after-visit authorization only and no payer — delivering pay link');
+      }
+      // A deferred job is charged only while its first visit still stands and
+      // no visit of the plan is mid-closeout (GitHub Codex #5567 r13): a visit
+      // reopened / cancelled / rescheduled since the release, or a closeout
+      // that started after it, sends the job back to wait for the next
+      // release pass — never a charge, never a pay link.
+      let deferredHeldTermId = null;
+      if (deferredToFirstVisit) {
+        const PafRelease = require('./paf-prepay-release');
+        // Released with NO visit = the year settled before any visit; reaching
+        // the charge means that payment came back (a returned debit). Never a
+        // charge before a performed visit, and no automatic re-debit after it
+        // (owner R2): back to wait, marked returned, so the visit's release
+        // goes to the pay link (pre-push audit P0).
+        if (!job.released_for_visit_id) {
+          await requeueDeferred({ charge_returned: true });
+          continue;
+        }
+        // The year must still be live: a cancelled term (e.g. the prepay flag
+        // removed) goes back to wait, and the release pass hands its held
+        // visit to the office as cancelled_after_visit (pre-push audit P0).
+        const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
+        deferredHeldTermId = heldTerm && String(heldTerm.status || '') !== 'cancelled' ? heldTerm.id : null;
+        if (!deferredHeldTermId || !(await PafRelease.visitStillPerformed(job.released_for_visit_id, deferredHeldTermId))
+          || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
+          await requeueDeferred();
+          continue;
+        }
+      }
       if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type')
@@ -1747,7 +1809,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // payer-billed account must not have this recovery enrollment
           // resolve the account-default payer, refuse, and retire the job
           // to a pay link instead of the authorized charge.
-          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          scheduledServiceId: jobPayerScopeSsId,
           // The customer's authorization moment (Codex r16): an Auto Pay
           // opt-out AFTER acceptance must WIN — the enrollment refuses
           // opted_out_after_authorization and the sweep falls to the
@@ -1773,7 +1835,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       if (pmRow && jobConsentVersionCurrent) {
         try {
           const ConsentService = require('./payment-method-consents');
-          const consentMethodType = pmRow.method_type || 'card';
+          const consentMethodType = require('./autopay-eligibility').isBankMethodType(pmRow.method_type) ? 'us_bank_account' : 'card';
           const jobAuthorizedAt = (job.authorized_at || job.created_at)
             ? new Date(job.authorized_at || job.created_at) : null;
           const already = await ConsentService.hasConsentSnapshotForVariant(
@@ -1815,7 +1877,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           paymentMethodId: pmRow.id,
           source: 'estimate_accept',
           details: { via: 'prepay_recovery_sweep', estimate_id: row.id, invoice_id: invoice.id },
-          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          scheduledServiceId: jobPayerScopeSsId,
           // Post-accept Auto Pay revocations WIN (Codex r16): with the
           // job's authorization timestamp, a later autopay_disabled event
           // refuses opted_out_after_authorization instead of this sweep
@@ -1841,13 +1903,6 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // method off-session would park again, so route straight to the
       // deterministic pay-link fallback (the customer authenticates by
       // paying on-session).
-      // A year routed to a payer at approval, authorized for a charge only
-      // AFTER the first visit (pre-push audit P0): with the payer gone, the
-      // homeowner's card is never charged at approval timing — pay link and
-      // office alert instead.
-      if (job.after_visit_attested === true && !deferredToFirstVisit) {
-        throw new Error('after-visit authorization only and no payer — delivering pay link');
-      }
       if (job.authentication_required === true) {
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }
@@ -1864,6 +1919,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // the ceiling alone binds. Every other job keeps the exact-total
           // freeze it was acknowledged under.
           ...(deferredToFirstVisit ? {} : { expectedTotal: Number(job.authorized_total_cents) / 100 }),
+          // …but the locked pre-credit bill never above what was approved, so
+          // credit can't mask an increase (GitHub Codex #5567 r18).
+          ...(deferredToFirstVisit && Number.isInteger(job.authorized_invoice_total_cents)
+            ? { maxAuthorizedInvoiceTotalCents: job.authorized_invoice_total_cents } : {}),
+          // The year is the account's bill: a visit-level Bill-To edit after
+          // the held closeout never routes it to that visit's payer (GitHub
+          // Codex #5567 r19).
+          ...(deferredToFirstVisit ? { selfPayAccountScope: true } : {}),
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
           requireAutopayForCustomerId: invoice.customer_id,
           // Live payer re-resolve IN the charge lock (Codex r9): the
@@ -1876,7 +1939,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // self_pay_override visit on a payer-billed account keeps its
           // customer-paid decision through recovery.
           ...(job.payer_scope_scheduled_service_id
-            ? { requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id }
+            ? {
+              requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id,
+              // The released first visit must still be completed under the
+              // charge's own visit lock (GitHub Codex #5567 r13).
+              ...(deferredToFirstVisit && job.released_for_visit_id
+                && String(job.released_for_visit_id) === String(job.payer_scope_scheduled_service_id)
+                ? { requireCompletedVisit: true, requirePerformedVisit: true, ...(deferredHeldTermId ? { requireHeldTermId: deferredHeldTermId } : {}) } : {}),
+            }
             : { requireSelfPayCustomerId: invoice.customer_id }),
         }));
         if (fencedCharge.ceded) {
@@ -1917,6 +1987,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${err.code || 'reconciliation pending'}`);
         continue;
       }
+      // The released first visit stopped standing between the preflight and
+      // the charge's own lock: back to waiting, never a pay link.
+      if (deferredToFirstVisit && err.code === 'VISIT_NOT_COMPLETED') {
+        logger.warn(`[recurring-cof] prepay sweep requeueing estimate ${row.id}: the released first visit is no longer completed`);
+        await requeueDeferred();
+        continue;
+      }
       // In-lock payer-guard refusal (Codex r10 P0): a payer was assigned
       // AFTER the mint while the invoice's frozen payer_id is still null.
       // Falling through to the generic fallback would hand the HOMEOWNER a
@@ -1934,7 +2011,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             const resolved = await require('./payer').resolveForInvoice({
               customerId: invoice?.customer_id,
               // Same scope basis the lane was admitted with (Codex r13).
-              scheduledServiceId: job.payer_scope_scheduled_service_id || invoiceRow?.scheduled_service_id || null,
+              scheduledServiceId: deferredToFirstVisit ? null : (job.payer_scope_scheduled_service_id || invoiceRow?.scheduled_service_id || null),
               throwOnError: true,
             });
             if (resolved?.payerId) {

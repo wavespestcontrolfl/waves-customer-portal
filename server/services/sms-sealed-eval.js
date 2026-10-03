@@ -43,7 +43,7 @@ const MODELS = require('../config/models');
 const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
-const { LABEL_FACTS_MARKER } = require('./sms-label-facts');
+const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -124,6 +124,13 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 // drafted) and are unaffected — this only excludes items being graded AS v12
 // evidence that were never given v12 facts.
 const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+// PR #5331: the PAYMENT OPTIONS fact is properly gated (see
+// sms-shadow-drafter.js buildFactsBlock's own comment) and renders on every
+// gate-on facts block of the payment-facts revision. It is a VERSION-SUFFIX
+// fact ('cflvp' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
+// every real-answers identity before that revision (bare, '_cf') never
+// carried it, so their historical sealed-eval contracts FORBID it.
+const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
 // Free re-service eligibility (Codex r6 P1) used to render ONLY with
 // GATE_SMS_AGENT_COMPLAINTS also on, so it lived in CATEGORY_FACT_MARKERS
 // below keyed to that category's 'c' tag. Decoupled 2026-09-29 (owner
@@ -168,10 +175,14 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // hasRenderedVisitLoops.
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
 const VISIT_LOOPS_MARKER = 'VISIT STATUS & OPEN LOOPS:';
+// 'cflvp' = '_cflv' + PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line. One glued token (not
+// '_cflv_p') keeps the identity at 35 chars, 40 with all four category tags = PROMPT_VERSION_COLUMN_MAX.
 const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   cf: [COMPANY_FACTS_HEADER],
   cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER],
   cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
+  cflvp: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER],
+  p: [V12_PAYMENT_OPTIONS_MARKER],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
@@ -213,13 +224,57 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
-// Does a frozen facts block carry this marker? COMPANY FACTS, LABEL FACTS and FREE RE-SERVICE are TRUSTED only at
-// their fixed rendered position (Codex #5392 r3 P2; #5336 round-24 P2): buildFactsBlock renders
-// "...FOLLOW-UP SLA RIGHT NOW: <phrase>\nFREE RE-SERVICE: <fact>\n[COMPANY FACTS section][LABEL FACTS section]BILLING:", so
-// the text before the FIRST "BILLING:" line must end with the exact company (+ label) structure (when those sections are
-// claimed) and, beneath it, the SLA line followed directly by the re-service line. A header or marker typed into a
-// multi-line SMS (the thread rides later in the block, verbatim) proves nothing. Every other marker is a
-// server-rendered line and stays a substring check.
+// Codex round-9 P1 (PR #5331): every fact marker is detected ONLY by its
+// STRUCTURAL position in the block buildFactsBlock emits — never as a bare
+// substring, which customer/admin free text (property notes, invoice titles,
+// service notes, account flags, call summaries, the SMS thread) can contain.
+// buildFactsBlock writes the fixed marker lines at column 0, in this order:
+//     ...UPCOMING SERVICES / OPEN TIMES
+//     FOLLOW-UP SLA RIGHT NOW: <phrase>          (gate on)
+//     FREE RE-SERVICE: <lanes>                   (gate on; numeric token >= 2 or the 'c' tag)
+//     COMPANY FACTS (...):  + "- <fact>" lines   ('_cf' cohort; matched by main's exact-render test)
+//     LABEL FACTS (...):  ('_cfl' cohort; matched by main's exact-render test, sms-label-facts)
+//     BILLING:
+//     - <billing lines…>  (incl. "- Payment options: …")
+//     PENDING ESTIMATE: …
+// while every free-text value it interpolates is collapsed to ONE line
+// (sanitizeSingleLine) and prefixed ("- Pets: …", "notes: \"…\"") — free text
+// can neither start a line with a marker nor contain the newline-delimited
+// BILLING/PENDING ESTIMATE anchors. So a marker counts only as:
+//   SLA           a column-0 line immediately before [FREE RE-SERVICE:] BILLING:
+//   FREE RE-SERVICE  main's exact-render test (hasRenderedReserviceFact): SLA line + this line end the text before BILLING:
+//   Payment options  a column-0 line INSIDE the BILLING section (before PENDING ESTIMATE:)
+// COMPANY FACTS and LABEL FACTS are the markers that are NOT structural here: they keep main's exact-render
+// tests (hasExactCompanyFacts / hasExactLabelFacts, sms-company-facts), and the optional sections below let the SLA
+// and FREE RE-SERVICE anchors sit in front of them.
+// The pattern source below is valid for BOTH JS RegExp and PostgreSQL ARE (`~`),
+// so itemCompatibleWith and the SQL twin (compatibleWhereRaw) cannot drift.
+const COMPANY_FACTS_OPTIONAL = `(?:${COMPANY_FACTS_HEADER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n(?:- [^\\n]*\\n)*)?(?:${LABEL_SECTION_REGEX_SRC}\\n)?`;
+const MARKER_STRUCTURE = Object.freeze({
+  [V12_FACTS_MARKER]: `(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?${COMPANY_FACTS_OPTIONAL}BILLING:\\n`,
+  [V12_PAYMENT_OPTIONS_MARKER]: '\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?- Payment options:',
+});
+// Defense in depth: the three free-text sections buildFactsBlock writes AFTER
+// every fixed section (call summaries, a per-line-sanitized call transcript, the
+// SMS thread) are never searched — the match must start before the earliest of
+// their headers (each at a LINE START) and cannot run into one. `(?:.|\\n)` (not [^]) is valid in
+// both JS and PostgreSQL ARE.
+const FREE_TEXT_HEADERS_ALT = 'RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:';
+function markerPattern(marker) {
+  const inner = MARKER_STRUCTURE[marker] || `(?:^|\\n)${String(marker).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
+  // Codex round-19 P2: a stop header counts ONLY at a line boundary ("\nRECENT PHONE CALLS…"), never as a
+  // substring — a service/property note that merely MENTIONS "RECENT PHONE CALLS" must not end the scan
+  // early and hide the fixed sections after it. (Lookahead on the preceding newline: valid in JS and PostgreSQL ARE.)
+  return `^(?:(?!\\n(?:${FREE_TEXT_HEADERS_ALT}))(?:.|\\n))*?${inner}`;
+}
+const MARKER_REGEXES = new Map();
+function markerRegex(marker) {
+  if (!MARKER_REGEXES.has(marker)) MARKER_REGEXES.set(marker, new RegExp(markerPattern(marker)));
+  return MARKER_REGEXES.get(marker);
+}
+// FREE RE-SERVICE (PR #5336, Codex round-24 P2) keeps main's exact-render trust test: the text before the FIRST
+// "BILLING:" line, minus the exact company render when it ends with it, must end with the SLA line directly
+// followed by the re-service line. SQL twin: the RESERVICE branch of compatibleWhereRaw.
 const RESERVICE_SECTION_RE = /(?:^|\n)FOLLOW-UP SLA RIGHT NOW:[^\n]*\nFREE RE-SERVICE:[^\n]*$/;
 function hasRenderedReserviceFact(factsBlock) {
   const facts = String(factsBlock || '');
@@ -240,23 +295,24 @@ function hasRenderedVisitLoops(facts) {
   const upcoming = head.split(UPCOMING_DELIMITER)[1];
   return typeof upcoming === 'string' && upcoming.includes(VISIT_LOOPS_LINE);
 }
-function factPresent(facts, marker) {
+function factsHasMarker(factsBlock, marker) {
+  const facts = String(factsBlock || '');
   if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
+  // COMPANY FACTS keeps main's exact-render trust test (a header typed into a multi-line SMS proves nothing).
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
   if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
   if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
-  return facts.includes(marker);
+  return markerRegex(marker).test(facts);
 }
 function itemCompatibleWith(factsBlock, promptVersion) {
-  const facts = String(factsBlock || '');
-  return requiredFactMarkers(promptVersion).every((m) => factPresent(facts, m))
-    && forbiddenFactMarkers(promptVersion).every((m) => !factPresent(facts, m));
+  return requiredFactMarkers(promptVersion).every((m) => factsHasMarker(factsBlock, m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !factsHasMarker(factsBlock, m));
 }
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
 // complement), parameterized: required markers present, forbidden absent.
-// Mirrors factPresent: LIKE for ordinary markers, the exact-suffix test for
-// COMPANY FACTS (text before the first BILLING: line ends with the exact
-// render). Bindings follow clause order.
+// Mirrors factsHasMarker: the structural pattern via Postgres `~` for the
+// line markers, the exact-suffix test for COMPANY FACTS (text before the first
+// BILLING: line ends with the exact render). Bindings follow clause order.
 function compatibleWhereRaw(markers, forbidden = []) {
   const col = "COALESCE(facts_block, '')";
   const clauses = [];
@@ -278,8 +334,8 @@ function compatibleWhereRaw(markers, forbidden = []) {
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND regexp_replace(split_part(${col}, ?::text, 1), ?::text, '') ~ ?::text)`);
       bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source);
     } else {
-      clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
-      bindings.push(`%${marker}%`);
+      clauses.push(`${col} ${negate ? '!~' : '~'} ?`);
+      bindings.push(markerPattern(marker));
     }
   };
   markers.forEach((m) => add(m, false));
@@ -1516,6 +1572,8 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
+    factsHasMarker,
+    markerPattern,
     compatibleWhereRaw,
   },
 };
