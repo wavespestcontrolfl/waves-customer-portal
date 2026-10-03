@@ -1796,8 +1796,14 @@ false`); once released it reads as the existing `pending`/`claimed` sweep postur
 the in-transaction account credit already covered settles exactly as before (no deferral).
 The accept notification (customer account feed) says nothing is charged today and the
 annual prepay is charged to the card on file after the first visit. No message is sent
-because of these fields. Client copy and the attestation ship in PR-E; until then a
-deferred accept re-quotes, so the gate must not be flipped before it.
+because of these fields. (5) PR-E: GET `/api/estimates/:token/data` carries
+`recurringCardPolicy.prepayAfterFirstVisit: true` (present only when true) exactly when an
+in-lane prepay accept would defer (`prepayInLane` plus the gate conjunction above). The React
+estimate page uses it to render the after-visit wording on the plan option, the review step and
+the capture checkbox (`after_visit_prepay` text), renders the quote's `consentVariant` at the
+confirm step, sends `prepayChargeConsentVariant` back, and shows the `after_first_visit` success
+copy. In-lane prepay is React-only (the legacy page redirects), so the legacy renderer is
+unchanged.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -5992,3 +5998,5 @@ baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the
 AGENTS.md P0 rule "Public route surface", not in this document. This
 document holds the per-route entries only.
+
+Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
