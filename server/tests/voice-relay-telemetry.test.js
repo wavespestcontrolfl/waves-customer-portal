@@ -130,9 +130,19 @@ describe('per-turn stats', () => {
     convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', value: 'off' });
     expect(stat.agentSpeakingEndAt).toBeGreaterThanOrEqual(stat.agentSpeakingStartAt);
     expect(convo._eventCounts).toMatchObject({ caller_speaking_start: 1, caller_speaking_end: 1, agent_speaking_start: 1, agent_speaking_end: 1 });
-    // The state label (never speech) rides the first shape line per kind.
-    const lines = logger.info.mock.calls.map((c) => c[0]).filter((s) => /relay event shape seen callSid=\S+ kind=caller_speaking_end /.test(s));
-    expect(lines[lines.length - 1]).toMatch(/ value=off$/);
+    // Each state label (never speech) is logged once, with the kind it read as.
+    const states = logger.info.mock.calls.map((c) => c[0]).filter((s) => /relay speaker state seen/.test(s));
+    expect(states.some((s) => / kind=caller_speaking_start value=on$/.test(s))).toBe(true);
+    expect(states.some((s) => / kind=caller_speaking_end value=off$/.test(s))).toBe(true);
+    // An unknown end label reads as a start (a kind already seen) and is still logged.
+    const before = logger.info.mock.calls.length;
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'disabled' });
+    const fresh = logger.info.mock.calls.slice(before).map((c) => c[0]);
+    expect(fresh.some((s) => /relay speaker state seen .* value=disabled$/.test(s))).toBe(true);
+    // A repeat of a label already seen logs nothing.
+    const again = logger.info.mock.calls.length;
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'disabled' });
+    expect(logger.info.mock.calls.slice(again).some((c) => /relay speaker state seen/.test(c[0]))).toBe(false);
   });
 
   test('agent speaking start/end land on the turn that spoke; tokens-played rewrites what the caller heard', () => {

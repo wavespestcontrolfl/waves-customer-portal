@@ -1133,6 +1133,7 @@ class RelayConversation {
     // classifyRelayEvent's `kind` so a call row alone can tell "we never saw
     // an agent_speaking_end frame" from "we saw one and it had these keys".
     this._eventShapesByKind = new Map();
+    this._speakerStatesSeen = new Set();
     // Every classified relay-event kind, counted — the RECEIVED half of the
     // trustworthy-measurement pair below (SUBSCRIBED is the other half). A
     // received event is proof of subscription no lookup can override.
@@ -1511,11 +1512,20 @@ class RelayConversation {
       // Deduped per KIND (not per shape): two kinds sharing an identical key
       // set are still two distinct things a payload drift could break.
       this._eventShapesByKind.set(ev.kind, ev.shape);
-      // A speaker frame's value is a state label (on/off), never speech; a
-      // short all-letters value is logged so a direction-word miss shows up
-      // on the first call instead of as a missing metric.
-      const state = /_speaking_/.test(ev.kind) && typeof frame.value === 'string' && /^[a-z]{1,8}$/i.test(frame.value) ? ` value=${frame.value}` : '';
-      logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}${state}`);
+      logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
+    }
+    // A speaker frame's value is a state label (on/off), never speech. Each
+    // new short all-letters label is logged once per call, on its own and
+    // not under the per-kind dedupe above: an unknown end label ("disabled")
+    // classifies as a start, a kind already seen, and would otherwise stay
+    // hidden. Capped so a drifting payload cannot flood the log.
+    if (/_speaking_/.test(ev.kind) && typeof frame.value === 'string' && /^[a-z]{1,8}$/i.test(frame.value)) {
+      const label = frame.value.toLowerCase();
+      const seenKey = `${ev.kind}:${label}`;
+      if (!this._speakerStatesSeen.has(seenKey) && this._speakerStatesSeen.size < 16) {
+        this._speakerStatesSeen.add(seenKey);
+        logger.info(`[voice-relay] relay speaker state seen callSid=${maskSid(this.callSid)} kind=${ev.kind} value=${label}`);
+      }
     }
     const t = now();
     switch (ev.kind) {
