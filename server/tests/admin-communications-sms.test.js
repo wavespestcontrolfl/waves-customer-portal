@@ -477,7 +477,8 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Su visita es el martes.', providerPreSendCheck }));
     });
-  });
+  // a whole accepted send through the route: the first one in a cold worker loads every lazy module
+  }, 20000);
 
   test('a suggested reply never goes out on the applicant rail (which runs none of its checks)', async () => {
     const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
