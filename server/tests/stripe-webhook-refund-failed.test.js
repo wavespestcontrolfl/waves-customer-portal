@@ -702,6 +702,7 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
   const { invoiceAmountDue } = jest.requireActual('../services/invoice-helpers');
   let tables;
   let beforeTransaction;
+  let afterPaymentRead;
 
   // Stateful stand-in for the two tables the dispute handlers touch; every other
   // table reads empty. Enough query surface for handleDisputeCreated/Closed.
@@ -721,7 +722,16 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     q.orderBy = () => q;
     q.whereExists = () => q;
     q.whereIn = () => q;
-    q.first = async () => pick()[0];
+    q.first = async (...cols) => {
+      const found = pick()[0];
+      const snapshot = found && { ...found }; // a read is a point-in-time copy, like the database
+      if (table === 'payments' && !cols.length && afterPaymentRead) {
+        const hook = afterPaymentRead;
+        afterPaymentRead = null;
+        await hook(); // another handler commits between this read and the caller's next step
+      }
+      return snapshot;
+    };
     q.update = async (patch) => { pick().forEach((r) => Object.assign(r, patch)); return pick().length; };
     q.insert = async () => [1];
     q.then = (res, rej) => Promise.resolve(pick()).then(res, rej);
@@ -753,6 +763,7 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(undefined);
     db.mockImplementation((table) => query(table));
     beforeTransaction = null;
+    afterPaymentRead = null;
     db.transaction.mockImplementation(async (cb) => {
       // Lets a test land a concurrent writer between a handler's unlocked read and its transaction.
       if (beforeTransaction) { const hook = beforeTransaction; beforeTransaction = null; hook(); }
@@ -773,7 +784,7 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     expect(row('invoices', 'inv_1')).toMatchObject({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null });
     expect(total()).toBe(1000);
     expect(nextCardTotal()).toBe(1029);
-    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900, dispute_invoice_id: 'inv_1' });
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ dispute_invoice_id: 'inv_1' });
   });
 
   test('a replay of the created event, or the lost closure after it, subtracts nothing more', async () => {
@@ -802,12 +813,11 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
       await handleDisputeCreated(dispute);
       expect(row('invoices', 'inv_1').status).toBe('overdue');
       expect(total()).toBe(1000);
-      expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
     }
   });
 
-  test('a card payment the webhook settled (total never rewritten) is not reduced', async () => {
-    seed({ total: 1000 }); // payments.amount 1029 but the invoice still reads its own 1000
+  test('a total that is not the settled shape (edited since the settle) is not reduced', async () => {
+    seed({ total: 1000 }); // payments.amount 1029 but the invoice total no longer equals cash + credit
     await handleDisputeCreated(dispute);
     expect(row('invoices', 'inv_1').status).toBe('overdue');
     expect(total()).toBe(1000);
@@ -830,6 +840,19 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     await handleDisputeCreated(dispute);
     expect(row('invoices', 'inv_1').status).toBe('overdue');
     expect(total()).toBe(1029);
+    // The put-back only restores what the reopen took: a refused removal leaves nothing to add back.
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1').status).toBe('paid');
+    expect(total()).toBe(1029);
+  });
+
+  test('won leaves a total that is neither the settled nor the reopened shape alone (edited invoice)', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    row('invoices', 'inv_1').total = '1111.00'; // re-totalled by an edit while reopened
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1').status).toBe('paid');
+    expect(total()).toBe(1111);
   });
 
   test('dispute won afterwards puts the invoice back to its paid state (total = cash + credit) once', async () => {
@@ -841,7 +864,6 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_card' });
     expect(total()).toBe(1023.2);
     expect(meta(row('payments', 'pay_1'))).toMatchObject({ dispute_final: 'won' });
-    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
 
     await handleDisputeClosed({ ...dispute, status: 'won' }); // replay
     expect(total()).toBe(1023.2);
@@ -870,13 +892,12 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
   test('won: a replacement that settles between the read and the transaction keeps its PI and total — no old surcharge added', async () => {
     seed();
     await handleDisputeCreated(dispute);
-    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900 });
 
     beforeTransaction = replacementSettles;
     await handleDisputeClosed({ ...dispute, status: 'won' });
     replacementOwnsInvoice();
-    // The stamp is not consumed by a restore that never happened, and a replay changes nothing.
-    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900, dispute_final: 'won' });
+    // A replay changes nothing.
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ dispute_final: 'won' });
     await handleDisputeClosed({ ...dispute, status: 'won' });
     replacementOwnsInvoice();
   });
@@ -886,7 +907,6 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     beforeTransaction = replacementSettles;
     await handleDisputeCreated(dispute);
     replacementOwnsInvoice();
-    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
   });
 
   test('lost: an invoice a replacement payment took after the read is not reopened or reduced', async () => {
@@ -894,6 +914,35 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     beforeTransaction = replacementSettles;
     await handleDisputeClosed({ ...dispute, status: 'lost' });
     replacementOwnsInvoice();
-    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
+  });
+
+  // created and closed run on separate webhook deliveries with no shared lock around their payment
+  // reads, so each order is checked: a paid invoice ends at cash + credit, a reopened one at its own amount.
+  test('interleaved: won reads the payment before created commits, then restores the invoice created reopened', async () => {
+    seed();
+    afterPaymentRead = () => handleDisputeCreated(dispute); // created commits right after won's payment read
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    // won wrote its stale view of the payment's metadata over created's; the total never depended on it.
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_card' });
+    expect(total()).toBe(1029);
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(total()).toBe(1029);
+  });
+
+  test('interleaved: created reads the payment before won commits, and reopens at the invoice\'s own amount', async () => {
+    seed();
+    afterPaymentRead = () => handleDisputeClosed({ ...dispute, status: 'won' }); // won commits right after created's read
+    await handleDisputeCreated(dispute);
+    // won found the invoice still paid (nothing to restore); created, acting on its earlier read, reopened it.
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(total()).toBe(1000);
+  });
+
+  test('won before created: the late created event is suppressed and the paid invoice stays at cash + credit', async () => {
+    seed();
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    await handleDisputeCreated(dispute);
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_card' });
+    expect(total()).toBe(1029);
   });
 });
