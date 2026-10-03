@@ -207,6 +207,63 @@ describe('find_slots', () => {
   });
 });
 
+// Owner ruling 2026-10-03: a caller recognised only through a customer's
+// secondary contact slot (spouse, tenant) gets ONE office bell tied to that
+// customer — never a new lead under their own number.
+describe('capture_lead for a recognised contact (secondary slot)', () => {
+  const relayAlert = require('../services/voice-agent/relay-alert');
+  const recognised = (over = {}) => ({
+    from: '+19415550133', callSid: 'CA-contact-1', callerVerified: true, customerId: 'c-1111', customerTier: 'redacted', markCaptured: jest.fn(), noteCallSummary: jest.fn(), ...over,
+  });
+  let bell;
+  beforeEach(() => { bell = jest.spyOn(relayAlert, 'alertOfficeContactFollowUp').mockResolvedValue(true); });
+  afterEach(() => bell.mockRestore());
+
+  test('rings the office for the customer, creates no lead, and stands the floor down', async () => {
+    const ctx = recognised();
+    const out = await executeTool('capture_lead', { call_summary: 'Asked what time the lawn tech is coming today.' }, ctx);
+    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c-1111', callbackPhone: '+19415550133', callSid: 'CA-contact-1', summary: expect.stringContaining('lawn tech') }));
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+    expect(ctx.markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(out).toMatch(/no new lead was created/);
+    expect(out).toMatch(/follow up with THEM/);
+    expect(out).toMatch(/Never promise that Waves will contact the account holder/);
+    // The benchmark fixture answers with this exact live text.
+    const fixture = require('../fixtures/voice-relay-eval/scenarios.json').scenarios.find((sc) => sc.id === 'eta-recognised-redacted');
+    expect(fixture.fixtures.toolResponses.capture_lead).toEqual({ text: out, capture: { leadCreated: false } });
+  });
+
+  test('a card number in the summary is scrubbed before it reaches the bell', async () => {
+    await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
+    expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);
+  });
+
+  test('a bell that cannot be raised falls through to the lead path, so a human still has an artifact', async () => {
+    bell.mockResolvedValue(false);
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-fallback', created: true });
+    const out = await executeTool('capture_lead', { call_summary: 'Needs a call back.' }, recognised());
+    expect(createLeadFromExtraction).toHaveBeenCalled();
+    expect(out).toMatch(/Lead saved successfully/);
+  });
+
+  test.each([
+    ['the account holder\'s own number (full tier)', { customerTier: 'full' }],
+    ['an unverified session', { callerVerified: false }],
+    ['a caller with no matched account', { customerId: null }],
+  ])('%s keeps the lead path — no contact bell', async (_label, over) => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', created: true });
+    await executeTool('capture_lead', { call_summary: 'Wants pest control.' }, recognised(over));
+    expect(bell).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).toHaveBeenCalled();
+  });
+
+  test('a sandbox call still writes nothing — no bell', async () => {
+    await executeTool('capture_lead', { call_summary: 'test' }, recognised({ sandbox: true }));
+    expect(bell).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+});
+
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
   test('capture preserves the claimed-session linkage when recovery is off', async () => {
     const saved = process.env.GATE_VOICE_RELAY_RECOVERY;

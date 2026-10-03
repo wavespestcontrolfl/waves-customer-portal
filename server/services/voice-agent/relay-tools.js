@@ -1277,6 +1277,31 @@ async function executeTool(name, input = {}, ctx = {}) {
           logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
         }
       }
+      // ⭐ A RECOGNISED CONTACT GETS AN OFFICE BELL, NEVER A LEAD (owner ruling
+      // 2026-10-03). The caller's own, verified number sits in a secondary slot
+      // on a customer's account: a lead here would file an existing household
+      // as a new prospect under the contact's number, linked to nothing. The
+      // bell is tied to the customer; the caller stays unverified, so nothing
+      // on the customer's record is read or changed. If the bell cannot be
+      // raised the capture falls through to the lead path below, so a human
+      // still has an artifact to work.
+      if (ctx.customerId && callerVerified && matchedCallerTier(ctx) === 'redacted') {
+        const { alertOfficeContactFollowUp } = require('./relay-alert');
+        const belled = await alertOfficeContactFollowUp({
+          customerId: ctx.customerId,
+          callbackPhone: callerPhone,
+          summary: [extracted.call_summary, extracted.requested_service, extracted.preferred_date_time].filter(Boolean).join(' — '),
+          callSid: ctx.callSid || null,
+        });
+        if (belled) {
+          if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
+          if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+          return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
+            + 'lead was created and none should be. The office has their callback number and your summary. Tell '
+            + 'the caller a Waves team member will follow up with THEM, and do not say a new request or appointment '
+            + 'was created. Never promise that Waves will contact the account holder.';
+        }
+      }
       // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE LEAD COMMITS. Writing it
       // after left a gap: a process exit between the lead insert and the
       // marker stamp produced a durable hot lead with neither a receipt nor an

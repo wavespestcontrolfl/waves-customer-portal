@@ -284,6 +284,38 @@ describe('RelayConversation — explicit end after capture', () => {
       attach.mockRestore();
     });
 
+    // Owner ruling 2026-10-03: a recognised contact's hangup rings the office
+    // for the customer; it never files a lead under the contact's number.
+    test('a recognised contact who hangs up rings the office instead of writing a lead', async () => {
+      jest.useRealTimers();
+      const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+      createLeadFromExtraction.mockClear();
+      const relayAlert = require('../services/voice-agent/relay-alert');
+      const bell = jest.spyOn(relayAlert, 'alertOfficeContactFollowUp').mockResolvedValue(true);
+
+      const convo = new RelayConversation({ callSid: 'CA-floor-contact', from: '+19415550133', send: jest.fn() });
+      convo._callerVerified = true;
+      convo._callerContext = { customer: { id: 'c-1111', first_name: 'Pat' }, tier: 'redacted' };
+      convo._userTurns = ['what time is the tech coming today'];
+      await convo._runCaptureFloor('hangup');
+
+      expect(bell).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c-1111', callbackPhone: '+19415550133', callSid: 'CA-floor-contact', summary: expect.stringContaining('what time is the tech coming') }));
+      expect(createLeadFromExtraction).not.toHaveBeenCalled();
+      expect(convo.leadCaptured).toBe(true);
+      expect(convo._noLeadCreated).toBe(true);
+
+      // The account holder's own number keeps the lead-path floor.
+      bell.mockClear();
+      createLeadFromExtraction.mockResolvedValue({ leadId: null });
+      const own = new RelayConversation({ callSid: 'CA-floor-own', from: '+19415550134', send: jest.fn() });
+      own._callerVerified = true;
+      own._callerContext = { customer: { id: 'c-1111', first_name: 'Pat' }, tier: 'full' };
+      await own._runCaptureFloor('hangup');
+      expect(bell).not.toHaveBeenCalled();
+      expect(createLeadFromExtraction).toHaveBeenCalled();
+      bell.mockRestore();
+    });
+
     test('with no booking on the call the floor attaches nothing', async () => {
       jest.useRealTimers();
       const { createLeadFromExtraction } = require('../services/lead-from-extraction');

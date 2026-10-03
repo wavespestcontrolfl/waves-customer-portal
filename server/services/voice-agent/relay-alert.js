@@ -634,7 +634,48 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
   return paged;
 }
 
+/**
+ * A caller recognised only through a customer's secondary contact slot
+ * (spouse, tenant, prior occupant) needs a human follow-up. Owner ruling
+ * 2026-10-03: ring ONE office bell tied to that customer — never a new lead
+ * under the caller's number, and nothing on the customer's record changes
+ * (the caller is recognised, not verified). Returns true only when a bell row
+ * exists; never throws.
+ */
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid }) {
+  if (!customerId || !callSid) return false;
+  try {
+    const db = require('../../models/db');
+    const { raiseAdminAlert, firstSentence } = require('../admin-alert-compose');
+    const { lookupCustomerName, fitAction, redactedWords, whyWithQuote } = require('../admin-alert-names');
+    const name = await lookupCustomerName(db, customerId);
+    const result = await raiseAdminAlert('alert', {
+      area: 'Comms',
+      action: name
+        ? fitAction('Comms', name, [(n) => `call back a contact on ${n}'s account`, (n) => `call back ${n}'s contact`])
+        : 'call back a contact on a customer account',
+      why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'customer', id: String(customerId) },
+      doneWhen: 'contact_called_back',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `sandy-contact-followup:${callSid}`,
+      // The full summary and the number to call, read from "Show full text".
+      detail: `Call back ${callbackPhone || 'the number this call came from'}. ${String(summary || '').trim()}`.trim(),
+      metadata: { customerId, callSid, callbackPhone: callbackPhone || null, source: 'voice_relay_contact_followup' },
+    });
+    return Boolean(result?.id) && !result.suppressed;
+  } catch (err) {
+    logger.error(`[voice-relay] contact follow-up bell failed callSid=${callSid}: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
+  alertOfficeContactFollowUp,
   alertOwnerHotLead,
   sweepAbandonedHotAlerts,
   alertOwnerReservice,
