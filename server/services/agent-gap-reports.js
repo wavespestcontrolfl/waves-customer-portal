@@ -244,9 +244,9 @@ async function ringGapBell(trx, event) {
 // sightings: only the inserter rings). The bell row and the belled_at stamp
 // are written in a savepoint of the same transaction (ringGapBell), so they
 // commit with the sighting or not at all.
-async function upsertGapRow(row) {
+async function upsertGapRow(row, database = db) {
   const now = new Date();
-  return db.transaction(async (trx) => {
+  return database.transaction(async (trx) => {
     const prior = await trx('agent_gap_reports')
       .where({ fingerprint: row.fingerprint })
       .forUpdate()
@@ -297,8 +297,8 @@ async function upsertGapRow(row) {
  * event, not a discovery loop). Same table, same dedupe-by-fingerprint;
  * never throws.
  */
-async function recordGap({ source, summary, attempted, closestTool } = {}) {
-  return writeGapRows([{ source, kind: 'missing_capability', summary, attempted, closestTool }]);
+async function recordGap({ source, summary, attempted, closestTool } = {}, database = db) {
+  return writeGapRows([{ source, kind: 'missing_capability', summary, attempted, closestTool }], database);
 }
 
 /**
@@ -309,7 +309,7 @@ async function recordGap({ source, summary, attempted, closestTool } = {}) {
  * throws; a failed write is logged with the error code only — the error text
  * can carry a compiled query with the summary in it.
  */
-async function writeGapRows(signals) {
+async function writeGapRows(signals, database = db) {
   if (!gapReportsEnabled()) return [];
   const seen = new Set();
   const saved = [];
@@ -318,7 +318,7 @@ async function writeGapRows(signals) {
       const row = prepareGapRow(signal);
       if (!row || seen.has(row.fingerprint)) continue;
       seen.add(row.fingerprint);
-      const result = await upsertGapRow(row);
+      const result = await upsertGapRow(row, database);
       if (result) saved.push(result);
     } catch (err) {
       logger.warn(`[agent-gap-reports] record failed (${err.code || err.name || 'error'})`);

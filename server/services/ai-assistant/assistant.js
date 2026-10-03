@@ -17,12 +17,29 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
 // One texting-AI gap report for an escalation its caller marked as the
-// assistant not knowing how to help. Fire-and-forget; never throws.
-function recordEscalationGap(customerMessage, reason) {
+// assistant not knowing how to help. Legacy calls fire-and-forget; a portal
+// turn supplies its bounded executor. Never throws.
+function recordEscalationGap(customerMessage, reason, database) {
   const summary = (reason && String(reason).trim()) || customerMessage;
   const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
-  recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+  const gap = { source: 'texting-ai', summary, attempted };
+  return recordGap(gap, database).catch(() => {});
 }
+
+async function escalationCustomer(customerId, executor = db) {
+  return customerId ? executor('customers').where('id', customerId).first() : null;
+}
+
+function escalationPriority(customerMessage) {
+  const lower = String(customerMessage || '').toLowerCase();
+  if (['cancel', 'lawsuit', 'bbb', 'complaint', 'not happy', 'refund']
+    .some((word) => lower.includes(word))) return 'urgent';
+  return 'normal';
+}
+
+const waitFor = (work, turn, stage) => turn
+  ? turn.waitFor(work, stage)
+  : (typeof work === 'function' ? work() : work);
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -772,16 +789,12 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack } = {}) {
-    const customer = conversation.customer_id
-      ? await db('customers').where('id', conversation.customer_id).first()
-      : null;
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, turn = null } = {}) {
+    if (turn) return this.escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, turn });
+    const customer = await escalationCustomer(conversation.customer_id);
 
     // Determine priority
-    const lower = (customerMessage || '').toLowerCase();
-    let priority = 'normal';
-    if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
-    if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
+    const priority = escalationPriority(customerMessage);
 
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
@@ -852,12 +865,100 @@ class WavesAssistant {
     };
   }
 
+  async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, turn }) {
+    const priority = escalationPriority(customerMessage);
+
+    const persisted = await turn.transaction('escalation persistence', async (trx) => {
+      turn.assertActive('escalation persistence');
+      const customer = await escalationCustomer(conversation.customer_id, trx);
+      let escalation = await trx('ai_escalations')
+        .where({ portal_chat_request_id: turn.requestRowId }).first();
+      let created = false;
+      if (!escalation) {
+        [escalation] = await trx('ai_escalations').insert({
+          conversation_id: conversation.id,
+          customer_id: conversation.customer_id,
+          reason: this.savedReason(customerMessage, { newEmail, topic, channel: conversation.channel }),
+          summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
+          customer_message: customerMessage,
+          ai_draft_response: null,
+          priority,
+          status: 'pending',
+          portal_chat_request_id: turn.requestRowId,
+        }).returning('*');
+        created = true;
+      }
+
+      await trx('agent_sessions').where('id', conversation.id).update({
+        escalated: true,
+        escalation_reason: reason,
+        status: 'escalated',
+        updated_at: new Date(),
+      });
+      const teamNotified = await trx.transaction((bellTrx) => this.notifyTeamOfEscalation({
+        escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, trx: bellTrx,
+      })).catch(() => false);
+      const reply = escalationReply({
+        isPortal: true,
+        teamNotified,
+        firstName: String(customer?.first_name || '').trim(),
+        newEmail,
+      });
+      await trx('agent_messages').insert({
+        conversation_id: conversation.id,
+        role: 'assistant',
+        content: reply,
+        channel: conversation.channel,
+        sent_to_customer: true,
+        portal_chat_request_id: turn.requestRowId,
+      }).onConflict().ignore();
+      // The escalation, customer transcript, bell and the exact response the
+      // portal must show are one durable outcome. Optional work after this
+      // transaction (gap telemetry / urgent SMS) may consume the turn budget;
+      // checkpointing here lets the coordinator return or replay this handoff
+      // instead of replacing it with a generic escalated:false timeout.
+      const handoff = {
+        reply,
+        conversationId: conversation.id,
+        escalated: true,
+        escalationId: escalation.id,
+        teamNotified,
+        generated: false,
+        ...turn.fallbackExtras(),
+      };
+      await turn.persistCommittedResult(trx, handoff);
+      return { customer, escalation, created, handoff };
+    });
+    turn.rememberCommittedResult(persisted.handoff);
+
+    if (gap) {
+      try {
+        await turn.transaction('gap persistence', (database) => recordEscalationGap(customerMessage, reason, database));
+      } catch { /* gap reports remain best-effort after the escalation commits */ }
+    }
+
+    // The existing urgent internal SMS remains portal behavior. Only the
+    // attempt that created the durable escalation may send it; a request
+    // retry that reconciles the same row never sends it again.
+    if (priority === 'urgent' && persisted.created && process.env.ADAM_PHONE) {
+      try {
+        const TwilioService = require('../twilio');
+        await waitFor(() => TwilioService.sendSMS(process.env.ADAM_PHONE,
+          `🚨 AI Escalation (${priority})\n${persisted.customer ? persisted.customer.first_name + ' ' + persisted.customer.last_name : 'Unknown'}\nReason: ${reason}\nMsg: "${(customerMessage || '').substring(0, 100)}"`,
+          { messageType: 'internal_alert' }), turn, 'urgent escalation notification');
+      } catch { /* internal SMS is best-effort; the operator bell remains truth */ }
+    }
+
+    logger.info('[ai-assistant] portal escalation committed', { conversationId: conversation.id, escalationId: persisted.escalation.id, priority });
+    return persisted.handoff;
+  }
+
   /**
    * Ring the admin bell for a portal-chat hand-off. Returns true only when a
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, trx = null }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -888,6 +989,7 @@ class WavesAssistant {
         // The topic lets the relevance sweep close an add-a-service bell once
         // an estimate goes out (admin-alert-relevance.js).
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id, ...(Object.hasOwn(TOPIC_WORDING, topic) ? { topic } : {}) },
+        ...(trx ? { trx } : {}),
       });
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
       // { id: null, suppressed: true } when the bell was withheld (a demo
@@ -895,6 +997,7 @@ class WavesAssistant {
       return Boolean(result?.id) && !result.suppressed;
     } catch (err) {
       logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
+      if (trx) throw err;
       return false;
     }
   }
