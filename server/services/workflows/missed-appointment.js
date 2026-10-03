@@ -1,6 +1,14 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
+// The occurrence fields a caller's snapshot supplies (customer_id stays the live row's).
+const OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
+function pickOccurrence(row) {
+  const out = {};
+  for (const f of OCCURRENCE_FIELDS) if (Object.prototype.hasOwnProperty.call(row, f)) out[f] = row[f];
+  return out;
+}
+
 class MissedAppointment {
   /**
    * Handle a skipped/missed appointment. First skip is handled by reschedule
@@ -9,10 +17,16 @@ class MissedAppointment {
    */
   // `conn`: an optional open transaction / connection to run on (default: the shared pool), so a caller that
   // already holds a connection (the street-level hold guard) never waits on a second pool checkout.
-  async onSkip(scheduledServiceId, reason = 'no_show', conn = db) {
-    const service = await conn('scheduled_services')
+  // `occurrence`: the row as the caller saw it when it marked the miss (dispatch's
+  // no-show transition). Its slot and scope are what the log freezes — a fresh read
+  // here could capture an edit committed after the transition (Codex #5669 r1).
+  async onSkip(scheduledServiceId, reason = 'no_show', conn = db, { occurrence = null } = {}) {
+    const current = await conn('scheduled_services')
       .where({ id: scheduledServiceId })
       .first();
+    const service = current && occurrence && String(occurrence.id) === String(scheduledServiceId)
+      ? { ...current, ...pickOccurrence(occurrence) }
+      : current;
 
     if (!service) {
       logger.error(`MissedAppointment: scheduled service ${scheduledServiceId} not found`);
@@ -36,6 +50,10 @@ class MissedAppointment {
       initiated_by: 'system',
       original_date: service.scheduled_date || null,
       original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+      // what was missed and where, frozen now: the row's own fields can change later
+      occurrence_service_type: service.service_type || null,
+      occurrence_service_id: service.service_id || null,
+      occurrence_property_id: service.property_id || null,
       notes: reason || 'skip',
     });
 
