@@ -171,6 +171,23 @@ describe('wiring', () => {
     expect(src).toContain('await probeSlotOverlap({ trx, date,');
   });
 
+  test('after-call booking: the picked technician is the one fenced, probed and saved', () => {
+    const src = read('services/call-recording-processor.js');
+    // Fresh insert: pick → fence → probe → insert all use bookingTechnicianId.
+    expect(src).toContain("require('./scheduling/pick-technician').pickTechnicianForVisit({");
+    expect(src).toContain('fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null })');
+    expect(src).toContain('technicianId: bookingTechnicianId || null,');
+    expect(src).toContain('technician_id: bookingTechnicianId,');
+    expect(src).not.toContain('technician_id: defaultTechnicianId,');
+    // Reused unassigned row: the pick excludes the row itself.
+    expect(src).toContain('excludeServiceIds: [existing.id],');
+    expect(src).toContain('let reuseTechId = reuseCandidateTechId;');
+    // Post-commit recheck judges each fresh row on its own technician.
+    expect(src).toContain('technicianId: svc.technician_id || null,');
+    expect(src).toContain('technicianId: followUpCreated.technician_id || null,');
+    expect(src).toContain('technicianId: visit.technicianId || null,');
+  });
+
   test('callers that must stay tech-blind never pass technicianId', () => {
     for (const p of ['services/scheduling/window-rules.js',
       'services/availability.js', 'services/slot-reservation.js', 'services/visit-groups.js',
