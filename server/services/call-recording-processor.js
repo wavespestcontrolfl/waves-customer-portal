@@ -4028,7 +4028,9 @@ function classifyHouseholdCandidates({ customers = [], sourcesById = new Map() }
   const [match] = matched;
   if (match.active !== true) return { customer: null, reason: 'not_active' };
   if (isCommercialKind(match.property_type) || String(match.waveguard_tier || '') === 'Commercial'
-    || (sourcesById.get(match.id) || []).some((src) => src.commercial)) {
+    // Only the address source that MATCHED the call counts: an unrelated commercial property
+    // on a residential customer's account must not waive the hold (codex #5700 r1 P1).
+    || (sourcesById.get(match.id) || []).some((src) => src.commercial && addressesExactlyMatch(src, wanted))) {
     return { customer: null, reason: 'commercial_account' };
   }
   return { customer: match, reason: 'address_match' };
@@ -4065,23 +4067,43 @@ async function fileHouseholdHoldCard(conn, { callLogId, procToken = null, custom
         .whereNull('customer_id').first('id');
       if (!owned) return 'moved';
     }
+    const evidence = {
+      suggested_customer_id: String(customerId),
+      heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+      caller_phone: phone || null,
+      address: [extracted.address_line1, extracted.address_line2, extracted.city, extracted.zip].filter(Boolean).join(', ') || null,
+      preferred_date_time: extracted.preferred_date_time || null,
+      service,
+    };
     const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'household_address_match' })
-      .select('status');
-    if (rows.some((row) => ['open', 'in_progress'].includes(row.status))) return 'open';
+      .select('id', 'status', 'payload');
+    const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
+    if (live) {
+      // A reprocess / adopted recording can move the match to another customer or address: the
+      // standing card must point the office (and the household_linked auto-resolve) at the
+      // CURRENT match, so its evidence is refreshed under the lock when it changed (codex
+      // #5700 r1 P1). Unchanged evidence leaves the card — and its version — untouched.
+      const current = (live.payload && typeof live.payload === 'object') ? live.payload
+        : (() => { try { return JSON.parse(live.payload) || {}; } catch { return {}; } })();
+      // jsonb reorders object keys, so compare by value, not by serialized text.
+      const { isDeepStrictEqual } = require('node:util');
+      const changed = Object.keys(evidence).some((k) => !isDeepStrictEqual(current[k] ?? null, evidence[k] ?? null));
+      if (changed) {
+        await trx('triage_items').where({ id: live.id }).forUpdate().first('id');
+        await trx('triage_items').where({ id: live.id }).update({
+          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        });
+      }
+      return 'open';
+    }
     if (rows.some((row) => row.status === 'dismissed')) return 'waived';
     await trx('triage_items').insert(buildTriageItem({
       callLogId,
       flag: 'household_address_match',
       extraction,
       severity: 'blocking',
-      extraPayload: {
-        suggested_customer_id: String(customerId),
-        heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
-        caller_phone: phone || null,
-        address: [extracted.address_line1, extracted.address_line2, extracted.city, extracted.zip].filter(Boolean).join(', ') || null,
-        preferred_date_time: extracted.preferred_date_time || null,
-        service,
-      },
+      extraPayload: evidence,
     })).onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
     return 'open';
   });

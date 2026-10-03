@@ -172,6 +172,12 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
   ])('%s: refused, no hold', (_label, over, sources) => {
     expect(classifyHouseholdCandidates(set([[cust('a', over), sources]]), call)).toEqual({ customer: null, reason: 'commercial_account' });
   });
+
+  test('an UNRELATED commercial property on a residential customer does not waive the hold (codex #5700 r1 P1)', () => {
+    const a = cust('a');
+    const elsewhere = src({ address_line1: '7 Elsewhere Way', commercial: true });
+    expect(classifyHouseholdCandidates(set([[a, [src(), elsewhere]]]), call)).toEqual({ customer: a, reason: 'address_match' });
+  });
 });
 
 // A real Postgres: the loader, the phone check, the finder and the card filer, on TEMP tables
@@ -287,9 +293,22 @@ const SKIP = !process.env.DATABASE_URL;
     });
     // a reprocess that still triggers files nothing more — whether the card is open or claimed
     expect(await fileHouseholdHoldCard(trx, args)).toBe('open');
+    // unchanged evidence leaves the card's version untouched
+    const [same] = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(new Date(same.updated_at).getTime()).toBe(new Date(card.updated_at).getTime());
     await trx('triage_items').update({ status: 'in_progress' });
     expect(await fileHouseholdHoldCard(trx, args)).toBe('open');
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
+    // a reprocess whose match MOVED to another customer / address refreshes the standing card (codex #5700 r1 P1)
+    const otherCustomer = randomUUID();
+    expect(await fileHouseholdHoldCard(trx, {
+      ...args, customerId: otherCustomer, extracted: { ...args.extracted, address_line1: '200 Sample Way' },
+    })).toBe('open');
+    const moved = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(moved).toHaveLength(1);
+    expect(moved[0].status).toBe('in_progress');
+    expect(moved[0].payload).toMatchObject({ suggested_customer_id: otherCustomer, address: '200 Sample Way, Sarasota, 34240', flag: 'household_address_match' });
+    expect(new Date(moved[0].updated_at).getTime()).toBeGreaterThan(new Date(card.updated_at).getTime());
     // the office DISMISSED it ("really someone new"): not re-filed, and the hold is waived
     await trx('triage_items').update({ status: 'dismissed' });
     expect(await fileHouseholdHoldCard(trx, args)).toBe('waived');
@@ -375,7 +394,10 @@ describe('wiring in processRecording (structural pin)', () => {
       expect(step3).not.toContain(forbidden);
     }
     const helpers = source.slice(source.indexOf('// ── Household hold (GATE_CALL_HOUSEHOLD_HOLD)'), source.indexOf('async function findCustomerForCallContact'));
-    expect(helpers).not.toMatch(/\.(update|del|delete)\(/);
+    // the ONLY update is the card's own evidence refresh on triage_items (codex #5700 r1); no deletes
+    expect(helpers).not.toMatch(/\.(del|delete)\(/);
+    expect(helpers.match(/\.update\(/g)).toHaveLength(1);
+    expect(helpers).toContain("await trx('triage_items').where({ id: live.id }).update({");
     expect(helpers.match(/\.insert\(/g)).toHaveLength(1);
     expect(helpers).not.toMatch(/trx\('customers'\)|conn\('customers'\)\.(insert|update)/);
   });
