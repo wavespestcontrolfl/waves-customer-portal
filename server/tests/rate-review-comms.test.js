@@ -1045,6 +1045,38 @@ describe('customer surfaces', () => {
       expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
     });
 
+    test('the match is re-checked on the locked row: a notice re-claimed by a re-send after it was selected is not charged with the old attempt\'s failure', async () => {
+      mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: false, sms_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), sms_sid: 'SM1' } })] }));
+      mockDb.raw.mockClear();
+      const selected = (await comms._private.noticesForDispatch(mockDb, CUSTOMER(1), 'sms_sid', 'SM1'))[0];
+      expect(mockDb.raw.mock.calls.some((c) => String(c[1] && c[1][0]) === `customer-comms:${CUSTOMER(1)}`)).toBe(true); // selected under the fence
+      expect(selected).toBeTruthy();
+      // a re-send claims the notice between the selection and the locked update
+      Object.assign(notices()[0], { status: 'sending', metadata: { source: 'rate_review', batch_key: BATCH_KEY, sms_sid: 'SM1', pending_letter: { key: 'newattempt' } } });
+      expect(await comms._private.recordChannelFailure(mockDb, selected, 'sms', { event: 'undelivered', at: new Date(), reason: '' })).toBeNull();
+      expect(notices()[0].metadata.early_failures).toBeUndefined();
+      expect(notices()[0].sms_sent).toBe(true);
+    });
+
+    test('portal: a text-only monthly notice with a failed sid is not upcoming and adds nothing to the other family\'s projected debit', async () => {
+      const mk = (n, over = {}) => draft(n, {
+        customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
+        current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+        family_key: n === 1 ? 'pest_control' : 'lawn_care',
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: [n === 1 ? 'pest_control:' : 'lawn_care:'], ...(over.metadata || {}) },
+        ...over,
+      });
+      const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_mode: 'monthly_membership' })], notices: [mk(1), mk(2, { email_sent: false, sms_sent: true, metadata: { sms_sid: 'SM2', source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: ['lawn_care:'] } })] });
+      bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
+      mockDb.reset(bk);
+      mockDb.store.sms_log = [{ twilio_sid: 'SM2', customer_id: CUSTOMER(1), status: 'delivered' }];
+      expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).map((c) => c.chargeCents)).toEqual([10800, 10800]);
+      mockDb.store.sms_log[0].status = 'undelivered';
+      const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
+      expect(out.map((c) => c.service)).toEqual(['Pest control']);
+      expect(out[0].chargeCents).toBe(10400); // only its own +$4
+    });
+
     test('a failed text reconciliation is re-thrown in strict mode (the status webhook then answers non-2xx) and swallowed otherwise', async () => {
       mockDb.reset(book());
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];

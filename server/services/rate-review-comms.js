@@ -1190,7 +1190,12 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const pendingIds = pending.map((n) => n.id);
   const snapshots = pendingIds.length ? await dbh('rate_review_snapshots').whereIn('notice_id', pendingIds).select('notice_id', 'cadence') : [];
   const lanes = await liveLanesFor(dbh, pending, { snapshots, customers: customer ? [customer] : [], today, includeSent: true });
-  const laneEligible = pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane);
+  // What the apply would refuse outright (an active plan hold, a revoked or
+  // failed delivery, a per-application structure): read BEFORE the monthly set
+  // is built, so such a notice neither shows nor adds to another family's
+  // projected debit. An applied prepaid notice is already recorded.
+  const gone = await linesGoneFor(dbh, pending.filter((n) => !n.applied_at), { snapshots, today });
+  const laneEligible = pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane && !gone.has(String(n.id)));
   const monthly = await applicableMonthly(dbh, laneEligible, customer, today);
   // A change the apply would refuse is not upcoming at all: monthly (rate
   // moved, or delivered too late); per application (its first visit's
@@ -1202,11 +1207,8 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // same checks; once recorded (applied_at) it stays upcoming until renewal.
   const unappliedPrepay = pending.filter((n) => n.billing_lane === 'annual_prepay' && !n.applied_at);
   const moved = await ratesMovedFor(dbh, [...perApp, ...unappliedPrepay], { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp), today });
-  // Per-application structure, and (every lane) an active plan hold the apply
-  // would answer with plan_on_hold. An applied prepaid notice is already recorded.
-  const gone = await linesGoneFor(dbh, pending.filter((n) => !n.applied_at), { snapshots, today });
   for (const id of gone.keys()) moved.add(id);
-  return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane && !(gone.get(String(n.id)) === 'plan_on_hold')
+  return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane && !gone.has(String(n.id))
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),
@@ -1255,17 +1257,23 @@ const isRateReviewMessage = (m) => !!m && m.template_key === TEMPLATE_KEY;
 const isEmailUndelivered = (ev) => EMAIL_UNDELIVERED_EVENTS.has(String(ev?.event || '').trim().toLowerCase());
 
 // Notices of this customer whose metadata names the provider id (set at dispatch).
+function noticeMatchesDispatch(n, key, value, claimKey) {
+  const meta = parseJson(n.metadata, {});
+  // A send in flight ('sending') belongs to its CURRENT attempt only: matched by
+  // that attempt's claim key — never by a provider id left from an earlier
+  // attempt, which would charge a delayed old failure to the new letter.
+  if (String(n.status) === 'sending') return !!claimKey && !!meta.pending_letter && String(meta.pending_letter.key) === String(claimKey);
+  return String(meta[key] || '') === String(value);
+}
+
+// Selected UNDER the customer's comms fence (a re-send claims, stamps and
+// repoints under it), and every match is re-checked on the locked row again in
+// recordChannelFailure.
 async function noticesForDispatch(dbh, customerId, key, value, { claimKey = null } = {}) {
   if (!customerId || !value) return [];
+  await lockCustomerComms(dbh, customerId);
   const rows = await dbh('price_change_notices').where({ customer_id: customerId }).whereNotNull('rate_review_row_id');
-  return rows.filter((n) => {
-    const meta = parseJson(n.metadata, {});
-    // A send in flight ('sending') belongs to its CURRENT attempt only: matched by
-    // that attempt's claim key — never by a provider id left from an earlier
-    // attempt, which would charge a delayed old failure to the new letter.
-    if (String(n.status) === 'sending') return !!claimKey && !!meta.pending_letter && String(meta.pending_letter.key) === String(claimKey);
-    return String(meta[key] || '') === String(value);
-  });
+  return rows.filter((n) => noticeMatchesDispatch(n, key, value, claimKey)).map((n) => ({ ...n, __match: { key, value, claimKey } }));
 }
 
 // One channel of one delivered notice failed (run inside a transaction, which
@@ -1282,6 +1290,9 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   await lockCustomerComms(trx, notice.customer_id);
   const live = await trx('price_change_notices').where({ id: notice.id }).forUpdate().first();
   if (!live) return null;
+  // The attempt this event belongs to must still be the notice's, on the LOCKED row.
+  if (notice.__match && (String(live.customer_id) !== String(notice.customer_id)
+    || !noticeMatchesDispatch(live, notice.__match.key, notice.__match.value, notice.__match.claimKey))) return null;
   const meta = parseJson(live.metadata, {});
   const flag = channel === 'email' ? 'email_sent' : 'sms_sent';
   const otherFlag = channel === 'email' ? 'sms_sent' : 'email_sent';
@@ -1421,5 +1432,5 @@ module.exports = {
   sendBatch,
   publicReview,
   upcomingRateChanges,
-  _private: { recordChannelFailure, whyFor, lineFor, letterPayload, planBatch, digestFor, linesGoneFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
+  _private: { recordChannelFailure, noticesForDispatch, whyFor, lineFor, letterPayload, planBatch, digestFor, linesGoneFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
 };
