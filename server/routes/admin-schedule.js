@@ -5079,6 +5079,7 @@ function mapLinkedProject(row) {
   };
 }
 
+// Null when the query fails: a lookup that could not run is not "no project".
 async function loadLinkedProjectsByServiceId(serviceIds) {
   const ids = (serviceIds || []).filter(Boolean);
   if (!ids.length) return new Map();
@@ -5102,7 +5103,7 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
     return map;
   } catch (e) {
     logger.warn(`[schedule] Linked project lookup failed: ${e.message}`);
-    return new Map();
+    return null;
   }
 }
 
@@ -5112,6 +5113,7 @@ async function loadProjectCompletionContextByServiceId(services) {
   // sheet (owner 2026-10-01, no per-tech flag).
   const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
+  const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5223,7 +5225,10 @@ async function loadProjectCompletionContextByServiceId(services) {
           })
           .filter(Boolean)
         : null,
-      linkedProject: linkedProjectsByServiceId.get(service.id) || null,
+      linkedProject: linkedProjectsByServiceId?.get(service.id) || null,
+      // An OUTAGE is not "no linked project": a visit with a project must not
+      // look project-free and complete on its own record.
+      linkedProjectLookupFailed,
     }];
   }));
   return new Map(entries);
@@ -6343,6 +6348,7 @@ router.get('/', async (req, res, next) => {
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
+        linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
@@ -6943,6 +6949,7 @@ router.get('/week', async (req, res, next) => {
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,
+          linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
           technicianId: s.technician_id,
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,

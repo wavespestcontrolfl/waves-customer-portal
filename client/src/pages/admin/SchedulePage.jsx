@@ -16831,10 +16831,15 @@ export function CompletionPanel({
         body: JSON.stringify({ note }),
       }).catch(() => null)
       : null;
-    if (heard?.status !== "read") {
-      // A read that answered nothing usable leaves no group unclear: the asks
-      // always reflect the latest Generate (the typed fill's rule, #5632).
-      // Words beside values still standing stay.
+    // A read that failed (the request, or the model behind it) answered
+    // nothing, so it clears nothing: the groups an earlier read left unclear
+    // stay asked. Specialty groups are not required at submission, so
+    // clearing them would let the report go out with the field empty and no
+    // warning (Codex P2 on #5635).
+    if (note && heard?.status !== "read") return;
+    if (!heard) {
+      // No notes to read leaves no group unclear: the asks were about words
+      // that are gone. Words beside values still standing stay.
       setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
       return;
     }
