@@ -170,6 +170,8 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
       expect(log.resolved_at).toBeUndefined();
       expect(log.miss_confirmed_by).toBe('dispatch');
       expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ confirmed: true }));
+      // the outreach task it may raise is linked to this row, so "Not a miss" can withdraw it
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledWith('c1', 'manual_no_show', expect.anything(), { logId: 'log-new' });
     });
 
     test.each([

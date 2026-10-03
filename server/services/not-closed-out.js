@@ -55,6 +55,16 @@ function isSameNoShowOccurrence(visit, { date = null, window = null } = {}) {
   return true;
 }
 
+// Did a move change the appointment's slot (date or window)? A technician-only
+// move at the same date and window is not a rebooking: the flagged appointment
+// stands, so its row and card stay. Times compare as HH:MM.
+const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+function slotChanged(before = {}, after = {}) {
+  return dateOnly(before.date) !== dateOnly(after.date)
+    || hhmm(before.start) !== hhmm(after.start)
+    || hhmm(before.end) !== hhmm(after.end);
+}
+
 // Run `fn(t)` in its own transaction, or — inside a caller's — in a savepoint,
 // so an error here never poisons the caller's transaction.
 function isolated(trx, fn) {
@@ -430,6 +440,7 @@ module.exports = {
   RESOLUTIONS,
   RESOLUTION_BY_STATUS,
   isSameNoShowOccurrence,
+  slotChanged,
   raiseCard,
   resolveForService,
   resolveForServices,

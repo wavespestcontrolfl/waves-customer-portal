@@ -40,23 +40,25 @@ class MissedAppointment {
     // in one transaction that holds the visit's row lock and rechecks the occurrence
     // (logSkip). The nightly check stays lock-free on the caller's connection.
     if (reason === 'manual_no_show' && conn === db) {
-      const customerId = await db.transaction((t) => this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true }));
-      return customerId ? this.evaluateThreshold(customerId, reason, db) : null;
+      const logged = await db.transaction((t) => this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true }));
+      return logged ? this.evaluateThreshold(logged.customerId, reason, db, { logId: logged.logId }) : null;
     }
-    const customerId = await this.logSkip(scheduledServiceId, reason, conn, { occurrence, scanned });
-    if (customerId === STALE_CANDIDATE) return { action: 'stale_candidate' };
-    if (!customerId) return null;
+    const logged = await this.logSkip(scheduledServiceId, reason, conn, { occurrence, scanned });
+    if (logged === STALE_CANDIDATE) return { action: 'stale_candidate' };
+    if (!logged) return null;
+    const { customerId, logId } = logged;
     // With the office queue on, the nightly check's row is only "still open at
     // 6 PM", not a miss: the repeated-miss outreach waits for a person to confirm
     // it (not-closed-out.js confirmMiss evaluates then).
     if (reason !== 'manual_no_show' && require('../not-closed-out').queueEnabled()) {
       return { action: 'awaiting_confirmation' };
     }
-    return this.evaluateThreshold(customerId, reason, conn);
+    return this.evaluateThreshold(customerId, reason, conn, { logId });
   }
 
-  // Write the flagged row (and raise its card). Returns the customer id, null when
-  // the visit or its customer is gone, or STALE_CANDIDATE (nothing written).
+  // Write the flagged row (and raise its card). Returns { customerId, logId }, null
+  // when the visit or its customer is gone, or STALE_CANDIDATE (nothing written).
+  // The row's id goes on the outreach task it may raise (withdrawOutreachFor).
   async logSkip(scheduledServiceId, reason, conn, { occurrence = null, lockVisit = false, scanned = null } = {}) {
     const currentQuery = conn('scheduled_services').where({ id: scheduledServiceId });
     if (lockVisit) currentQuery.forUpdate();
@@ -114,7 +116,7 @@ class MissedAppointment {
       });
     }
 
-    return customerId;
+    return { customerId, logId };
   }
 
   /**

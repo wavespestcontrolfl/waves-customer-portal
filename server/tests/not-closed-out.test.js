@@ -358,3 +358,21 @@ describe('reconcileOpenRows (nightly repair pass)', () => {
     expect(mockCreateAlertOnce).not.toHaveBeenCalled();
   });
 });
+
+describe('slotChanged: only a real change of date or window is a rebooking', () => {
+  const slot = { date: '2026-09-29', start: '09:00:00', end: '10:00:00' };
+  test('a technician-only move at the same date and window is not', () => {
+    expect(notClosedOut.slotChanged(slot, { ...slot })).toBe(false);
+    expect(notClosedOut.slotChanged(slot, { date: new Date('2026-09-29T04:00:00Z'), start: '09:00', end: '10:00' })).toBe(false);
+  });
+  test('a new date, or a new window the same day, is', () => {
+    expect(notClosedOut.slotChanged(slot, { ...slot, date: '2026-10-06' })).toBe(true);
+    expect(notClosedOut.slotChanged(slot, { ...slot, start: '14:00:00', end: '15:00:00' })).toBe(true);
+  });
+  test('the rebooker settles on that test, single move and series', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rebooker.js'), 'utf8');
+    expect(src).toMatch(/if \(notClosedOut\.slotChanged\(\s*\{ date: originalDate[\s\S]{0,260}\)\) \{\s*await notClosedOut\.resolveForService\(/);
+    expect(src).toContain('moveRows.filter((r) => notClosedOut.slotChanged(slotOf(r.before), slotOf(r.after))).map((r) => r.id)');
+  });
+});
+
