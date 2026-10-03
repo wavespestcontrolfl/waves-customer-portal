@@ -67,7 +67,8 @@ const DEFAULT_BUDGET_MS = 60 * 60 * 1000;
 const DEFAULT_MIN_GAP_MS = 2500;
 const MIN_GAP_FLOOR_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 60000;
-const MAX_LINKS_PER_PERMIT = 4;
+const EMPTY_SEARCH_RE = /your search returned no results/i;
+const MAX_LINKS_PER_PERMIT = 12; // revisions can sort ahead of the base record; every hop is throttled and budgeted
 const STOP_AFTER = 5;
 // Retry windows for permits whose last attempt did not produce facts.
 const RETRY_DAYS = { error: 1, not_found: 14, no_fields: 30 };
@@ -250,7 +251,9 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
     if (!pageNamesPermit(html, permitNo)) return null;
     if (isRecordPage) sawRecord = true;
     const facts = parseDetailFacts(html);
-    return facts.conditioned_sqft !== null ? facts : null;
+    // Any of the five facts makes a read (the columns and the read helper
+    // take partial facts); only a page with none is no_fields.
+    return Object.values(facts).some((v) => v !== null) ? facts : null;
   };
 
   // A single hit redirects straight to the record page (no results list).
@@ -263,7 +266,15 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
     const facts = judge(page, true);
     if (facts) return { status: 'ok', facts };
   }
-  return { status: sawRecord ? 'no_fields' : 'not_found', facts: null };
+  if (sawRecord) return { status: 'no_fields', facts: null };
+  // not_found only on the county's own empty-search notice (live 10-03:
+  // "Your search returned no results."). Any other link-less response — a
+  // validation or login page from a changed form — is a transport error,
+  // never 14 days of not_found.
+  if (!links.length && !EMPTY_SEARCH_RE.test(results || '')) {
+    throw new TransientAcaError('permit search returned an unrecognized page');
+  }
+  return { status: 'not_found', facts: null };
 }
 
 // ── Candidates + write ──

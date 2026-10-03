@@ -214,7 +214,8 @@ function fakeAca(permits, { clock, tickMs = 0 } = {}) {
       const params = new URLSearchParams(opts.body);
       const pn = params.get('ctl00$PlaceHolderMain$generalSearchForm$txtGSPermitNumber');
       const sc = permits[pn];
-      if (!sc || sc.empty) return response('<html>No records matched.</html>');
+      if (!sc || sc.empty) return response('<html>Notice: Your search returned no results. Please modify your search criteria and try again.</html>');
+      if (sc.invalid) return response('<html>Please sign in to continue.</html>');
       if (sc.fail) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
       if (sc.direct) return response(sc.direct);
       if (sc.redirectTo) {
@@ -257,6 +258,37 @@ describe('search form validation', () => {
     expect(out).toMatchObject({ errors: 5, notFound: 0, stopped: 'outage' });
     expect(global.fetch.mock.calls.some(([, o]) => o.method === 'POST')).toBe(false);
     expect(calls).toBeDefined();
+  });
+});
+
+describe('round-2 classification', () => {
+  test('a link-less search reply without the county\'s empty notice is an error, not not_found', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0971')]);
+    fakeAca({ 'BLD9801-0971': { invalid: true } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ errors: 1, notFound: 0 });
+  });
+
+  test('a page with partial facts (no conditioned sq ft) is an ok read', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const b = stubDb([cand('BLD9801-0972')]);
+    fakeAca({ 'BLD9801-0972': { pages: [recordPage('BLD9801-0972', row('Number of Stories:', '2') + row('Number of Bedrooms:', '4'))] } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ ok: 1, noFields: 0 });
+    expect(b.update.mock.calls[0][0]).toMatchObject({ conditioned_sqft: null, stories: 2, bedrooms: 4 });
+  });
+
+  test('five revision records ahead of the base record: the base record is still reached', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0973')]);
+    const pn = 'BLD9801-0973';
+    fakeAca({ [pn]: { pages: [...Array.from({ length: 5 }, () => noFieldsPage(pn)), okPage(pn)] } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ ok: 1 });
   });
 });
 
