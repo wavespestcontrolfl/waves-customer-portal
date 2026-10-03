@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Technician allow-list (owner 2026-10-02): equipment is READ-ONLY for a
-// technician login, except calibration entry and verification (owner
-// 2026-10-03). Every other write control is hidden for a technician (the
+// technician login, calibration included (owner 2026-10-03: calibration is not
+// set up yet, skipped for now). Every write control is hidden for a technician (the
 // routes 403 at the staff default-deny flip) and still shown to an admin.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -121,10 +121,17 @@ describe('equipment maintenance', () => {
 });
 
 describe('equipment calibrations', () => {
-  // Owner 2026-10-03: calibration entry and verification stay open to a
-  // technician (both routes are on the technician allow-list).
-  it.each(['technician', 'admin'])('keeps the new-calibration form for a %s', async (role) => {
-    mountPage('tab=calibrations', role);
+  // Owner 2026-10-03: calibration is not set up yet, so recording and
+  // verifying stay admin-only for now; a technician only reads.
+  it('hides the new-calibration form from a technician', async () => {
+    mountPage('tab=calibrations', 'technician');
+    await screen.findByText('Equipment Calibration');
+    expect(screen.queryByText('New calibration test')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Save Calibration/ })).toBeNull();
+  });
+
+  it('keeps the new-calibration form for an admin', async () => {
+    mountPage('tab=calibrations', 'admin');
     await screen.findByText('Equipment Calibration');
     expect(screen.getByText('New calibration test')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Save Calibration/ })).toBeInTheDocument();

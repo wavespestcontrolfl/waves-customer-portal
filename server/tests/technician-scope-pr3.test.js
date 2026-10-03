@@ -2,8 +2,6 @@
 //  - GET  /communications/sender            (composer's server-chosen line)
 //  - GET  /discounts/stacking               (discount-picker feature flag)
 //  - POST /inventory/waveguard-forecast/:id/restock-request  (job-card "Order more")
-//  - POST /equipment-systems/:id/calibrations                (record a calibration)
-//  - POST /equipment-systems/calibrations/:id/verify         (field-verify one)
 // Exact paths and methods only: neighbours stay denied.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -19,8 +17,6 @@ describe('technician reach added for the field client (PR 3)', () => {
     ['GET', '/api/admin/discounts/stacking'],
     ['HEAD', '/api/admin/discounts/stacking'],
     ['POST', `/api/admin/inventory/waveguard-forecast/${ID}/restock-request`],
-    ['POST', `/api/admin/equipment-systems/${ID}/calibrations`],
-    ['POST', `/api/admin/equipment-systems/calibrations/${ID}/verify`],
   ])('%s %s is reachable', (method, path) => {
     expect(technicianMayReach(method, path)).toBe(true);
   });
@@ -47,7 +43,9 @@ describe('technician reach added for the field client (PR 3)', () => {
     ['POST', `/api/admin/inventory/unit-review/${ID}/fix`],
     ['POST', '/api/admin/inventory'],
     ['PUT', `/api/admin/inventory/${ID}`],
-    // calibrations: create + verify only.
+    // calibrations: admin-only for now (owner 2026-10-03, not set up yet).
+    ['POST', `/api/admin/equipment-systems/${ID}/calibrations`],
+    ['POST', `/api/admin/equipment-systems/calibrations/${ID}/verify`],
     ['PUT', `/api/admin/equipment-systems/calibrations/${ID}`],
     ['PUT', `/api/admin/equipment-systems/${ID}/assets`],
     ['PATCH', `/api/admin/equipment-systems/${ID}/calibrations`],

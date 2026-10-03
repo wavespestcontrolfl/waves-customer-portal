@@ -151,12 +151,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // stock. Receiving, marking ordered, cancelling and stock adjustments stay
   // admin-only.
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/inventory\/waveguard-forecast\/[^/]+\/restock-request$/ },
-  // Sprayer calibration entry and field verification: per equipment system,
-  // attributed to the authenticated technician (technician_id is never taken
-  // from the body). Amending or deactivating a calibration (PUT) and linking
-  // assets stay admin-only.
-  { bucket: 'equipment-calibration', methods: ['POST'], pattern: /^\/api\/admin\/equipment-systems\/[^/]+\/calibrations$/ },
-  { bucket: 'equipment-calibration', methods: ['POST'], pattern: /^\/api\/admin\/equipment-systems\/calibrations\/[^/]+\/verify$/ },
+  // Sprayer calibration stays admin-only for now (owner 2026-10-03: not set
+  // up yet; revisit when it is).
 ];
 
 function normalizePath(req) {

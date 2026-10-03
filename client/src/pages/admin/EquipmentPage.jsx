@@ -227,7 +227,7 @@ export default function EquipmentPage() {
       {tab === "analytics" && isAdminRole && <EquipmentMaintenancePage key="analytics" embedded initialTab="analytics" />}
       {tab === "tank-mixes" && <TankMixTab showToast={showToast} canEdit={isAdminRole} />}
       {tab === "job-costs" && isAdminRole && <JobCostTab />}
-      {tab === "calibrations" && <EquipmentCalibrationPanel />}
+      {tab === "calibrations" && <EquipmentCalibrationPanel readOnly={!isAdminRole} />}
       {toast && <Card role="status" className="pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
