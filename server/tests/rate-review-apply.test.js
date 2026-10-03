@@ -898,6 +898,20 @@ describe('applyDueRateChanges — per_application', () => {
     expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.has('term-1')).toBe(false);
   });
 
+  test('renewal guard evidence: a prepaid letter between its provider handoff and its delivery stamp already counts as told; a claim with no handoff, or one returned to draft, does not', async () => {
+    const inFlight = (over = {}) => ({
+      customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', status: 'sending', sent_at: null, applied_at: null,
+      email_sent: false, sms_sent: false, noticed_new_cents: 48400, new_amount_cents: 48400, effective_date: '2027-05-15',
+      metadata: { term_id: 'term-1', coverage_visits: 4, pending_letter: { key: 'k', handoff_at: '2027-03-01T15:00:00.000Z' } }, ...over,
+    });
+    const read = async (notice) => { mockDb.reset({ price_change_notices: [notice], sms_log: [], rate_review_sms_failures: [] }); return apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1)); };
+    expect((await read(inFlight())).deliveredCents.get('term-1')).toMatchObject({ cents: 48400, day: '2027-05-15' });
+    expect((await read(inFlight({ metadata: { term_id: 'term-1', coverage_visits: 4, pending_letter: { key: 'k' } } }))).deliveredCents.has('term-1')).toBe(false);
+    expect((await read(inFlight({ status: 'draft' }))).deliveredCents.has('term-1')).toBe(false);
+    // handed off with less than the 30-day lead the apply requires: guards nothing, as for a delivered notice
+    expect((await read(inFlight({ effective_date: '2027-03-20' }))).deliveredCents.has('term-1')).toBe(false);
+  });
+
   test('a text-only notice whose sid Twilio reports undelivered is held delivery_revoked, never applied (the status callback\'s sms_log bookkeeping is the durable evidence)', async () => {
     const book = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
     book.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'undelivered' }];
