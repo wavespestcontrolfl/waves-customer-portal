@@ -571,8 +571,9 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   // A 1 the English wrote as a DIGIT is never the one let go. Counts alone cannot tell the two apart, so the
   // allowance is off whenever the English has a literal bare 1 - except the day of a named date ("Oct 1"),
   // which the read-back's own date check keeps (calendarTokens compares month and day together).
+  // Strict mode (our reply) only: a customer's text is compared as written, with no allowance.
   const raw = strictTimes ? protectedTokens(englishReply, { strictTimes }).digits : [];
-  const wordedOnes = diffCounts(en.digits, raw).filter((d) => d === '1').length;
+  const wordedOnes = strictTimes ? diffCounts(en.digits, raw).filter((d) => d === '1').length : 0;
   const literalOnes = raw.filter((d) => d === '1').length;
   const datedOnes = calendarTokens(String(englishReply || '')).filter((t) => /^md:\d+\/1$/.test(t)).length;
   let spareOnes = literalOnes > datedOnes ? 0 : wordedOnes;

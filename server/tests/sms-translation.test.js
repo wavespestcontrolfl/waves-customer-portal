@@ -116,6 +116,9 @@ describe('tokenParity', () => {
     expect(tokenParity('I see one payment.', 'Veo 2 pagos.')).toMatchObject({ ok: false, added: ['2'] });
     expect(tokenParity('I see two payments.', 'Veo dos pagos.')).toMatchObject({ ok: false, missing: ['2'] });
     expect(tokenParity('You have 1 visit left.', 'Le queda una visita.')).toMatchObject({ ok: false, missing: ['1'] });
+    // a customer's text (loose mode) gets no allowance at all: an invented or dropped count holds
+    expect(tokenParity('I have 1 appointment', 'Tengo citas', { strictTimes: false })).toMatchObject({ ok: false, missing: ['1'] });
+    expect(tokenParity('I have one appointment', 'Tengo 1 cita', { strictTimes: false })).toMatchObject({ ok: false, added: ['1'] });
     // a literal 1 beside a worded one: counts cannot say which was dropped, so the allowance is off
     expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda una visita y 1 pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
     expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda 1 visita y un pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
