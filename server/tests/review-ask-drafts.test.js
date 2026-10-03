@@ -1,10 +1,10 @@
 'use strict';
 
-const mockEvidence = jest.fn(async () => null);
+const mockEvidence = jest.fn(async () => new Map());
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/review-request', () => ({ reviewAskDeliveryEvidence: (...a) => mockEvidence(...a) }));
+jest.mock('../services/review-request', () => ({ reviewAskDeliveryEvidenceFor: (...a) => mockEvidence(...a) }));
 
 const Drafts = require('../services/review-ask-drafts');
 const logger = require('../services/logger');
@@ -21,7 +21,7 @@ function insertDb() {
 }
 
 beforeEach(() => {
-  mockEvidence.mockReset().mockResolvedValue(null);
+  mockEvidence.mockReset().mockResolvedValue(new Map());
   logger.warn.mockClear();
 });
 
@@ -206,10 +206,21 @@ describe('listRecent: whether THIS outcome went out', () => {
   });
 
   test('a text the provider accepted whose stamp write failed is sent by the sender\'s own delivery evidence', async () => {
-    mockEvidence.mockResolvedValueOnce({ id: 'sms-1', created_at: new Date('2026-10-02T15:04:00Z') });
-    const out = await listWith([draftRow({ id: 10, outcome: 'drafted', body: 'Hi there' })], [request({ id: 'rr-9', customer_id: 'cust-9', custom_body: 'Hi there' })]);
-    expect(out.drafts[0].sentAt).toEqual(new Date('2026-10-02T15:04:00Z'));
-    expect(mockEvidence).toHaveBeenCalledWith('rr-9', 'cust-9');
+    mockEvidence.mockResolvedValueOnce(new Map([['rr-9', { id: 'sms-1', created_at: new Date('2026-10-02T15:04:00Z') }]]));
+    const out = await listWith([
+      draftRow({ id: 10, outcome: 'drafted', body: 'Hi there' }),
+      draftRow({ id: 13, outcome: 'drafted', body: 'Other', sequence_id: 'seq-2' }),
+      draftRow({ id: 14, outcome: 'drafted', body: 'Stamped', sequence_id: 'seq-3' }),
+    ], [
+      request({ id: 'rr-9', customer_id: 'cust-9', custom_body: 'Hi there' }),
+      request({ id: 'rr-8', customer_id: 'cust-8', custom_body: 'Other', sequence_id: 'seq-2' }),
+      request({ id: 'rr-7', custom_body: 'Stamped', sequence_id: 'seq-3', sms_sent_at: new Date('2026-10-02T15:09:00Z') }),
+    ]);
+    expect(out.drafts.find((d) => d.id === 10).sentAt).toEqual(new Date('2026-10-02T15:04:00Z'));
+    expect(out.drafts.find((d) => d.id === 13).sentAt).toBeNull();
+    // #5682 r8: ONE evidence read for every unstamped text on the page; a stamped one is not asked about
+    expect(mockEvidence).toHaveBeenCalledTimes(1);
+    expect(mockEvidence.mock.calls[0][0].map((r) => r.id).sort()).toEqual(['rr-8', 'rr-9']);
     // a failed first attempt followed by a successful same-body retry (the draft is reused the same day) is sent
     const retried = await listWith([draftRow({ id: 12, outcome: 'drafted', body: 'Hi there' })], [
       request({ id: 'rr-a', custom_body: 'Hi there' }),

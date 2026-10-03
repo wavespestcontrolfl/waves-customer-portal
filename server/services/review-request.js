@@ -914,6 +914,35 @@ async function reviewAskDeliveryEvidence(requestId, customerId) {
   }
 }
 
+// The same evidence for many requests in ONE query (the review page lists up
+// to 200 outcomes): Map of request id -> its sms_log row. `requests` are
+// { id, customer_id }. An unreadable sms_log reads as no evidence, as above.
+async function reviewAskDeliveryEvidenceFor(requests) {
+  const wanted = new Map((requests || []).filter((r) => r?.id && r?.customer_id).map((r) => [String(r.id), r.customer_id]));
+  const found = new Map();
+  if (!wanted.size) return found;
+  try {
+    const rows = await db("sms_log")
+      .where({ direction: "outbound" })
+      .whereIn("customer_id", [...new Set(wanted.values())])
+      .whereIn("status", ["sent", "delivered"])
+      .whereRaw("metadata->>'review_request_id' = ANY(?)", [[...wanted.keys()]])
+      .orderBy("created_at", "asc")
+      .select("id", "customer_id", "created_at", "metadata");
+    for (const row of rows) {
+      let meta = row.metadata;
+      try { meta = typeof meta === "string" ? JSON.parse(meta) : meta || {}; } catch { continue; }
+      const requestId = String(meta?.review_request_id);
+      // The reservation marker, the request id and its customer all have to match.
+      if (meta?.review_ask_reservation !== true || wanted.get(requestId) !== row.customer_id || found.has(requestId)) continue;
+      found.set(requestId, row);
+    }
+  } catch (err) {
+    logger.warn(`[review] delivered-ask evidence batch lookup failed (requests=${wanted.size}): ${err.message}`);
+  }
+  return found;
+}
+
 // promoteReviewSmsReservation (turn an accepted-but-unstamped reservation
 // into durable delivery evidence) now lives in messaging/review-ask-
 // reservation.js as `promote` — imported above. releaseReviewSmsReservation
@@ -8069,6 +8098,6 @@ ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 // The review page reads the same delivered-ask evidence the sender trusts.
-ReviewService.reviewAskDeliveryEvidence = reviewAskDeliveryEvidence;
+ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;
 
 module.exports = ReviewService;

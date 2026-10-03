@@ -137,15 +137,14 @@ function requestsFor(row, requests, rows) {
 
 // When one of those requests reached the customer: its own send stamp, else
 // the sender's durable delivery evidence (review-request.js
-// reviewAskDeliveryEvidence: the provider accepted the text but the stamp
-// write failed). The first one that did, or null.
-async function sentAtOf(candidates) {
+// reviewAskDeliveryEvidenceFor: the provider accepted the text but the stamp
+// write failed), read once for the whole page. The first one that did, or null.
+function sentAtOf(candidates, evidence) {
   for (const request of candidates) {
     const stamped = request.sms_sent_at || request.sent_at;
     if (stamped) return stamped;
-    if (request.channel !== 'sms') continue;
-    const evidence = await require('./review-request').reviewAskDeliveryEvidence(request.id, request.customer_id);
-    if (evidence) return evidence.created_at;
+    const proof = evidence.get(String(request.id));
+    if (proof) return proof.created_at;
   }
   return null;
 }
@@ -182,6 +181,13 @@ async function listRecent({ days = 14, database = db } = {}) {
     .orderBy('s.updated_at', 'desc')
     .limit(MAX_ROWS + 1)
     .select('s.id', 's.customer_id', 's.current_step', 's.plan', 's.decision', 's.updated_at', 'c.first_name', 'c.last_name');
+  // One evidence read for every unstamped text on the page, not one per row.
+  const candidates = new Map(rows.map((r) => [r, requestsFor(r, requests, rows)]));
+  const unstamped = [...new Set([...candidates.values()].flat())]
+    .filter((q) => q.channel === 'sms' && !(q.sms_sent_at || q.sent_at));
+  const evidenceBy = unstamped.length
+    ? await require('./review-request').reviewAskDeliveryEvidenceFor(unstamped)
+    : new Map();
   const drafts = [];
   for (const r of rows) {
     const evidence = parseJson(r.evidence) || {};
@@ -206,7 +212,7 @@ async function listRecent({ days = 14, database = db } = {}) {
       serviceType: r.service_type,
       serviceDate: r.service_date ? dateOnly(r.service_date) : null,
       createdAt: r.created_at,
-      sentAt: await sentAtOf(requestsFor(r, requests, rows)),
+      sentAt: sentAtOf(candidates.get(r), evidenceBy),
       replacedByFixedText: replaced,
     });
   }

@@ -7812,6 +7812,28 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mock.__state.rows.review_ask_drafts).toEqual([expect.objectContaining({ sequence_id: 'seq-hold', sequence_step: 1, outcome: 'held', reason: 'payment_hold_dropped' })]);
   });
 
+  test('#5682 r8: delivery evidence for many requests is one sms_log read, matched by marker, request and customer', async () => {
+    const at = new Date('2026-10-02T15:04:00Z');
+    const log = (over) => ({ customer_id: 'c-1', direction: 'outbound', status: 'sent', created_at: at, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, ...over });
+    const mock = makeMock({ sms_log: [
+      log({ id: 'sms-1' }),
+      log({ id: 'sms-2', metadata: JSON.stringify({ review_request_id: 'rr-2' }) }), // no reservation marker
+      log({ id: 'sms-3', customer_id: 'c-other', metadata: { review_ask_reservation: true, review_request_id: 'rr-3' } }), // another customer's row
+    ] });
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); return mock(table); });
+    const found = await ReviewService.reviewAskDeliveryEvidenceFor([
+      { id: 'rr-1', customer_id: 'c-1' }, { id: 'rr-2', customer_id: 'c-1' }, { id: 'rr-3', customer_id: 'c-3' }, { id: null, customer_id: 'c-1' },
+    ]);
+    expect([...found.keys()]).toEqual(['rr-1']);
+    expect(found.get('rr-1')).toMatchObject({ id: 'sms-1', created_at: at });
+    expect(tables).toEqual(['sms_log']);
+    // nothing to look up: no read at all
+    tables.length = 0;
+    expect((await ReviewService.reviewAskDeliveryEvidenceFor([])).size).toBe(0);
+    expect(tables).toEqual([]);
+  });
+
   test('#5682 r6: the drop is listed only when the step actually advanced, and a history write that fails never blocks the advance', async () => {
     mockGates.reviewAskTechVoice = true;
     mockPaymentHold.mockResolvedValue({ reason: 'overdue_invoice', invoiceId: 'inv-9' });
