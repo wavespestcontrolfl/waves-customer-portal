@@ -42,6 +42,7 @@ const sharp = require('sharp');
 const DEFAULT_BUDGET_BYTES = 150 * 1024;
 const DEFAULT_MAX_IMAGES = 4;
 const DATA_URL_PREFIX = 'data:image/jpeg;base64,';
+const MAX_INPUT_PIXELS = 25_000_000;
 
 // Ordered best-quality-first; each rung gives up edge and quality together.
 // 1600/q80 down to 800/q58 is what report photos landed on in the 2026-10-02
@@ -69,7 +70,9 @@ const totalLength = (items) => items.reduce((sum, it) => sum + dataUrlLength(it.
 // ladder has six edges and two qualities each, so resizing once per edge and
 // only re-running the JPEG encode per quality keeps a four-photo walk fast.
 async function rasterAt(buffer, maxEdge) {
-  const { data, info } = await sharp(buffer, { failOn: 'none' })
+  // 25 MP decode cap (the visit-prep upload normalizer's limit): a small file
+  // declaring huge dimensions is refused instead of decoded.
+  const { data, info } = await sharp(buffer, { failOn: 'none', limitInputPixels: MAX_INPUT_PIXELS })
     .rotate() // apply EXIF orientation, then the tag is gone with the rest
     .flatten({ background: '#ffffff' }) // JPEG has no alpha
     .resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true })
@@ -142,4 +145,4 @@ async function fitImagesForClef(buffers, { budgetBytes = DEFAULT_BUDGET_BYTES, m
   return { ok: false, reason: 'over_budget', images: [], budgetBytes: budget, bestBytes: bestLength };
 }
 
-module.exports = { fitImagesForClef, clefBodyOverhead, LADDER, DEFAULT_BUDGET_BYTES, DEFAULT_MAX_IMAGES };
+module.exports = { fitImagesForClef, clefBodyOverhead, MAX_INPUT_PIXELS, LADDER, DEFAULT_BUDGET_BYTES, DEFAULT_MAX_IMAGES };

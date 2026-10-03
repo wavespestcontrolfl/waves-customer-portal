@@ -140,6 +140,11 @@ describe('fitImagesForClef', () => {
     expect(accented - plain).toBe(1000);
   });
 
+  test('a photo declaring more than 25 MP is refused, not decoded', async () => {
+    const huge = await sharp({ create: { width: 6000, height: 5000, channels: 3, background: '#808080' } }).jpeg({ quality: 10 }).toBuffer();
+    expect(await fitImagesForClef([huge])).toMatchObject({ ok: false, reason: 'undecodable_image' });
+  });
+
   test('the budget is for the whole batch: four large images share it', async () => {
     const bigs = await Promise.all([1, 2, 3, 4].map(() => jpegOf(900, 700).toBuffer()));
     const budgetBytes = 300 * 1024;

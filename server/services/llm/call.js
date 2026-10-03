@@ -55,7 +55,15 @@ const WORKERS_AI_ACCOUNTS_API = 'https://api.cloudflare.com/client/v4/accounts';
 // number, minus clefBodyOverhead(state, questions).
 const CLEF_MAX_IMAGES = 4;
 const CLEF_IMAGES_BUDGET_BYTES = 150 * 1024;
-const CLEF_DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})$/i;
+// Clef takes embedded JPEG, PNG or WebP only (Cloudflare's Clef schema); the
+// decoded bytes must carry that format's signature, so a GIF, SVG, HEIC or
+// arbitrary bytes behind an image MIME are refused before the network.
+const CLEF_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
+const CLEF_IMAGE_SIGNATURES = {
+  jpeg: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  png: (b) => b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  webp: (b) => b.length > 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP',
+};
 // A Workers AI decision model is one the catalog registers as Cloudflare's
 // with the 'decision' cap (config/models.js is the one place ids live).
 function workersAiDecisionModel(model) {
@@ -508,10 +516,11 @@ function clefImagesPlan(images) {
   let bad = !Array.isArray(images);
   for (const image of list) {
     const match = typeof image === 'string' ? CLEF_DATA_URL_RE.exec(image) : null;
-    const decoded = match && match[1].length % 4 === 0 ? Buffer.from(match[1], 'base64') : null;
+    const decoded = match && match[2].length % 4 === 0 ? Buffer.from(match[2], 'base64') : null;
     // Buffer.from silently truncates malformed base64 ("A", "AA="): only a
-    // payload that round-trips byte-for-byte is the image we hash and send.
-    if (!decoded || !decoded.length || decoded.toString('base64') !== match[1]) { bad = true; break; }
+    // payload that round-trips byte-for-byte is the image we hash and send,
+    // and only when its bytes are the format its MIME names.
+    if (!decoded || decoded.toString('base64') !== match[2] || !CLEF_IMAGE_SIGNATURES[match[1]](decoded)) { bad = true; break; }
     hashes.push(crypto.createHash('sha256').update(decoded).digest('hex'));
   }
   return { present: true, bad, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };

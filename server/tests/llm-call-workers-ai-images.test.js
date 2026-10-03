@@ -18,7 +18,9 @@ const STATE = { note: 'synthetic state' };
 const ENVELOPE = { result: { model: 'clef-flash', answers: { clear: { type: 'noul', noul: 0.9 } }, usage: { input_tokens: 1200, output_tokens: 0 } }, success: true, errors: [] };
 const okResponse = () => ({ ok: true, status: 200, json: async () => ENVELOPE });
 
-const rawBytes = (n, fill) => Buffer.alloc(n, fill);
+// Synthetic bytes behind a real JPEG signature (FF D8 FF): the adapter checks
+// the format's magic bytes, not the full image.
+const rawBytes = (n, fill) => { const b = Buffer.alloc(n, fill); b[0] = 0xff; b[1] = 0xd8; b[2] = 0xff; return b; };
 const urlOf = (bytes) => `data:image/jpeg;base64,${bytes.toString('base64')}`;
 const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -97,7 +99,7 @@ describe('callWorkersAIDecision images', () => {
     // The limit is the SERIALIZED body: images + state + questions.
     const prefix = 'data:image/jpeg;base64,';
     const overhead = JSON.stringify({ images: [prefix], state: STATE, questions: QUESTIONS }).length;
-    const fits = `${prefix}${'A'.repeat(Math.floor((CLEF_IMAGES_BUDGET_BYTES - overhead) / 4) * 4)}`;
+    const fits = urlOf(rawBytes(Math.floor((CLEF_IMAGES_BUDGET_BYTES - overhead) / 4) * 3, 0));
     expect(JSON.stringify({ images: [fits], state: STATE, questions: QUESTIONS }).length).toBeLessThanOrEqual(CLEF_IMAGES_BUDGET_BYTES);
     expect((await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: [fits] })).ok).toBe(true);
     expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -127,6 +129,23 @@ describe('callWorkersAIDecision images', () => {
       expect(await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images })).toEqual({ ok: false, reason: 'cloudflare_bad_images' });
     }
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('only JPEG, PNG or WebP whose bytes match the MIME are sent; GIF, SVG and fake bytes are refused', async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(30, 1)]);
+    const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4, 0), Buffer.from('WEBP'), Buffer.alloc(30, 1)]);
+    const b64 = (b) => b.toString('base64');
+    for (const images of [
+      [`data:image/gif;base64,${b64(Buffer.from('GIF89a0000000000'))}`],
+      [`data:image/svg+xml;base64,${b64(Buffer.from('<svg xmlns="x"></svg>'))}`],
+      ['data:image/jpeg;base64,AAAA'], // canonical base64 of zero bytes, not a JPEG
+      [`data:image/jpeg;base64,${b64(png)}`], // PNG bytes behind a JPEG MIME
+      [`data:image/JPEG;base64,${b64(rawBytes(30, 1))}`],
+    ]) {
+      expect(await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images })).toEqual({ ok: false, reason: 'cloudflare_bad_images' });
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect((await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: [`data:image/png;base64,${b64(png)}`, `data:image/webp;base64,${b64(webp)}`] })).ok).toBe(true);
   });
 
   test('dispatch threads images to the Clef route; the TypeSafe route refuses them', async () => {
