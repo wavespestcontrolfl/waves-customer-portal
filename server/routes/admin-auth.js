@@ -29,6 +29,7 @@ const { seedNewHireCapabilities } = require('../services/technician-capabilities
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const staffMfa = require('../services/staff-mfa');
 const { noStore } = require('../middleware/no-store');
+const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
 const { adminMfaLive } = require('../config/feature-gates');
 
 const RESET_TOKEN_BYTES = 32;
@@ -258,8 +259,6 @@ function mfaFailureResponse(res, result, invalidStatus = 401) {
 async function loginMfa(req, res, next) {
   try {
     const { challengeToken, code } = req.body || {};
-    // Dark: the same generic 404 as the pre-limiter gate in server/index.js.
-    if (!adminMfaLive()) return res.status(404).json({ error: 'Not found' });
     const restart = () => res.status(401).json({ error: 'Your sign-in expired. Enter your email and password again.', code: 'MFA_CHALLENGE_INVALID' });
     if (typeof challengeToken !== 'string' || typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
@@ -292,7 +291,9 @@ async function loginMfa(req, res, next) {
   } catch (err) { return next(err); }
 }
 
-router.post('/login/mfa', noStore, loginMfa);
+// Dark = the generic unknown-route 404 (server/middleware/staff-mfa-guard.js,
+// also mounted ahead of every limiter in server/index.js).
+router.post('/login/mfa', ...loginMfaPreParserGuard, loginMfa);
 
 // The self-service two-step routes exist only while GATE_ADMIN_MFA is on.
 function requireMfaGate(req, res, next) {

@@ -32,6 +32,7 @@ const { adminAuthenticate, verifyStaffBearer } = require('../middleware/admin-au
 const {
   changePassword, login, loginMfa, mfaConfirm, mfaDisable, mfaRegenerateRecoveryCodes, mfaSetup, resetPassword,
 } = require('../routes/admin-auth')._handlers;
+const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
 
 const SECRET = 'test-secret';
 const ENV = ['GATE_ADMIN_MFA', 'GATE_ADMIN_MFA_ENFORCE', 'GATE_STAFF_DEFAULT_DENY'];
@@ -211,12 +212,23 @@ describe('POST /login/mfa', () => {
     expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
   });
 
-  test('gate turned off between the steps: a generic 404, no lookup', async () => {
+  test('dark: the pre-router guard answers the generic 404 with no-store headers; live it passes through', async () => {
+    const [noStoreMw, darkGate] = loginMfaPreParserGuard;
+    const res = response();
+    res.set = jest.fn();
+    const next = jest.fn();
+    noStoreMw({}, res, next);
+    expect(res.set).toHaveBeenCalledWith(expect.objectContaining({ 'Cache-Control': expect.stringContaining('no-store') }));
+
     delete process.env.GATE_ADMIN_MFA;
-    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: '123456' } });
+    next.mockClear();
+    darkGate({ method: 'POST', originalUrl: '/api/admin/auth/login/mfa' }, res, next);
     expect(res.statusCode).toBe(404);
-    expect(res.body).toEqual({ error: 'Not found' });
-    expect(db).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+
+    process.env.GATE_ADMIN_MFA = 'true';
+    darkGate({ method: 'POST', originalUrl: '/api/admin/auth/login/mfa' }, response(), next);
+    expect(next).toHaveBeenCalled();
   });
 
   test('a password change between the steps (fenced inside the code check) restarts sign-in', async () => {

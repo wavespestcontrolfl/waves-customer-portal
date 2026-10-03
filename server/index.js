@@ -278,6 +278,12 @@ app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'
 // other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
 app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
 
+// Staff two-step code step (GATE_ADMIN_MFA, dark): no-store/noindex headers
+// and the generic unknown-route 404 while the gate is off, mounted in the same
+// position — above cors(), the global `/api/` limiter, the login limiter and
+// the body parsers. The route re-runs it.
+app.use('/api/admin/auth/login/mfa', ...require('./middleware/staff-mfa-guard').loginMfaPreParserGuard);
+
 // Signed satellite image proxy (lead-form lookup, service report, portal
 // station map): serves Google imagery WITHOUT the server Maps key ever
 // reaching a customer. Mounted ABOVE the global cors() (which would otherwise
@@ -500,11 +506,6 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
-// Two-step code step (GATE_ADMIN_MFA): while dark it answers a generic 404
-// BEFORE the login limiter, so a probe never sees a revealing 401 or 429.
-app.use('/api/admin/auth/login/mfa', (req, res, next) => (
-  require('./config/feature-gates').adminMfaLive() ? next() : res.status(404).json({ error: 'Not found' })
-));
 app.use('/api/admin/auth/login', authLimiter);
 
 // Public, unauthenticated surfaces that hit paid third-party APIs get tight
