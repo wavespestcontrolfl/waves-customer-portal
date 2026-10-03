@@ -1669,7 +1669,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         .then((d) => {
           if (!cancelled) {
             setAgentDraft(d?.draft || null);
-            setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
+            // (a translation card's Use Reply anchor has no decisionId: it stays with the draft and is re-checked at send)
+            setSelectedAgentDraft((current) => current?.translationTrialId || current?.decisionId === d?.draft?.decisionId ? current : null);
             // only for the customer it was read for (a phone-only lookup carries none)
             const translation = d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null;
             setTranslationAssist(translation && !translation.pending ? translation : null);
@@ -1681,7 +1682,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         .catch(() => {
           if (!cancelled) {
             setAgentDraft(null);
-            setSelectedAgentDraft(null);
+            setSelectedAgentDraft((current) => current?.translationTrialId ? current : null);
             setTranslationAssist(null);
           }
         })
@@ -1708,6 +1709,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const t = setTimeout(expire, Math.min(Math.max(new Date(translationAssist.replyExpiresAt).getTime() - Date.now(), 0), 2 ** 31 - 1));
     return () => clearTimeout(t);
   }, [translationAssist]);
+
+  // An emptied message box is no longer the suggested reply: what staff type next is their own.
+  useEffect(() => {
+    if (selectedAgentDraft?.translationTrialId && !msgBody.trim()) setSelectedAgentDraft(null);
+  }, [msgBody, selectedAgentDraft, setSelectedAgentDraft]);
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
@@ -2018,7 +2024,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             scheduledFor,
             linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
-            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+            agentDraft: selectedAgentDraft?.decisionId ? selectedAgentDraft.suggestedMessage || undefined : undefined,
+            // Use Reply on the translation card: the server re-checks the reply is still current
+            translationTrialId: selectedAgentDraft?.translationTrialId || undefined,
           }),
         });
         setSendResult({
@@ -2060,7 +2068,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 ? attachments.map(({ previewUrl, ...a }) => a)
                 : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
-            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+            agentDraft: selectedAgentDraft?.decisionId ? selectedAgentDraft.suggestedMessage || undefined : undefined,
+            // Use Reply on the translation card: the server re-checks the reply is still current
+            translationTrialId: selectedAgentDraft?.translationTrialId || undefined,
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
@@ -3438,8 +3448,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   variant="secondary"
                   onClick={() => {
                     setMsgBody(translationAssist.replyTranslated);
-                    // a translated reply is not the Agent Review draft: it is sent as an ordinary staff message
-                    setSelectedAgentDraft(null);
+                    // A translated reply is not the Agent Review draft: it is sent as an ordinary staff message.
+                    // The trial it came from rides with the saved draft so the server can refuse it once stale.
+                    setSelectedAgentDraft({ translationTrialId: translationAssist.trialId });
                   }}
                 >
                   Use Reply

@@ -728,9 +728,28 @@ it("shows the translation of a text in another language and sends the suggested 
   expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue(translation.replyTranslated);
   fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
   const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
-  expect(JSON.parse(request[1].body)).toMatchObject({ body: translation.replyTranslated, messageType: "manual" });
+  // the trial rides along so the server can refuse a reply that went stale after the card was read
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: translation.replyTranslated, messageType: "manual", translationTrialId: 7 });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDraft");
   expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
   expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
+});
+
+it("an emptied message box drops the suggested reply's anchor: the next text is the staff member's own", async () => {
+  const owner = "translation-cleared-owner";
+  const translation = { trialId: 12, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day?", replyEnglish: "Tuesday.", replyTranslated: "El martes.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" }, customerMessages: [{ channel: "sms", contactPhone: "+19415550100", ourEndpointId: line }] }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Use Reply" }));
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  fireEvent.change(field, { target: { value: "" } }); await tick(10);
+  fireEvent.change(field, { target: { value: "We will call you." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "We will call you." });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("translationTrialId");
 });
 
 it("drops the suggested reply when its time is up and keeps the translation", async () => {

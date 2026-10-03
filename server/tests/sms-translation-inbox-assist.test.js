@@ -3,9 +3,11 @@
 let mockGateOn = true;
 const mockLast = jest.fn();
 const mockTrial = jest.fn();
+const mockLater = jest.fn();
 
 jest.mock('../models/db', () => jest.fn((table) => {
-  const q = { where: () => q, whereRaw: () => q, orderBy: () => q, limit: () => q, first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
+  // sms_log is read twice: the latest inbound (.first) and the outbound rows after it (.select)
+  const q = { where: () => q, whereRaw: () => q, whereIn: () => q, whereNot: () => q, whereNotIn: () => q, whereNull: () => q, orWhereNull: () => q, modify: () => q, orderBy: () => q, limit: () => q, select: () => mockLater(), first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
   return q;
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -14,19 +16,21 @@ jest.mock('../config/feature-gates', () => {
   return { ...actual, gateEnvValue: (name) => (name === 'GATE_SMS_ANY_LANGUAGE_INBOX' ? mockGateOn : actual.gateEnvValue(name)) };
 });
 
-const { inboxAssistFor } = require('../services/sms-translation');
+const { inboxAssistFor, translationReplyStillCurrent } = require('../services/sms-translation');
 
 const NOW = new Date('2026-10-03T15:00:00Z');
 const READY = {
   id: 7, sms_log_id: 's1', customer_id: 'c1', language: 'Spanish', inbound_original: '¿A qué hora vienen el martes?',
   inbound_english: 'What time are you coming on Tuesday?', reply_english: 'Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.',
   reply_translated: 'Su visita es el martes 6 de oct, 13:00 - 15:00.', verdict: 'ready', hold_reason: null, created_at: new Date('2026-10-03T14:00:00Z'),
+  checks: { intended_actions: [{ type: 'none' }] },
 };
 
 beforeEach(() => {
   mockGateOn = true;
-  mockLast.mockReset(); mockTrial.mockReset();
-  mockLast.mockResolvedValue({ id: 's1', direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:00:00Z') });
+  mockLast.mockReset(); mockTrial.mockReset(); mockLater.mockReset();
+  mockLater.mockResolvedValue([]);
+  mockLast.mockResolvedValue({ id: 's1', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:00:00Z') });
   mockTrial.mockResolvedValue(READY);
 });
 
@@ -43,10 +47,38 @@ describe('inboxAssistFor', () => {
     });
   });
 
-  test('somebody already answered (the last message is ours): nothing', async () => {
-    mockLast.mockResolvedValue({ id: 'o9', direction: 'outbound', created_at: new Date() });
+  test('answered = an accepted human reply to that number after the text; a reminder or a failed send is not', async () => {
+    mockLater.mockResolvedValue([{ message_type: 'manual', status: 'delivered', to_phone: '+19415550100' }]);
     expect(await inboxAssistFor('c1', NOW)).toBeNull();
     expect(mockTrial).not.toHaveBeenCalled();
+    // a failed manual send, and a manual text to another number, leave the question open
+    mockLater.mockResolvedValue([{ message_type: 'manual', status: 'failed', to_phone: '+19415550100' }, { message_type: 'manual', status: 'sent', to_phone: '+19415550177' }]);
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated });
+  });
+
+  test('a reply the drafter paired with an action (pay link, booking, hand-off) is withheld; so is a row with no action record', async () => {
+    const words = 'The reply promises a follow-up (a link, a booking or a hand-off), so it needs a person.';
+    mockTrial.mockResolvedValue({ ...READY, checks: JSON.stringify({ intended_actions: [{ type: 'send_payment_link' }] }) });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, heldReason: words });
+    mockTrial.mockResolvedValue({ ...READY, checks: null });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: words });
+    mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [] } });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated, heldReason: null });
+  });
+
+  test('send boundary: the suggested reply is sendable only while its card would still offer it', async () => {
+    jest.useFakeTimers().setSystemTime(NOW);
+    try {
+      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(true);
+      expect(await translationReplyStillCurrent({ trialId: 6, customerId: 'c1', to: '+19415550100' })).toBe(false); // another text's trial
+      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550177' })).toBe(false); // another number
+      expect(await translationReplyStillCurrent({ trialId: 7, customerId: null, to: '+19415550100' })).toBe(false);
+      mockLater.mockResolvedValue([{ message_type: 'manual', status: 'sent', to_phone: '+19415550100' }]);
+      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(false); // already answered
+      mockLater.mockResolvedValue([]);
+      mockTrial.mockResolvedValue({ ...READY, created_at: new Date('2026-10-02T13:00:00Z') });
+      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(false); // expired
+    } finally { jest.useRealTimers(); }
   });
 
   test('no trial row for the latest text (an English writer), or a skipped one: nothing', async () => {

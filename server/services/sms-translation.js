@@ -805,7 +805,11 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
     facts_block: draft?.factsBlock || null,
     ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
   });
-  const checks = { inbound_parity: inboundParity, ...(openLoopThanks ? { open_loop_thanks: true } : {}), converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
+  // the action types the drafter attached (a pay link, a booking, a hand-off): the inbox never offers a reply
+  // whose words promise work nothing here performs
+  const intendedActions = Array.isArray(draft?.parsed?.intended_actions)
+    ? draft.parsed.intended_actions.map((a) => ({ type: (typeof a === 'string' ? a : a?.type) || null })) : null;
+  const checks = { inbound_parity: inboundParity, ...(openLoopThanks ? { open_loop_thanks: true } : {}), intended_actions: intendedActions, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
   if (!draft?.parsed) return { stop: 'draft_unparseable', fields, checks };
   // an open loop is never answered with silence: the live drafter routes an empty draft to a person
   if (!englishReply) return openLoopThanks ? { stop: 'open_loop_thanks_to_person', fields, checks } : { skip: 'no_reply_needed', fields, checks };
@@ -959,6 +963,17 @@ const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 
+/**
+ * Send boundary for a Use Reply text: the suggested reply is sendable only while the card that offered it would
+ * still offer it (same trial, still the customer's latest text, unanswered, not expired, same number). Fails
+ * closed: any doubt reads as stale.
+ */
+async function translationReplyStillCurrent({ trialId, customerId, to, now = new Date() }) {
+  if (!trialId || !customerId) return false;
+  const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null);
+  return Boolean(assist && !assist.pending && assist.replyTranslated && String(assist.trialId) === String(trialId));
+}
+
 function quotesLiveEta(replyEnglish, factsBlock) {
   const drafter = require('./sms-shadow-drafter');
   const text = require('./sms-track-links').stripTrackLinks(replyEnglish || '');
@@ -967,8 +982,8 @@ function quotesLiveEta(replyEnglish, factsBlock) {
 }
 
 /**
- * Inbox assist for one customer: the trial row of their LATEST text, when that text is still the last message
- * in the thread (nobody has answered and they have not written again). null when the gate is off, there is no
+ * Inbox assist for one customer: the trial row of their LATEST text, while nobody has answered it (the shared
+ * response policy's rule) and they have not written again. null when the gate is off, there is no
  * such row, or the read fails. The translated reply is offered only for a 'ready' row under 24 hours old (it may
  * quote a visit time); the English of the customer's text is shown only when its translation passed its checks.
  * A reply quoting minutes-away is never offered. With phoneLast10, only when the text came from that number.
@@ -979,12 +994,26 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     if (!customerId || !inboxAssistEnabled()) return null;
     const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
     // (a placeholder for a send still in flight is not a message: left out, as every general reader of sms_log does)
-    const last = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId }))
-      .orderBy('created_at', 'desc').limit(1).first('id', 'direction', 'created_at', 'from_phone');
-    if (!last || last.direction !== 'inbound') return null;
+    const policy = require('./sms-response-policy');
+    const last10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
+    // their latest text (an applicant's hiring reply on a shared phone is another thread)
+    const last = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'inbound' }))
+      .modify((qb) => require('../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb, 'message_type'))
+      .orderBy('created_at', 'desc').limit(1).first('id', 'created_at', 'from_phone');
+    if (!last) return null;
     // the composer may be pointed at another number than the one this customer wrote from (a shared or edited
     // To number): the reply is offered only into the thread the text came in on
-    if (phoneLast10 && String(last.from_phone || '').replace(/\D/g, '').slice(-10) !== phoneLast10) return null;
+    if (phoneLast10 && last10(last.from_phone) !== phoneLast10) return null;
+    // Answered = the shared response policy's rule, as the inbox's own unanswered state: an accepted human
+    // reply to that number after the text. A reminder, receipt, review ask or failed send is not an answer.
+    // (An approved-draft send after the text counts without resolving which text it answered: that hides the
+    // card, never shows it.)
+    const later = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
+      .where('created_at', '>', last.created_at).whereIn('message_type', policy.HUMAN_REPLY_TYPES)
+      .select('message_type', 'status', 'to_phone');
+    const answered = (later || []).some((o) => last10(o.to_phone) === last10(last.from_phone)
+      && policy.outboundIsAnswer({ direction: 'outbound', messageType: o.message_type, status: o.status, replyToMessageId: last.id }));
+    if (answered) return null;
     const row = await db(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
     // The trial runs after the webhook answers and takes several model calls: for a text that just arrived, no
     // row yet means "not finished", and the composer asks again. (An English text never gets a row, so this
@@ -1000,10 +1029,16 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     // Same two detectors as the trial's own live-ETA hold: a worded claim anywhere, and, when the facts the
     // reply was drafted from carried a LIVE ETA line, any bare minutes figure ("20 minutes.").
     const quotesEta = fresh && quotesLiveEta(row.reply_english, row.facts_block);
-    const ready = fresh && !quotesEta;
+    // Nor a reply the drafter paired with an action (pay link, booking, hand-off): nothing performs it from here.
+    // A row stored before the action types were recorded reads as unknown, which is withheld too.
+    const storedChecks = typeof row.checks === 'string' ? (() => { try { return JSON.parse(row.checks); } catch { return {}; } })() : (row.checks || {});
+    const needsAction = fresh && !require('./sms-auto-send').autoSendActionsSafe(storedChecks.intended_actions);
+    const ready = fresh && !quotesEta && !needsAction;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
-    const staleWords = quotesEta ? 'The reply quotes a live arrival time, so it needs a person.' : 'The suggested reply is more than a day old.';
+    const staleWords = quotesEta ? 'The reply quotes a live arrival time, so it needs a person.'
+      : needsAction ? 'The reply promises a follow-up (a link, a booking or a hand-off), so it needs a person.'
+        : 'The suggested reply is more than a day old.';
     return {
       trialId: row.id,
       smsLogId: row.sms_log_id,
@@ -1027,7 +1062,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
 
 module.exports = {
   runTranslationTrial,
-  inboxAssistFor,
+  inboxAssistFor, translationReplyStillCurrent,
   inboxAssistEnabled,
   needsTranslation,
   trialEnabled,

@@ -514,6 +514,8 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
+      // Use Reply on the translation card (GATE_SMS_ANY_LANGUAGE_INBOX): the trial the body came from.
+      translationTrialId,
       // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
@@ -661,6 +663,13 @@ router.post('/sms', async (req, res, next) => {
       reservationFromNumber = resolvedFromNumber;
       providerCoordinationCustomerId = trustedCustomerId;
     };
+
+    // A reply taken from the translation card is re-checked here, as an Agent Review draft is below: the
+    // customer may have written again, someone may have answered, or the reply may have expired since the
+    // card was read. Refused rather than sent stale or twice.
+    if (translationTrialId && !(await require('../services/sms-translation').translationReplyStillCurrent({ trialId: translationTrialId, customerId: trustedCustomerId, to }))) {
+      return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
+    }
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
@@ -3959,7 +3968,10 @@ router.post('/schedule-sms', async (req, res, next) => {
     // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
     // lookup or insert, with the staff default-deny gate on or off.
     if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId, translationTrialId } = req.body || {};
+    // A reply taken from the translation card answers the customer's latest text as of now; nothing re-checks
+    // it when a queued send fires, so it is sent now or not at all.
+    if (translationTrialId) return res.status(409).json({ error: 'A suggested reply in the customer\'s language can only be sent now, not scheduled.' });
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
