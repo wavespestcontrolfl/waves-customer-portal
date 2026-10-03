@@ -17,6 +17,11 @@ const MAX_TOTAL_BYTES = DEFINITION.maxTotalBytes;
 const MINIMUM_SLOTS = Object.freeze(DEFINITION.minimumSlots.map((slot) => Object.freeze([...slot])));
 const BY_KEY = new Map(SHOTS.map((shot) => [shot.key, shot]));
 
+// Written beside each photo in lawn_assessments.photos when a visit was captured
+// under the shot list, and read by the eval replay: the stored zones alone cannot
+// say which vocabulary a capture used. Absent (never false) when the gate was off.
+const PHOTO_VOCABULARY = 'shot_list_v1';
+
 const keyOf = (zone) => String(zone == null ? '' : zone).trim().toLowerCase();
 const shotFor = (zone) => BY_KEY.get(keyOf(zone)) || null;
 
@@ -115,7 +120,11 @@ function photoSizeError(byteSizes = []) {
   return `These photos total ${mib(total)}; one visit can carry ${mib(MAX_TOTAL_BYTES)}. Photo ${largest + 1} is the largest (${mib(byteSizes[largest])}); retake it smaller or remove it.`;
 }
 
-// Whether a replayed capture used the shot-list zone vocabulary. Zones are the
+// Fallback ONLY for rows captured before the PHOTO_VOCABULARY marker existed:
+// whether their stored zones show the shot-list vocabulary. A pre-marker
+// shot-list capture holding only front/back/side/close_up/trouble has no
+// distinctive tag and replays as legacy, a known and bounded limit (the gate has
+// never been on in production, so no such rows exist there). Zones are then the
 // only record of the capture mode: shade, hot_edge and blade_crown exist only
 // there. back/side alone are ambiguous (retired 2026-09-24, same words) and a
 // set larger than the old 6-photo cap with none of these zones is
@@ -135,7 +144,7 @@ function missingMinimumSlots(zones = []) {
 }
 
 module.exports = {
-  SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
+  PHOTO_VOCABULARY, SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
   PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
   normalizeShotZone, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
 };

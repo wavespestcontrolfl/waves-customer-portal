@@ -889,6 +889,10 @@ router.post('/assess', async (req, res, next) => {
     const photoMeta = photos.map((p, i) => ({
       filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
       uploadedAt: new Date().toISOString(),
+      // Capture mode, stored at capture time (no schema change): the zones on the
+      // photo rows cannot say which vocabulary they were captured under. Absent,
+      // not false, with the gate off, so those rows are unchanged.
+      ...(shotListEnabled ? { photoVocabulary: shotList.PHOTO_VOCABULARY } : {}),
     }));
 
     // Save the assessment. Gate on: the raw output and provenance live on the

@@ -560,6 +560,44 @@ describe('runner', () => {
     }));
   });
 
+  test('the stored capture mode decides: a shot-list capture of only front/back/close_up keeps back (no distinctive tag needed)', async () => {
+    const meta = JSON.stringify([{ filename: 'a', photoVocabulary: 'shot_list_v1' }, { filename: 'b', photoVocabulary: 'shot_list_v1' }, { filename: 'c', photoVocabulary: 'shot_list_v1' }]);
+    const captured = evalLib.fixtureCase(row({ id: 'marked', photos: meta }), [
+      { id: 'm1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'm2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+      { id: 'm3', s3_key: 'k3', photo_order: 2, zone: 'close_up' },
+    ], {});
+    expect(captured.photoVocabulary).toBe('shot_list_v1');
+    const calls = [];
+    await evalLib.runEval([captured], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(calls[0].shotList).toBe(true);
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
+  });
+
+  test('a case without the marker (gate off, or a pre-marker row) falls back to the zones: back/side replay legacy, shade still replays as shot list', async () => {
+    const unmarked = evalLib.fixtureCase(row({ id: 'plain', photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }]) }), [
+      { id: 'u1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'u2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+    ], {});
+    expect(Object.keys(unmarked)).not.toContain('photoVocabulary');
+    const preMarkerShade = evalLib.fixtureCase(row({ id: 'shade' }), [
+      { id: 's1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 's2', s3_key: 'k2', photo_order: 1, zone: 'shade' },
+    ], {});
+    const calls = [];
+    await evalLib.runEval([unmarked, preMarkerShade], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    }, { concurrency: 1 });
+    expect(Object.keys(calls[0])).not.toContain('shotList');
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', null]);
+    expect(calls[1].shotList).toBe(true);
+    expect(calls[1].photos.map((p) => p.zone)).toEqual(['front', 'shade']);
+  });
+
   test('an older capture replays exactly as before: no shotList key, three-slot vocabulary', async () => {
     const old = evalLib.fixtureCase(row({ id: 'old' }), [
       { id: 'o1', s3_key: 'k1', photo_order: 0, zone: 'front' },
