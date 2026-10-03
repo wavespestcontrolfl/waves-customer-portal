@@ -259,6 +259,9 @@ describe('computeEditSummary', () => {
     expect(same('123 Main St, Bradenton 34205', '123 Main St, Bradenton, FL 34205, USA')).toBeUndefined();
     expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton 34205-1234')).toBeUndefined();
     expect(same('123 Main St, Bradenton, FL 34205-1234', '123 Main St, Bradenton, FL 34205-9999')).toBe(true);
+    // A unit written after the ZIP is not a ZIP+4.
+    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205 #1234')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL 34205 #1234', '123 Main St, Bradenton, FL 34205 #5678')).toBe(true);
     // A lone four-digit ending is a unit, not a ZIP+4.
     expect(same('123 Main St, Bradenton', '123 Main St, Bradenton #1234')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();
@@ -280,49 +283,20 @@ describe('computeEditSummary', () => {
     expect(summary.serviceInterestChanged).toBe(true);
   });
 
-  test('the setup fee the engine draft already owed is not a price change', () => {
+  test('totals are compared as stored; the setup fee a builder row carries is recorded beside them', () => {
     const builderData = (oneTime) => ({ engineRequest: { selectedServices: ['PEST'] }, result: { oneTime } });
-    // An engine draft whose pest line owes the fee but whose stored total leaves it out.
-    const owing = (fee) => baselineRow({
-      baseline_estimate_data: {
-        engineInputs: { services: { pest: {} } },
-        engineResult: { lineItems: [{ service: 'pest_control', initialFee: fee }] },
-      },
-    });
-    const feeOnly = computeEditSummary({
-      baseline: owing(99),
+    const summary = computeEditSummary({
+      baseline: baselineRow(),
       sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
     });
-    expect(feeOnly.totalsChanged).toBeUndefined();
-    expect(feeOnly.setupFeeExcluded).toBe(99);
-    // A one-time line added on top of the fee is still a change, net of the fee.
-    const withLine = computeEditSummary({
-      baseline: owing(99),
-      sentRow: sentRow({ onetime_total: '298.00', estimate_data: builderData({ membershipFee: 99, total: 298 }) }),
-    });
-    expect(withLine.totalsChanged.onetime_total).toEqual({ from: 0, to: 199 });
-    // A one-time discount that takes the stored total under the fee is a decrease.
-    const discounted = computeEditSummary({
-      baseline: owing(99),
-      sentRow: sentRow({ onetime_total: '49.00', estimate_data: builderData({ membershipFee: 99, total: 49 }) }),
-    });
-    expect(discounted.totalsChanged.onetime_total).toEqual({ from: 0, to: -50 });
-    expect(discounted.setupFeeExcluded).toBe(99);
-    // A fee the baseline did NOT owe (a bundle edited down to one service)
-    // is a real price change.
-    for (const baseline of [owing(0), baselineRow()]) {
-      const introduced = computeEditSummary({
-        baseline,
-        sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
-      });
-      expect(introduced.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
-      expect(introduced.setupFeeExcluded).toBeUndefined();
-    }
-    // An engine-shaped sent row carries no builder fee: compared as stored.
-    const engineShape = computeEditSummary({ baseline: owing(99), sentRow: sentRow({ onetime_total: '99.00' }) });
+    // Never netted out: whether the draft already owed the fee is not decided here.
+    expect(summary.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
+    expect(summary.sentSetupFee).toBe(99);
+    // An engine-shaped sent row carries no builder fee.
+    const engineShape = computeEditSummary({ baseline: baselineRow(), sentRow: sentRow({ onetime_total: '99.00' }) });
     expect(engineShape.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
-    expect(engineShape.setupFeeExcluded).toBeUndefined();
-    // Both sides builder-saved with the fee: nothing is subtracted.
+    expect(engineShape.sentSetupFee).toBeUndefined();
+    // Both sides builder-saved with the fee: nothing to note.
     const both = computeEditSummary({
       baseline: baselineRow({
         baseline_estimate_data: builderData({ membershipFee: 99, total: 99 }),
@@ -331,7 +305,7 @@ describe('computeEditSummary', () => {
       sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
     });
     expect(both.totalsChanged).toBeUndefined();
-    expect(both.setupFeeExcluded).toBeUndefined();
+    expect(both.sentSetupFee).toBeUndefined();
   });
 });
 

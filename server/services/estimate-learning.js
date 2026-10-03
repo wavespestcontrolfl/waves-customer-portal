@@ -147,7 +147,14 @@ const STREET_WORDS = Object.freeze({
 const COUNTRY_TAIL = [['usa'], ['us'], ['united', 'states'], ['united', 'states', 'of', 'america']];
 
 function addressTokens(value) {
-  const tokens = norm(value).replace(/[^a-z0-9 ]/g, ' ').split(' ').filter(Boolean).map((t) => STREET_WORDS[t] || t);
+  // A ZIP+4 is recognized by its hyphen, while the punctuation is still
+  // there, and kept as one token: "34205 #1234" is a ZIP and a unit.
+  const tokens = norm(value)
+    .replace(/\b(\d{5})-(\d{4})\b/g, '$1plus$2')
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .map((t) => STREET_WORDS[t] || t);
   // The country says nothing about which property it is.
   for (const tail of COUNTRY_TAIL) {
     if (tokens.length > tail.length && tail.every((t, i) => tokens[tokens.length - tail.length + i] === t)) {
@@ -157,21 +164,19 @@ function addressTokens(value) {
   return tokens;
 }
 
-// Split off the ending "[state] [ZIP[+4]]" (in that order; a +4 only
-// straight after a 5-digit ZIP, so a lone "#1234" stays in the core as the
-// unit it is). The core keeps a house number, a street word and one more
-// word at least; with less than that nothing is split off.
+// Split off the ending "[state] [ZIP or ZIP+4]", in that order. A bare
+// four-digit ending is never a +4 (it is a unit). The core keeps a house
+// number, a street word and one more word at least; with less than that
+// nothing is split off.
 function splitAddress(tokens) {
   const core = tokens.slice();
   const out = { core: tokens, state: '', zip: '', plus4: '' };
-  let plus4 = '';
-  let zip = '';
   let state = '';
-  if (core.length >= 2 && /^\d{4}$/.test(core[core.length - 1]) && /^\d{5}$/.test(core[core.length - 2])) plus4 = core.pop();
-  if (/^\d{5}$/.test(core[core.length - 1] || '')) zip = core.pop();
+  const zipMatch = /^(\d{5})(?:plus(\d{4}))?$/.exec(core[core.length - 1] || '');
+  if (zipMatch) core.pop();
   if (core[core.length - 1] === 'fl') state = core.pop();
-  if (core.length < 3 || !(zip || state)) return out;
-  return { core, state, zip, plus4 };
+  if (core.length < 3 || !(zipMatch || state)) return out;
+  return { core, state, zip: zipMatch ? zipMatch[1] : '', plus4: (zipMatch && zipMatch[2]) || '' };
 }
 
 function sameProperty(a, b) {
@@ -182,32 +187,18 @@ function sameProperty(a, b) {
   return ['state', 'zip', 'plus4'].every((k) => !x[k] || !y[k] || x[k] === y[k]);
 }
 
-// The WaveGuard setup fee stored two ways is not an edit. The builder's
-// save folds it into the stored one-time total (result.oneTime.membershipFee,
-// which the mapper takes from the pest line's initialFee); the engine
-// draft's stored one-time total leaves the same fee out (60-day read
-// 2026-10-03: 34 of 36 one-time changes were exactly this fee). So when the
-// baseline is an engine draft whose own pest line already owed the fee, a
-// builder-saved row is compared net of it (setupFeeExcluded records the
-// amount). A fee the baseline did NOT owe (a bundle edited down to a
-// single-service plan) is a real price change and stays in the diff.
-const isBuilderShape = (data) => Array.isArray(data?.engineRequest?.selectedServices);
-const positive = (value) => {
-  const num = parseFloat(value);
-  return Number.isFinite(num) && num > 0 ? money(num) : 0;
-};
-
+// The builder's save folds the WaveGuard setup fee into the stored one-time
+// total (result.oneTime.membershipFee); the engine draft's stored total
+// leaves it out (60-day read 2026-10-03: 34 of 36 one-time changes were
+// exactly this fee). Whether a given draft already owed that fee depends on
+// its recurring service mix and waivers, which this diff does not decide.
+// So the totals are compared exactly as stored, and the fee the sent row
+// carries is recorded beside them (sentSetupFee) for the reader to weigh.
 function builderSetupFee(data) {
-  if (!isBuilderShape(data)) return 0;
+  if (!Array.isArray(data?.engineRequest?.selectedServices)) return 0;
   const root = data.result && typeof data.result === 'object' ? data.result : data;
-  return positive(root?.oneTime?.membershipFee);
-}
-
-function engineOwedSetupFee(data) {
-  if (isBuilderShape(data)) return 0;
-  const lines = data?.engineResult?.lineItems;
-  if (!Array.isArray(lines)) return 0;
-  return positive(lines.find((line) => line?.service === 'pest_control')?.initialFee);
+  const fee = parseFloat(root?.oneTime?.membershipFee);
+  return Number.isFinite(fee) && fee > 0 ? money(fee) : 0;
 }
 
 /**
@@ -229,20 +220,12 @@ function computeEditSummary({ baseline, sentRow }) {
   const totals = {};
   for (const key of ['monthly_total', 'annual_total', 'onetime_total']) {
     const from = money(fields[key]);
-    let to = money(sentRow[key]);
-    if (key === 'onetime_total') {
-      // Net of the fee only up to what the engine baseline already owed. A
-      // one-time discount can leave the stored total under the fee; the net
-      // is then negative, which is the discount showing as a decrease.
-      const fee = Math.min(builderSetupFee(sentData), engineOwedSetupFee(baselineData));
-      if (fee > 0) {
-        to = money(to - fee);
-        summary.setupFeeExcluded = fee;
-      }
-    }
+    const to = money(sentRow[key]);
     if (from !== to) totals[key] = { from, to };
   }
   if (Object.keys(totals).length) summary.totalsChanged = totals;
+  const sentSetupFee = builderSetupFee(sentData);
+  if (sentSetupFee && !builderSetupFee(baselineData)) summary.sentSetupFee = sentSetupFee;
 
   if (!sameProperty(fields.address, sentRow.address)) summary.addressChanged = true;
   if (
@@ -470,7 +453,6 @@ module.exports = {
     serviceKeysFrom,
     sameProperty,
     builderSetupFee,
-    engineOwedSetupFee,
     money,
     norm,
     // Test-only: the cutover is cached for the process lifetime.
