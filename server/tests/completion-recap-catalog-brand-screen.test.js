@@ -11,8 +11,11 @@ const CATALOG = [
   { name: 'Southern Ag Copper Fungicide 27.15%', active_ingredient: 'Copper' },
   { name: 'T-Zone SE', active_ingredient: 'Triclopyr; Sulfentrazone' },
   { name: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate' },
-  { name: 'Pesticide application sign 4x5 (yard sign card)', active_ingredient: null },
-  { name: 'Termite protection notice sticker 5.5x4', active_ingredient: null },
+  { name: 'Pesticide application sign 4x5 (yard sign card)', active_ingredient: null, category: 'supplies' },
+  { name: 'Yard sign sticker 4x5 "Serviced by Waves"', active_ingredient: null, category: 'supplies' },
+  { name: 'Atticus Talak 7.9 F', active_ingredient: 'Bifenthrin', aliases: ['Talstar P', 'Premium: Dispatch wetting agent', 'Organic acidifier', 'Headway ONLY if severe'] },
+  { name: 'Advance Termite Bait Station', active_ingredient: null },
+  { name: 'Termite protection notice sticker 5.5x4', active_ingredient: null, category: 'supplies' },
   { name: 'Permethrin SFR', active_ingredient: 'Permethrin' },
   { name: 'Prodiamine 65 WDG Pre-Emergent Herbicide', active_ingredient: 'Prodiamine' },
   { name: 'Non-ionic Surfactant', active_ingredient: null },
@@ -28,6 +31,13 @@ describe('catalog-wide brand screen', () => {
     'We applied Demand CS around the foundation.',
     'The weeds got a T-Zone application.',
     'We applied BoraCare to the sill plate.',
+    'We applied Talak around the foundation.',
+    'We applied Talstar around the foundation.',
+    'We applied Talstar P around the foundation.',
+    'We added Dispatch to the tank.',
+    'We added an Organic acidifier to the tank.',
+    'We installed Advance Termite Bait Station units along the slab.',
+    'We installed Advance bait stations along the slab.',
     'We set T-Rex traps in the attic.',
     'We set trex traps in the attic.',
     'We applied Arena 0.25G to the beds.',
@@ -45,6 +55,10 @@ describe('catalog-wide brand screen', () => {
     'We saw southern chinch bug damage along the driveway.',
     'A pesticide application sign was posted and termite protection was discussed.',
     'We added a non-ionic surfactant to the tank.',
+    'We added an organic acidifier to the tank, and the Premium plan covers it.',
+    'We made headway only on the front beds and will dispatch a technician if it returns.',
+    'We checked the termite bait stations in advance of the rainy season.',
+    'Advance notice: the Application was posted and Serviced by Waves today.',
     'A pre-emergent treatment is planned for spring.',
     'WHAT WE DID AND WHY\nWe treated the thresholds.',
     'WHAT WE FOUND\nGhost ants were trailing along the kitchen threshold.',
@@ -75,6 +89,16 @@ describe('catalog-wide brand screen', () => {
     };
     const screen = await buildReportTradeNameScreen({ wholeCatalog: true, db: reader(CATALOG) });
     expect(screen('We used Termidor along the thresholds.')).toBe(true);
+    // Registered aliases are read with the catalog and screened with it.
+    const withAliases = (table) => ({
+      select: async () => (table === 'product_aliases'
+        ? [{ product_id: 'p1', alias_name: 'Hydretain' }]
+        : [{ id: 'p1', name: 'Moisture Manager Humectant', active_ingredient: null }]),
+    });
+    withAliases.transaction = async (fn) => fn(withAliases);
+    const aliasScreen = await buildReportTradeNameScreen({ wholeCatalog: true, db: withAliases });
+    expect(aliasScreen('We watered in Hydretain across the front lawn.')).toBe(true);
+    expect(aliasScreen('We watered in the front lawn.')).toBe(false);
     const failing = () => ({ select: async () => { throw new Error('catalog read failed'); } });
     failing.transaction = async (fn) => fn(failing);
     await expect(buildReportTradeNameScreen({ wholeCatalog: true, db: failing })).rejects.toThrow();

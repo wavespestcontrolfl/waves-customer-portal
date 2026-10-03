@@ -394,8 +394,9 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 //   - the name, its leading two tokens, or a hyphenated single-letter
 //     designation anywhere in it ("T-Rex"), as a phrase ("Demand CS",
 //     "T-Zone") or as one collapsed word ("BoraCare"), any case; and
-//   - its leading token alone (the brand word: "Termidor", "Trapper") only
-//     where the text writes it capitalized in the middle of a sentence. A
+//   - its brand word alone (the first word, "Termidor", "Trapper", or the
+//     second when a maker's name comes first, "Talak" in "Atticus Talak")
+//     only where the text writes it capitalized in the middle of a sentence. A
 //     lowercase or sentence-opening use ("Suspend watering for 24 hours",
 //     "keep your distance") is ordinary wording and passes.
 // In an all-capitals line every word is capitalized, so a brand word inside
@@ -413,16 +414,15 @@ function buildCatalogBrandScreen(rows, genericTokens) {
   for (const row of rows) {
     tokensOf(row?.active_ingredient).filter((tok) => tok.length >= 4).forEach((tok) => generic.add(tok));
   }
-  // 'pesticide' joins its siblings (insecticide, herbicide, fungicide) here
-  // only: the catalog holds a "Pesticide application sign" row.
   const isPlain = (token) => generic.has(token) || GENERIC_NAME_TOKENS.has(token)
-    || COMMON_PRODUCT_NAME_WORDS.has(token) || token === 'pesticide' || /^\d+$/.test(token);
+    || COMMON_PRODUCT_NAME_WORDS.has(token) || /^\d+$/.test(token);
   // Punctuation-collapsed echoes are one word in the copy: "BoraCare" for
   // "Bora-Care", "TZone" for "T-Zone SE" (the visit screen's collapsedEcho
   // rule: four letters or more, or a digit).
   const collapsible = (word) => word.length >= 4 || /\d/.test(word);
   // A name made only of plain words ("Non-ionic Surfactant", where the pair
-  // collapses to the generic "nonionic") is ordinary copy, not a name.
+  // collapses to the generic "nonionic"; "Advance Termite Bait Station") is
+  // ordinary copy in lowercase and a name only as the catalog writes it.
   const whollyPlain = (tokens) => tokens.every((token, i) => isPlain(token)
     || (i + 1 < tokens.length && isPlain(`${token}${tokens[i + 1]}`))
     || (i > 0 && isPlain(`${tokens[i - 1]}${token}`)));
@@ -432,13 +432,57 @@ function buildCatalogBrandScreen(rows, genericTokens) {
   // product and is screened as one.
   const named = [];
   for (const row of rows) {
-    for (const label of new Set([row?.name, row?.display_name].filter(Boolean))) named.push({ name: row.name, label });
+    // Signs, stickers and stakes are not products.
+    if (String(row?.category || '').toLowerCase() === 'supplies') continue;
+    const labels = new Set([row?.name, row?.display_name].filter(Boolean));
+    for (const label of labels) named.push({ name: row.name, label });
+    // Registered aliases ("Talstar P" for Atticus Talak) name the product
+    // too. They are shorthand typed by staff or copied from a protocol
+    // ("Premium: Dispatch wetting agent", "Dismiss if sedge", "Organic
+    // acidifier"), so an alias is matched only as written, capitals and
+    // all, or by its brand word; a note before a colon is dropped.
+    for (const alias of new Set(Array.isArray(row?.aliases) ? row.aliases : [])) {
+      const label = String(alias || '').split(':').pop().trim();
+      if (label && !labels.has(label)) named.push({ name: row.name, label, alias: true });
+    }
   }
-  for (const { name, label } of named) {
+  const escapeRe = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const asWritten = (label) => {
+    const cased = String(label).match(/[A-Za-z0-9]+/g) || [];
+    return cased.length >= 2
+      ? new RegExp(`(?<![A-Za-z0-9])${cased.map(escapeRe).join('[\\s-]+')}(?![A-Za-z0-9])`)
+      : null;
+  };
+  for (const { name, label, alias } of named) {
     const tokens = tokensOf(label);
-    if (!tokens.length || whollyPlain(tokens)) continue;
-    const entry = { name, brand: null, phrases: [], collapsed: [] };
-    if (tokens[0].length >= 4 && !isPlain(tokens[0])) entry.brand = tokens[0];
+    if (!tokens.length) continue;
+    const entry = { name, brands: [], phrases: [], collapsed: [], exact: null, stem: null };
+    if (whollyPlain(tokens)) {
+      // The label as the catalog cases it ("Advance Termite Bait Station"),
+      // or its capitalized first word mid-sentence followed by another
+      // word of the name ("installed Advance bait stations"). Lowercase
+      // copy ("a non-ionic surfactant", "in advance of") passes.
+      entry.exact = asWritten(label);
+      if (entry.exact) {
+        entry.stem = {
+          lead: tokens[0],
+          followers: tokens.slice(1).filter((tok) => tok.length >= 3 && !/^\d+$/.test(tok)),
+        };
+        entries.push(entry);
+      }
+      continue;
+    }
+    // The brand word is the name's first word, or its second when a maker's
+    // name comes first ("Talak" in "Atticus Talak", "Polyzone" in "Suspend
+    // Polyzone").
+    for (const token of tokens.slice(0, 2)) {
+      if (token.length >= 4 && !isPlain(token)) entry.brands.push(token);
+    }
+    if (alias) {
+      entry.exact = asWritten(label);
+      if (entry.exact || entry.brands.length) entries.push(entry);
+      continue;
+    }
     if (tokens.length >= 2) {
       entry.phrases.push(` ${tokens.join(' ')} `);
       if (collapsible(tokens.join(''))) entry.collapsed.push(tokens.join(''));
@@ -468,6 +512,8 @@ function buildCatalogBrandScreen(rows, genericTokens) {
     const raw = String(text || '');
     const words = tokensOf(raw);
     const midSentenceCapitalized = new Set();
+    // "<capitalized mid-sentence word> <the word after it>", both lowercased.
+    const midSentencePairs = new Set();
     const wordRe = /[A-Za-z0-9]+/g;
     let match;
     while ((match = wordRe.exec(raw)) !== null) {
@@ -482,17 +528,38 @@ function buildCatalogBrandScreen(rows, genericTokens) {
       // Opens the line, a sentence, or a list item: reads as an ordinary word.
       if (!before || /[.!?:;]$/.test(before) || /^\d+$/.test(before)) continue;
       midSentenceCapitalized.add(match[0].toLowerCase());
+      const next = /^[^A-Za-z0-9\n]*([A-Za-z0-9]+)/.exec(raw.slice(match.index + match[0].length));
+      if (next) midSentencePairs.add(`${match[0].toLowerCase()} ${next[1].toLowerCase()}`);
     }
-    return { normHay: ` ${words.join(' ')} `, wordSet: new Set(words), midSentenceCapitalized };
+    return {
+      raw, normHay: ` ${words.join(' ')} `, wordSet: new Set(words), midSentenceCapitalized, midSentencePairs,
+    };
   };
   const names = (entry, read) => entry.phrases.some((phrase) => read.normHay.includes(phrase))
     || entry.collapsed.some((word) => read.wordSet.has(word))
-    || (entry.brand !== null && read.midSentenceCapitalized.has(entry.brand));
+    || entry.brands.some((brand) => read.midSentenceCapitalized.has(brand))
+    || (entry.exact !== null && entry.exact.test(read.raw))
+    || (entry.stem !== null && entry.stem.followers.some((tok) => read.midSentencePairs.has(`${entry.stem.lead} ${tok}`)
+      || read.midSentencePairs.has(`${entry.stem.lead} ${tok}s`)));
   return (text) => {
     if (!text) return false;
     const read = readText(text);
     return entries.some((entry) => names(entry, read));
   };
+}
+
+// Catalog rows for the catalog-wide screen, each carrying its registered
+// product_aliases names as row.aliases.
+function withCatalogAliases(catalogRows, aliasRows) {
+  const byProduct = new Map();
+  for (const alias of Array.isArray(aliasRows) ? aliasRows : []) {
+    if (!alias?.product_id || !alias?.alias_name) continue;
+    const key = String(alias.product_id);
+    if (!byProduct.has(key)) byProduct.set(key, []);
+    byProduct.get(key).push(alias.alias_name);
+  }
+  return (Array.isArray(catalogRows) ? catalogRows : [])
+    .map((row) => ({ ...row, aliases: byProduct.get(String(row?.id)) || [] }));
 }
 
 // Builds a screen(text) predicate for THIS visit's recorded products.
@@ -503,7 +570,7 @@ function buildCatalogBrandScreen(rows, genericTokens) {
 // too. Chunked by 10 so safeProducts' cap never leaves an entry
 // unscreened. Catalog lookup failure keeps the guard strict.
 // wholeCatalog adds the catalog-wide brand screen above; catalogRows lets a
-// caller that already read the catalog pass it in. A failed catalog read
+// caller that already read the catalog pass it in (withCatalogAliases rows). A failed catalog read
 // throws: the screen cannot run complete, so the caller fails closed.
 async function buildReportTradeNameScreen({
   products = [], extraNames = [], db = null, wholeCatalog = false, catalogRows = null,
@@ -553,7 +620,10 @@ async function buildReportTradeNameScreen({
     let rows = catalogRows;
     if (!Array.isArray(rows)) {
       if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
-      rows = await savepointRead(db, (k) => k('products_catalog').select('name', 'display_name', 'active_ingredient'));
+      rows = withCatalogAliases(
+        await savepointRead(db, (k) => k('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category')),
+        await savepointRead(db, (k) => k('product_aliases').select('product_id', 'alias_name')),
+      );
     }
     catalogScreen = buildCatalogBrandScreen(Array.isArray(rows) ? rows : [], genericTokens);
   }
@@ -585,4 +655,5 @@ module.exports = {
   sanitizeRecap,
   smsRecap,
   SMS_RECAP_MAX_CHARS,
+  withCatalogAliases,
 };

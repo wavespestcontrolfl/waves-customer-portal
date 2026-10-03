@@ -25883,9 +25883,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
     // Under the writer rules a cached draft is screened again below before it
-    // is served: the catalog-wide brand screen reads the catalog as it is
-    // now, and a product added since the draft was cached must not ride out
-    // on the cache.
+    // is served.
     if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
@@ -25911,8 +25909,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const readRows = await db('products_catalog').select('name', 'display_name', 'active_ingredient');
-        catalogRows = Array.isArray(readRows) ? readRows : [];
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category');
+        const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         for (const row of catalogRows) {
           const named = Boolean(row?.name)
             && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
@@ -25947,9 +25946,6 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
         retryable: true,
       });
-    }
-    if (cached && !screenTradeNames(cached)) {
-      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // Under the writer rules the copy may not name an active ingredient
     // either: this visit's catalog actives join the rules screen (fail-soft
@@ -25994,6 +25990,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // A cached draft is served only if it still passes both screens as they
+    // read now: a product, alias or active ingredient added since it was
+    // cached must not ride out on the cache.
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    }
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,

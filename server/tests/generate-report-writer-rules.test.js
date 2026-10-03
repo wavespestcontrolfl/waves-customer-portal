@@ -9,6 +9,7 @@ let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
 let mockServiceType = 'Quarterly Pest Control Service';
 let mockCatalogRows = [];
 let mockCatalogFails = false;
+let mockAliasRows = [];
 let mockBooked = {};
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
@@ -54,7 +55,8 @@ jest.mock('../models/db', () => {
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1', ...mockBooked } : null);
     chain.then = (resolve, reject) => (table === 'products_catalog' && mockCatalogFails
       ? Promise.reject(new Error('catalog read failed'))
-      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row)) : [])).then(resolve, reject);
+      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row))
+        : (table === 'product_aliases' ? mockAliasRows : []))).then(resolve, reject);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -99,6 +101,7 @@ beforeEach(() => {
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
   mockCatalogFails = false;
+  mockAliasRows = [];
   mockBooked = {};
   delete process.env.GATE_REPORT_WRITER_RULES;
 });
@@ -316,6 +319,44 @@ test('gate on: a cached draft is screened again against the catalog as it is now
   await handler(mkReq(body), third);
   expect(mockProvider).toHaveBeenCalledTimes(2);
   expect(third.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2, cached: true }));
+});
+
+test('gate on: a cached draft is screened again for an active ingredient filled in since', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const named = CLEAN_V2.replace('Ghost ants were trailing', 'We put down a quintazole band. Ghost ants were trailing');
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: named }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const body = {
+    serviceNotes: 'Treated the thresholds (cached draft active case).',
+    productsApplied: 'Zylo Mix (1 fl oz/gal)',
+    products: [{ productId: 'prod-9', name: 'Zylo Mix', applicationMethod: 'perimeter_spray' }],
+  };
+  // The selected product has no active ingredient on file yet.
+  mockCatalogRows = [{ id: 'prod-9', name: 'Zylo Mix', active_ingredient: null }];
+  const first = mkRes();
+  await handler(mkReq(body), first);
+  expect(first.json).toHaveBeenCalledWith(expect.objectContaining({ report: named }));
+  // Filled in: the cached draft names it and is not served.
+  mockCatalogRows = [{ id: 'prod-9', name: 'Zylo Mix', active_ingredient: 'Quintazole' }];
+  const second = mkRes();
+  await handler(mkReq(body), second);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(second.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
+});
+
+test('gate on: a registered alias of a catalog product is screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ id: 'prod-3', name: 'Atticus Talak 7.9 F', active_ingredient: 'Bifenthrin' }];
+  mockAliasRows = [{ product_id: 'prod-3', alias_name: 'Talstar P' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Talstar here. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds and the lanai (registered alias case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {
