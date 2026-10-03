@@ -10,6 +10,7 @@ const CATALOG = [
   { name: 'Suspend Polyzone', active_ingredient: 'Deltamethrin' },
   { name: 'Southern Ag Copper Fungicide 27.15%', active_ingredient: 'Copper' },
   { name: 'T-Zone SE', active_ingredient: 'Triclopyr; Sulfentrazone' },
+  { name: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate' },
   { name: 'Pesticide application sign 4x5 (yard sign card)', active_ingredient: null },
   { name: 'Termite protection notice sticker 5.5x4', active_ingredient: null },
   { name: 'Permethrin SFR', active_ingredient: 'Permethrin' },
@@ -23,6 +24,8 @@ describe('catalog-wide brand screen', () => {
     'We set Trapper stations in the garage.',
     'We applied Demand CS around the foundation.',
     'The weeds got a T-Zone application.',
+    'We applied BoraCare to the sill plate.',
+    'The weeds got a tzone application.',
     'The full name, trapper t-rex rat snap trap, went in the attic.',
   ])('a brand word or a product name is caught: %s', async (text) => {
     expect((await build())(text)).toBe(true);

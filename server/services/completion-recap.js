@@ -414,16 +414,25 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
     || COMMON_PRODUCT_NAME_WORDS.has(token) || token === 'pesticide' || /^\d+$/.test(token);
   const brandWords = new Set();
   const phrases = new Set();
+  // Punctuation-collapsed echoes are one word in the copy: "BoraCare" for
+  // "Bora-Care", "TZone" for "T-Zone SE" (the visit screen's collapsedEcho
+  // rule: four letters or more, or a digit).
+  const collapsed = new Set();
+  const addCollapsed = (word) => { if (word.length >= 4 || /\d/.test(word)) collapsed.add(word); };
   for (const row of rows) {
     const tokens = tokensOf(row?.name);
     if (!tokens.length) continue;
     if (tokens[0].length >= 4 && !isPlain(tokens[0])) brandWords.add(tokens[0]);
     if (tokens.length >= 2) {
       phrases.add(` ${tokens.join(' ')} `);
+      addCollapsed(tokens.join(''));
       // The leading pair is a name only when it opens on the brand or a
       // short designation ("T-Zone", "PGF Complete"); a pair that opens on a
       // plain word ("termite protection", "yard sign") is ordinary copy.
-      if (!isPlain(tokens[0])) phrases.add(` ${tokens[0]} ${tokens[1]} `);
+      if (!isPlain(tokens[0])) {
+        phrases.add(` ${tokens[0]} ${tokens[1]} `);
+        addCollapsed(`${tokens[0]}${tokens[1]}`);
+      }
     }
   }
   const mentionedWords = new Set(tokensOf(mentionedText));
@@ -434,6 +443,7 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
     const hayWords = tokensOf(raw);
     const normHay = ` ${hayWords.join(' ')} `;
     for (const phrase of phrases) if (normHay.includes(phrase)) return true;
+    if (hayWords.some((word) => collapsed.has(word))) return true;
     if (mentionedBrands.length) {
       const wordSet = new Set(hayWords);
       if (mentionedBrands.some((word) => wordSet.has(word))) return true;
