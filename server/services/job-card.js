@@ -2043,7 +2043,22 @@ function fieldGuideLineProduct(name, products) {
   return byId.size === 1 ? [...byId.values()][0] : null;
 }
 
+// The standard order for one product, computed here rather than taken from a
+// client: the same pack-size rule the job card's "Order more" shows (one pack
+// in the inventory unit). Used to bound a technician's restock request
+// (codex #5733 r3). null when the product is unknown or inactive.
+async function standardOrderFor(productId, { dbh = db } = {}) {
+  const product = await dbh('products_catalog').where({ id: productId })
+    .where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); })
+    .first('id', 'name', 'inventory_unit', 'rate_unit', 'best_price_amount_cached');
+  if (!product) return null;
+  const packSizes = await loadPackSizes(dbh, [product.id]);
+  const order = packSizes ? orderFor(product, packSizes[product.id], null, { includePricing: false }) : null;
+  return { name: product.name, quantity: order?.quantity > 0 ? order.quantity : 1, unit: order?.unit || product.inventory_unit || product.rate_unit || null };
+}
+
 module.exports = {
+  standardOrderFor,
   jobCardEnabled,
   paragraphLlmEnabled,
   customerContextEnabled,

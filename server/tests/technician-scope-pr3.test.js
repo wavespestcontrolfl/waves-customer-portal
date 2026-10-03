@@ -86,23 +86,48 @@ describe('sender-line lookup is scoped for a technician (codex #5683 r1)', () =>
   });
 });
 
-describe('technician restock requests: own visit, job-card fields only (codex #5683 r3, #5733 r2)', () => {
+describe('technician restock requests: own visit, server-set details (codex #5683 r3, #5733 r2/r3)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/admin-inventory.js'), 'utf8');
-  const handler = src.slice(src.indexOf("router.post('/waveguard-forecast/:productId/restock-request'")).slice(0, 2600);
+  const handler = src.slice(src.indexOf("router.post('/waveguard-forecast/:productId/restock-request'")).slice(0, 3600);
+  const techBlock = handler.slice(handler.indexOf('if (!isAdminCaller) {'), handler.indexOf('const result = await inventoryOperations.createRestockRequest(req.params.productId, {\n      requestedQuantity: body.requestedQuantity'));
 
-  test('a non-admin needs an owned current visit before the request is created', () => {
-    const guard = handler.indexOf('if (!isAdminCaller) {');
-    const create = handler.indexOf('inventoryOperations.createRestockRequest(');
-    expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(create);
-    const block = handler.slice(guard, create);
-    expect(block).toMatch(/technicianCurrentVisitFilter\(\s*\{ techRole: 'technician', technicianId: req\.technicianId \},/);
-    expect(block).toMatch(/if \(!owned\) return res\.status\(403\)/);
+  test('a non-admin needs an owned current visit before anything is created', () => {
+    expect(techBlock).toMatch(/technicianCurrentVisitFilter\(\s*\{ techRole: 'technician', technicianId: req\.technicianId \},/);
+    expect(techBlock.indexOf("if (!owned) return res.status(403)")).toBeGreaterThan(-1);
+    expect(techBlock.indexOf("if (!owned) return res.status(403)")).toBeLessThan(techBlock.indexOf('createRestockRequest('));
   });
 
-  test('planning fields, priority and allowDuplicate are the office\'s only', () => {
-    expect(handler).toMatch(/\} : \{ priority: 'high', allowDuplicate: false \};/);
-    expect(handler).toMatch(/const officeFields = isAdminCaller \? \{[\s\S]*allowDuplicate: body\.allowDuplicate,[\s\S]*neededBy: body\.neededBy/);
-    expect(handler).toMatch(/requestedQuantity: body\.requestedQuantity, unit: body\.unit, reason: body\.reason,\s*\.\.\.officeFields,/);
+  test('unit, reason, priority and dedupe are set by the server; quantity is bounded by the standard order', () => {
+    expect(techBlock).toMatch(/standardOrderFor\(req\.params\.productId, \{ dbh: db \}\)/);
+    expect(techBlock).toMatch(/Math\.min\(asked, standard\.quantity \* TECH_RESTOCK_MAX_PACKS\)/);
+    expect(techBlock).toMatch(/priority: 'high', allowDuplicate: false,/);
+    expect(techBlock).toMatch(/reason: `Job card: \$\{standard\.name\} \(visit \$\{visitId\.slice\(0, 8\)\}\)`/);
+    // Nothing from the request body but the quantity reaches the technician write.
+    expect(techBlock).not.toMatch(/body\.(unit|reason|priority|allowDuplicate|neededBy|targetStock|forecastDays|committedDemand|projectedRemaining|firstShortDate)/);
+  });
+
+  test('the office path still reads its planning fields', () => {
+    expect(handler).toMatch(/neededBy: body\.neededBy, targetStock: body\.targetStock,/);
+    expect(handler).toMatch(/allowDuplicate: body\.allowDuplicate,/);
+  });
+});
+
+describe('standardOrderFor (codex #5733 r3)', () => {
+  const { standardOrderFor } = require('../services/job-card');
+  const fakeDb = (product, packRows) => (table) => {
+    const c = {};
+    for (const m of ['where', 'whereIn', 'whereNotNull', 'orderBy', 'orWhereNull']) c[m] = (arg) => { if (typeof arg === 'function') arg.call(c); return c; };
+    c.first = async () => (table === 'products_catalog' ? product : null);
+    c.select = () => Object.assign(Promise.resolve(packRows), { catch: () => Promise.resolve(packRows) });
+    return c;
+  };
+
+  test('an unknown or inactive product answers null', async () => {
+    expect(await standardOrderFor('p-x', { dbh: fakeDb(null, []) })).toBeNull();
+  });
+
+  test('a product with no readable pack orders one unit, in its own inventory unit', async () => {
+    const order = await standardOrderFor('p-1', { dbh: fakeDb({ id: 'p-1', name: 'Fixture Product', inventory_unit: 'gal', rate_unit: 'fl_oz' }, []) });
+    expect(order).toMatchObject({ name: 'Fixture Product', quantity: 1, unit: 'gal' });
   });
 });
