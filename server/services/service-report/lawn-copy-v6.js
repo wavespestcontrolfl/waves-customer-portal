@@ -185,21 +185,33 @@ function cleanFields(fields) {
   return out;
 }
 
+// "What to expect" with every by-next-visit sentence left out: what a cached
+// PDF / static render prints. Those renders never carry live schedule fields
+// (report-data stripLiveOnlyScheduleFields drops the "Next visit" line too),
+// so a reschedule can never leave a stale sentence in a stored document.
+function staticWhatToExpect(sentences, fallback) {
+  if (!Array.isArray(sentences)) return fallback || null;
+  const kept = sentences.filter((s) => s && !s.needsVisit && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
+  return kept.length ? kept.join(' ') : null;
+}
+
 // A frozen entry's fields for THIS render. Everything replays as frozen except
 // the by-next-visit sentences, which follow the visit the report now shows:
 // one TIMED from the gap is left out when that visit is on another day (a
 // reschedule), and every one is left out when the report shows no next visit
 // at all. Never re-chosen: the rest of the frozen copy stands.
+// `whatToExpectStatic` rides along for non-live renders (staticWhatToExpect).
 function replayFields(entry, ctx = {}) {
   const fields = cleanFields(entry.fields);
   const sentences = Array.isArray(entry.expectSentences) ? entry.expectSentences : null;
-  if (!sentences) return fields;
+  const whatToExpectStatic = staticWhatToExpect(sentences, fields.whatToExpect);
+  if (!sentences) return { ...fields, whatToExpectStatic };
   const shownIso = ctx.nextVisitIso || null;
   const moved = (entry.nextVisitIso || null) !== shownIso;
   const dropped = (s) => (s.gapBased && moved) || ((s.needsVisit || s.gapBased) && !shownIso);
-  if (!sentences.some((s) => s && dropped(s))) return fields;
+  if (!sentences.some((s) => s && dropped(s))) return { ...fields, whatToExpectStatic };
   const kept = sentences.filter((s) => s && !dropped(s) && clean(s.text)).map((s) => s.text.trim());
-  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null };
+  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null, whatToExpectStatic };
 }
 
 /** One assessment's frozen entry out of a record's structured_notes, or null. */
@@ -260,7 +272,8 @@ async function freezeLawnCopyV6(serviceRecordId, entry, knex) {
  * writer wins.
  *
  * Returns { copy, unfrozen }. `copy` is { headline, whatWeDid, whatToExpect,
- * watching } (each a string or null) or null when there is nothing to carry.
+ * watching, whatToExpectStatic } (each a string or null; the last is what a
+ * non-live render prints) or null when there is nothing to carry.
  * `unfrozen` means this render is not reproducible (degraded read or the
  * freeze failed): the caller must not durably cache it.
  */
@@ -287,7 +300,7 @@ async function resolveLawnCopyV6ForRender({
     nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
-  if (!frozen) return { copy: cleanFields(built.fields), unfrozen: true };
+  if (!frozen) return { copy: replayFields(entry, ctx), unfrozen: true };
   return { copy: replayFields(frozen, ctx), unfrozen: false };
 }
 

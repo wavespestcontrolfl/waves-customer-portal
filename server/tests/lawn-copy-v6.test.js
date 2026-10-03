@@ -119,7 +119,7 @@ describe('resolveLawnCopyV6ForRender', () => {
     const deps = expectationsReturning([]);
     const stored = { v: 1, assessmentId: 'a1', fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null } };
     const out = await resolveLawnCopyV6ForRender({ structuredNotes: { lawnCopyV6: { a1: stored } }, assessmentId: 'a1', reportV2: reportV2(), deps });
-    expect(out).toEqual({ copy: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null }, unfrozen: false });
+    expect(out).toEqual({ copy: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null }, unfrozen: false });
     expect(deps.buildExpectations).not.toHaveBeenCalled();
   });
 
@@ -156,6 +156,18 @@ describe('resolveLawnCopyV6ForRender', () => {
       });
       expect(await replay(entry, '2026-10-20')).toBe(entry.fields.whatToExpect);
       expect(await replay(entry, null)).toBe('Nothing changes visibly.');
+    });
+
+    test('the static version (what a PDF prints) leaves every by-next-visit sentence out, whatever the visit', async () => {
+      const staticOf = (entry, nextVisitIso) => resolveLawnCopyV6ForRender({
+        structuredNotes: { lawnCopyV6: { a1: entry } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso },
+      }).then((r) => r.copy.whatToExpectStatic);
+      expect(await staticOf(stored(), '2026-11-11')).toBe('Weeds curl and fade.');
+      const onlyVisit = stored({ expectSentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false }] });
+      expect(await staticOf(onlyVisit, '2026-11-11')).toBeNull();
+      // An entry frozen before sentences were recorded has only its whole text.
+      const legacy = stored({ expectSentences: undefined, nextVisitIso: undefined });
+      expect(await staticOf(legacy, null)).toBe(legacy.fields.whatToExpect);
     });
 
     test('an entry frozen before this field existed replays as frozen', async () => {

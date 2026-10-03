@@ -2149,6 +2149,15 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.planSummary;
   delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  // The lawn v6 copy's by-next-visit sentences are schedule content too: a
+  // non-live render prints "What to expect" without them (lawn-copy-v6.js
+  // staticWhatToExpect). The carrier stays a non-enumerable hand-off.
+  const copyV6 = data.reportV2?.copyV6;
+  if (copyV6 && typeof copyV6 === 'object' && Object.prototype.hasOwnProperty.call(copyV6, 'whatToExpectStatic')) {
+    Object.defineProperty(data.reportV2, 'copyV6', {
+      value: { ...copyV6, whatToExpect: copyV6.whatToExpectStatic ?? null }, enumerable: false, writable: true, configurable: true,
+    });
+  }
   return data;
 }
 
@@ -2665,82 +2674,6 @@ function lawnCadenceWeeks(serviceType) {
   return null;
 }
 
-// The customer's upcoming lawn bookings, for the PDF key while
-// GATE_LAWN_REPORT_COPY_V6 is live: the lead's next-visit line, and the frozen
-// copy's gap-timed sentence it can drop, both follow those bookings, so a
-// reschedule or cancellation must re-key a cached PDF. Customer-wide on
-// purpose (a superset of the property-scoped visit the render picks): it can
-// only re-render more often, never serve a stale page. A failed read is
-// UNKNOWN, never "no bookings", so it gets a non-reusable stamp.
-async function lawnUpcomingVisitsStamp(service, knex) {
-  if (!service?.customer_id) return ':nv=0';
-  try {
-    const svcRaw = service.service_date;
-    const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
-    const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const rows = await knex('scheduled_services')
-      .where('customer_id', service.customer_id)
-      .andWhere('scheduled_date', '>', svcIso && svcIso > todayIso ? svcIso : todayIso)
-      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-      .orderBy('scheduled_date', 'asc')
-      .orderBy('id', 'asc')
-      .limit(LAWN_NEXT_VISIT_SCAN)
-      .select('id', 'scheduled_date', 'updated_at', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
-    const days = (Array.isArray(rows) ? rows : [])
-      // Every lawn row the render's scan reads, with every property column
-      // the resolver reads (a unit or locality edit moves the match too).
-      .filter((row) => isSameLineVisit(row, { serviceLine: 'lawn' }))
-      .map((row) => {
-        const raw = row.scheduled_date;
-        const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-        // Each row's revision too: a booking moved A -> B -> A during a render
-        // ends on the same day, but not the same updated_at, so the
-        // post-render stability check sees it.
-        const revision = row.updated_at ? new Date(row.updated_at).toISOString() : '';
-        return `${row.id || ''}:${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}@${revision}`;
-      });
-    // The property and estimate records those bookings (and this report's own
-    // visit) resolve their address through, with each record's revision: an
-    // address edited A -> B -> A during a render ends on the same address but
-    // not the same updated_at.
-    const reportRow = service.scheduled_service_id
-      ? await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('property_id', 'source_estimate_id', 'updated_at')
-      : null;
-    const linked = [...(Array.isArray(rows) ? rows : []), ...(reportRow ? [reportRow] : [])];
-    const propertyIds = [...new Set(linked.map((row) => row.property_id).filter(Boolean))].sort();
-    const estimateIds = [...new Set(linked.map((row) => row.source_estimate_id).filter(Boolean))].sort();
-    const revisionsOf = async (table, ids) => (ids.length
-      ? (await knex(table).whereIn('id', ids).select('id', 'updated_at'))
-        .map((row) => `${row.id}@${row.updated_at ? new Date(row.updated_at).toISOString() : ''}`).sort()
-      : []);
-    days.push(
-      `report@${reportRow?.updated_at ? new Date(reportRow.updated_at).toISOString() : ''}`,
-      ...await revisionsOf('customer_properties', propertyIds),
-      ...await revisionsOf('estimates', estimateIds),
-    );
-    // ... and the visit the render's own resolver picks for this report, so a
-    // corrected address behind a linked property (same ids, same dates) moves
-    // the key too. A failed lookup inside it is unknown: non-reusable.
-    const failures = new Set();
-    const picked = await lawnNextVisitAtProperty(service, svcIso && svcIso > todayIso ? svcIso : todayIso, knex, failures);
-    if (failures.size) return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
-    const pickedRaw = picked.state === 'scheduled' ? picked.row.scheduled_date : null;
-    const pickedIso = pickedRaw ? (pickedRaw instanceof Date ? pickedRaw.toISOString().slice(0, 10) : String(pickedRaw).slice(0, 10)) : '';
-    // With no booking here the render shows the plan-cadence estimate only
-    // while it is still ahead, and the frozen gap-timed sentence goes with it.
-    let estimate = '';
-    const weeks = picked.state === 'none' && svcIso ? lawnCadenceWeeks(service.service_type) : null;
-    if (weeks) {
-      const est = new Date(`${svcIso}T12:00:00Z`);
-      est.setUTCDate(est.getUTCDate() + weeks * 7);
-      estimate = `${est.toISOString().slice(0, 10)}:${est.getTime() > Date.now() ? 'ahead' : 'past'}`;
-    }
-    return `:nv=${crypto.createHash('sha1').update(`${days.join('|')}#${picked.state}:${pickedIso}#${estimate}`).digest('hex').slice(0, 8)}`;
-  } catch {
-    return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
-  }
-}
-
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
@@ -2806,16 +2739,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
   // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
   // its PDF key moves with it; the stamp rides only while the gate is live.
-  // The premise is resolved as the full render resolves it (a cache-lookup
-  // caller passes a partial row with no address, and the single-premises
-  // fallback in lawnNextVisitAtProperty reads it): both must key the same.
-  if (featureGates.lawnReportCopyV6Live()) {
-    // An unreadable premise is unknown, never "no address": non-reusable.
-    const premise = await loadServicePremise(service, knex).catch(() => null);
-    irrigationStamp += premise
-      ? `:copyv6=1${await lawnUpcomingVisitsStamp(premise, knex)}`
-      : `:copyv6=1:nv=err${crypto.randomBytes(4).toString('hex')}`;
-  }
+  // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
+  // so a PDF never depends on the customer's bookings and needs no key for them.
+  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3923,7 +3849,7 @@ function buildWateringBanner(instruction, weekPlan = null) {
 }
 
 // The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
-const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
+const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
 
 // The next lawn visit AT THIS REPORT'S PROPERTY (GATE_LAWN_REPORT_COPY_V6):
 // what the report's "Next visit" line shows and what the v6 copy's "by your
@@ -5879,6 +5805,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           if (outcome.copy && outcome.copy.headline && reportV2.snapshot) {
             reportV2.snapshot.statusHeadline = outcome.copy.headline;
           }
+          // A failed next-visit read leaves this render's schedule content
+          // unknown even when frozen copy replayed: never durably cached.
+          if (readFailures.has('next_visit')) lawnAssessment.weekWeatherUncacheable = true;
           if (outcome.unfrozen) {
             lawnAssessment.weekWeatherUncacheable = true;
             // DELIVERY: an emailed PDF is permanent, so it must not carry copy a

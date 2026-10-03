@@ -227,7 +227,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(frozen.fields.whatWeDid).toBeTruthy();
     expect(frozen.fields.whatToExpect).toBeNull();
     expect(frozen.copyVersion).toBe('lawn_report_v6_fixed_1');
-    expect(data.reportV2.copyV6).toEqual(frozen.fields);
+    expect(data.reportV2.copyV6).toEqual({ ...frozen.fields, whatToExpectStatic: null });
     const out = reconciled(data);
     expect(out.reportV2.lead.headline).toBe(frozen.fields.headline);
     expect(out.reportV2.lead.applied).toBe(frozen.fields.whatWeDid);
@@ -278,7 +278,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
     // An all-null carrier: the lead keeps the snapshot headline and shows no
     // applied line rather than the AI narrative in snapshot.treatmentSummary.
-    expect(data.reportV2.copyV6).toEqual({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
+    expect(data.reportV2.copyV6).toEqual({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
     data.reportV2.snapshot.treatmentSummary = 'An AI narrative paragraph.';
     const lead = reconciled(data).reportV2.lead;
@@ -580,71 +580,27 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(both).not.toBe(leadOnlySig);
   });
 
-  test('gate live: the PDF key follows the upcoming lawn bookings (a reschedule or cancellation re-keys it; a failed read never matches)', async () => {
-    jest.useFakeTimers({
-      now: new Date('2026-10-02T16:00:00Z'),
-      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
-    });
-    try {
-      process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-      process.env.GATE_LAWN_REPORT_LEAD = 'true';
-      // A row that already carries its premise (as the full render's does).
-      const svc = {
-        id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30',
-        address_line1: '100 Test Palm Way', address_line2: null, city: 'Bradenton', zip: '34201', stamped_address_diverges: false,
-      };
-      // A partial row whose premise cannot be read is unknown: it never matches.
-      const bare = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
-      const bareSig = () => resolveCanonicalLawnRender(bare, makeKnex({ ...fixtures(), service_records: [] })).then((r) => r.signature);
-      expect(await bareSig()).not.toBe(await bareSig());
-      const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
-      const visit = (date, status = 'confirmed') => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status, service_type: 'Lawn Care Treatment Program' });
-      const booked = await sigWith([visit('2026-11-11')]);
-      expect(await sigWith([visit('2026-11-11')])).toBe(booked);
-      expect(await sigWith([visit('2026-11-18')])).not.toBe(booked);
-      expect(await sigWith([visit('2026-11-11', 'cancelled')])).not.toBe(booked);
-      // A -> B -> A during a render: same day again, but a new revision, so the key moves.
-      const revised = (updatedAt) => sigWith([{ ...visit('2026-11-11'), updated_at: updatedAt }]);
-      expect(await revised('2026-10-02T15:00:00Z')).not.toBe(await revised('2026-10-02T15:05:00Z'));
-      // A corrected address behind a linked property (same ids and dates) moves the key.
-      const linked = (address) => resolveCanonicalLawnRender({ ...svc, scheduled_service_id: 'ss-cur' }, makeKnex({
-        ...fixtures(),
-        service_records: [],
-        scheduled_services: [
-          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' },
-          { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2026-11-11', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
-        ],
-        customer_properties: [{ id: 'prop-2', address_line1: address, city: 'Bradenton', zip: '34201' }],
-      })).then((r) => r.signature);
-      expect(await linked('100 Test Palm Way')).not.toBe(await linked('200 Sample Oak Ln'));
-      // The same address after an A -> B -> A edit: a new property revision moves the key.
-      const linkedAt = (updatedAt) => resolveCanonicalLawnRender({ ...svc, scheduled_service_id: 'ss-cur' }, makeKnex({
-        ...fixtures(),
-        service_records: [],
-        scheduled_services: [
-          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' },
-          { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2026-11-11', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
-        ],
-        customer_properties: [{ id: 'prop-2', address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201', updated_at: updatedAt }],
-      })).then((r) => r.signature);
-      expect(await linkedAt('2026-10-02T15:00:00Z')).not.toBe(await linkedAt('2026-10-02T15:05:00Z'));
-      expect(await linkedAt('2026-10-02T15:00:00Z')).toBe(await linkedAt('2026-10-02T15:00:00Z'));
-      // No booking: the plan-cadence estimate keys the PDF, and so does its passing.
-      const cadenceSvc = { ...svc, scheduled_service_id: 'ss-cur', service_type: 'Lawn Care every 6 weeks' };
-      const cadenceSig = () => resolveCanonicalLawnRender(cadenceSvc, makeKnex({
-        ...fixtures(),
-        service_records: [],
-        scheduled_services: [{ id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care every 6 weeks', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' }],
-      })).then((r) => r.signature);
-      const ahead = await cadenceSig();
-      jest.setSystemTime(new Date('2026-12-01T16:00:00Z'));
-      expect(await cadenceSig()).not.toBe(ahead);
-      jest.setSystemTime(new Date('2026-10-02T16:00:00Z'));
-      const failedA = await sigWith(FAIL);
-      expect(failedA).not.toBe(booked);
-      expect(await sigWith(FAIL)).not.toBe(failedA);
-    } finally {
-      jest.useRealTimers();
-    }
+  test('a non-live render (PDF) prints "What to expect" without the by-next-visit sentences; the live view keeps them', async () => {
+    const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+    const { deriveLawnLead } = require('../services/service-report/lawn-report-lead');
+    const carrier = { headline: 'Looking healthy', whatWeDid: null, whatToExpect: 'Weeds curl and fade. Most should be gone by your next visit.', watching: null, whatToExpectStatic: 'Weeds curl and fade.' };
+    const data = { reportV2: { snapshot: { statusHeadline: 'Looking healthy', nextVisit: { label: 'Wednesday, November 11', source: 'scheduled' } } } };
+    Object.defineProperty(data.reportV2, 'copyV6', { value: carrier, enumerable: false, writable: true, configurable: true });
+    expect(deriveLawnLead(data.reportV2, { copyV6: data.reportV2.copyV6 }).whatToExpect).toBe(carrier.whatToExpect);
+    stripLiveOnlyScheduleFields(data);
+    expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+    expect(deriveLawnLead(data.reportV2, { copyV6: data.reportV2.copyV6 }).whatToExpect).toBe('Weeds curl and fade.');
+    // Still a non-enumerable hand-off, and the frozen carrier object is untouched.
+    expect(Object.keys(data.reportV2)).not.toContain('copyV6');
+    expect(carrier.whatToExpect).toBe('Weeds curl and fade. Most should be gone by your next visit.');
+  });
+
+  test('the PDF key does not depend on the customer\'s bookings (the visit sentences never reach a PDF)', async () => {
+    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
+    process.env.GATE_LAWN_REPORT_LEAD = 'true';
+    const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+    const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
+    const visit = (date) => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status: 'confirmed', service_type: 'Lawn Care Treatment Program' });
+    expect(await sigWith([visit('2027-01-15')])).toBe(await sigWith([visit('2027-02-12')]));
   });
 });

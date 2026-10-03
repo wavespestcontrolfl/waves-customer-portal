@@ -2310,9 +2310,11 @@ by-next-visit sentence is timed from that same visit, counted from the selected
 assessment's date, and the frozen entry records that visit's day
 (`nextVisitIso`, with each printed sentence in `expectSentences`): when a later
 render shows a different day (a reschedule) the gap-timed sentence is left out
-of `whatToExpect` and the rest of the frozen copy stands. The lawn PDF cache
-signature carries the customer's upcoming lawn bookings beside `:copyv6=1`, so
-a reschedule or cancellation re-keys a cached PDF. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
+of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
+sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
+(PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
+so a stored PDF never depends on the customer's bookings and its cache signature
+carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
