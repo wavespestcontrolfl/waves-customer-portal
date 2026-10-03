@@ -49,8 +49,6 @@ import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill,
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
-// Form measurements that describe ONE scope (a space or the whole building).
-const SCOPE_SIZED_FIELDS = ["homeSqFt", "lotSqFt", "stories", "termiteFootprintSqFt", "trenchingPerimeterLF", "boracareSqft", "preslabSqft"];
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -3229,21 +3227,17 @@ export default function EstimateToolViewV2({
     if (!scopeQuestion && enrichedProfile?.occupancyAnswer === answer) return;
     occupancyRef.current = { address: form.address.trim(), answer };
     setScopePending({ address: form.address.trim(), answer });
-    // A size typed for the old scope is not a measurement of the new one (a
-    // suite's 1,200 sq ft is not the building's): the re-run lookup's values
-    // replace the boxes, and staff re-enter a measurement for the new scope.
+    // A different scope is a different property to measure and classify: a
+    // suite's sizes, termite measurements and commercial typing are not the
+    // building's, nor a rejected business's the base property's. The form
+    // gets the same reset a replaced property gets (clearedPropertyFields),
+    // and the re-run lookup fills it for the new scope.
     setForm((f) => ({
       ...f,
+      ...clearedPropertyFields(),
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
-      // The termite measurements derive from the same structure: typed for
-      // one space, they are not the building's either.
-      termiteFootprintSqFt: "",
-      trenchingPerimeterLF: "",
-      boracareSqft: "",
-      preslabSqft: "",
-      _manualFields: (f._manualFields || []).filter((key) => !SCOPE_SIZED_FIELDS.includes(key)),
     }));
     void doLookup({ occupancy: answer });
   }

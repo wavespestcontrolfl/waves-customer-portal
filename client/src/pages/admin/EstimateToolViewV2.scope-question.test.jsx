@@ -315,6 +315,22 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(9000));
   });
 
+  it("rejecting the business after confirming it restores the base classification: the form is no longer commercial", async () => {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1200));
+    fireEvent.click(screen.getByRole("button", { name: "Not this business" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(3));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Not this business" })).toHaveAttribute("aria-pressed", "true"));
+    pickPest();
+    fireEvent.click(screen.getByRole("button", { name: "Generate Estimate", exact: true }));
+    await waitFor(() => expect(calcBodies()).toHaveLength(1));
+    const { profile } = calcBodies()[0];
+    expect(profile.isCommercial).not.toBe(true);
+    expect(profile.commercialSubtype || "").not.toBe("salon_spa");
+  });
+
   it("clicking the answer that is already applied changes nothing: no new lookup, and a typed size stays", async () => {
     await lookUp();
     fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
