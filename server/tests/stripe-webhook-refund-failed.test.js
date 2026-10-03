@@ -50,8 +50,8 @@ jest.mock('../services/invoice-helpers', () => ({ ...jest.requireActual('../serv
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []), withTermiteGateForCharge: jest.fn(async (_keys, fn) => fn()) }));
-jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []), withTermiteGateForCharge: jest.fn(async (_keys, fn) => fn()), acquireTermiteGateAtEntry: jest.fn(async () => undefined), suspendActiveTermsForDisputedInvoice: jest.fn(async () => undefined) }));
+jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })), handleDepositDisputeClosed: jest.fn(async () => ({ handled: false })) }));
 // Fee-lane detection's guarded fallback retrieves the PI when no local
 // pointer row exists; model Stripe answering "not a fee PI" so the
 // unlocked fence path stays exercisable (detection failures now throw).
@@ -67,6 +67,8 @@ const {
   _handleChargeRefunded: handleChargeRefunded,
   _resolveOrphanSucceededPaymentIntentIfSettled: resolveOrphanSucceededPaymentIntentIfSettled,
   _withDisputeRenewalGate: withDisputeRenewalGate,
+  _handleDisputeCreated: handleDisputeCreated,
+  _handleDisputeClosed: handleDisputeClosed,
 } = require('../routes/stripe-webhook');
 
 // The admin brevity guard keeps a long notification's whole text in `detail`.
@@ -686,5 +688,168 @@ describe('dispute handlers hold the renewal gate', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
     expect(src).toContain("case 'charge.dispute.created':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeCreated(event.data.object));");
     expect(src).toContain("case 'charge.dispute.closed':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeClosed(event.data.object));");
+  });
+});
+
+
+// B05: a card settle writes invoices.total = cash charged + credit_applied, so the
+// 2.9% surcharge sits in `total` as principal. A chargeback returns the whole charge
+// and reopens the invoice — which must ask for the invoice's own amount again, not the
+// surcharge, and a won dispute must put the invoice back in the paid state it was in.
+describe('dispute reopen takes the card surcharge back out of invoices.total (B05)', () => {
+  const NotificationService = require('../services/notification-service');
+  const { computeChargeAmount } = jest.requireActual('../services/stripe-pricing');
+  const { invoiceAmountDue } = jest.requireActual('../services/invoice-helpers');
+  let tables;
+
+  // Stateful stand-in for the two tables the dispute handlers touch; every other
+  // table reads empty. Enough query surface for handleDisputeCreated/Closed.
+  function query(table) {
+    const rows = tables[table] || [];
+    const filters = [];
+    const q = {};
+    const pick = () => rows.filter((r) => filters.every((f) => f(r)));
+    q.where = (arg, val) => {
+      if (typeof arg === 'function') return q;
+      if (typeof arg === 'string') filters.push((r) => r[arg] === val);
+      else filters.push((r) => Object.entries(arg).every(([k, v]) => r[k] === v));
+      return q;
+    };
+    q.whereNotIn = (col, vals) => { filters.push((r) => !vals.includes(r[col])); return q; };
+    q.forUpdate = () => q;
+    q.orderBy = () => q;
+    q.whereExists = () => q;
+    q.whereIn = () => q;
+    q.first = async () => pick()[0];
+    q.update = async (patch) => { pick().forEach((r) => Object.assign(r, patch)); return pick().length; };
+    q.insert = async () => [1];
+    q.then = (res, rej) => Promise.resolve(pick()).then(res, rej);
+    return q;
+  }
+  const row = (table, id) => tables[table].find((r) => r.id === id);
+  const meta = (p) => JSON.parse(p.metadata);
+
+  // A $1,000 invoice paid by credit card: surcharge $29, settle wrote total = 1029.
+  const seed = ({ credit = 0, surchargeCents = 2900, cashCents = 102900, total } = {}) => {
+    tables = {
+      invoices: [{
+        id: 'inv_1', status: 'paid', paid_at: '2026-10-01T00:00:00Z', stripe_payment_intent_id: 'pi_card', stripe_charge_id: 'ch_card',
+        subtotal: '1000.00', discount_amount: '0.00', tax_amount: '0.00', credit_applied: String(credit),
+        total: String(total ?? ((cashCents / 100) + credit)),
+      }],
+      payments: [{
+        id: 'pay_1', status: 'paid', amount: String(cashCents / 100), surcharge_amount_cents: surchargeCents,
+        stripe_payment_intent_id: 'pi_card', stripe_charge_id: 'ch_card', metadata: JSON.stringify({ invoice_id: 'inv_1' }),
+      }],
+    };
+  };
+  const dispute = { id: 'dp_1', charge: 'ch_card', payment_intent: 'pi_card', amount: 102900, reason: 'fraudulent', status: 'needs_response' };
+  const total = () => Number(row('invoices', 'inv_1').total);
+  const nextCardTotal = () => computeChargeAmount(invoiceAmountDue(row('invoices', 'inv_1')), 'card', { funding: 'credit' }).total;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(undefined);
+    db.mockImplementation((table) => query(table));
+    db.transaction.mockImplementation(async (cb) => {
+      const trx = (table) => query(table);
+      trx.raw = jest.fn(async () => undefined);
+      trx.fn = { now: () => 'NOW' };
+      return cb(trx);
+    });
+    db.fn = { now: () => 'NOW' };
+  });
+
+  test('dispute created reopens at the invoice\'s own amount, and the next card quote surcharges that base only', async () => {
+    seed();
+    expect(nextCardTotal()).toBe(1058.84); // what the bug charged: surcharge on the surcharged 1029
+
+    await handleDisputeCreated(dispute);
+
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null });
+    expect(total()).toBe(1000);
+    expect(nextCardTotal()).toBe(1029);
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900, dispute_invoice_id: 'inv_1' });
+  });
+
+  test('a replay of the created event, or the lost closure after it, subtracts nothing more', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    await handleDisputeCreated(dispute);
+    expect(total()).toBe(1000);
+
+    await handleDisputeClosed({ ...dispute, status: 'lost' });
+    expect(total()).toBe(1000);
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+  });
+
+  test('a lost closure with no created event reopens at the invoice\'s own amount, once', async () => {
+    seed();
+    await handleDisputeClosed({ ...dispute, status: 'lost' });
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'overdue', stripe_payment_intent_id: null });
+    expect(total()).toBe(1000);
+    await handleDisputeClosed({ ...dispute, status: 'lost' });
+    expect(total()).toBe(1000);
+  });
+
+  test('a payment with no surcharge (bank, cash, legacy NULL) reopens with total unchanged', async () => {
+    for (const surcharge of [0, null, undefined]) {
+      seed({ surchargeCents: surcharge, cashCents: 100000 });
+      await handleDisputeCreated(dispute);
+      expect(row('invoices', 'inv_1').status).toBe('overdue');
+      expect(total()).toBe(1000);
+      expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
+    }
+  });
+
+  test('a card payment the webhook settled (total never rewritten) is not reduced', async () => {
+    seed({ total: 1000 }); // payments.amount 1029 but the invoice still reads its own 1000
+    await handleDisputeCreated(dispute);
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(total()).toBe(1000);
+  });
+
+  test('with account credit applied, total and credit stay consistent (amount due = the invoice\'s own balance)', async () => {
+    // $1,000 invoice, $200 credit: customer owed $800, paid $800 + $23.20 = $823.20; settle wrote total = 823.20 + 200.
+    seed({ credit: 200, surchargeCents: 2320, cashCents: 82320 });
+    expect(total()).toBe(1023.2);
+    await handleDisputeCreated(dispute);
+    expect(total()).toBe(1000);
+    expect(Number(row('invoices', 'inv_1').credit_applied)).toBe(200);
+    expect(invoiceAmountDue(row('invoices', 'inv_1'))).toBe(800);
+    expect(nextCardTotal()).toBe(823.2);
+  });
+
+  test('never reduces total below the invoice\'s line items', async () => {
+    seed();
+    row('invoices', 'inv_1').subtotal = '1029.00'; // the invoice really bills 1029
+    await handleDisputeCreated(dispute);
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(total()).toBe(1029);
+  });
+
+  test('dispute won afterwards puts the invoice back to its paid state (total = cash + credit) once', async () => {
+    seed({ credit: 200, surchargeCents: 2320, cashCents: 82320 });
+    await handleDisputeCreated(dispute);
+    expect(total()).toBe(1000);
+
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_card' });
+    expect(total()).toBe(1023.2);
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ dispute_final: 'won' });
+    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
+
+    await handleDisputeClosed({ ...dispute, status: 'won' }); // replay
+    expect(total()).toBe(1023.2);
+  });
+
+  test('a won dispute never touches an invoice a replacement payment now owns', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    // Customer re-paid with a new card payment (surcharged on the corrected 1000 base).
+    Object.assign(row('invoices', 'inv_1'), { status: 'paid', stripe_payment_intent_id: 'pi_new', total: '1029.00' });
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_new' });
+    expect(total()).toBe(1029);
   });
 });

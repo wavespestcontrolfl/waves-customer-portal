@@ -6836,6 +6836,86 @@ async function findInvoiceForPayment(payment) {
   return null;
 }
 
+// B05: a pay-page / saved-card CARD settle rewrites invoices.total to the cash
+// charged plus applied credit (confirmInvoicePayment, chargeInvoiceWithSavedCard),
+// so a credit-card payment's processing surcharge sits in `total` as if it were
+// principal. A chargeback returns the whole charge, surcharge included, and
+// reopens the invoice — which then asks for the surcharge as principal and
+// surcharges it again on the next card payment. When the reopen happens, take
+// the surcharge back out of `total`.
+//   - The figure is the payment row's recorded surcharge_amount_cents, never a
+//     recomputed percentage.
+//   - It only acts when `total` is exactly what that settle wrote (cash charged +
+//     credit_applied). A webhook-settled card payment never rewrote `total`,
+//     and a replay finds it already restored, so neither subtracts again — no
+//     extra marker is needed for idempotence.
+//   - Rows with no surcharge (ACH, cash, legacy NULL) and combined-balance
+//     rows (their invoices are never re-totalled) are untouched.
+// What was removed is stamped on the payment row so a WON dispute can put it
+// back with the invoice (reinstateCardSurchargeOnWonInvoice).
+// Runs inside the caller's reopen transaction, after the invoice reopen write.
+const SURCHARGE_REMOVED_META_KEY = 'surcharge_removed_from_invoice_cents';
+
+function parsePaymentMeta(row) {
+  try {
+    return row?.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+  } catch { return {}; }
+}
+
+async function removeCardSurchargeFromReopenedInvoice(trx, { invoiceId, payment }) {
+  const surchargeCents = Math.max(0, Math.round(Number(payment?.surcharge_amount_cents) || 0));
+  if (!invoiceId || !payment?.id || surchargeCents <= 0) return false;
+  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
+  if (!paymentRow) return false;
+  const meta = parsePaymentMeta(paymentRow);
+  if (meta.combined_payment) return false;
+  const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+  if (!invoice) return false;
+
+  const totalCents = Math.round((Number(invoice.total) || 0) * 100);
+  const creditCents = Math.round((Number(invoice.credit_applied) || 0) * 100);
+  const cashCents = Math.round((Number(paymentRow.amount) || 0) * 100);
+  // Not the settle's own rewrite (never inflated, or already restored).
+  if (totalCents !== cashCents + creditCents) return false;
+
+  const restoredCents = totalCents - surchargeCents;
+  // Never below what the invoice's line items bill, nor below the credit
+  // already applied (amount due would go negative).
+  const lineFloorCents = Math.round(((Number(invoice.subtotal) || 0)
+    - (Number(invoice.discount_amount) || 0) + (Number(invoice.tax_amount) || 0)) * 100);
+  if (restoredCents <= 0 || restoredCents < creditCents
+    || (invoice.subtotal != null && restoredCents < lineFloorCents)) {
+    logger.warn(`[stripe-webhook] invoice ${invoiceId}: surcharge ${surchargeCents}c not removed on reopen — restored total ${restoredCents}c would fall below its line items / applied credit`);
+    return false;
+  }
+
+  await trx('invoices').where({ id: invoiceId }).update({ total: restoredCents / 100, updated_at: trx.fn.now() });
+  await trx('payments').where({ id: payment.id })
+    .update({ metadata: JSON.stringify({ ...meta, [SURCHARGE_REMOVED_META_KEY]: surchargeCents }) });
+  logger.info(`[stripe-webhook] invoice ${invoiceId}: removed ${surchargeCents}c card surcharge from total on reopen (${totalCents}c -> ${restoredCents}c)`);
+  return true;
+}
+
+// Dispute WON: the original card payment stands again, so the invoice goes
+// back to the paid state that payment left it in (total = cash + credit). Only
+// when the reopen above removed a surcharge; the stamp is cleared in the same
+// transaction so a replay adds nothing twice.
+async function reinstateCardSurchargeOnWonInvoice(trx, { invoiceId, payment }) {
+  if (!invoiceId || !payment?.id) return false;
+  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
+  const meta = parsePaymentMeta(paymentRow);
+  const removedCents = Math.max(0, Math.round(Number(meta[SURCHARGE_REMOVED_META_KEY]) || 0));
+  if (removedCents <= 0) return false;
+  const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+  if (!invoice) return false;
+  const totalCents = Math.round((Number(invoice.total) || 0) * 100);
+  await trx('invoices').where({ id: invoiceId }).update({ total: (totalCents + removedCents) / 100, updated_at: trx.fn.now() });
+  const { [SURCHARGE_REMOVED_META_KEY]: _removed, ...rest } = meta;
+  await trx('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(rest) });
+  logger.info(`[stripe-webhook] invoice ${invoiceId}: dispute won — card surcharge ${removedCents}c back in total (${totalCents}c -> ${totalCents + removedCents}c)`);
+  return true;
+}
+
 /**
  * charge.dispute.created — ACH return or chargeback. ~60 days to respond.
  * Flip invoice back to overdue, log dispute, alert admin.
@@ -7487,6 +7567,9 @@ async function handleDisputeCreated(dispute) {
           stripe_payment_intent_id: null,
           stripe_charge_id: null,
         });
+        // B05: the chargeback returned the surcharge too — it must not stay
+        // in the reopened invoice's total as principal.
+        await removeCardSurchargeFromReopenedInvoice(trx, { invoiceId: invoice.id, payment });
       });
     }
     }
@@ -8295,13 +8378,18 @@ async function handleDisputeClosed(dispute) {
       // the dispute still owns it.
       if (invoice && invoice.status !== 'paid'
         && (!wonInvoicePi || (wonDisputedPi && wonInvoicePi === wonDisputedPi))) {
-        await db('invoices').where({ id: invoice.id }).update({
-          status: 'paid',
-          paid_at: new Date().toISOString(),
-          // Restore the linkage the reopen cleared — the disputed PI's
-          // funds are what settle this invoice again.
-          stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
-          stripe_charge_id: payment.stripe_charge_id || null,
+        // One transaction with the surcharge put-back (B05): the invoice is
+        // never paid-again with the surcharge still out of its total.
+        await db.transaction(async (trx) => {
+          await trx('invoices').where({ id: invoice.id }).update({
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+            // Restore the linkage the reopen cleared — the disputed PI's
+            // funds are what settle this invoice again.
+            stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
+            stripe_charge_id: payment.stripe_charge_id || null,
+          });
+          await reinstateCardSurchargeOnWonInvoice(trx, { invoiceId: invoice.id, payment });
         });
       }
       // Restored settlement completes any plan created while the dispute had
@@ -8390,6 +8478,9 @@ async function handleDisputeClosed(dispute) {
             stripe_payment_intent_id: null,
             stripe_charge_id: null,
           });
+          // B05: same surcharge take-back as dispute-created (idempotent —
+          // created normally did it already).
+          await removeCardSurchargeFromReopenedInvoice(trx, { invoiceId: lostInvoice.id, payment });
         });
       }
       // Annual-prepay claw-back: lost = the money is gone for good — the
@@ -8625,6 +8716,8 @@ module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._withDisputeRenewalGate = withDisputeRenewalGate;
+module.exports._handleDisputeCreated = handleDisputeCreated;
+module.exports._handleDisputeClosed = handleDisputeClosed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._resolveRefundIdForCharge = resolveRefundIdForCharge;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
