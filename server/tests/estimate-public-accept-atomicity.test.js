@@ -4606,6 +4606,59 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(storedEstimate().customer_id).toBeTruthy();
   });
 
+  // ── B18 r5 (pre-push): the final revalidation judges the PRE-FILL identity ─────────────────────
+  // A submitted contactEmail is written to the estimate (and may be filled onto the reused customer) in
+  // this very transaction. The authoritative match judged the estimate as it was BEFORE that fill; the
+  // final revalidation must judge the same fields, or the accept's own fill flips the verdict, the fill
+  // rolls back, and every retry fails the same way.
+  const conversionFor = (customerId) => EstimateConverter.convertEstimate.mockResolvedValueOnce({
+    customerId, tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null, recurringConversionSkipped: false,
+    welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+  });
+  const blankEmailEstimate = (id) => recurringPestEstimate({ id, token: `tok-${id}-x0123456789`, customer_name: 'Testy', customer_email: null });
+
+  test('several phone candidates, blank estimate email: the address picks A, a submitted email equal to B\'s does not flip the final verdict (accept lands on A, a repeat is stable)', async () => {
+    resetStore(blankEmailEstimate('est-b18-p1'));
+    db.__state.tables.customers.push(
+      sharedPhoneRow({ id: 'cust-a', account_id: 'acct-ab', first_name: 'Testy', email: 'a@example.com', address_line1: '123 Palm Ave' }),
+      sharedPhoneRow({ id: 'cust-b', account_id: 'acct-ab', first_name: 'Other', email: 'testy@example.com', address_line1: '9 Other St' }),
+    );
+    db.__state.tables.customer_accounts = [{ id: 'acct-ab' }];
+    conversionFor('cust-a');
+    const first = await putAccept('tok-est-b18-p1-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(first.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-a');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+    const repeat = await putAccept('tok-est-b18-p1-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(repeat.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-a');
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('lone candidate with an email on file, blank estimate email, a submitted email that differs: still reused (the filled email does not make the final pass call it contradicted)', async () => {
+    resetStore(blankEmailEstimate('est-b18-p2'));
+    db.__state.tables.customers.push(sharedPhoneRow({ first_name: 'Testy', email: 'bob@example.com', address_line1: '9 Other St' }));
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionFor('cust-bob');
+    const res = await putAccept('tok-est-b18-p2-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+    expect((await putAccept('tok-est-b18-p2-x0123456789', { contactEmail: 'testy@example.com' })).status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('the accept filling the reused candidate\'s own blank email cannot flip its verdict (the locked final read sees that write)', async () => {
+    resetStore(blankEmailEstimate('est-b18-p3'));
+    db.__state.tables.customers.push(sharedPhoneRow({ first_name: 'Testy', email: null, address_line1: '9 Other St' }));
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionFor('cust-bob');
+    const res = await putAccept('tok-est-b18-p3-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+    expect(db.__state.tables.customers.find((c) => c.id === 'cust-bob').email).toBe('testy@example.com');
+  });
+
   // ── B18 r5: a one-time card hold drops with the identity ────────────────────────────────────────
 
   test('identity drift drops the one-time card hold: its SetupIntent is retired after the rollback and the 409 is reloadable', async () => {

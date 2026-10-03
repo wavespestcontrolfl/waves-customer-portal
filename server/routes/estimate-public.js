@@ -12006,6 +12006,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // re-run over the whole candidate set under the phone fence just before the commit (see the
       // revalidation before the return).
       let acceptedPhoneVerdict = null;
+      // The identity fields (phone, email, address) the authoritative match judged, copied before any
+      // contact fill mutates `estimate`, and handed to the final revalidation explicitly: a submitted
+      // email or address normalization written later in this transaction must not change the verdict.
+      let acceptedPhoneIdentity = null;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -12092,7 +12096,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           busyErr.code = 'CUSTOMER_BUSY_RETRY';
           throw busyErr;
         }
-        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true });
+        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address };
+        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true });
         // The verdict this accept acts on; the final revalidation before the commit compares to it.
         acceptedPhoneVerdict = { matchId: existing?.id || null, contradicted: phoneContradicted === true };
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT
@@ -14021,7 +14026,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // orders before it. Remaining window: a creator or restore that does not take the phone key (the
       // restore route and lead conversion) can still commit after this read and before the commit.
       if (acceptedPhoneVerdict) {
-        const finalVerdict = await matchAcceptCustomerByPhone(estimate, trx, {
+        // The SAME identity fields the authoritative match used (never the contact-filled `estimate`), so
+        // this transaction's own writes - the submitted email on the estimate row, a fill onto the reused
+        // candidate - cannot flip the verdict; only a change to the candidate set or a candidate by
+        // someone else can.
+        const finalVerdict = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, {
           authoritative: true,
           lockRows: true,
           excludeCustomerId: customerCreatedThisAccept ? customerId : null,
