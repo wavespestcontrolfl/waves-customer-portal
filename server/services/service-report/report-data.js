@@ -5698,7 +5698,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : 'unknown',
             };
           }
-          lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
+          lawnProgress = buildLawnProgress({
+            current,
+            prior: priorForProgress,
+            sinceLast: visitMemorySinceLast || null,
+            // P19b kill switch on the READ: gate off = a stored photo_pair recheck is ignored.
+            photoPair: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive(),
+          });
         } catch {
           lawnProgress = null;
         }

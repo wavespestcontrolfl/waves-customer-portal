@@ -303,6 +303,27 @@ describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
       expect(again.reportV2.sinceLast).toEqual(first.data.reportV2.sinceLast);
       const check = again.reportV2.progress.items.find((i) => i.kind === 'check' && i.key === 'weeds');
       expect(check).toMatchObject({ state: 'improving', source: 'photo_pair', recheck: 'checked_better' });
+
+      // Kill switch on the READ: with the paired gate cleared, the stored verdict is ignored
+      // (the check reads unclear, as before the feature); the entry itself is untouched.
+      delete process.env.GATE_LAWN_PAIRED_RECHECK;
+      const off = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p12', knex, {});
+      expect(off.reportV2.progress.items.find((i) => i.kind === 'check' && i.key === 'weeds'))
+        .toMatchObject({ state: 'unclear', gate: 'not_rechecked', recheck: 'not_recorded', source: null });
+      expect(JSON.stringify(off)).not.toMatch(/recheck|photoPairs|photo_pair/);
+      expect(storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur').sinceLast.checks[0].recheck.verdict).toBe('better');
+
+      // Gate off, but a person's office_review decision still stands.
+      const officeNotes = JSON.parse(JSON.stringify(recs['svc-cur'].structured_notes));
+      officeNotes.lawnVisitMemory['la-cur'].sinceLast.checks[0].recheckOverride = { verdict: 'worse', source: 'office_review' };
+      const officeKnex = withRecords(f, { ...recs, 'svc-cur': { structured_notes: officeNotes } }).knex;
+      const office = await buildReportV1Data(service(officeNotes), 'token-p12', officeKnex, {});
+      expect(office.reportV2.progress.items.find((i) => i.kind === 'check' && i.key === 'weeds')).toMatchObject({ state: 'behind', source: 'office_review' });
+
+      // Toggled back on: the verdict is used again.
+      process.env.GATE_LAWN_PAIRED_RECHECK = 'true';
+      const back = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p12', knex, {});
+      expect(back.reportV2.progress.items.find((i) => i.kind === 'check' && i.key === 'weeds')).toMatchObject({ state: 'improving', source: 'photo_pair' });
     });
   });
 

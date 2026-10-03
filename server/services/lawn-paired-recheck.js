@@ -44,7 +44,7 @@ const { photoIsUsable } = require('./service-report/lawn-progress');
 const { recordPairedRecheck } = require('./service-report/lawn-visit-memory');
 const { lawnPairedRecheckLive } = require('../config/feature-gates');
 
-const PROMPT_VERSION = 'lawn-paired-recheck-v1';
+const PROMPT_VERSION = 'lawn-paired-recheck-v2';
 const LANE_ID = 'lawn_paired_recheck';
 const RECHECK_SOURCE = 'photo_pair';
 const VERDICTS = ['better', 'same', 'worse', 'cannot_tell'];
@@ -62,13 +62,23 @@ const MAX_MS = 60 * 1000;
 const GRACE_MS = 2000;
 
 // The plain name of each watched topic the visit memory can carry
-// (lawn-visit-memory.js CHECK_CATEGORIES). Names only; no status or score.
+// (lawn-visit-memory.js CHECK_CATEGORIES). A frozen check stores ONLY
+// { key, status }: no cause and no direction. So every label is neutral about
+// both, and the model is told to judge only whether the affected areas look
+// better, the same or worse, never which way the problem runs or why.
+//   water    covers drought AND overwatering (lawn-report-insights.js), so it is
+//            "a watering problem (too dry or too wet)", not drought
+//   weeds    the topic itself
+//   damage   the insight's own words, "stress patterns": no disease or pest named
+//   coverage thinning AND uneven color (not bare ground)
+// mowing is NOT here: it is a measured height of cut, too short or too tall
+// (the frozen check does not say which), and an overview photo cannot establish
+// it, so it is never put to the model (the engine then says unclear as today).
 const ITEM_NAMES = Object.freeze({
-  water: 'dry or drought-stressed turf',
-  weeds: 'weeds in the turf',
-  damage: 'damaged, discolored or diseased turf',
-  coverage: 'thin or bare patches',
-  mowing: 'mowing height or scalping',
+  water: 'areas with a watering problem (too dry or too wet)',
+  weeds: 'weeds growing among the turf',
+  damage: 'areas of turf showing stress or damage (cause not known)',
+  coverage: 'thin or uneven-colored areas of turf',
 });
 
 // ── Native JSON schema (Gemini response schema / OpenAI strict mode) ──────
@@ -97,7 +107,8 @@ Rules:
 - better = clearly less of the problem or clearly healthier turf in AFTER. worse = clearly more of the problem or clearly poorer turf in AFTER. same = no clear difference. cannot_tell = you cannot judge. When unsure between a verdict and cannot_tell, answer cannot_tell.
 - what_changed lists only the dimensions that clearly differ, chosen from: patch_size (how large an affected area is), color (green versus pale, yellow or brown), edge (how sharp or spreading the border of an affected area is), density (how thick the turf is, how much bare ground shows). Empty for same and cannot_tell.
 - pairs: one entry for EVERY pair number you were given, the whole-lawn comparison of that pair.
-- items: one entry for EVERY watch item named in the request. Judge that item only from the pairs where it can be seen, and list those pair numbers in pairs. If no pair shows it, answer cannot_tell with an empty pairs list.
+- items: one entry for EVERY watch item named in the request, using its key exactly as given. Judge that item only from the pairs where it can be seen, and list those pair numbers in pairs. If no pair shows it, answer cannot_tell with an empty pairs list.
+- For an item, answer only whether the affected areas look better, the same or worse in AFTER than in BEFORE. Never say which direction the problem runs (for example too dry versus too wet) or what caused it.
 Return JSON only, matching the schema.`;
 
 const parseJson = (value) => {
@@ -212,11 +223,11 @@ function buildRequest({ pairs, items }) {
 const isChangeList = (value) => Array.isArray(value) && value.every((d) => CHANGE_DIMENSIONS.includes(d));
 const orderedChanges = (list) => CHANGE_DIMENSIONS.filter((d) => list.includes(d));
 
-/**
- * null when the answer conforms, otherwise a short reason (a failed leg, so
- * the fallback provider gets its turn). Enums and pair numbers are checked
- * here because the schema carries no numeric bounds.
- */
+// An item key as the request sends it is lowercase with no padding; an answer's
+// key is matched after trim + lowercase, and two answers for one key are a duplicate.
+const itemKeyOf = (value) => String(value == null ? '' : value).trim().toLowerCase();
+
+// EXACT coverage: one entry for every pair number sent and no others.
 function pairProblem(pairs, pairCount) {
   const seen = new Set();
   for (const p of pairs) {
@@ -224,23 +235,37 @@ function pairProblem(pairs, pairCount) {
     if (!VERDICTS.includes(p.verdict) || !isChangeList(p.what_changed)) return 'invalid_pair';
     seen.add(p.pair);
   }
-  return null;
+  return seen.size === pairCount ? null : 'incomplete_pairs';
 }
 
-function itemProblem(items, pairCount) {
+// EXACT coverage: one entry for every item key sent and no others.
+function itemProblem(items, pairCount, itemKeys) {
+  const asked = new Set(itemKeys);
   const seen = new Set();
   for (const item of items) {
-    if (!item || typeof item.item !== 'string' || seen.has(item.item)) return 'invalid_item';
+    if (!item || typeof item.item !== 'string') return 'invalid_item';
+    const key = itemKeyOf(item.item);
+    if (!asked.has(key)) return 'unknown_item';
+    if (seen.has(key)) return 'invalid_item';
     if (!VERDICTS.includes(item.verdict) || !isChangeList(item.what_changed)) return 'invalid_item';
     if (!Array.isArray(item.pairs) || !item.pairs.every((n) => Number.isInteger(n) && n >= 1 && n <= pairCount)) return 'invalid_item';
-    seen.add(item.item);
+    seen.add(key);
   }
-  return null;
+  return seen.size === asked.size ? null : 'incomplete_items';
 }
 
-function answerProblem(json, { pairCount } = {}) {
+/**
+ * null when the answer conforms, otherwise a short reason. The validator is the
+ * chain's per-leg check, so a miss here sends the request to the NEXT provider;
+ * it must reject anything normalizeAnswer would otherwise have to drop silently:
+ * an empty array, a missing or extra or repeated pair, a missing, unknown or
+ * repeated item. Enums and pair numbers are checked here because the schema
+ * carries no numeric bounds.
+ */
+function answerProblem(json, { pairCount, itemKeys } = {}) {
   if (!json || typeof json !== 'object' || !Array.isArray(json.pairs) || !Array.isArray(json.items)) return 'schema_invalid';
-  return pairProblem(json.pairs, pairCount) || itemProblem(json.items, pairCount);
+  if (!Number.isInteger(pairCount) || pairCount < 1 || !Array.isArray(itemKeys) || !itemKeys.length) return 'no_request_context';
+  return pairProblem(json.pairs, pairCount) || itemProblem(json.items, pairCount, itemKeys);
 }
 
 /**
@@ -256,12 +281,13 @@ function normalizeAnswer(json, { pairs, items }) {
   const askedKeys = new Set(items.map((item) => item.key));
   const rechecks = {};
   for (const answer of json.items) {
-    if (!askedKeys.has(answer.item) || !WRITABLE_VERDICTS.has(answer.verdict)) continue;
+    const key = itemKeyOf(answer.item);
+    if (!askedKeys.has(key) || !WRITABLE_VERDICTS.has(answer.verdict)) continue;
     const cited = [...new Set(answer.pairs)].filter((n) => (byPair.get(n)?.verdict || 'cannot_tell') !== 'cannot_tell');
     if (!cited.length) continue;
     const changed = answer.verdict === 'same' ? [] : orderedChanges(answer.what_changed);
     if (answer.verdict !== 'same' && !changed.length) continue;
-    rechecks[answer.item] = {
+    rechecks[key] = {
       verdict: answer.verdict,
       source: RECHECK_SOURCE,
       whatChanged: changed,
@@ -325,12 +351,13 @@ async function loadPairImages(formed, photoService, assessmentId) {
 
 // The one model call over every pair. { outcome } on a conforming answer, else { miss }.
 async function askModel({ loaded, items, assessmentId, dispatch, deadlineMs }) {
+  const itemKeys = items.map((item) => item.key);
   const payload = buildRequest({ pairs: loaded, items });
   const started = Date.now();
   const outcome = await withDeadline(
     Promise.resolve().then(() => dispatch(MODELS.TEXT_POLICIES.lawnPairedRecheck, payload, {
       // A nonconforming answer is a failed leg, so the OpenAI stand-in gets its turn.
-      validate: (result) => answerProblem(result.json, { pairCount: loaded.length }),
+      validate: (result) => answerProblem(result.json, { pairCount: loaded.length, itemKeys }),
       reserveFallbackBudget: true,
       hardDeadline: true,
     })),
@@ -341,7 +368,7 @@ async function askModel({ loaded, items, assessmentId, dispatch, deadlineMs }) {
     logger.warn(`[lawn-paired-recheck] unavailable for ${assessmentId} (${(outcome && outcome.reason) || 'timeout'})`);
     return { miss: { status: 'unavailable', latencyMs } };
   }
-  const problem = answerProblem(outcome.json, { pairCount: loaded.length });
+  const problem = answerProblem(outcome.json, { pairCount: loaded.length, itemKeys });
   if (problem) {
     logger.warn(`[lawn-paired-recheck] unusable answer for ${assessmentId} (${problem})`);
     return { miss: { status: 'unavailable', latencyMs } };

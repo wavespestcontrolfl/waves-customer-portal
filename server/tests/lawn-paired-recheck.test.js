@@ -116,11 +116,33 @@ describe('watch items', () => {
     const items = recheck.watchItemsFrom({
       checks: [
         { key: 'weeds', status: 'watch' }, { key: 'weeds', status: 'watch' }, { key: 'water', status: 'needs_attention', recheck: { verdict: 'same', source: 'office_review' } },
-        { key: 'coverage', status: 'watch', recheckOverride: { verdict: 'worse', source: 'office_review' } }, { key: 'mystery', status: 'watch' }, { key: 'damage', status: 'watch' }, null,
+        { key: 'coverage', status: 'watch', recheckOverride: { verdict: 'worse', source: 'office_review' } }, { key: 'mystery', status: 'watch' }, { key: 'damage', status: 'watch' },
+        { key: 'mowing', status: 'watch' }, null,
       ],
     });
     expect(items).toEqual([{ key: 'weeds', name: recheck.ITEM_NAMES.weeds }, { key: 'damage', name: recheck.ITEM_NAMES.damage }]);
     expect(recheck.watchItemsFrom(null)).toEqual([]);
+  });
+
+  test('label table: every label is neutral about cause and direction; mowing is never put to the model', () => {
+    expect(recheck.ITEM_NAMES).toEqual({
+      water: 'areas with a watering problem (too dry or too wet)',
+      weeds: 'weeds growing among the turf',
+      damage: 'areas of turf showing stress or damage (cause not known)',
+      coverage: 'thin or uneven-colored areas of turf',
+    });
+    // the frozen water check stores only { key, status } (no moisture direction), so the label names neither
+    expect(recheck.ITEM_NAMES.water).toMatch(/too dry or too wet/);
+    for (const label of Object.values(recheck.ITEM_NAMES)) {
+      expect(label).not.toMatch(/drought|overwater|disease|fung|insect|chinch|bare|scalp|mow|irrigat|sprinkler/i);
+    }
+    expect(recheck.ITEM_NAMES.mowing).toBeUndefined();
+    expect(recheck.watchItemsFrom({ checks: [{ key: 'mowing', status: 'watch' }] })).toEqual([]);
+  });
+
+  test('the prompt tells the model to answer better / same / worse only, never direction or cause', () => {
+    expect(recheck.SYSTEM_PROMPT).toMatch(/Never say which direction the problem runs/);
+    expect(recheck.SYSTEM_PROMPT).toMatch(/using its key exactly as given/);
   });
 });
 
@@ -135,7 +157,7 @@ describe('the request', () => {
     ]);
     expect(payload.images[3]).toMatchObject({ data: 'QUZURVI=', mimeType: 'image/png' });
     expect(payload).toMatchObject({ jsonMode: true, laneId: 'lawn_paired_recheck', promptVersion: recheck.PROMPT_VERSION, jsonSchema: recheck.RESPONSE_SCHEMA });
-    expect(payload.text).toContain('- weeds: weeds in the turf');
+    expect(payload.text).toContain('- weeds: weeds growing among the turf');
     expect(payload.text).toContain('- Pair 2: Back overview');
   });
 
@@ -189,22 +211,46 @@ describe('answer validation and normalization', () => {
     ...over,
   });
 
+  const ASKED = { pairCount: 2, itemKeys: ['weeds', 'water'] };
+
   test('a conforming answer passes; bad enums, pair numbers and shapes are rejected (so the fallback gets its turn)', () => {
-    expect(recheck.answerProblem(answer(), { pairCount: 2 })).toBeNull();
-    expect(recheck.answerProblem(null, { pairCount: 2 })).toBe('schema_invalid');
-    expect(recheck.answerProblem({ pairs: [] }, { pairCount: 2 })).toBe('schema_invalid');
+    expect(recheck.answerProblem(answer(), ASKED)).toBeNull();
+    expect(recheck.answerProblem(null, ASKED)).toBe('schema_invalid');
+    expect(recheck.answerProblem({ pairs: [] }, ASKED)).toBe('schema_invalid');
     const bad = [
       answer({ pairs: [{ pair: 3, verdict: 'better', what_changed: [] }] }),
       answer({ pairs: [{ pair: 0, verdict: 'better', what_changed: [] }] }),
       answer({ pairs: [{ pair: 1.5, verdict: 'better', what_changed: [] }] }),
-      answer({ pairs: [{ pair: 1, verdict: 'much better', what_changed: [] }] }),
-      answer({ pairs: [{ pair: 1, verdict: 'better', what_changed: ['the grass looks lovely'] }] }),
-      answer({ pairs: [{ pair: 1, verdict: 'better', what_changed: [] }, { pair: 1, verdict: 'same', what_changed: [] }] }),
-      answer({ items: [{ item: 'weeds', verdict: 'better', what_changed: [], pairs: [5] }] }),
-      answer({ items: [{ item: 'weeds', verdict: 'maybe', what_changed: [], pairs: [1] }] }),
-      answer({ items: [{ item: 'weeds', verdict: 'same', what_changed: [], pairs: [1] }, { item: 'weeds', verdict: 'same', what_changed: [], pairs: [1] }] }),
+      answer({ pairs: [{ pair: 1, verdict: 'much better', what_changed: [] }, { pair: 2, verdict: 'same', what_changed: [] }] }),
+      answer({ pairs: [{ pair: 1, verdict: 'better', what_changed: ['the grass looks lovely'] }, { pair: 2, verdict: 'same', what_changed: [] }] }),
+      answer({ items: [{ item: 'weeds', verdict: 'better', what_changed: [], pairs: [5] }, { item: 'water', verdict: 'same', what_changed: [], pairs: [1] }] }),
+      answer({ items: [{ item: 'weeds', verdict: 'maybe', what_changed: [], pairs: [1] }, { item: 'water', verdict: 'same', what_changed: [], pairs: [1] }] }),
     ];
-    for (const b of bad) expect(recheck.answerProblem(b, { pairCount: 2 })).not.toBeNull();
+    for (const b of bad) expect(recheck.answerProblem(b, ASKED)).not.toBeNull();
+  });
+
+  test('EXACT coverage: a missing, extra, duplicate or empty pair / item list is rejected', () => {
+    const p = (n) => ({ pair: n, verdict: 'same', what_changed: [] });
+    const i = (item) => ({ item, verdict: 'same', what_changed: [], pairs: [1] });
+    const cases = {
+      'missing pair': [answer({ pairs: [p(1)] }), 'incomplete_pairs'],
+      'extra pair': [answer({ pairs: [p(1), p(2), p(3)] }), 'invalid_pair'],
+      'duplicate pair': [answer({ pairs: [p(1), p(1)] }), 'invalid_pair'],
+      'empty pairs': [answer({ pairs: [] }), 'incomplete_pairs'],
+      'missing item': [answer({ items: [i('weeds')] }), 'incomplete_items'],
+      'unknown item': [answer({ items: [i('weeds'), i('water'), i('mowing')] }), 'unknown_item'],
+      'only unknown items': [answer({ items: [i('mowing'), i('lawn')] }), 'unknown_item'],
+      'duplicate item': [answer({ items: [i('weeds'), i('weeds')] }), 'invalid_item'],
+      'duplicate item by case': [answer({ items: [i('weeds'), i(' WEEDS ')] }), 'invalid_item'],
+      'empty items': [answer({ items: [] }), 'incomplete_items'],
+      'both empty': [{ pairs: [], items: [] }, 'incomplete_pairs'],
+    };
+    for (const [name, [json, reason]] of Object.entries(cases)) expect([name, recheck.answerProblem(json, ASKED)]).toEqual([name, reason]);
+    // key matching is trim + lowercase, the way the request sends keys; any order is fine
+    const loose = answer({ items: [i(' Water '), i('WEEDS')], pairs: [p(2), p(1)] });
+    expect(recheck.answerProblem(loose, ASKED)).toBeNull();
+    // no request context, no validation to pass
+    expect(recheck.answerProblem(answer(), { pairCount: 2 })).toBe('no_request_context');
   });
 
   test('better / worse / same earn a record naming the closed change set and the zones used; same names no change', () => {
@@ -338,6 +384,7 @@ describe('the job', () => {
     expect(payload.laneId).toBe('lawn_paired_recheck');
     expect(options.validate({ json: goodJson() })).toBeNull();
     expect(options.validate({ json: { nope: true } })).toBe('schema_invalid');
+    expect(options.validate({ json: { pairs: [], items: [] } })).toBe('incomplete_pairs');
     expect(options).toMatchObject({ reserveFallbackBudget: true, hardDeadline: true });
     // the pairs are last visit's (frozen prior) photo then today's, same shot
     expect(ps.getPhotoBase64.mock.calls.map(([k]) => k).slice(0, 2).sort()).toEqual([`lawn/${CUR}/front.jpg`, `lawn/${PRIOR}/front.jpg`]);
@@ -378,7 +425,7 @@ describe('the job', () => {
     });
     dispatchWithFallback.mockResolvedValue(okAnswer({
       pairs: [{ pair: 1, verdict: 'better', what_changed: ['color'] }, { pair: 2, verdict: 'better', what_changed: ['color'] }, { pair: 3, verdict: 'better', what_changed: ['color'] }],
-      items: [{ item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] }, { item: 'water', verdict: 'better', what_changed: ['color'], pairs: [1] }],
+      items: [{ item: 'water', verdict: 'better', what_changed: ['color'], pairs: [1] }],
     }));
     await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, photoService: photoService(), dispatch: dispatchWithFallback });
     expect(dispatchWithFallback.mock.calls[0][1].text).not.toContain('- weeds');
@@ -473,6 +520,9 @@ describe('fail-open: a miss writes nothing, is logged, and never throws', () => 
     ['garbage object', async () => okAnswer({ hello: 'world' })],
     ['garbage string', async () => okAnswer('not json')],
     ['invalid enum', async () => okAnswer({ pairs: [{ pair: 1, verdict: 'amazing', what_changed: [] }], items: [] })],
+    ['empty arrays', async () => okAnswer({ pairs: [], items: [] })],
+    ['only unknown item keys', async () => okAnswer({ pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'mowing', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
+    ['a missing item', async () => okAnswer({ pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
     ['null result', async () => null],
   ])('%s', async (_name, dispatch) => {
     const { w, out } = await run(dispatch);

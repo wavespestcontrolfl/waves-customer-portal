@@ -53,7 +53,7 @@ const PRODUCT = {
 // One comparison: the prior visit applied `applied`, `days` later the lawn scored `cur`.
 function run({
   days = 30, applied = [], checks = [], cur = {}, prior = {}, confidence = 'moderate', priorSeason = 'peak',
-  curSeason = 'peak', priorDate = PRIOR_DATE, band, overallBand, isBaseline = false, sinceLast, issues,
+  curSeason = 'peak', priorDate = PRIOR_DATE, band, overallBand, isBaseline = false, sinceLast, issues, photoPair,
 } = {}) {
   return buildLawnProgress({
     current: { date: addDays(priorDate, days), season: curSeason, isBaseline, scores: scores(cur), confidence },
@@ -61,6 +61,7 @@ function run({
     sinceLast: sinceLast === undefined ? { priorDate, applied, checks, ...(issues ? { issues } : {}) } : sinceLast,
     band,
     overallBand,
+    ...(photoPair === undefined ? {} : { photoPair }),
   });
 }
 
@@ -439,6 +440,23 @@ describe('rule 4: a recheck verdict comes only from a technician chip', () => {
     // An override alone, with no photo read at all, is still a recheck.
     const lone = run({ days: 30, checks: [{ key: 'weeds', status: 'watch', recheckOverride: { verdict: 'worse', source: 'office_review' } }] });
     expect(lone.items[0]).toMatchObject({ state: 'behind', source: 'office_review' });
+  });
+
+  it('P19b kill switch on the read: photoPair false ignores a stored photo_pair verdict (unclear, as before the feature); an office_review decision stands; true uses it again', () => {
+    const photo = { key: 'weeds', status: 'watch', recheck: { verdict: 'better', source: 'photo_pair' } };
+    const off = run({ days: 30, photoPair: false, checks: [photo] });
+    expect(off.items[0]).toMatchObject({ state: 'unclear', gate: 'not_rechecked', recheck: 'not_recorded', source: null });
+    // identical to a check that never had a recheck
+    const never = run({ days: 30, photoPair: false, checks: [{ key: 'weeds', status: 'watch' }] });
+    expect(off.items).toEqual(never.items);
+    // gate off + office_review (as the recheck itself, or as the override beside a photo read): honored
+    const officeOwn = run({ days: 30, photoPair: false, checks: [{ key: 'weeds', status: 'watch', recheck: { verdict: 'worse', source: 'office_review' } }] });
+    expect(officeOwn.items[0]).toMatchObject({ state: 'behind', source: 'office_review' });
+    const override = run({ days: 30, photoPair: false, checks: [{ ...photo, recheckOverride: { verdict: 'worse', source: 'office_review' } }] });
+    expect(override.items[0]).toMatchObject({ state: 'behind', source: 'office_review' });
+    // toggled back on, and the default, use the stored verdict again
+    expect(run({ days: 30, photoPair: true, checks: [photo] }).items[0]).toMatchObject({ state: 'improving', source: 'photo_pair' });
+    expect(run({ days: 30, checks: [photo] }).items[0]).toMatchObject({ state: 'improving', source: 'photo_pair' });
   });
 
   it('a recheck never changes an applied item, and photo score deltas never change a check', () => {
