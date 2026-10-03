@@ -78,7 +78,7 @@ async function alertAutopayScaParked(customer, err, { amount, source }) {
       severity: 'high',
       title: `Autopay needs card authentication — ${dollars || 'amount unknown'} (${name})`,
       description: 'The cardholder\'s bank has to approve this card charge, so it was NOT collected and no retry is scheduled. Reach the customer to approve it with their bank, or collect it another way. The office bell could not be filed.',
-      trigger_data: JSON.stringify({ payment_id: attemptId, stripe_payment_intent_id: paymentIntentId, source: `autopay_sca_parked_${source}` }),
+      trigger_data: JSON.stringify({ payment_id: attemptId, stripe_payment_intent_id: paymentIntentId, source: `${HEALTH_SOURCE_PREFIX}${source}` }),
     });
   } catch (fallbackErr) {
     logger.error(`[autopay-sca] CRITICAL: customer ${customerId} autopay is parked on card authentication and neither the office bell nor the health-alert fallback could be written (${fallbackErr.message}); the sca_required autopay_log row is the only record`);
@@ -86,9 +86,56 @@ async function alertAutopayScaParked(customer, err, { amount, source }) {
   return false;
 }
 
-// Close the alert(s) for these payment rows ({ id, customer_id, stripe_payment_intent_id }).
-// Best-effort and never throws: clearing a bell must not fail a collection or a webhook.
+// The health-alert fallback's `source` tag is `${HEALTH_SOURCE_PREFIX}<autopay|autopay_retry>`; its
+// trigger_data also carries payment_id and stripe_payment_intent_id (the identifiers below).
+const HEALTH_SOURCE_PREFIX = 'autopay_sca_parked_';
+const HEALTH_ACTIVE = ['new', 'acknowledged']; // the table's live states (health-alerts.js, admin-health.js)
+
+// Resolve the OPEN health-alert fallback rows written when the bell insert failed. Same row set
+// the notification close covers (rows are the callers' payment rows), scoped by customer AND the
+// payment / PI identifiers in trigger_data, so another customer's or another charge's alert is
+// never touched. Resolved the way the existing updateAlert does (status 'resolved' + resolved_at /
+// resolved_by / resolution_notes). Only live rows are selected, so a replay is a no-op.
+async function resolveScaFallbackHealthAlerts(rows, { conn = db, resolution = null } = {}) {
+  const byCustomer = new Map();
+  for (const row of rows || []) {
+    if (!row?.customer_id) continue;
+    const ids = byCustomer.get(String(row.customer_id)) || { pis: new Set(), ids: new Set() };
+    if (row.stripe_payment_intent_id) ids.pis.add(String(row.stripe_payment_intent_id));
+    if (row.id != null) ids.ids.add(String(row.id));
+    byCustomer.set(String(row.customer_id), ids);
+  }
+  let resolved = 0;
+  for (const [customerId, { pis, ids }] of byCustomer) {
+    resolved += await conn('customer_health_alerts')
+      .where({ customer_id: customerId, alert_type: 'payment_failure' })
+      .whereIn('status', HEALTH_ACTIVE)
+      .whereRaw("starts_with(trigger_data->>'source', ?)", [HEALTH_SOURCE_PREFIX])
+      .where(function () {
+        this.whereRaw("trigger_data->>'stripe_payment_intent_id' = ANY(?::text[])", [[...pis]])
+          .orWhereRaw("trigger_data->>'payment_id' = ANY(?::text[])", [[...ids]]);
+      })
+      .update({
+        status: 'resolved',
+        resolved_at: conn.fn.now(),
+        resolved_by: 'system',
+        resolution_notes: resolution || 'The parked autopay charge was collected',
+        updated_at: conn.fn.now(),
+      });
+  }
+  return resolved;
+}
+
+// Close the alert(s) for these payment rows ({ id, customer_id, stripe_payment_intent_id }): the
+// bell row (by dedupe key) AND the health-alert fallback row. The two closes are independent, so
+// one failing never blocks the other. Best-effort and never throws: clearing a bell must not
+// fail a collection or a webhook.
 async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null } = {}) {
+  try {
+    await resolveScaFallbackHealthAlerts(rows, { conn, resolution });
+  } catch (err) {
+    logger.error(`[autopay-sca] could not resolve the parked-charge health alert (a replay of the settlement retries it): ${err.message}`);
+  }
   try {
     const keys = [];
     for (const row of rows || []) {

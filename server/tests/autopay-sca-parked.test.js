@@ -9,7 +9,7 @@
  *     key of each row it resolved;
  *   - closeScaParkedAlerts recomputes the key from a payments row and never throws.
  */
-const mockState = { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [] };
+const mockState = { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [], healthRows: [], healthUpdates: [] };
 
 jest.mock('../models/db', () => {
   function paymentsBuilder() {
@@ -27,12 +27,45 @@ jest.mock('../models/db', () => {
     b.select = jest.fn(() => Promise.resolve(mockState.alreadySuperseded));
     return b;
   }
+  // customer_health_alerts with just enough semantics to evaluate the fallback close: a live row
+  // set, and an update that applies the recorded filters (equality, whereIn, the source-prefix
+  // test, and the PI / payment-id OR group) to it.
+  function healthBuilder() {
+    const f = { eq: {}, in: {}, prefix: null, pis: null, ids: null };
+    const b = {};
+    b.insert = jest.fn((row) => {
+      mockState.inserts.push(row);
+      mockState.healthRows.push({ status: 'new', ...row, trigger_data: typeof row.trigger_data === 'string' ? JSON.parse(row.trigger_data) : row.trigger_data });
+      return Promise.resolve([1]);
+    });
+    b.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(b, b); else Object.assign(f.eq, arg); return b; });
+    b.whereIn = jest.fn((col, vals) => { f.in[col] = vals; return b; });
+    const raw = (sql, bindings) => {
+      if (/starts_with\(trigger_data->>'source'/.test(sql)) f.prefix = bindings[0];
+      else if (/'stripe_payment_intent_id' = ANY/.test(sql)) f.pis = bindings[0];
+      else if (/'payment_id' = ANY/.test(sql)) f.ids = bindings[0];
+      return b;
+    };
+    b.whereRaw = jest.fn(raw);
+    b.orWhereRaw = jest.fn(raw);
+    b.update = jest.fn((payload) => {
+      const hit = mockState.healthRows.filter((r) => Object.entries(f.eq).every(([k, v]) => String(r[k]) === String(v))
+        && Object.entries(f.in).every(([k, v]) => v.includes(r[k]))
+        && String(r.trigger_data?.source || '').startsWith(f.prefix || '')
+        && ((f.pis || []).includes(String(r.trigger_data?.stripe_payment_intent_id)) || (f.ids || []).includes(String(r.trigger_data?.payment_id))));
+      hit.forEach((r) => Object.assign(r, payload));
+      mockState.healthUpdates.push(payload);
+      return Promise.resolve(hit.length);
+    });
+    return b;
+  }
   const db = jest.fn((table) => {
     if (table === 'payments') return paymentsBuilder();
-    if (table === 'customer_health_alerts') return { insert: jest.fn((row) => { mockState.inserts.push(row); return Promise.resolve([1]); }) };
+    if (table === 'customer_health_alerts') return healthBuilder();
     throw new Error(`unexpected table ${table}`);
   });
   db.raw = jest.fn((sql, bindings) => { mockState.rawBindings.push([sql, bindings]); return { sql, bindings }; });
+  db.fn = { now: () => 'NOW' };
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -54,7 +87,7 @@ const PERIOD = { monthKey: '2026-10', monthStart: '2026-10-01', monthEnd: '2026-
 
 beforeEach(() => {
   jest.clearAllMocks();
-  Object.assign(mockState, { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [] });
+  Object.assign(mockState, { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [], healthRows: [], healthUpdates: [] });
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1' });
 });
 
@@ -196,6 +229,8 @@ describe('settleParkedForPaidPayment', () => {
 
   test('a failure in the step never throws (it cannot fail the settlement or the charge)', async () => {
     const db = require('../models/db');
+    // 1st db() call: the own-PI close's health read (let it through); 2nd: the supersede update
+    db.mockImplementationOnce(db.getMockImplementation());
     db.mockImplementationOnce(() => { throw new Error('db down'); });
     await expect(Sca.settleParkedForPaidPayment(settledAchReplacement())).resolves.toEqual([]);
     expect(logger.error.mock.calls.some((c) => /could not resolve parked rows/.test(String(c[0])))).toBe(true);
@@ -247,5 +282,63 @@ describe('recoverable alert close (supersede committed, close failed)', () => {
     await expect(realClose(conn, ['autopay-sca-parked:cust-1:pi_sca_orig'], 'charge_collected')).resolves.toBe(0);
     // already-cleared rows are excluded by the predicate, so nothing is rewritten, re-versioned or re-rung
     expect(calls.raw.some((sql) => /autoCleared' IS DISTINCT FROM 'true'/.test(sql))).toBe(true);
+  });
+});
+
+// When the bell insert fails, the fallback customer_health_alerts row tells staff to collect by hand.
+// Collection must resolve it (the table's live states are new / acknowledged; resolved is
+// status 'resolved' + resolved_at, as health-alerts.updateAlert writes it).
+describe('health-alert fallback is resolved on collection', () => {
+  const PAID = { id: 'pay-new', customer_id: 'cust-1', status: 'paid', metadata: JSON.stringify({ billed_month: '2026-10' }) };
+  const row = (over) => ({ customer_id: 'cust-1', alert_type: 'payment_failure', status: 'new',
+    trigger_data: { payment_id: 'x', stripe_payment_intent_id: 'pi_x', source: 'autopay_sca_parked_autopay' }, ...over });
+
+  test('fallback created (bell insert returned null) -> settlement resolves it; replay is a no-op; others untouched', async () => {
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    await Sca.alertAutopayScaParked(CUSTOMER, SCA_ERR(), { amount: 89, source: 'autopay' });
+    expect(mockState.healthRows).toHaveLength(1);
+    // the fallback carries the identifiers the closer matches on
+    expect(mockState.healthRows[0].trigger_data).toMatchObject({ payment_id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_1' });
+    const fallback = mockState.healthRows[0];
+    // rows that must NOT be touched
+    const otherCustomer = row({ customer_id: 'cust-2', trigger_data: { payment_id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_1', source: 'autopay_sca_parked_autopay' } });
+    const otherPi = row({ trigger_data: { payment_id: 'pay-other', stripe_payment_intent_id: 'pi_other', source: 'autopay_sca_parked_autopay' } });
+    const ambiguousShape = row({ trigger_data: { payment_id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_1', source: 'autopay_ambiguous_parked' } });
+    const alreadyDone = row({ status: 'dismissed', trigger_data: { payment_id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_1', source: 'autopay_sca_parked_autopay' } });
+    mockState.healthRows.push(otherCustomer, otherPi, ambiguousShape, alreadyDone);
+
+    // the parked row is superseded by the collecting payment
+    mockState.resolvedRows = [{ id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' }];
+    await Sca.settleParkedForPaidPayment(PAID);
+
+    expect(fallback).toMatchObject({ status: 'resolved', resolved_by: 'system', resolved_at: 'NOW' });
+    expect(otherCustomer.status).toBe('new');
+    expect(otherPi.status).toBe('new');
+    expect(ambiguousShape.status).toBe('new');
+    expect(alreadyDone.status).toBe('dismissed');
+
+    // replay: only live rows are selected, so nothing is rewritten
+    mockState.healthUpdates.length = 0;
+    const resolvedAt = fallback.resolved_at;
+    mockState.resolvedRows = [];
+    mockState.alreadySuperseded = [{ id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' }];
+    await Sca.settleParkedForPaidPayment(PAID);
+    expect(fallback).toMatchObject({ status: 'resolved', resolved_at: resolvedAt });
+    expect(otherPi.status).toBe('new');
+  });
+
+  test('the payment\'s own PI (the original parked PI settling) also resolves its fallback', async () => {
+    const own = row({ trigger_data: { payment_id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_1', source: 'autopay_sca_parked_autopay_retry' } });
+    mockState.healthRows.push(own);
+    await Sca.settleParkedForPaidPayment({ id: 'pay-sca-1', customer_id: 'cust-1', status: 'paid', stripe_payment_intent_id: 'pi_sca_1', metadata: '{}' });
+    expect(own.status).toBe('resolved');
+  });
+
+  test('a failure resolving the health alert is logged at error level and does not block the bell close', async () => {
+    const db = require('../models/db');
+    db.mockImplementationOnce(() => { throw new Error('db down'); }); // the health update
+    await expect(Sca.closeScaParkedAlerts([{ id: 'p', customer_id: 'c', stripe_payment_intent_id: 'pi' }], 'x')).resolves.toBe(1);
+    expect(logger.error.mock.calls.some((c) => /could not resolve the parked-charge health alert/.test(String(c[0])))).toBe(true);
+    expect(closeAdminAlertKeys).toHaveBeenCalledTimes(1);
   });
 });

@@ -17,6 +17,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
+  fn.fn = { now: () => 'NOW' };
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -315,6 +316,12 @@ describe('charge-now already-collected guard', () => {
       db.mockImplementation((table) => {
         if (table === 'customers') return makeQB({ first: CUSTOMER });
         if (table === 'payments') return ledgerQB();
+        // the shared step also resolves any health-alert fallback row (none here)
+        if (table === 'customer_health_alerts') {
+          const hq = makeQB({ first: null });
+          hq.update = jest.fn(() => Promise.resolve(0));
+          return hq;
+        }
         if (table === 'stripe_orphan_charges') return makeQB({ first: null });
         throw new Error(`unexpected table ${table}`);
       });
