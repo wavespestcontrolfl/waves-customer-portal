@@ -17,7 +17,7 @@ test.each([
   'chinch bugs are back in the lawn',
   'the chinch bugs are killing my grass',
   'my yard is brown',
-  'the yard is looking terrible',
+  'the yard is looking awful',
   'the weeds returned',
   'the grass is brown and not getting better',
 ])('active: %s', (text) => {
@@ -38,6 +38,9 @@ test.each([
   'ants are back in the yard',
   'the grass was brown but it is green now',
   'the lawn was patchy, now it looks good',
+  "The weeds were back, but they aren't anymore",
+  // A complaint word: the portal assistant hands it to the team first.
+  'the yard is looking terrible',
   '',
 ])('not active: %s', (text) => {
   expect(isActiveLawnReport(text)).toBe(false);
