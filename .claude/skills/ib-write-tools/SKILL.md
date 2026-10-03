@@ -25,7 +25,19 @@ step 3 is skipped; step 4 runs server-side through `commitPendingAction` (the
 `/confirm-action` body) via `OwnerDirect.runDirectCommit`, so pins, receipt,
 audit row and `IB_WRITES_DISABLED` are unchanged. A new write tool is NOT
 direct unless deliberately added to that list — customer messages, money,
-bulk, grouped-visit and customer-facing-copy writes never are.
+bulk, grouped-visit and customer-facing-copy writes never are. Two runtime
+limits (owner ruling 2026-10-02): (1) bulk cap — three or more same-tool edits
+in one request that would run direct are refused as a set with
+`owner_direct_bulk_limit` (`BULK_LIMIT_RESULT` points the model at the bulk
+tool, which shows one card; refused in `proposePendingWrite` before any
+pending action is stored, so the bulk card that follows is not blocked). The count is `seedDirectCounts` (the task's direct commits, so a resume
+keeps it) plus `messageDirectPlan` (this message's calls that could run
+direct, `mayExecuteWithoutCard`), decided once per message by `cappedTools`;
+the refusal is applied after the preview, so a call the preview cards still
+gets its card. (2) Notes — an `update_customer` `notes` edit replaces
+`crm_notes`: the proposal reads the current notes and the version pin in one
+read (`preview.notes_replaced`, contract `pinned_notes_replaced`, the card says
+what it deletes) and `executesWithoutCard` runs it direct only over empty notes.
 
 ## Adding a new write tool — checklist
 

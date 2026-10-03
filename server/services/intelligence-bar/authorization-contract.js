@@ -431,6 +431,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (preview?.pinned_customer && (toolName === 'create_appointment' || toolName === 'update_customer')) {
     push('customer', `${toolName === 'create_appointment' ? 'Booked for' : 'Customer'}: ${preview.pinned_customer.name}`);
   }
+  // A notes edit replaces the whole field; over existing notes the card
+  // names what is deleted (Codex r1 on #5675).
+  if (toolName === 'update_customer' && preview?.notes_replaced?.before) {
+    const after = String(params?.updates?.notes ?? '').trim();
+    push('customer', `REPLACES the existing notes — deletes "${preview.notes_replaced.before}" and saves "${after}" in its place`, {
+      before: preview.notes_replaced.before, after,
+    });
+  }
   if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
     const a = preview.pinned_appointment;
     const from = `${a.scheduled_date || '?'}${a.time_window ? ` ${a.time_window}` : ''}`;
@@ -994,6 +1002,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // appointment state) also bind the hash so the card can't drift.
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
+    ...(preview?.notes_replaced ? { pinned_notes_replaced: preview.notes_replaced } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
     // The exact structured effect set (fee amount, invoice ids/credit_applied,
     // inspection-credit offer ids/amounts) — not just its formatted text

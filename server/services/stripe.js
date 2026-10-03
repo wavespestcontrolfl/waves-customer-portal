@@ -3244,19 +3244,19 @@ const StripeService = {
   /**
    * Get payment history with payment method details (both processors)
    */
-  async getPaymentHistory(customerId, limit = 20, offset = 0) {
-    let q = db('payments')
+  async getPaymentHistory(customerId, limit = 20, offset = 0, database = db) {
+    let q = database('payments')
       .where({ 'payments.customer_id': customerId })
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',
         // A removed method nulls payment_method_id (ON DELETE SET NULL) —
         // fall back to the brand/last-four snapshot taken at charge time.
-        db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
-        db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
+        database.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
+        database.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
         'payment_methods.processor as pm_processor',
-        db.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
-        db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
+        database.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
+        database.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
       // payment_date is a DATE: a failed attempt and its same-day retry need

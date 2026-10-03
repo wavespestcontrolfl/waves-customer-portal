@@ -1855,6 +1855,18 @@ router.get('/sender', async (req, res, next) => {
     if (currentLine && !customerLines.includes(currentLine)) return res.json({ fromNumber: null });
     const rawCustomerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
     const customerId = UUID_RE.test(rawCustomerId) ? rawCustomerId : null;
+    // A technician gets a line only for a customer on their own route, and
+    // only for that customer's own number: the answer reveals whether a number
+    // texted Waves recently and which office line it uses (codex #5683 r1 P1).
+    // Anything else answers "no line" and the composer keeps its default.
+    if (isTechnicianRequest(req)) {
+      if (!customerId || !(await technicianServicesCustomer(req, customerId))) return res.json({ fromNumber: null });
+      const owner = await db('customers').where({ id: customerId }).first('phone');
+      // phoneIdentityKey, not a last-10 compare: an international customer
+      // number keeps its full-number identity (codex #5733 r1).
+      const ownKey = phoneIdentityKey(owner?.phone);
+      if (!ownKey || ownKey !== phoneIdentityKey(phone)) return res.json({ fromNumber: null });
+    }
     const { fromNumber, reason } = await require('../services/home-line').staffTextSender({ phone, customerId });
     const line = TWILIO_NUMBERS.findByNumber(fromNumber);
     // replaceableLines: the composer applies fromNumber only while its own
