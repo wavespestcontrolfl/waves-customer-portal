@@ -586,20 +586,14 @@ const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'tha
 const CORRECTION_FILLERS = new Set(['wait', 'weight', 'it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
 function isCorrectingNo(tokens, j) {
   if (tokens[j] !== 'no') return false;
-  // there must be a quantity just before it to correct ("No two ounces of Taurus
-  // were used" corrects nothing: it is a negation)
-  let before = false;
-  for (let k = j - 1; k >= 0 && j - k <= 4; k -= 1) if (readSpokenNumber(tokens, k)) { before = true; break; }
-  if (!before) return false;
   let k = j + 1;
   while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
-  const number = readSpokenNumber(tokens, k);
-  if (!number) return false;
-  // a replacement is a bare amount ("no, five ounces"); "no two ounces OF Taurus"
-  // names what was not used
-  const unit = readUnitAfter(tokens, number.next);
-  return tokens[number.next + unit.skipped + unit.length] !== 'of';
+  return Boolean(readSpokenNumber(tokens, k));
 }
+// "no wait", and "no weight" before a number (how a transcriber writes it): a
+// correction cue, never a negation.
+const isNoWait = (tokens, j) => tokens[j] === 'no'
+  && (tokens[j + 1] === 'wait' || (tokens[j + 1] === 'weight' && Boolean(readSpokenNumber(tokens, j + 2))));
 function isRetracted(tokens, breaks, start, end, stops = []) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
     if (isNegationAt(tokens, j) && !isCorrectingNo(tokens, j)) return true;
@@ -863,7 +857,7 @@ const isCurrentVisitAt = (tokens, j) => tokens[j] === 'today' || tokens[j] === '
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
-  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && (tokens[j + 1] === 'wait' || isCorrectingNo(tokens, j)));
+  return NEGATION_WORDS.has(tokens[j]) && !isNoWait(tokens, j);
 }
 // Token positions a negation word governs: up to NEGATED_SPAN words after it, never
 // past a clause break ("Activity was not heavy, just light": only "heavy"; "Did not
@@ -915,7 +909,7 @@ function wordAfterName(tokens, j, firstAfter) {
   const outOf = token === 'out' && (tokens[j + 1] === 'of' || tokens[j - 1] === 'ran' || tokens[j - 1] === 'all' || j === firstAfter + 1);
   if (outOf || (token === 'ran' && tokens[j + 1] === 'out')) return 'negated';
   if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) {
-    return token === 'no' && (tokens[j + 1] === 'wait' || isCorrectingNo(tokens, j)) ? 'used' : 'negated';
+    return isNoWait(tokens, j) ? 'used' : 'negated';
   }
   return AUXILIARY_WORDS.has(token) ? 'continue' : 'used';
 }

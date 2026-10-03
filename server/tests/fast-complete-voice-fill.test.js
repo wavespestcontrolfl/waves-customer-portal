@@ -1926,3 +1926,9 @@ test('a number in the sentence before does not turn "No two ounces of Taurus wer
   const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, fix).products[0].amount;
   expect(run(4)).toBeNull();
 });
+
+test('"Taurus four ounces, no, five ounces of Taurus": the four is corrected away', () => {
+  const t = 'Taurus four ounces, no, five ounces of Taurus.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+});
