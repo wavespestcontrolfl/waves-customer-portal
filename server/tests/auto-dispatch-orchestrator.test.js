@@ -104,7 +104,7 @@ test('a run that moved visits sends the one summary push after the run is record
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
     await runAutoDispatch({ mode: 'apply' });
     expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledTimes(1);
-    expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledWith({ since: expect.any(Date), runId: 'run1' });
+    expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledWith({ runId: 'run1' });
     expect(audit.completeRun.mock.invocationCallOrder[0])
       .toBeLessThan(techNotices.pushAutoDispatchSummary.mock.invocationCallOrder[0]);
 

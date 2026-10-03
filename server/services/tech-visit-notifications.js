@@ -471,6 +471,13 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
   }
 }
 
+// Auto-dispatch cards whose push deliver() held, by tech, until the run's
+// summary push claims them. In-process on purpose: a run and every move it
+// makes (rebooker → afterCommit → the per-visit queues) happen in one app
+// instance, and this names exactly the cards that run wrote — a time window
+// would count a back-to-back manual run's cards too (pre-push audit P1).
+const heldAutoDispatchCards = new Map();
+
 // Every card in the batch is persisted BEFORE any push is awaited: a push
 // can wait seconds per subscription, and two rapid reassignments (A→B,
 // B→C) must never let B's stale "new visit" land after its "moved off".
@@ -488,7 +495,12 @@ async function deliver(notices) {
   }
   for (const n of written) {
     // An auto-dispatch card's push is held for the run's one summary push.
-    if (n.actorText === AUTO_DISPATCH_ACTOR_TEXT && gateEnvValue(SUMMARY_GATE)) continue;
+    if (n.actorText === AUTO_DISPATCH_ACTOR_TEXT && gateEnvValue(SUMMARY_GATE)) {
+      const key = String(n.technicianId);
+      if (!heldAutoDispatchCards.has(key)) heldAutoDispatchCards.set(key, new Set());
+      heldAutoDispatchCards.get(key).add(n.cardId || `${n.visitId}:${n.kind}`);
+      continue;
+    }
     await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
   }
   return { written: written.length, dropped };
@@ -617,34 +629,26 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
 }
 
 /**
- * After an auto-dispatch run: ONE push per tech that got cards from it —
- * "Auto-dispatch moved 12 visits" — in place of the per-visit pushes deliver()
- * held. The cards are written post-commit on the per-visit queues, so those
- * drain first and the count is the cards the tech will actually see. Counted
- * from `since` (the run's start, less a minute of app/DB clock slack: runs
- * are daily and serialized by runExclusive). Best-effort; never throws.
+ * After an auto-dispatch run: ONE push per tech whose card push it held —
+ * "Auto-dispatch moved 12 visits" — in place of the per-visit pushes. The
+ * cards are written post-commit on the per-visit queues, so those drain
+ * first; the count is the cards the tech will actually see. Best-effort;
+ * never throws.
  */
-async function pushAutoDispatchSummary({ since, runId } = {}) {
+async function pushAutoDispatchSummary({ runId } = {}) {
   try {
-    if (!enabled() || !gateEnvValue(SUMMARY_GATE) || !since) return { pushed: 0 };
+    if (!enabled() || !gateEnvValue(SUMMARY_GATE)) return { pushed: 0 };
     for (let i = 0; i < 5 && visitQueues.size; i += 1) {
       await Promise.allSettled([...visitQueues.values()]);
     }
-    const from = new Date(new Date(since).getTime() - 60 * 1000);
-    const rows = await db('tech_notifications')
-      .whereIn('type', Object.values(TYPE_BY_KIND))
-      .where('created_at', '>=', from)
-      .whereRaw("payload->>'actor' = ?", [AUTO_DISPATCH_ACTOR_TEXT])
-      .groupBy('technician_id')
-      .select('technician_id')
-      .count('* as n');
+    const held = [...heldAutoDispatchCards.entries()];
+    heldAutoDispatchCards.clear();
     const PushService = require('./push-notifications');
     let pushed = 0;
-    for (const row of rows) {
-      const n = Number(row.n) || 0;
-      if (!n || !row.technician_id) continue;
+    for (const [technicianId, cards] of held) {
+      const n = cards.size;
       try {
-        await PushService.sendToAdminUser(row.technician_id, {
+        await PushService.sendToAdminUser(technicianId, {
           title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
           body: '',
           url: '/admin/today',
@@ -653,7 +657,7 @@ async function pushAutoDispatchSummary({ since, runId } = {}) {
         });
         pushed += 1;
       } catch (err) {
-        logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${row.technician_id}: ${err.message}`);
+        logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
       }
     }
     return { pushed };
@@ -740,5 +744,5 @@ module.exports = {
   notifyVisitCancelled,
   pushAutoDispatchSummary,
   SUMMARY_GATE,
-  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
+  _test: { heldAutoDispatchCards, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

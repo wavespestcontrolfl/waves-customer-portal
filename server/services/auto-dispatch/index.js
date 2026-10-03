@@ -904,7 +904,7 @@ async function runAutoDispatch(opts = {}) {
   // One push per tech for the whole run (GATE_AUTO_DISPATCH_PUSH_SUMMARY),
   // after the per-visit cards it summarizes. Best-effort; never throws.
   if (config.mode !== 'dry_run' && totals.changed > 0) {
-    await require('../tech-visit-notifications').pushAutoDispatchSummary({ since: nowDate, runId });
+    await require('../tech-visit-notifications').pushAutoDispatchSummary({ runId });
   }
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
