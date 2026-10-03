@@ -576,7 +576,7 @@ async function matchAcceptCustomerByPhone(estimate, database = db) {
   return {
     match,
     candidateCount: candidates.length,
-    ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id, rejectedAccountId: candidates[0].account_id || null } : {}),
+    ...(contradicted ? { contradicted: true } : {}),
   };
 }
 

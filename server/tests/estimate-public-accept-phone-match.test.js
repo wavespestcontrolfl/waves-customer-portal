@@ -107,7 +107,6 @@ describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts'
     expect(res.candidateCount).toBe(1);
     // The reason is exposed so the accept keeps the new profile off Bob's account.
     expect(res.contradicted).toBe(true);
-    expect(res.rejectedCustomerId).toBe('cust-bob');
   });
 
   it('(a) email compare is case/space-insensitive, address compare keeps the token boundary', async () => {
