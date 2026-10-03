@@ -687,6 +687,9 @@ function availabilityResultToText(res, ctx = {}) {
  * address on your account" to confirm. Fail-soft: an unanswerable read is
  * null.
  */
+// Stored in place of a location part the caller replaced (see capture_lead).
+const ESTIMATE_FIELD_REPLACED = '(replaced)';
+
 async function accountDetailsForEstimate(ctx = {}, stated = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
   // The caller-context kill switch is read at execution time, like every
@@ -1068,7 +1071,8 @@ async function executeTool(name, input = {}, ctx = {}) {
       const { isValidEmail } = require('../../utils/internal-email-recipients');
       // Fields accumulate across captures on this call (hook P1): a retry that
       // supplies only the missing piece keeps what earlier captures gave.
-      const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
+      const priorEstimateFields = Object.fromEntries(Object.entries(typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {})
+        .filter(([, v]) => v !== ESTIMATE_FIELD_REPLACED));
       // Whitespace-only is EMPTY (hook P1): a field must carry real text to
       // count toward a deliverable request.
       const nz = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
@@ -1087,6 +1091,23 @@ async function executeTool(name, input = {}, ctx = {}) {
       // given": they named another address, so the account's never stands in
       // for it. Remembered for the call until a readable one arrives.
       const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || priorEstimateFields.email_unreadable === 'true');
+      // ⭐ AN ADDRESS IS ONE THING. A location part that REPLACES one the
+      // caller gave earlier means a different property: the earlier location
+      // goes, whole, and what this capture did not restate is asked for —
+      // never an old street under a new city. A retry that only ADDS a
+      // missing part (the street after the city), or restates the same one,
+      // still accumulates.
+      const sameText = (x, y) => String(x).trim().toLowerCase() === String(y).trim().toLowerCase();
+      if (LOCATION.some((k) => nz(extracted[k]) && nz(priorEstimateFields[k]) && !sameText(extracted[k], priorEstimateFields[k]))) {
+        for (const k of LOCATION) delete priorEstimateFields[k];
+        // The call's store only adds, and a reconnect rebuilds it by merging
+        // every leg's fields: so the replaced parts are OVERWRITTEN with a
+        // marker (read back as empty) rather than deleted, and the marker
+        // wins that merge like any later value.
+        if (typeof ctx.noteEstimateFields === 'function') {
+          ctx.noteEstimateFields(Object.fromEntries(LOCATION.map((k) => [k, ESTIMATE_FIELD_REPLACED])));
+        }
+      }
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -1156,7 +1177,10 @@ async function executeTool(name, input = {}, ctx = {}) {
           // capture that omits it must not put the inbound number back on
           // the office card.
           ...(input.callback_phone && isLikelyE164(callerPhone) ? { callback_phone: callerPhone } : {}),
-          ...(yesToOffer && accountDetails ? { account_details_confirmed: 'true' } : {}),
+          // The yes is remembered whether or not the account could be read
+          // just now: eligibility is re-proven on every capture, so a failed
+          // read only delays the details, it does not lose the answer.
+          ...(yesToOffer ? { account_details_confirmed: 'true' } : {}),
         });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
@@ -1952,4 +1976,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };
+module.exports = { ESTIMATE_FIELD_REPLACED, TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };

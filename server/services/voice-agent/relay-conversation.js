@@ -733,7 +733,9 @@ const PRICE_LINE_CONTEXT = [
   '- If you cannot give a number for what they want, do not leave them empty-handed — but do not',
   '  promise first: say the office can put a written estimate together, get their first and last',
   '  name, email address, and full service street address, and call capture_lead with',
-  '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
+  '  estimate_requested: true. (For a caller a KNOWN CALLER block says is already a customer, do',
+  '  not collect those first: call capture_lead with what they have told you and follow its',
+  '  result.) Only if the tool result says the request is queued may you promise',
   '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
   '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
   '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
@@ -2827,7 +2829,9 @@ class RelayConversation {
         callerAttested: !!(convo._callerContext && convo._callerContext.attested === true),
         from: this.from || null,
         language: this.language || null,
-        factsCollected: { ...(convo._estimateFields || {}) },
+        // A location part the caller replaced is stored as a marker, not a fact.
+        factsCollected: Object.fromEntries(Object.entries(convo._estimateFields || {})
+          .filter(([, v]) => v !== require('./relay-tools').ESTIMATE_FIELD_REPLACED)),
         tools: this._toolOutcomes.slice(),
         commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
         turnCount: this._userTurns.length,

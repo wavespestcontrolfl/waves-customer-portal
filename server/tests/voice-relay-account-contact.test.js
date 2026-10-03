@@ -418,6 +418,36 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(filedCards()[2][2].phone).toBe('+19415550188');
   });
 
+  test('a location part that replaces one the caller gave is a different property: the earlier address goes whole; a part that only adds still accumulates', async () => {
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    const full = { first_name: 'Dana', last_name: 'Sample', email: 'd@example.com' };
+    expect(await ask({ ...full, address_line1: '9 Rental Rd', city: 'Venice', zip: '34285' }, ctx)).toMatch(/IS on the office queue/);
+    // A new city alone: the old street and ZIP must not complete it.
+    const moved = await ask({ city: 'Sarasota' }, ctx);
+    expect(moved).toMatch(/still missing: address_line1/);
+    // The store only adds: the replaced parts are overwritten with a marker, which reads back as empty…
+    expect(store.bag()).toMatchObject({ city: 'Sarasota', address_line1: '(replaced)', zip: '(replaced)' });
+    // …and survives a reconnect, which rebuilds the store by merging every leg's fields, later legs winning.
+    const resumed = callStore();
+    resumed.noteEstimateFields({ address_line1: '9 Rental Rd', city: 'Venice', zip: '34285' }); // the earlier leg
+    resumed.noteEstimateFields(store.bag()); // this leg
+    expect(await ask({}, estimateCtx(resumed))).toMatch(/still missing: address_line1/);
+    // Adding the street accumulates; restating the same city is not a change.
+    expect(await ask({ address_line1: '4 Other Ave', city: 'sarasota' }, ctx)).toMatch(/IS on the office queue/);
+    expect(filedCards().at(-1)[1]).toMatchObject({ address_line1: '4 Other Ave', city: 'sarasota', zip: null });
+  });
+
+  test('a yes given while the account could not be read is not lost: the next capture uses it', async () => {
+    const ctx = estimateCtx(callStore());
+    const ok = db.getMockImplementation();
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    db.mockImplementation(ok);
+    expect(await ask({}, ctx)).toMatch(/IS on the office queue/); // no repeated flag, no repeated question
+    expect(filedCards()[0][2].accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
+  });
+
   test('a yes counts only as the answer to a question the tool offered: the flag on a first capture confirms nothing', async () => {
     const ctx = estimateCtx(callStore({ offered: false }));
     const eager = await ask({ use_account_details: true }, ctx);
@@ -488,6 +518,8 @@ describe('the exception lives at system priority, only when the caller-context l
     expect(buildBasePrompt(true)).toMatch(/written estimate, call capture_lead with estimate_requested first/);
     expect(buildBasePrompt(true)).toMatch(/ONLY when that result offers it, ask the one\s+question "Should it go to the email and service address on your account\?"/);
     expect(buildBasePrompt(true)).toMatch(/When the result does not offer it, ask for what is missing/);
+    // …and the pricing rule defers to that sequence for a known customer, so the prompt has one order.
+    expect(buildBasePrompt(true)).toMatch(/already a customer, do\s+not collect those first: call capture_lead with what they have told you/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });
