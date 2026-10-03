@@ -292,6 +292,24 @@ describe('self-service routes', () => {
     expect(res.body.secret).toBeUndefined();
   });
 
+  test('a recovery code spent to replace the authenticator returns a session with a replacement window', async () => {
+    bcrypt.compare.mockResolvedValue(true);
+    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'recovery' });
+    const err = Object.assign(new Error('Two-step sign-in cannot be set up: no encryption key is configured.'), { status: 503 });
+    staffMfa.startSetup.mockRejectedValue(err);
+    const res = await invoke(mfaSetup, { technician: staffRow({ mfa_enabled_at: new Date() }), staffToken: { mfa: true }, body: { currentPassword: 'right', code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(res.statusCode).toBe(503);
+    expect(res.body.replaceWithoutCode).toBe(true);
+    expect(jwt.verify(res.body.token, SECRET).mfaRecoveryUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    // A database failure in the setup write keeps the window too.
+    staffMfa.startSetup.mockRejectedValue(new Error('staff MFA setup failed: database error 40001'));
+    const failed = await invoke(mfaSetup, { technician: staffRow({ mfa_enabled_at: new Date() }), staffToken: { mfa: true }, body: { currentPassword: 'right', code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body.replaceWithoutCode).toBe(true);
+    expect(failed.body.token).toEqual(expect.any(String));
+  });
+
   test('confirm is fenced on the session version and continues this session on the new version', async () => {
     staffMfa.confirmSetup.mockResolvedValue({
       ok: true,

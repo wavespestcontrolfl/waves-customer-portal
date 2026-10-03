@@ -295,6 +295,16 @@ export default function AdminTwoStepPage() {
 
   // `authToken`: a request made right after this page replaced its own
   // session passes the new token (state updates land on the next render).
+  // A response carrying a fresh session (a recovery code spent to replace
+  // the authenticator) becomes this page's session, unless another tab
+  // changed the session meanwhile.
+  const adoptSession = (data, usedToken) => {
+    if (!data?.token || !data.replaceWithoutCode || localStorage.getItem('waves_admin_token') !== usedToken) return;
+    localStorage.setItem('waves_admin_token', data.token);
+    setToken(data.token);
+    setStatus((current) => (current ? { ...current, replaceWithoutCode: true } : current));
+  };
+
   const call = async (path, { method = 'GET', body, authToken = token } = {}) => {
     const response = await fetch(`${API_BASE}/admin/auth/mfa${path}`, {
       method,
@@ -321,6 +331,7 @@ export default function AdminTwoStepPage() {
       navigate('/admin/login', { replace: true });
       throw new Error(data.error || 'Sign in again.');
     }
+    adoptSession(data, authToken);
     if (!response.ok) {
       throw Object.assign(new Error(data.error || 'Something went wrong. Try again.'), { status: response.status });
     }

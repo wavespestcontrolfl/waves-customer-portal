@@ -326,6 +326,11 @@ async function mfaStatus(req, res, next) {
 // authenticator to the account. A session that just signed in with a
 // recovery code (the lost-phone path) may replace it without another code.
 async function mfaSetup(req, res, next) {
+  // A recovery code spent to replace a lost authenticator must not be the
+  // last one gone for nothing: the session that spent it gets the same
+  // replacement window a recovery-code sign-in gets (a fresh token carrying
+  // mfaRecoveryUntil), returned with whatever this request answers next.
+  let recoverySession = {};
   try {
     const tech = req.technician;
     const { currentPassword, code } = req.body || {};
@@ -338,12 +343,26 @@ async function mfaSetup(req, res, next) {
       }
       const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
       if (!result.ok) return mfaFailureResponse(res, result, 400);
+      if (result.method === 'recovery') {
+        const { token, refreshToken } = mintStaffTokens(tech, { mfa: true, mfaRecoveryUntil: staffMfa.recoveryReplaceDeadline() });
+        recoverySession = { token, refreshToken, replaceWithoutCode: true };
+      }
     }
     const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!started.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
-    return res.json({ secret: started.secret, otpauthUrl: started.otpauthUrl, expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000 });
+    return res.json({
+      secret: started.secret,
+      otpauthUrl: started.otpauthUrl,
+      expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000,
+      ...recoverySession,
+    });
   } catch (err) {
-    if (err.status === 503) return res.status(503).json({ error: err.message });
+    if (err.status === 503) return res.status(503).json({ error: err.message, ...recoverySession });
+    // A spent recovery code still gets its retry window when the setup write
+    // itself failed (the error is already sanitized by staff-mfa).
+    if (recoverySession.token) {
+      return res.status(500).json({ error: 'Setup could not start. Try again.', ...recoverySession });
+    }
     return next(err);
   }
 }

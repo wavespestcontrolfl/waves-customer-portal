@@ -174,6 +174,24 @@ describe('AdminTwoStepPage', () => {
     expect(await screen.findByLabelText('Code from your current authenticator')).toBeInTheDocument();
   });
 
+  it('a recovery code spent to replace the authenticator keeps a retry window on this session', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: true, recoveryCodesRemaining: 1 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15, token: 'recovery-window-jwt', replaceWithoutCode: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace authenticator (new phone)' }));
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.change(screen.getByLabelText('Code from your current authenticator'), { target: { value: 'AAAA-BBBB-CCCC-DDDD' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByLabelText('Code from the app')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('recovery-window-jwt');
+    // Cancel back to the setup form: no current code is asked for now.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace authenticator (new phone)' }));
+    expect(screen.queryByLabelText('Code from your current authenticator')).not.toBeInTheDocument();
+  });
+
   it('another tab signing out ends this page at once', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 9 })));
     renderPage();
