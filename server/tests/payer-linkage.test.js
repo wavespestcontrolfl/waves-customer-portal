@@ -71,7 +71,7 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
   test('the portal payment history (GET /api/billing) uses the shared service (no second copy of the predicate)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/portal-payment-history'), 'utf8');
     expect(src).toMatch(/require\('\.\/payer-linkage'\)/);
-    expect(src).toMatch(/await loadPayerLinkage\(customerId\)/);
+    expect(src).toMatch(/await loadPayerLinkage\(customerId(?:, database(?:, \{ propagateCancellation: database !== db \})?)?\)/);
     expect(src).not.toMatch(/const isPayerLinked = /);
     expect(require('fs').readFileSync(require.resolve('../routes/billing-v2'), 'utf8')).not.toMatch(/const isPayerLinked = /);
   });
@@ -142,5 +142,15 @@ describe('loadLivePayerLinkage is bounded', () => {
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([invoices(5)]));
     const out = await loadLivePayerLinkage('c1', dbh);
     expect(out.failed).toBe(false);
+  });
+});
+
+describe('scoped payer-linkage cancellation', () => {
+  test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }, { code: 'PORTAL_CHAT_DEADLINE' }])('keeps default fail-closed behavior and propagates only for opted-in readers: %j', async (identity) => {
+    const failure = Object.assign(new Error('cancelled'), identity);
+    const query = { where: () => query, select: () => query, catch: (handler) => Promise.reject(failure).catch(handler) };
+    const database = () => query;
+    expect(await loadPayerLinkage('c1', database)).toMatchObject({ failed: true });
+    await expect(loadPayerLinkage('c1', database, { propagateCancellation: true })).rejects.toBe(failure);
   });
 });

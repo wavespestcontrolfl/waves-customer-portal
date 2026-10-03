@@ -415,6 +415,15 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 60000, maxRetries: 0 });
   });
 
+  test('an external abort signal reaches the Anthropic SDK request', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const controller = new AbortController();
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', timeoutMs: 60000, signal: controller.signal });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toMatchObject({
+      timeout: 60000, maxRetries: 0, signal: controller.signal,
+    });
+  });
+
   test('no timeoutMs → no per-request options (SDK default timeout + retries apply)', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });
@@ -572,6 +581,19 @@ describe('callOpenAI jsonMode parsing', () => {
     const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
     await callOpenAI({ model: OPENAI_BEST, text: 'hi', timeoutMs: 1234 });
     expect(timeoutSpy).toHaveBeenCalledWith(1234);
+  });
+
+  test('an external abort signal is combined with the OpenAI timeout', async () => {
+    let requestSignal;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, options) => {
+      requestSignal = options.signal;
+      return { ok: true, json: async () => ({ output_text: '{"ok":true}' }) };
+    });
+    const controller = new AbortController();
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', timeoutMs: 1234, signal: controller.signal });
+    expect(requestSignal.aborted).toBe(false);
+    controller.abort();
+    expect(requestSignal.aborted).toBe(true);
   });
 });
 
