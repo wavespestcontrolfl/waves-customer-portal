@@ -343,6 +343,11 @@ async function linesGoneFor(dbh, notices, { snapshots, today }) {
     logger.warn(`[rate-review-comms] plan holds unreadable: ${err.message}`);
     for (const n of notices) gone.set(String(n.id), 'visits_unreadable');
   }
+  // Delivered on paper but every channel failed afterwards (see recordChannelFailure):
+  // the apply names it delivery_revoked and changes nothing.
+  for (const n of notices) {
+    if (n.sent_at && parseJson(n.metadata, {}).delivery_revoked) gone.set(String(n.id), 'delivery_revoked');
+  }
   for (const n of notices.filter((x) => x.billing_lane === 'per_application' && !gone.has(String(x.id)))) {
     try {
       const meta = parseJson(n.metadata, {});
@@ -691,10 +696,10 @@ async function freezeLetter(dbh, entry, frozen) {
 
 // hold: a named reason the send was refused before any provider took it
 // (recorded on each line as metadata.send_hold; the next attempt clears it).
-async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null }) {
+async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, extra = {} }) {
   for (const l of entry.lines) {
     const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
-    const next = { ...meta, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString() } } : {}) };
+    const next = { ...meta, ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString() } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
@@ -885,6 +890,12 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       }),
     },
   });
+  // The provider ids, persisted on the notice at dispatch: a later bounce, drop
+  // or undelivered text finds its notice through them (recordChannelFailure).
+  const dispatchMeta = {
+    ...(email.messageId ? { email_message_id: String(email.messageId) } : {}),
+    ...(sms.sid ? { sms_sid: String(sms.sid) } : {}),
+  };
   const smsHold = SMS_HOLD_REASONS[sms.blockedCode] || null;
   if (smsHold) logger.warn(`[rate-review-comms] text pointer withheld for customer ${entry.customerId}: ${smsHold}`);
   if (!email.sent && !sms.sent) {
@@ -906,10 +917,10 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // with the named reason (the preview recomputes who it belongs to) —
     // never parked unreachable.
     if (holdReason && !attempted) {
-      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason });
+      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason, extra: dispatchMeta });
       return { outcome: emailRejected || smsNotPrepared ? 'rejected' : 'in_flight', holdReason };
     }
-    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason });
+    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason, extra: dispatchMeta });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = clock();
@@ -920,13 +931,19 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
     for (const l of entry.lines) {
-      const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
+      // A re-send after a bounce: the earlier revocation is history, and the old
+      // provider ids must not match this send's events.
+      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: _cf, email_message_id: _e, sms_sid: _s, ...meta } = parseJson(l.notice.metadata, {});
       const stamped = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-        metadata: JSON.stringify({ ...meta, ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
+        metadata: JSON.stringify({ ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
       if (stamped) {
-        await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
+        const snap = await trx('rate_review_snapshots').where({ notice_id: l.noticeId }).first();
+        await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({
+          status: 'sent', updated_at: sentAt,
+          ...(snap ? { flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)) } : {}),
+        });
       } else {
         orphaned.push(l);
       }
@@ -1177,12 +1194,163 @@ async function declinedPrepayTermIds(dbh, rows) {
   return out;
 }
 
+// ── delivery reconciliation ────────────────────────────────────────────
+
+const DELIVERY_BOUNCED_FLAG = 'delivery_bounced';
+const flagList = (raw) => (Array.isArray(raw) ? raw : (() => { const v = parseJson(raw, []); return Array.isArray(v) ? v : []; })());
+
+// SendGrid events that mean the message did not reach the mailbox. (A soft
+// 'deferred' is still retrying; 'delivered' never un-revokes a failure; a spam
+// report is a delivered message.)
+const EMAIL_UNDELIVERED_EVENTS = new Set(['bounce', 'dropped', 'blocked']);
+const isEmailUndelivered = (ev) => EMAIL_UNDELIVERED_EVENTS.has(String(ev?.event || '').trim().toLowerCase());
+
+// Notices of this customer whose metadata names the provider id (set at dispatch).
+async function noticesForDispatch(dbh, customerId, key, value) {
+  if (!customerId || !value) return [];
+  const rows = await dbh('price_change_notices').where({ customer_id: customerId }).whereNotNull('rate_review_row_id');
+  return rows.filter((n) => String(parseJson(n.metadata, {})[key] || '') === String(value));
+}
+
+// One channel of one delivered notice failed (run inside a transaction, which
+// the caller owns). The failed channel's flag goes off; when NO channel is left
+// the notice is undelivered: delivery_revoked is recorded and, unless a
+// per-application/monthly rate was already written (that cannot be un-written —
+// it is flagged for a hand check instead), the notice returns to a sendable
+// draft, a staged prepaid amount is un-staged, and the ranking row goes back
+// to approved with a 'delivery_bounced' flag so the admin screen offers a
+// re-send. Duplicate or late events (flag already off, already revoked) do
+// nothing: the first hard failure wins and a later 'delivered' never undoes it.
+// Returns an alert descriptor when the notice was revoked, else null.
+async function recordChannelFailure(trx, notice, channel, detail) {
+  await lockCustomerComms(trx, notice.customer_id);
+  const live = await trx('price_change_notices').where({ id: notice.id }).forUpdate().first();
+  if (!live) return null;
+  const meta = parseJson(live.metadata, {});
+  const flag = channel === 'email' ? 'email_sent' : 'sms_sent';
+  const otherFlag = channel === 'email' ? 'sms_sent' : 'email_sent';
+  if (meta.delivery_revoked || live[flag] !== true) return null;
+  const at = (detail.at instanceof Date ? detail.at : new Date()).toISOString();
+  const failure = { event: String(detail.event || ''), channel, at, reason: String(detail.reason || '').slice(0, 300) };
+  const next = { ...meta, channel_failures: { ...(meta.channel_failures || {}), [channel]: failure } };
+  const patch = { [flag]: false, updated_at: new Date() };
+  if (live[otherFlag] === true) {
+    await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
+    return null;
+  }
+  next.delivery_revoked = failure;
+  const prepay = live.billing_lane === 'annual_prepay';
+  const rateWritten = !!live.applied_at && !prepay;
+  if (!rateWritten) {
+    patch.status = 'draft';
+    patch.sent_at = null;
+    if (live.applied_at && prepay) {
+      // The renewal amount staged the night after delivery: un-stage it, unless
+      // the 30-day reminder already told the customer that amount.
+      const term = meta.term_id ? await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first() : null;
+      const { termRenewalNoticed } = require('./rate-review-apply')._private;
+      if (term && !termRenewalNoticed(term) && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents)) {
+        await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
+        next.prepay_unstaged = true;
+      }
+      Object.assign(patch, { applied_at: null, apply_hold_reason: null, applies_from_visit_id: null });
+    }
+  }
+  await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
+  const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
+  if (snap) {
+    const flags = flagList(snap.flags);
+    if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
+    await trx('rate_review_snapshots').where({ id: snap.id }).update({
+      flags: JSON.stringify(flags), ...(rateWritten ? {} : { status: 'approved' }), updated_at: new Date(),
+    });
+  }
+  try {
+    await trx.transaction(async (sp) => sp('activity_log').insert({
+      customer_id: live.customer_id,
+      action: 'rate_review_delivery_revoked',
+      description: `Rate review notice undelivered (${channel} ${failure.event}): ${rateWritten ? 'the new rate was already applied — check it by hand' : 'back to ready to send'}.`,
+      metadata: JSON.stringify({ notice_id: live.id, ...failure, rate_written: rateWritten, prepay_unstaged: !!next.prepay_unstaged }),
+    }));
+  } catch (err) {
+    logger.warn(`[rate-review-comms] activity log failed for revoked notice ${live.id}: ${err.message}`);
+  }
+  return { noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten, channel, event: failure.event };
+}
+
+// The existing admin alert path (no new channel); after the event commits.
+async function raiseDeliveryAlerts(alerts) {
+  for (const a of alerts || []) {
+    try {
+      const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+      const spec = {
+        area: 'Billing',
+        action: a.rateWritten ? 'check a rate change whose letter bounced' : 'fix the contact and re-send a rate letter',
+        why: a.rateWritten
+          ? 'The rate letter was undelivered after the new rate had already been applied, so check what the customer was told.'
+          : 'The rate letter bounced or was blocked, so the customer was not told. It is back in Rate review, ready to send again once the contact is fixed.',
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(a.customerId)}`,
+        subject: { type: 'customer', id: String(a.customerId) },
+        doneWhen: 'rate_review_letter_delivered',
+        who: 'person',
+      };
+      const opts = { dedupeKey: `rate-review-delivery-revoked:${a.noticeId}:${a.event}`, refreshOnDedupe: true, metadata: { noticeId: a.noticeId, rateReviewRowId: a.rowId, familyKey: a.familyKey, channel: a.channel, event: a.event } };
+      if (!require('../config/feature-gates').alertEpisodesLive()) { await raiseAdminAlert('billing', spec, opts); continue; }
+      const composed = composeAdminAlert(spec);
+      await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, { ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata } });
+    } catch (err) {
+      logger.warn(`[rate-review-comms] delivery alert failed for notice ${a.noticeId}: ${err.message}`);
+    }
+  }
+}
+
+// The SendGrid event webhook's hook (routes/webhooks-sendgrid.js, inside the
+// event's own transaction, for a ledger row the event matched): a rate review
+// letter that did not reach the mailbox. Returns alerts to raise after commit.
+async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
+  if (!emailMessage || emailMessage.template_key !== TEMPLATE_KEY || !isEmailUndelivered(ev)) return [];
+  const notices = await noticesForDispatch(trx, emailMessage.recipient_id, 'email_message_id', emailMessage.id);
+  const alerts = [];
+  const at = ev.timestamp ? new Date(Number(ev.timestamp) * 1000) : new Date();
+  for (const notice of notices) {
+    const alert = await recordChannelFailure(trx, notice, 'email', { event: ev.event, at, reason: ev.reason || ev.response || ev.type });
+    if (alert) alerts.push(alert);
+  }
+  return alerts;
+}
+
+// Twilio's status callback for a failed/undelivered text (routes/twilio-webhook.js):
+// the same reconciliation for the text pointer. Best-effort; never throws.
+async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db } = {}) {
+  try {
+    if (!sid) return [];
+    const log = await dbh('sms_log').where({ twilio_sid: sid }).first();
+    if (!log || !log.customer_id) return [];
+    const alerts = [];
+    await dbh.transaction(async (trx) => {
+      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {
+        const alert = await recordChannelFailure(trx, notice, 'sms', { event: String(status || 'failed'), at: new Date(), reason: errorCode ? `error ${errorCode}` : '' });
+        if (alert) alerts.push(alert);
+      }
+    });
+    await raiseDeliveryAlerts(alerts);
+    return alerts;
+  } catch (err) {
+    logger.warn(`[rate-review-comms] sms failure reconciliation failed for ${sid}: ${err.message}`);
+    return [];
+  }
+}
+
 module.exports = {
   TEMPLATE_KEY,
+  handleEmailDeliveryEvent,
+  handleSmsDeliveryFailure,
+  raiseDeliveryAlerts,
   sendPreview,
   letterPreview,
   sendBatch,
   publicReview,
   upcomingRateChanges,
-  _private: { whyFor, lineFor, letterPayload, planBatch, digestFor, linesGoneFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
+  _private: { recordChannelFailure, whyFor, lineFor, letterPayload, planBatch, digestFor, linesGoneFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
 };

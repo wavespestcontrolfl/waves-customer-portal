@@ -919,6 +919,118 @@ describe('customer surfaces', () => {
     expect(JSON.parse(notices()[0].metadata).sms_withheld).toBe('recipient_phone_changed');
   });
 
+  describe('delivery reconciliation (a bounce after provider acceptance)', () => {
+    const bounce = (over = {}) => ({ event: 'bounce', type: 'bounce', reason: '550 mailbox not found', timestamp: 1790000000, ...over });
+    const message = (over = {}) => ({ id: 'em-1', template_key: comms.TEMPLATE_KEY, recipient_type: 'customer', recipient_id: CUSTOMER(1), ...over });
+    const meta = () => JSON.parse(notices()[0].metadata);
+    const sendEmailOnly = async (b = book()) => {
+      mockDb.reset(b);
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+    };
+
+    test('the provider ids are persisted on the notice at dispatch', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(meta()).toMatchObject({ email_message_id: 'em-1', sms_sid: 'SM1' });
+    });
+
+    test('a bounce of an email-only letter revokes the notice: undelivered, back to a sendable draft, ranking row approved + flagged, alert returned', async () => {
+      await sendEmailOnly();
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      expect(alerts).toEqual([expect.objectContaining({ noticeId: notices()[0].id, customerId: CUSTOMER(1), rateWritten: false, event: 'bounce' })]);
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ event: 'bounce', channel: 'email', reason: '550 mailbox not found' });
+      expect(snapshots()[0].status).toBe('approved');
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+      // the dead link no longer renders a letter
+      expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true });
+      // and the line is offered for re-send
+      expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    });
+
+    test('duplicate and late events change nothing: a repeated bounce, a delivered after the bounce, another message id, another template', async () => {
+      await sendEmailOnly();
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message(), bounce())).toHaveLength(1);
+      const after = JSON.stringify(notices()[0]);
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message(), bounce({ event: 'dropped' }))).toEqual([]);
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message(), { event: 'delivered' })).toEqual([]);
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-OTHER' }), bounce())).toEqual([]);
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message({ template_key: 'billing.invoice' }), bounce())).toEqual([]);
+      expect(JSON.stringify(notices()[0])).toBe(after);
+    });
+
+    test('a re-send after a bounce creates a new message id; the old message\'s late event is ignored and the revocation becomes history', async () => {
+      await sendEmailOnly();
+      await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-2' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+      expect(meta()).toMatchObject({ email_message_id: 'em-2' });
+      expect(meta().delivery_revoked).toBeUndefined();
+      expect(meta().delivery_revocations).toHaveLength(1);
+      expect(JSON.parse(snapshots()[0].flags)).not.toContain('delivery_bounced');
+      expect(snapshots()[0].status).toBe('sent');
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message(), bounce())).toEqual([]); // the OLD message again
+      expect(notices()[0].status).toBe('sent');
+    });
+
+    test('a prepaid amount already staged is un-staged and the notice returns to unapplied', async () => {
+      const prepay = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+      });
+      const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+      b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+      await sendEmailOnly(b);
+      // the nightly apply staged the successor amount
+      Object.assign(notices()[0], { applied_at: NOW, apply_hold_reason: null });
+      mockDb.store.annual_prepay_terms[0].next_term_prepay_amount = '484.00';
+      await comms.handleEmailDeliveryEvent(mockDb, message(), bounce({ event: 'blocked', type: 'blocked' }));
+      expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, applied_at: null });
+      expect(meta()).toMatchObject({ prepay_unstaged: true });
+      expect(snapshots()[0].status).toBe('approved');
+    });
+
+    test('a rate already written (non-prepaid) cannot be un-written: recorded and flagged for a hand check, not re-sent', async () => {
+      await sendEmailOnly();
+      Object.assign(notices()[0], { applied_at: NOW });
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      expect(alerts[0]).toMatchObject({ rateWritten: true });
+      expect(notices()[0]).toMatchObject({ status: 'sent' });
+      expect(snapshots()[0].status).toBe('sent');
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+    });
+
+    test('both channels: a failed email alone keeps the notice delivered (the text stands); the text failing afterwards revokes it', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message(), bounce())).toEqual([]);
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: false, sms_sent: true });
+      expect(meta().delivery_revoked).toBeUndefined();
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      const alerts = await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30003' }, { dbh: mockDb });
+      expect(alerts).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'undelivered' });
+      // a text sid we do not know is ignored
+      expect(await comms.handleSmsDeliveryFailure({ sid: 'SM-OTHER', status: 'failed' }, { dbh: mockDb })).toEqual([]);
+    });
+
+    test('portal: a revoked notice that still carries its stamps is not upcoming (the apply names delivery_revoked)', async () => {
+      mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), delivery_revoked: { event: 'bounce' } } })] }));
+      expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+    });
+  });
+
   test('portal: a prepaid change whose renewal is already recorded (a successor term) is not upcoming', async () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,

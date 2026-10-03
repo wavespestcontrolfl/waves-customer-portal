@@ -240,7 +240,9 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
       },
     });
     if (result?.blocked) return { sent: false, attempted: false };
-    return { sent: !!result?.sent, attempted };
+    // The ledger row this send created (the SendGrid event webhook resolves a
+    // bounce to it): callers that must reconcile a later failure persist it.
+    return { sent: !!result?.sent, attempted, ...(result?.message?.id ? { messageId: String(result.message.id) } : {}) };
   } catch (err) {
     logger.error(`[price-change] email failed for customer ${customer.id} (${err?.name || 'Error'})`);
     // The library's own definite-non-send classification (unconfigured, or a
@@ -322,7 +324,7 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       if (res.deliveryOutcome === 'not_sent') return { sent: false, attempted: false };
       if (res.sent && res.deliveryOutcome !== 'accepted') return { sent: false, attempted: true };
     }
-    return { sent: !!res.sent, attempted };
+    return { sent: !!res.sent, attempted, ...(res.providerMessageId ? { sid: String(res.providerMessageId) } : {}) };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
     return { sent: false, attempted, ...(attempted && !reachedSender ? { definiteNonSend: true } : {}) };

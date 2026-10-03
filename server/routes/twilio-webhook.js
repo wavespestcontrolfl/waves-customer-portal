@@ -1672,6 +1672,12 @@ router.post('/status', async (req, res) => {
           link: '/admin/communications',
         });
 
+        // A rate review letter's text pointer that failed: reconcile its notice
+        // (the same undelivered handling as a bounced email). No-op for any
+        // other message; best-effort, off the response path.
+        void require('../services/rate-review-comms').handleSmsDeliveryFailure({ sid: MessageSid, status: MessageStatus, errorCode: ErrorCode })
+          .catch((e) => logger.error(`[twilio-status] rate review reconciliation failed: ${e.message}`));
+
         // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
         // STOP we never saw inbound (sent to a different number on the
         // Messaging Service, a pre-portal opt-out, a carrier block). Without
