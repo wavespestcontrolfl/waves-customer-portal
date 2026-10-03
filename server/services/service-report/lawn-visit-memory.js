@@ -425,6 +425,18 @@ async function recordPairedRecheck(serviceRecordId, assessmentId, { rechecks = {
   }
 }
 
+// The token route's own read-side eligibility, as one SQL predicate: the report
+// is a service_report_v1 report, and it is not a suppressed typed report
+// (routes/reports-public.js: report_template_version !== 'service_report_v1'
+// is a 404, and suppressedTypedReport() treats a typedReportDelivery other than
+// 'auto_send' as staff-read-only; a write on such a report is refused for
+// everyone). The weather lookup runs between the route's check and this write,
+// so the UPDATE re-asks it atomically. The other post-completion writers
+// (recordPairedRecheck, the week-weather and v6 copy freezes) do not carry this
+// guard; it is added for this writer only.
+const REPORT_READABLE_SQL = "report_template_version = 'service_report_v1'"
+  + " AND COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'typedReportDelivery', ''), 'auto_send') = 'auto_send'";
+
 /**
  * Write the rainfast retreat-check (P31) onto an ALREADY FROZEN entry as its one
  * `retreatCheck` item, after the visit, on a live render. Same rules as
@@ -437,6 +449,8 @@ async function recordPairedRecheck(serviceRecordId, assessmentId, { rechecks = {
  *   - compare-and-set on the entry as read (jsonb equality), so a concurrent
  *     writer on the same entry forces a re-read, never a lost write; no
  *     SELECT ... FOR UPDATE;
+ *   - the record must still be readable as a customer report (REPORT_READABLE_SQL),
+ *     asked in the same UPDATE, not only before the weather lookup;
  *   - nothing else in structured_notes or in the entry changes.
  * Returns the item the entry now carries, or null when nothing could be stored.
  */
@@ -452,6 +466,7 @@ async function recordRetreatCheck(serviceRecordId, assessmentId, item, knex) {
       const next = { ...entry, retreatCheck: item };
       const updated = await knex('service_records')
         .where({ id: serviceRecordId })
+        .whereRaw(REPORT_READABLE_SQL)
         .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnVisitMemory' -> ? = ?::jsonb", [assessmentId, JSON.stringify(entry)])
         .update({
           structured_notes: knex.raw(

@@ -119,7 +119,11 @@ function withRecords(fixtures, records, hooks = {}) {
     const ctx = { where: {}, binding: null };
     const chain = {
       where(cond) { Object.assign(ctx.where, cond); return chain; },
-      whereRaw(_sql, bindings) { ctx.binding = bindings?.[0] ?? null; ctx.expected = bindings?.[1] ?? null; return chain; },
+      whereRaw(sql, bindings) {
+        // The report-readable guard (P31) carries no bindings; the memory predicates do.
+        if (String(sql).includes('report_template_version')) { ctx.readableGuard = true; return chain; }
+        ctx.binding = bindings?.[0] ?? null; ctx.expected = bindings?.[1] ?? null; return chain;
+      },
       async update(patch) {
         const sql = patch.structured_notes?.__raw || '';
         if (!sql.includes('lawnVisitMemory')) return 1; // week-weather / other freezes: out of scope here
@@ -128,6 +132,8 @@ function withRecords(fixtures, records, hooks = {}) {
         if (!rec) return 0;
         const map = (rec.structured_notes && rec.structured_notes.lawnVisitMemory) || {};
         if (ctx.expected != null) {
+          // the record must still be a readable customer report when the write lands
+          if (ctx.readableGuard && (rec.report_template_version || 'service_report_v1') !== 'service_report_v1') return 0;
           // compare-and-set on the entry as read (P31 retreat check): the entry must equal what was read
           if (JSON.stringify(map[ctx.binding]) !== ctx.expected) return 0;
           const next = JSON.parse(patch.structured_notes.bindings[0]);
@@ -871,6 +877,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
   const ID = '11111111-2222-4333-8444-555555555555';
   const records = () => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } } });
   const withProduct = (rainfast = 180) => ({
+    frozenRainfast: rainfast, // read by serve(): the interval completion froze
     service_products: [{ id: 'sp-1', service_record_id: 'svc-cur', product_id: ID, product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' }],
     products_catalog: [{ id: ID, name: 'Test Herbicide B', category: 'herbicide', epa_reg_number: '2217-1031', approved_for_service_report: true, rainfast_minutes: rainfast }],
   });
@@ -878,9 +885,16 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', ...gates].forEach((gate) => { process.env[gate] = 'true'; });
   };
+  // The facts completion froze for the visit's product (the only source of the interval the watch reads).
+  const snapshotFor = (rainfast = 180) => ({
+    version: 1,
+    frozenAt: '2026-09-30T18:41:00Z',
+    productFacts: { [ID]: { productType: 'pesticide', name: 'Test Herbicide B', category: 'herbicide', epaRegNumber: '2217-1031', rainfastMinutes: rainfast } },
+  });
   const serve = async (recs, patch, mode = 'live', optIn = true) => {
     const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs);
-    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p31', knex, mode ? { mode, lawnRainfastWatch: optIn } : {});
+    const svc = { ...service(recs['svc-cur'].structured_notes), service_data: JSON.stringify({ reportIdentitySnapshot: snapshotFor(patch.frozenRainfast === undefined ? 180 : patch.frozenRainfast) }) };
+    const data = await buildReportV1Data(svc, 'token-p31', knex, mode ? { mode, lawnRainfastWatch: optIn } : {});
     applyLawnReportReconciliation(data, null);
     return { data, log };
   };
@@ -994,7 +1008,6 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
 
   test.each([
     ['the visit\'s products could not be read', { service_products: FAIL }],
-    ['the catalog lookup failed', { products_catalog: FAIL }],
   ])('%s: no new judgment and no write; a healthy view later tries again, and a stored verdict still replays', async (_label, broken) => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
@@ -1016,42 +1029,72 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     expect(replay.data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
   });
 
-  test('frozen facts for one product plus a failed lookup for another: no partial verdict is judged or stored', async () => {
+  test('a product attached after the snapshot (live catalog only) holds the verdict, with the lookup failed or healthy', async () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const ID2 = '66666666-7777-4888-8999-000000000000';
-    const frozen = { [ID]: { productType: 'pesticide', name: 'Test Herbicide B', category: 'herbicide', epaRegNumber: '2217-1031', rainfastMinutes: 180 } };
-    const svc = (recs) => ({
-      ...service(recs['svc-cur'].structured_notes),
-      service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, frozenAt: '2026-09-30T18:41:00Z', productFacts: frozen } }),
-    });
     const patch = {
       service_products: [
         { id: 'sp-1', service_record_id: 'svc-cur', product_id: ID, product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' },
         { id: 'sp-2', service_record_id: 'svc-cur', product_id: ID2, product_name: 'Test Iron', product_category: 'fertilizer', created_at: '2026-09-30T18:05:00Z' },
       ],
-      products_catalog: FAIL, // the lookup for the second product fails
+      products_catalog: [{ id: ID2, name: 'Test Iron', category: 'fertilizer', approved_for_service_report: true, rainfast_minutes: 60 }],
     };
-    const run = async (recs, over = patch) => {
-      const { knex } = withRecords({ ...fixtures(), ...over }, recs);
-      const data = await buildReportV1Data(svc(recs), 'token-p31', knex, { mode: 'live', lawnRainfastWatch: true });
-      applyLawnReportReconciliation(data, null);
-      return data;
-    };
-    const healthyPatch = { ...patch, products_catalog: [{ id: ID2, name: 'Test Iron', category: 'fertilizer', approved_for_service_report: true, rainfast_minutes: 60 }] };
     const recs = records();
-    await run(recs, healthyPatch); // freezes the entry from a healthy read (a degraded read never creates it)
+    await serve(recs, patch, 'live', false); // freezes the entry from a healthy read
     fetchSpy.mockClear();
-    const degraded = await run(recs);
-    expect(fetchSpy).not.toHaveBeenCalled(); // the frozen product alone would have been judged
-    expect(degraded.reportV2.lead.watching).toBeUndefined();
-    expect(stored(recs).retreatCheck).toBeUndefined();
-    // a healthy view reads both products and judges them together
     const quarterSpy = jest.spyOn(conditions, 'fetchPropertyRainQuarterHours').mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.3 });
-    const healthy = await run(recs, healthyPatch);
+    // catalog lookup failed: the frozen product alone would have breached
+    const degraded = await serve(recs, { ...patch, products_catalog: FAIL });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(degraded.data.reportV2.lead.watching).toBeUndefined();
+    // catalog healthy and saying 60 minutes: still not judged, because the snapshot never saw the second product
+    const healthy = await serve(recs, patch);
     quarterSpy.mockRestore();
-    expect(fetchSpy).toHaveBeenCalled();
-    expect(healthy.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(healthy.data.reportV2.lead.watching).toBeUndefined();
+    expect(stored(recs).retreatCheck).toBeUndefined();
+  });
+
+  test('a later live-catalog edit of a frozen product changes nothing: the frozen interval decides', async () => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const recs = records();
+    // the catalog row now says 5 minutes; completion froze 180
+    const patch = { ...withProduct(180), products_catalog: [{ id: ID, name: 'Test Herbicide B', category: 'herbicide', epa_reg_number: '2217-1031', approved_for_service_report: true, rainfast_minutes: 5 }] };
+    await serve(recs, patch, 'live', false);
+    fetchSpy.mockClear();
+    const { data } = await serve(recs, patch);
+    expect(fetchSpy.mock.calls[0][0]).toMatchObject({ from: new Date('2026-09-30T18:40:00Z'), to: new Date('2026-09-30T21:40:00Z') });
+    expect(data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+  });
+
+  test('a visit with no snapshot (an older record) is never judged', async () => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const recs = records();
+    const { knex } = withRecords({ ...fixtures(), ...withProduct() }, recs);
+    const noSnapshot = service(recs['svc-cur'].structured_notes);
+    await buildReportV1Data(noSnapshot, 'token-p31', knex, { mode: 'live', lawnRainfastWatch: false });
+    fetchSpy.mockClear();
+    const data = await buildReportV1Data(noSnapshot, 'token-p31', knex, { mode: 'live', lawnRainfastWatch: true });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(JSON.stringify(data)).not.toContain(RAINFAST_WATCH_LINE);
+  });
+
+  test('the record stops being a readable report while the weather lookup is in flight: nothing is written', async () => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const recs = records();
+    await serve(recs, withProduct(), 'live', false);
+    fetchSpy.mockImplementation(async () => {
+      recs['svc-cur'].report_template_version = 'other_template'; // changed after the route's own check
+      return { status: 'ok', precipitationInTotalExact: 0.4 };
+    });
+    const { data } = await serve(recs, withProduct());
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(data.reportV2.lead.watching).toBeUndefined();
+    expect(stored(recs).retreatCheck).toBeUndefined();
   });
 
   test('a visit whose only prior record is a retreat-check: no public sinceLast, no since-last copy, nothing else moves', async () => {

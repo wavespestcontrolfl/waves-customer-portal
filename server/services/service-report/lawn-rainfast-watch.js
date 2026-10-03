@@ -69,19 +69,54 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+const canonicalId = (value) => String(value == null ? '' : value).trim().toLowerCase();
+
 /**
- * The distinct rainfast intervals of the products applied, each with the
- * names that carry it: [{ minutes, products: [name...] }]. A product with no
- * positive, plausible rainfast_minutes is skipped (never judged). Pure.
- * @param {Array<{product_name?: string, approved_report_product_facts?: {rainfastMinutes?: number|null}}>} products
+ * The distinct rainfast intervals of the products applied, each with the names
+ * that carry it: [{ minutes, products: [name...] }], read ONLY from the facts
+ * frozen with the visit (reportIdentitySnapshot.productFacts, keyed by product
+ * id). The products' own `approved_report_product_facts` are not used: for a
+ * product the snapshot does not cover they are filled from the LIVE catalog,
+ * and a later catalog edit must not rewrite what was known at treatment time.
+ *
+ * Returns null when any applied product's interval is UNKNOWN, which holds the
+ * whole verdict (a partial set would be permanent, first writer wins):
+ *   - no snapshot at all (an older record), or
+ *   - a product the snapshot has no entry for (attached after the freeze, or no
+ *     catalog id and no frozen name match), or
+ *   - a product whose frozen entry is null (not approved for reports, so no
+ *     facts were frozen), or an interval that is present but unusable.
+ * A product whose frozen facts state NO interval (null, empty or non-positive)
+ * is known-absent: it is simply not judged. Pure.
+ *
+ * @param {Array<{product_id?: string, product_name?: string}>} products
+ * @param {object|null} frozenFacts  { [canonical product id]: facts|null }
+ * @returns {Array<{minutes: number, products: string[]}>|null}
  */
-function rainfastWindows(products) {
+function rainfastWindows(products, frozenFacts) {
+  const frozen = frozenFacts && typeof frozenFacts === 'object' && !Array.isArray(frozenFacts) ? frozenFacts : null;
+  const list = Array.isArray(products) ? products : [];
+  if (!frozen || !list.length) return frozen ? [] : (list.length ? null : []);
+  const byName = new Map();
+  for (const facts of Object.values(frozen)) {
+    const name = String(facts?.name || '').trim().toLowerCase();
+    if (name && !byName.has(name)) byName.set(name, facts);
+  }
   const byMinutes = new Map();
-  for (const product of Array.isArray(products) ? products : []) {
-    const raw = product?.approved_report_product_facts?.rainfastMinutes;
-    if (raw == null || raw === '') continue;
+  for (const product of list) {
+    const id = canonicalId(product?.product_id);
+    // A product row whose catalog row was deleted keeps only its name; the
+    // report's own frozen lookup falls back to the frozen name the same way.
+    const facts = id
+      ? (Object.prototype.hasOwnProperty.call(frozen, id) ? frozen[id] : undefined)
+      : byName.get(String(product?.product_name || '').trim().toLowerCase());
+    if (!facts || typeof facts !== 'object') return null; // unknown, not known-absent
+    const raw = facts.rainfastMinutes;
+    if (raw == null || raw === '') continue; // known-absent
     const minutes = Number(raw);
-    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_INTERVAL_MINUTES) continue;
+    if (!Number.isFinite(minutes)) return null;
+    if (minutes <= 0) continue; // known-absent
+    if (minutes > MAX_INTERVAL_MINUTES) return null;
     const name = typeof product.product_name === 'string' ? product.product_name.trim().slice(0, 200) : '';
     if (!byMinutes.has(minutes)) byMinutes.set(minutes, []);
     if (name && !byMinutes.get(minutes).includes(name)) byMinutes.get(minutes).push(name);
@@ -97,6 +132,7 @@ function rainfastWindows(products) {
  *
  * @param {object} input
  * @param {Array} input.products       the visit's products (rainfastWindows shape)
+ * @param {object|null} input.frozenFacts  the visit's frozen product facts (reportIdentitySnapshot.productFacts)
  * @param {Date|string} input.completedAt
  * @param {Date} [input.now]
  * @param {number|string} input.latitude
@@ -104,7 +140,7 @@ function rainfastWindows(products) {
  * @param {Function} input.fetchForecast  application-conditions fetchPropertyForecast
  */
 async function judgeRainfastBreach({
-  products, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
+  products, frozenFacts, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
 } = {}) {
   try {
     if (typeof fetchForecast !== 'function') return null;
@@ -115,8 +151,10 @@ async function judgeRainfastBreach({
     // is ready (the longest interval plus the settle hour): a verdict stored
     // after the short window alone would be first-writer-wins and the longer
     // window's breach could never be added.
-    const ready = rainfastWindows(products);
-    if (!ready.length) return null;
+    const ready = rainfastWindows(products, frozenFacts);
+    // null = some applied product's interval is unknown (hold the verdict);
+    // [] = every product is known to have none (nothing to judge).
+    if (!ready || !ready.length) return null;
     const lastEndMs = fromMs + Math.max(...ready.map(({ minutes }) => minutes)) * 60000;
     if (nowMs < lastEndMs + SETTLE_MS || nowMs > lastEndMs + LOOKBACK_DAYS * 24 * HOUR_MS) return null;
 
@@ -202,7 +240,7 @@ function reCheckLine(item) {
  * @returns {Promise<{line: string}|null>}
  */
 async function resolveRainfastWatch({
-  structuredNotes, serviceRecordId, assessmentId, products, completedAt, latitude, longitude, now, knex, fetchForecast, fetchQuarterHours, degraded = false,
+  structuredNotes, serviceRecordId, assessmentId, products, frozenFacts, completedAt, latitude, longitude, now, knex, fetchForecast, fetchQuarterHours, degraded = false,
 } = {}) {
   try {
     if (!serviceRecordId || !assessmentId || !knex) return null;
@@ -223,7 +261,7 @@ async function resolveRainfastWatch({
     // NEW judgment and no write (a later healthy view tries again).
     if (degraded) return null;
     const item = await judgeRainfastBreach({
-      products, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
+      products, frozenFacts, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
     });
     if (!item) return null;
     const stored = await recordRetreatCheck(serviceRecordId, assessmentId, item, knex);

@@ -43,7 +43,7 @@ describeIfDb.each([['jsonb'], ['text']])('lawn visit memory freeze (postgres, st
       connection: URL,
       pool: { min: 0, max: 12, afterCreate: (conn, done) => conn.query(`SET search_path TO ${schema}`, (err) => done(err, conn)) },
     });
-    await knex.raw(`CREATE TABLE service_records (id text PRIMARY KEY, customer_id text, structured_notes ${columnType})`);
+    await knex.raw(`CREATE TABLE service_records (id text PRIMARY KEY, customer_id text, structured_notes ${columnType}, report_template_version text DEFAULT 'service_report_v1')`);
   });
   afterAll(async () => {
     if (!knex) return;
@@ -215,6 +215,35 @@ describeIfDb.each([['jsonb'], ['text']])('lawn visit memory freeze (postgres, st
       await recordRetreatCheck('s1', 'as-C', item(0.4), knex);
       await expect(recordRetreatCheck('s1', 'as-C', item(0.9), knex)).resolves.toEqual(item(0.4));
       expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toEqual(item(0.4));
+    });
+
+    test('a record that stopped being a readable report writes nothing: another template, or a suppressed typed report', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-C', 'This Visit'), knex);
+      await knex('service_records').where({ id: 's1' }).update({ report_template_version: 'other_template' });
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toBeUndefined();
+      await knex('service_records').where({ id: 's1' }).update({ report_template_version: 'service_report_v1' });
+      const withDelivery = async (mode) => {
+        const n = await notes();
+        n.typedReportDelivery = mode;
+        await knex('service_records').where({ id: 's1' }).update({ structured_notes: JSON.stringify(n) });
+      };
+      await withDelivery('internal_only');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      await withDelivery('disabled');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toBeUndefined();
+      // readable again (auto_send, an empty marker, or none) writes
+      await withDelivery('');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toEqual(item());
+    });
+
+    test('auto_send and an absent marker are readable', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-C', 'This Visit'), knex);
+      const n = await notes();
+      n.typedReportDelivery = 'auto_send';
+      await knex('service_records').where({ id: 's1' }).update({ structured_notes: JSON.stringify(n) });
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toEqual(item());
     });
 
     test('never creates an entry', async () => {

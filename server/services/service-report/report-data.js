@@ -6039,6 +6039,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             products,
+            // Only the intervals frozen with the visit count; facts the catalog
+            // lookup filled in live are not completion-time evidence.
+            frozenFacts: frozenIdentity?.productFacts || null,
             completedAt: completionTime,
             latitude: service.customer_latitude ?? service.latitude ?? service.lat,
             longitude: service.customer_longitude ?? service.longitude ?? service.lng,

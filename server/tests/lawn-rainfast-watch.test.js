@@ -18,28 +18,60 @@ const {
 
 const HOUR = 3600000;
 const COMPLETED = '2026-09-10T14:20:00Z'; // 10:20 AM ET
-const product = (name, rainfastMinutes) => ({ product_name: name, approved_report_product_facts: { rainfastMinutes } });
+const idOf = (name) => `aaaaaaaa-0000-4000-8000-${Buffer.from(name).toString('hex').padEnd(12, '0').slice(0, 12)}`;
+// A product row as the report loads it; the live catalog facts are NOT what the watch reads.
+const product = (name, rainfastMinutes) => ({ product_id: idOf(name), product_name: name, approved_report_product_facts: { rainfastMinutes } });
 const SPRAY = product('Test Herbicide A', 180);
+// reportIdentitySnapshot.productFacts for those products, as completion froze them.
+const frozen = (products) => Object.fromEntries(products.filter((p) => p.product_id).map((p) => [
+  p.product_id, p.approved_report_product_facts === null ? null : { name: p.product_name, rainfastMinutes: p.approved_report_product_facts?.rainfastMinutes },
+]));
 
-describe('rainfastWindows: only a stated interval is judged', () => {
-  test('products with no usable interval are skipped; equal intervals group; the list is ordered', () => {
-    expect(rainfastWindows([
+describe('rainfastWindows: only the intervals frozen with the visit are judged', () => {
+  test('known-absent products are skipped; equal intervals group; the list is ordered', () => {
+    const products = [
       product('No Interval', null),
       product('Zero', 0),
       product('Negative', -30),
-      product('Text', 'soon'),
-      { product_name: 'No Facts' },
-      { product_name: 'Unapproved', approved_report_product_facts: null },
-      product('Too Long', 100000),
       product('Test Herbicide A', 180),
       product('Test Growth Regulator', 60),
       product('Test Iron', 60),
-    ])).toEqual([
+    ];
+    expect(rainfastWindows(products, frozen(products))).toEqual([
       { minutes: 60, products: ['Test Growth Regulator', 'Test Iron'] },
       { minutes: 180, products: ['Test Herbicide A'] },
     ]);
-    expect(rainfastWindows(null)).toEqual([]);
-    expect(rainfastWindows([])).toEqual([]);
+    expect(rainfastWindows([], frozen([]))).toEqual([]);
+    expect(rainfastWindows(null, frozen([]))).toEqual([]);
+    expect(rainfastWindows([], null)).toEqual([]);
+  });
+
+  test('a snapshot that says "no interval" is known-absent: not judged, and it does not hold the verdict', () => {
+    const products = [product('Test Herbicide A', 180), product('No Interval', null)];
+    expect(rainfastWindows(products, frozen(products))).toEqual([{ minutes: 180, products: ['Test Herbicide A'] }]);
+  });
+
+  test('a product the snapshot does not cover (attached later, or filled live from the catalog) holds the whole verdict', () => {
+    const covered = product('Test Herbicide A', 180);
+    const attachedLater = product('Test Iron', 60); // live catalog says 60; the snapshot never saw it
+    expect(rainfastWindows([covered, attachedLater], frozen([covered]))).toBeNull();
+    // a live catalog edit on a covered product does not change the frozen interval
+    const edited = { ...covered, approved_report_product_facts: { rainfastMinutes: 5 } };
+    expect(rainfastWindows([edited], frozen([covered]))).toEqual([{ minutes: 180, products: ['Test Herbicide A'] }]);
+  });
+
+  test('no snapshot at all, a null frozen entry (not approved at completion), or an unusable frozen interval holds the verdict', () => {
+    expect(rainfastWindows([SPRAY], null)).toBeNull();
+    expect(rainfastWindows([SPRAY], {})).toBeNull();
+    expect(rainfastWindows([SPRAY], { [SPRAY.product_id]: null })).toBeNull();
+    expect(rainfastWindows([SPRAY], { [SPRAY.product_id]: { name: 'Test Herbicide A', rainfastMinutes: 'soon' } })).toBeNull();
+    expect(rainfastWindows([SPRAY], { [SPRAY.product_id]: { name: 'Test Herbicide A', rainfastMinutes: 100000 } })).toBeNull();
+  });
+
+  test('a product row with no catalog id falls back to the frozen name, as the report does; with no match it is unknown', () => {
+    const noId = { product_id: null, product_name: 'Test Herbicide A', approved_report_product_facts: { rainfastMinutes: 5 } };
+    expect(rainfastWindows([noId], frozen([SPRAY]))).toEqual([{ minutes: 180, products: ['Test Herbicide A'] }]);
+    expect(rainfastWindows([{ ...noId, product_name: 'Custom Product' }], frozen([SPRAY]))).toBeNull();
   });
 });
 
@@ -90,7 +122,7 @@ describe('judgeRainfastBreach with the real Open-Meteo hour math', () => {
   const realFetch = global.fetch;
   afterEach(() => { global.fetch = realFetch; });
   const judge = (over = {}) => judgeRainfastBreach({
-    products: [SPRAY], completedAt: COMPLETED, now: NOW, ...coords(), fetchForecast: fetchPropertyForecast, fetchQuarterHours: fetchPropertyRainQuarterHours, ...over,
+    products: [SPRAY], frozenFacts: frozen(over.products || [SPRAY]), completedAt: COMPLETED, now: NOW, ...coords(), fetchForecast: fetchPropertyForecast, fetchQuarterHours: fetchPropertyRainQuarterHours, ...over,
   });
 
   test('0.25 inch or more inside the interval is a breach; only the whole hours inside the window count', async () => {
@@ -215,6 +247,24 @@ describe('judgeRainfastBreach with the real Open-Meteo hour math', () => {
     await expect(judge({ now: new Date('2026-09-10T18:20:00Z') })).resolves.toMatchObject({ kind: 'rainfast_breach' });
   });
 
+  test('snapshot-backed intervals only: an unknown product holds the verdict; a known-absent one does not; a live catalog edit changes nothing', async () => {
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 }));
+    const covered = product('Test Herbicide A', 180);
+    const noInterval = product('No Interval', null);
+    const attachedLater = product('Test Iron', 60);
+    // known-absent beside a judged product: judged
+    await expect(judge({ products: [covered, noInterval] })).resolves.toMatchObject({ breaches: [{ minutes: 180, products: ['Test Herbicide A'] }] });
+    // a product the snapshot never saw: no verdict and no weather call, whatever the live catalog says
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 }));
+    await expect(judge({ products: [covered, attachedLater], frozenFacts: frozen([covered, noInterval]) })).resolves.toBeNull();
+    await expect(judge({ products: [covered], frozenFacts: null })).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+    // the live catalog now says 5 minutes: the frozen 180 still decides
+    const edited = { ...covered, approved_report_product_facts: { rainfastMinutes: 5 } };
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 }));
+    await expect(judge({ products: [edited], frozenFacts: frozen([covered]) })).resolves.toMatchObject({ breaches: [{ minutes: 180 }] });
+  });
+
   test('no product with a stated interval: no weather call', async () => {
     global.fetch = jest.fn();
     await expect(judge({ products: [product('No Interval', null), { product_name: 'Bare' }] })).resolves.toBeNull();
@@ -258,13 +308,18 @@ function memoryKnex(record, { failUpdate = false } = {}) {
   const log = { reads: 0, updates: 0 };
   const knex = () => {
     let binding = null;
+    let readableGuard = false;
     const chain = {
       where() { return chain; },
-      whereRaw(_sql, bindings) { binding = bindings; return chain; },
+      whereRaw(sql, bindings) {
+        if (String(sql).includes('report_template_version')) { readableGuard = true; return chain; }
+        binding = bindings; return chain;
+      },
       async first() { log.reads += 1; return { structured_notes: JSON.stringify(record.structured_notes) }; },
       async update(patch) {
         if (failUpdate) throw new Error('update failed');
         const [assessmentId, expected] = binding;
+        if (readableGuard && record.report_template_version && record.report_template_version !== 'service_report_v1') return 0;
         const map = record.structured_notes.lawnVisitMemory || {};
         if (JSON.stringify(canon(map[assessmentId])) !== JSON.stringify(canon(JSON.parse(expected)))) return 0;
         const add = JSON.parse(patch.structured_notes.bindings[0]);
@@ -292,7 +347,7 @@ const ITEM = {
 
 describe('resolveRainfastWatch: judge once, record once, replay after', () => {
   const run = (record, knex, over = {}) => resolveRainfastWatch({
-    structuredNotes: record.structured_notes, serviceRecordId: 'svc-1', assessmentId: 'la-1', products: [SPRAY],
+    structuredNotes: record.structured_notes, serviceRecordId: 'svc-1', assessmentId: 'la-1', products: [SPRAY], frozenFacts: frozen([SPRAY]),
     completedAt: COMPLETED, now: NOW, latitude: 27.3, longitude: -82.4, knex, fetchForecast: over.fetchForecast, ...over,
   });
   const breachFetch = () => jest.fn(async () => ({ status: 'ok', precipitationInTotalExact: 0.4, fetchedAt: '2026-09-10T20:00:00.000Z' }));
@@ -347,6 +402,19 @@ describe('resolveRainfastWatch: judge once, record once, replay after', () => {
     const again = breachFetch();
     await expect(run(record, knex, { structuredNotes: {}, fetchForecast: again })).resolves.toEqual({ line: RAINFAST_WATCH_LINE });
     expect(again).not.toHaveBeenCalled();
+  });
+
+  test('the record stops being a readable report while the weather lookup is in flight: nothing is written, nothing is said', async () => {
+    const record = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY } } };
+    const { knex, log } = memoryKnex(record);
+    const fetchForecast = jest.fn(async () => {
+      record.report_template_version = 'other_template'; // changed after the route's own check
+      return { status: 'ok', precipitationInTotalExact: 0.4 };
+    });
+    await expect(run(record, knex, { fetchForecast })).resolves.toBeNull();
+    expect(fetchForecast).toHaveBeenCalledTimes(1);
+    expect(log.updates).toBe(0);
+    expect(storedVisitMemoryFor(record.structured_notes, 'la-1').retreatCheck).toBeUndefined();
   });
 
   test('a failed write says nothing (a sentence that could vanish on the next view is worse than none)', async () => {

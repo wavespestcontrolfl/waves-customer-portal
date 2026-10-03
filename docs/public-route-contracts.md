@@ -2447,8 +2447,13 @@ do not (it fits alone); it is given up with the rest of Watching if the lead
 runs over its 250-word budget. PDF, static and queued builds never carry it, so PDF content and its
 cache signature are unchanged. No other payload key is added: the item below
 is internal and `reportV2.sinceLast` leaves it off. Only a product whose catalog
-row states a rainfast interval (`products_catalog.rainfast_minutes`, read from
-the facts frozen at completion) is judged; no interval means never judged. Only
+row states a rainfast interval (`products_catalog.rainfast_minutes`) is judged,
+and only from the facts FROZEN with the visit (`reportIdentitySnapshot.productFacts`),
+never from the live catalog: a later catalog edit cannot change what was known
+at treatment time. A frozen "no interval" is known-absent and not judged. If any
+applied product's interval is unknown (no snapshot on an older record, a product
+the snapshot never saw or one frozen as not approved for reports, or an unusable
+frozen interval) the whole verdict is held, never judged on a partial set. Only
 the rendered `/data` view opts in (the Ask Waves `/ask` build, which also uses
 `mode: 'live'`, makes no weather call and no write). Nothing is judged until
 EVERY interval on the visit is over: one hour after the LONGEST interval ended,
@@ -2460,7 +2465,10 @@ inch inside any interval, judged on the unrounded total, writes ONE
 `retreatCheck` item naming every breached interval and its products onto the
 visit's frozen memory entry
 (`structured_notes.lawnVisitMemory[assessmentId].retreatCheck`: first writer
-wins, compare-and-set on that entry, never creates an entry, no row lock) and
+wins, compare-and-set on that entry, never creates an entry, no row lock; the same
+UPDATE re-asks the token route's read eligibility, `report_template_version =
+'service_report_v1'` and not a suppressed typed report, so a record that stops being
+readable while the weather lookup is in flight is not written) and
 the sentence follows. The first eligible `/data` view is enough: it reads the record again after its own memory step, so a request that creates the entry can also judge. Later views replay the stored item with no weather call.
 A missing hour, a failed or slow read, missing coordinates or a missing
 completion time writes nothing and says nothing; the next live view tries
