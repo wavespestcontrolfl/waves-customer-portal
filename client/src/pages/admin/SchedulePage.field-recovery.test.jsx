@@ -247,7 +247,10 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(await getCompletionDraft(service.id)).toBeNull();
   });
 
-  it('lets the technician discard retained photos when the frozen visit identity has changed', async () => {
+  it.each([
+    { status: 409, code: 'visit_identity_changed' },
+    { status: 403, code: null },
+  ])('lets the technician discard retained photos after a permanent $status retry failure', async ({ status, code }) => {
     await seed();
     const servicePhotoVisit = {
       customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
@@ -270,9 +273,9 @@ describe('completion photos in an unsubmitted draft', () => {
         uploads.push(options);
         const response = {
           ok: false,
-          status: 409,
+          status,
           statusText: 'Conflict',
-          json: async () => ({ error: 'Visit changed', code: 'visit_identity_changed' }),
+          json: async () => ({ error: 'Visit changed or access revoked', ...(code ? { code } : {}) }),
           text: async () => 'Visit changed',
         };
         response.clone = () => response;
@@ -286,7 +289,7 @@ describe('completion photos in an unsubmitted draft', () => {
     });
 
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry photo uploads' })));
-    await screen.findByText(/visit changed after these photos were selected/i);
+    await screen.findByText(/visit changed or is no longer accessible/i);
     expect(completionResumeOwed(service.id)).toBe(true);
     expect(uploads).toHaveLength(1);
     expect(reconciles).toHaveLength(0);

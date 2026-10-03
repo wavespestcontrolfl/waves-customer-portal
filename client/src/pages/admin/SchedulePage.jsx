@@ -17766,7 +17766,7 @@ export function CompletionPanel({
     setPhotoRetryError("");
     setPhotoRetryConflict(false);
     const failedPhotos = [];
-    let visitChanged = false;
+    let retryPermanentlyBlocked = false;
     try {
       const photos = draft.servicePhotos || [];
       for (const [index, photo] of photos.entries()) {
@@ -17784,8 +17784,8 @@ export function CompletionPanel({
           });
         } catch (error) {
           failedPhotos.push(photo);
-          if (error?.code === "visit_identity_changed") {
-            visitChanged = true;
+          if (error?.code === "visit_identity_changed" || Number(error?.status) === 403) {
+            retryPermanentlyBlocked = true;
             failedPhotos.push(...photos.slice(index + 1));
             break;
           }
@@ -17824,9 +17824,9 @@ export function CompletionPanel({
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
           setCompletionResult(result);
-          setPhotoRetryConflict(visitChanged);
-          setPhotoRetryError(visitChanged
-            ? "This visit changed after these photos were selected, so they can’t be attached safely. Your copies remain on this device until you discard them."
+          setPhotoRetryConflict(retryPermanentlyBlocked);
+          setPhotoRetryError(retryPermanentlyBlocked
+            ? "This visit changed or is no longer accessible, so these photos can’t be attached safely. Your copies remain on this device until you discard them."
             : "Some photos still could not upload. Your copies are retained on this device; retry when connected.");
         }
       }
