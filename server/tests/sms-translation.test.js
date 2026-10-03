@@ -101,6 +101,11 @@ describe('tokenParity', () => {
     expect(loose('Come at 3 PM', 'Vini a 3 è nan aprèmidi').ok).toBe(true);
     // a flipped half holds
     expect(loose('Can you come at 9 PM?', 'Bạn đến lúc 9 giờ sáng được không?')).toMatchObject({ ok: false, order: ['9 pm', '9 am'] });
+    // "trưa" (midday) is read by its hour: 11 is AM, 12 and 1 are PM
+    expect(loose('Come at 11 AM', 'Đến lúc 11 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 12 PM', 'Đến lúc 12 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 1 PM', 'Đến lúc 1 giờ trưa').ok).toBe(true);
+    expect(loose('Come at 11 PM', 'Đến lúc 11 giờ trưa')).toMatchObject({ ok: false });
     // "đêm" (night) does not say which side of midnight: no half is read, so the English half is unmatched
     expect(loose('Can you come at 11 PM?', 'Bạn đến lúc 11 giờ đêm được không?')).toMatchObject({ ok: false, order: ['11 pm'] });
   });
@@ -558,6 +563,9 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo 1 pago en octubre.', back: 'I see 1 payment in October.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on October the 1st.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's3' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
     // the faithful one passes the date check, day before or after the month
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });

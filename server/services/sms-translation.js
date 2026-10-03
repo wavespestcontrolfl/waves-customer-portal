@@ -323,7 +323,8 @@ const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
 // (an hour word may sit between the number and the half: "2 h du soir", "9 giờ sáng", "9 è nan maten", "2 часа дня")
 // Words that name NIGHT without saying which side of midnight ("đêm", "ночи", "nachts") are left out: such a
-// time keeps no half on its side and holds the trial.
+// time keeps no half on its side and holds the trial. Vietnamese "trưa" (midday) is read by its hour instead
+// (MIDDAY_RE): "11 giờ trưa" is 11 AM, "12 giờ trưa" and "1 giờ trưa" are PM.
 const RU_HOUR = '\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?';
 const HOUR_GAP = `(?:(?:h|horas?|heures?|uhr|ore|gi\\u1EDD|\\u00E8|${RU_HOUR})\\s+)?`;
 const END = '(?![\\p{L}\\p{N}])';
@@ -333,7 +334,7 @@ const LOCAL_PM_RE = new RegExp(`^\\s*(?:${RU_HOUR}\\s+\\u0434\\u043D\\u044F|${HO
   'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
   'in\\s+the\\s+(?:afternoon|evening)', 'at\\s+night',
   // Vietnamese, Haitian Creole, Russian, Italian, German, Tagalog
-  'chi\\u1EC1u', 't\\u1ED1i', 'tr\\u01B0a',
+  'chi\\u1EC1u', 't\\u1ED1i',
   'nan\\s+apr[e\\u00E8]midi', 'apr[e\\u00E8]midi', 'nan\\s+asw[e\\u00E8]', 'di\\s?swa',
   '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
   'del\\s+pomeriggio', 'di\\s+sera', 'nachmittags', 'abends', 'ng\\s+hapon', 'ng\\s+gabi',
@@ -343,6 +344,13 @@ const LOCAL_AM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
   's\\u00E1ng', 'nan\\s+maten', 'di\\s?maten', '\\u0443\\u0442\\u0440\\u0430',
   'di\\s+mattina', 'del\\s+mattino', 'morgens', 'vormittags', 'ng\\s+umaga',
 ].join('|')})${END}`, 'iu');
+const MIDDAY_RE = new RegExp(`^\\s*${HOUR_GAP}tr\\u01B0a${END}`, 'iu');
+function middayHalf(raw, after) {
+  if (!MIDDAY_RE.test(after)) return null;
+  const hour = Number(raw.split(':')[0]);
+  if (hour === 10 || hour === 11) return 'am';
+  return hour === 12 || hour === 1 || hour === 2 ? 'pm' : null;
+}
 // languages that name the half of the day BEFORE the number: Chinese 下午2点, Japanese 午後2時, Korean 오후 2시
 const PREFIX_PM_RE = /(?:下午|晚上|傍晚|中午|午後|夜|오후|저녁)\s*$/u;
 const PREFIX_AM_RE = /(?:上午|早上|凌晨|清晨|午前|朝|오전|새벽)\s*$/u;
@@ -428,7 +436,7 @@ function numberValues(text, { strictTimes = false } = {}) {
     const before = str.slice(0, m.index);
     const flags = {
       pm: PM_RE.test(after),
-      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : null),
+      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : middayHalf(raw, after)),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
       // a clock time only ("14:00", "14 h", "14時"); "14 horas" is a duration and never stands in for "2 PM"
       clock: raw.includes(':') || CLOCK_MARK_RE.test(after),
@@ -731,8 +739,8 @@ function calendarTokens(text) {
     const re = names === 'May' ? /\bMay\b(?=\.?\s*\d)|(?<=\d(?:st|nd|rd|th)?\s+(?:of\s+)?)May\b/g : new RegExp(`\\b(?:${names})\\b`, 'g');
     for (const m of str.matchAll(re)) {
       out.push(`month:${i + 1}`);
-      // ...and its day with it ("Oct 1", "October 1st", "1 Oct", "1st of October"): "Oct 1" is not "October"
-      const after = /^\.?\s*(\d{1,2})(?:st|nd|rd|th)?(?![\d:])/.exec(str.slice(m.index + m[0].length));
+      // ...and its day with it ("Oct 1", "October 1st", "October the 1st", "1 Oct", "1st of October"): "Oct 1" is not "October"
+      const after = /^\.?\s*(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?![\d:])/.exec(str.slice(m.index + m[0].length));
       const before = /(?<![\d:])(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?$/.exec(str.slice(0, m.index));
       const day = after?.[1] || before?.[1];
       if (day) out.push(`md:${i + 1}/${Number(day)}`);
