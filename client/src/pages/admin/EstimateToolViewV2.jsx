@@ -49,6 +49,8 @@ import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill,
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
+// Form measurements that describe ONE scope (a space or the whole building).
+const SCOPE_SIZED_FIELDS = ["homeSqFt", "lotSqFt", "stories", "termiteFootprintSqFt", "trenchingPerimeterLF", "boracareSqft", "preslabSqft"];
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -3235,7 +3237,13 @@ export default function EstimateToolViewV2({
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
-      _manualFields: (f._manualFields || []).filter((key) => !["homeSqFt", "lotSqFt", "stories"].includes(key)),
+      // The termite measurements derive from the same structure: typed for
+      // one space, they are not the building's either.
+      termiteFootprintSqFt: "",
+      trenchingPerimeterLF: "",
+      boracareSqft: "",
+      preslabSqft: "",
+      _manualFields: (f._manualFields || []).filter((key) => !SCOPE_SIZED_FIELDS.includes(key)),
     }));
     void doLookup({ occupancy: answer });
   }
