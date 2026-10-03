@@ -343,6 +343,9 @@ router.post('/', async (req, res) => {
       // busy multi-tech range, past any fixed cap (Codex #4120 r1). topN
       // only changes the engine's final slice, never its work.
       topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
+      // A hint fires on every pick in every staff form; it must not spend
+      // the Google drive-time allowance customer booking depends on.
+      ...(hint ? { providerTravel: false } : {}),
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit

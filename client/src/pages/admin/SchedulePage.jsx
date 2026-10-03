@@ -2149,9 +2149,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     propertyId: selectedPropertyId || undefined,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
+  // The form as it opened: a save that leaves the visit's slot alone (a
+  // price or notes edit) is not overriding anything, even on a day the
+  // strip calls over-booked.
+  const openedForm = useRef(form).current;
+  const slotEdited = ["scheduledDate", "windowStart", "windowEnd", "technicianId", "estimatedDuration"]
+    .some((key) => String(form[key] ?? "") !== String(openedForm[key] ?? ""));
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
-  const routeMissVerdict = availabilityVerdict(availability, stripCurrent)?.tone === "miss";
+  const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the

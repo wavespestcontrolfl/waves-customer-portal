@@ -181,7 +181,11 @@ async function findCapacitySlots(opts) {
   const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
-  const travel = require('../route-optimizer').createSchedulingTravel();
+  // Road estimates come out of ONE paid Google allowance per process,
+  // shared with customer booking. A caller that only advises (the admin
+  // picker hint, opts.providerTravel === false) uses the conservative model
+  // and spends none of it; the save it advises checks with that same model.
+  const travel = require('../route-optimizer').createSchedulingTravel(opts.providerTravel === false ? { maxRequests: 0 } : undefined);
   // Loaded before the candidate loop, not just before packCapacityEnds
   // (Codex r8 P1 follow-on): capacityGapNeighbours below now resolves each
   // neighbour's credited expected-minutes per candidate via

@@ -149,6 +149,11 @@ it('a verified route miss relabels both save paths as overrides', () => {
   };
   render(<Harness />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  // Untouched slot (a price or notes edit): nothing is being overridden.
+  expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save & take payment' })).toBeInTheDocument();
+  // Moving the visit onto the missed slot is an override.
+  fireEvent.change(screen.getByRole('dialog', { name: 'Edit appointment' }).querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
   expect(screen.getByRole('button', { name: 'Save anyway' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Save & take payment anyway' })).toBeInTheDocument();
   expect(writes()).toHaveLength(0);
