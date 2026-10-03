@@ -2675,6 +2675,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfill = false,             // backdated quiet completion of a stale past-dated visit — see backfillCompletionPlan
 
       lawnAssessmentId = null,
+      // Lawn Fast Complete (GATE_LAWN_FAST_COMPLETE): present only on the quick
+      // sheet's submit. Its presence asks for the lawn-fast preflight below
+      // (gate, eligible visit, confirmed assessment); nothing else in the
+      // completion changes and the block itself is not stored.
+      lawnFast = null,
       lawnProtocolCompletion = null,
       propertyServiceArea = null,
       treeShrubCompletion = null,
@@ -4434,6 +4439,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
           db,
         );
         return ({ status: structuredObservationError.status, body: structuredObservationError.body });
+      }
+      // Lawn Fast Complete: the quick sheet's own preflight runs first, so its
+      // refusals (disabled / not eligible / assessment required) are the ones the
+      // sheet's failure handling reads. The advisory photo floor never refuses.
+      if (lawnFast !== null && lawnFast !== undefined) {
+        const lawnFastBlock = await require('./lawn-fast-complete').preflightLawnFastCompletion({
+          knex: db,
+          svc,
+          lawnAssessmentId,
+          isIncompleteVisit,
+        });
+        if (lawnFastBlock) {
+          await CompletionAttempts.markCompletionAttemptFailed(
+            completionAttempt,
+            new Error(lawnFastBlock.payload.code || 'lawn_fast_completion_blocked'),
+            db,
+          );
+          return ({ status: lawnFastBlock.status, body: lawnFastBlock.payload });
+        }
       }
       // The lawn assessment confirmation is a FORM gate; an invoice-issued
       // closeout has no form behind it and renders no report (pre-push P1).

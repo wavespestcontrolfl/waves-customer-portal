@@ -73,7 +73,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -4535,6 +4535,49 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
       return res.status(status).json({ error: ctx.reason, code: ctx.reason });
     }
     const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/lawn-fast/context
+// What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
+// lawn visit type is eligible, recurring program visits first): the eligibility
+// verdict with a reason, the visit identity (echoed back as `expectedVisit` on
+// /complete), the planned products each with its post-application watering
+// rule, whether a CONFIRMED lawn assessment exists, and the advisory photo
+// status. Read-only; dark behind GATE_LAWN_FAST_COMPLETE. The lawn re-service
+// keeps its own sheet. An ineligible visit answers 200 `eligible: false` with a
+// reason. See services/lawn-fast-complete.js.
+router.get('/:serviceId/lawn-fast/context', async (req, res, next) => {
+  try {
+    if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(req.params.serviceId, { technicianId: req.technicianId });
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/lawn-fast/watering-preview
+// body: { productIds: [catalog product ids] }
+// Each chosen product's watering rule and the one watering instruction the
+// customer report would print for them, built by the report's own functions so
+// the sheet's sentence can never differ from the report's. Read-only; sends
+// nothing. Dark behind GATE_LAWN_FAST_COMPLETE.
+router.post('/:serviceId/lawn-fast/watering-preview', async (req, res, next) => {
+  try {
+    if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const result = await require('../services/lawn-fast-complete').buildLawnFastWateringPreview({
+      serviceId: req.params.serviceId,
+      productIds: req.body?.productIds,
+    });
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404 : 400;
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const { ok, ...body } = result;
     res.json({ enabled: true, ...body });
   } catch (err) { next(err); }
 });
