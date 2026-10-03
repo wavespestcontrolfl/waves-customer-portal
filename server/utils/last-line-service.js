@@ -62,9 +62,8 @@ async function loadRecentLineServices(db, customerId, serviceType, { limit = 5, 
   const lineRecords = [];
   let last = null;
   for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
-    const rows = await db('service_records')
-      .where({ customer_id: customerId, status: 'completed' })
-      .modify((q) => { if (before) q.where('service_date', '<', before); })
+    const base = db('service_records').where({ customer_id: customerId, status: 'completed' });
+    const rows = await (before ? base.where('service_date', '<', before) : base)
       .orderBy('service_date', 'desc')
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
