@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
-import { clearStaffDeviceData } from '../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken } from '../lib/adminAuth';
+
+// The same key set useStaffSession clears when a session ends.
+const SESSION_KEYS = ['waves_admin_token', 'adminToken', 'waves_admin_user'];
+function clearStoredSession() {
+  for (const key of SESSION_KEYS) {
+    try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
+  }
+  clearStaffDeviceData();
+}
 import { refetchFlags } from '../hooks/useFeatureFlag';
 
 // Staff two-step sign-in (GATE_ADMIN_MFA): set up an authenticator app, make
@@ -264,7 +273,7 @@ const EMPTY_FORM = { password: '', code: '', offPassword: '', offCode: '' };
 
 export default function AdminTwoStepPage() {
   const navigate = useNavigate();
-  const [token, setToken] = useState(() => localStorage.getItem('waves_admin_token'));
+  const [token, setToken] = useState(() => getAdminAuthToken());
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState('');
   // view: overview | setup | scan | codes
@@ -325,9 +334,7 @@ export default function AdminTwoStepPage() {
         setToken(stored);
         throw new Error('You signed in again in another tab. Try that once more.');
       }
-      localStorage.removeItem('waves_admin_token');
-      localStorage.removeItem('waves_admin_user');
-      clearStaffDeviceData();
+      clearStoredSession();
       navigate('/admin/login', { replace: true });
       throw new Error(data.error || 'Sign in again.');
     }
@@ -490,9 +497,7 @@ export default function AdminTwoStepPage() {
   };
 
   const signOut = () => {
-    localStorage.removeItem('waves_admin_token');
-    localStorage.removeItem('waves_admin_user');
-    clearStaffDeviceData();
+    clearStoredSession();
     refetchFlags().catch(() => {});
     navigate('/admin/login', { replace: true });
   };

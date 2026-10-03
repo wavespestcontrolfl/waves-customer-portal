@@ -331,30 +331,29 @@ async function mfaStatus(req, res, next) {
 // authenticator to the account. A session that just signed in with a
 // recovery code (the lost-phone path) may replace it without another code.
 async function mfaSetup(req, res, next) {
-  // A recovery code spent to replace a lost authenticator must not be the
-  // last one gone for nothing: the session that spent it gets the same
-  // replacement window a recovery-code sign-in gets (a fresh token carrying
-  // mfaRecoveryUntil), returned with whatever this request answers next.
-  let recoverySession = {};
   try {
     const tech = req.technician;
     const { currentPassword, code } = req.body || {};
     if (!(await currentPasswordMatches(tech, currentPassword))) {
       return res.status(400).json({ error: 'Current password is incorrect' });
     }
-    if (staffMfa.mfaEnabled(tech) && !staffMfa.recoverySessionCanReplace(req.staffToken)) {
-      if (typeof code !== 'string' || !code.trim() || code.length > 64) {
-        return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
-      }
-      const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
-      if (!result.ok) return mfaFailureResponse(res, result, 400);
-      if (result.method === 'recovery') {
-        const { token, refreshToken } = mintStaffTokens(tech, { mfa: true, mfaRecoveryUntil: staffMfa.recoveryReplaceDeadline() });
-        recoverySession = { token, refreshToken, replaceWithoutCode: true };
-      }
+    const needsCode = staffMfa.mfaEnabled(tech) && !staffMfa.recoverySessionCanReplace(req.staffToken);
+    if (needsCode && (typeof code !== 'string' || !code.trim() || code.length > 64)) {
+      return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
     }
-    const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech) });
-    if (!started.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    // The current code is checked in the same transaction that writes the
+    // pending setup: a recovery code is consumed only if the setup starts.
+    const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech), code: needsCode ? code : null });
+    if (!started.ok) return mfaFailureResponse(res, started, 400);
+    // A recovery code spent here (lost authenticator) gives this session the
+    // same replacement window a recovery-code sign-in gets, so a failed,
+    // expired or cancelled setup can be retried with the password alone.
+    const recoverySession = started.method === 'recovery'
+      ? {
+        ...mintStaffTokens(tech, { mfa: true, mfaRecoveryUntil: staffMfa.recoveryReplaceDeadline() }),
+        replaceWithoutCode: true,
+      }
+      : {};
     return res.json({
       secret: started.secret,
       otpauthUrl: started.otpauthUrl,
@@ -362,12 +361,7 @@ async function mfaSetup(req, res, next) {
       ...recoverySession,
     });
   } catch (err) {
-    if (err.status === 503) return res.status(503).json({ error: err.message, ...recoverySession });
-    // A spent recovery code still gets its retry window when the setup write
-    // itself failed (the error is already sanitized by staff-mfa).
-    if (recoverySession.token) {
-      return res.status(500).json({ error: 'Setup could not start. Try again.', ...recoverySession });
-    }
+    if (err.status === 503) return res.status(503).json({ error: err.message });
     return next(err);
   }
 }

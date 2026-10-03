@@ -295,4 +295,12 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(confirmResult.status).toBe('fulfilled');
     expect(confirmResult.value.ok).toBe(true);
   });
+  test('replacing with a recovery code consumes it only if the new setup starts', async () => {
+    const { recoveryCodes } = await enroll();
+    // A password change landing first: nothing is written, nothing consumed.
+    expect(await staffMfa.startSetup(tech, { expectedTokenVersion: 1, code: recoveryCodes[0] })).toEqual({ ok: false, reason: 'revoked' });
+    const started = await staffMfa.startSetup(tech, { expectedTokenVersion: 2, code: recoveryCodes[0] });
+    expect(started).toMatchObject({ ok: true, method: 'recovery' });
+    expect(await staffMfa.startSetup(tech, { expectedTokenVersion: 2, code: recoveryCodes[0] })).toEqual({ ok: false, reason: 'invalid' });
+  });
 });

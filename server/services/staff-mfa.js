@@ -334,15 +334,26 @@ async function verifySecondFactor(technicianId, code, { expectedTokenVersion, co
 // like every other factor write: a request from a session that a password
 // change or factor replacement revoked meanwhile writes nothing.
 // Returns { ok: true, secret, otpauthUrl } or { ok: false, reason: 'revoked' }.
-async function startSetup(tech, { expectedTokenVersion } = {}) {
+// `code` (replacing an existing authenticator): checked inside the same
+// transaction, so a recovery code is consumed only if the new pending setup
+// is written too. Returns { ok: true, secret, otpauthUrl, method } or
+// { ok: false, reason: revoked|invalid|locked|unavailable }.
+async function startSetup(tech, { expectedTokenVersion, code = null } = {}) {
   if (!hasMfaKey()) {
     throw Object.assign(new Error('Two-step sign-in cannot be set up: no encryption key is configured.'), { status: 503 });
   }
   const secret = generateSecret();
-  let fenced;
+  let outcome;
   try {
-    fenced = await db.transaction(async (trx) => {
-      if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion)) return false;
+    outcome = await db.transaction(async (trx) => {
+      if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
+      let method = null;
+      if (code !== null) {
+        await trx('staff_mfa_totp').where({ technician_id: tech.id }).forUpdate().first();
+        const verified = await verifySecondFactor(tech.id, code, { expectedTokenVersion, conn: trx });
+        if (!verified.ok) return verified;
+        method = verified.method;
+      }
       await trx('staff_mfa_totp')
         .insert({
           technician_id: tech.id,
@@ -355,7 +366,7 @@ async function startSetup(tech, { expectedTokenVersion } = {}) {
           pending_created_at: trx.fn.now(),
           updated_at: trx.fn.now(),
         });
-      return true;
+      return { ok: true, method };
     });
   } catch (e) {
     // knex puts bindings (the new secret AND the key) in its error message;
@@ -364,8 +375,8 @@ async function startSetup(tech, { expectedTokenVersion } = {}) {
     err.code = e && e.code != null ? String(e.code) : undefined;
     throw err;
   }
-  if (!fenced) return { ok: false, reason: 'revoked' };
-  return { ok: true, secret, otpauthUrl: otpauthUri(secret, tech.email) };
+  if (!outcome.ok) return outcome;
+  return { ok: true, method: outcome.method, secret, otpauthUrl: otpauthUri(secret, tech.email) };
 }
 
 // Confirms a pending setup with a code from the new authenticator. In one
