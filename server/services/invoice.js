@@ -2234,9 +2234,31 @@ async function prepareMembershipDuesRestore(trx, invoiceId, { exceptPaymentId = 
       { statusCode: 503, code: "MEMBERSHIP_DUES_MONTH_BUSY", isOperational: true },
     );
   }
+  // The monthly collectors (cron, retry sweep, charge-now) hold the SEPARATE
+  // customer collection claim across a charge: one that read the original as
+  // refunded and is charging could otherwise write its payment after this
+  // restore finds nothing and commits. Month, then claim (the order the mint and
+  // the void take them in), both TRIES; busy throws and Stripe redelivers.
+  // Coverage and the collected-payment read below happen with both held.
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(trx, inv.customer_id))) {
+    throw Object.assign(
+      new Error(`Membership dues for ${month} may be mid-collection by the billing run — the refund bounce is retried`),
+      { statusCode: 503, code: "MEMBERSHIP_DUES_COLLECTION_BUSY", isOperational: true },
+    );
+  }
   const replacement = await findLiveStampedDuesInvoice(trx, inv.customer_id, month, { excludeInvoiceId: inv.id });
   let collected = null;
-  if (!replacement) {
+  let replacementRow = null;
+  let replacementHasPayment = false;
+  if (replacement) {
+    replacementRow = await trx("invoices").where({ id: replacement.id })
+      .first("id", "status", "line_items", "credit_applied", "payment_recorded_at", "stripe_payment_intent_id", "paid_at");
+    replacementHasPayment = !!(await trx("payments")
+      .whereIn("status", ["paid", "processing"])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(replacement.id)])
+      .first("id"));
+  } else {
     const payment = await findCollectedDuesPayment(trx, inv.customer_id, month);
     if (payment && String(payment.id) !== String(exceptPaymentId)) collected = payment;
   }
@@ -2245,9 +2267,38 @@ async function prepareMembershipDuesRestore(trx, invoiceId, { exceptPaymentId = 
     invoiceNumber: inv.invoice_number || null,
     customerId: inv.customer_id,
     month,
-    replacement: replacement ? { id: replacement.id, status: replacement.status, invoice_number: replacement.invoice_number || null } : null,
+    replacement: replacement ? {
+      id: replacement.id,
+      status: replacement.status,
+      invoice_number: replacement.invoice_number || null,
+      // Decided HERE, with the month lock and the collection claim held: the
+      // replacement is provably nothing but the duplicate dues.
+      dueOnly: replacementIsDuesOnly(replacementRow, { hasPayment: replacementHasPayment }),
+    } : null,
     collectedPaymentId: collected ? collected.id : null,
   };
+}
+
+// True ONLY when an unpaid replacement is provably just the duplicate dues
+// obligation, so voiding it cancels nothing else the customer owes: unpaid
+// status, no credit applied, no recorded or in-flight payment (no intent, no
+// paid / processing payment row), and every line is the stamped dues line set
+// (the marker-bearing primary plus its price-reconciliation lines,
+// membershipDuesLineSet, the same definition the stamp and the edit guard use).
+// An extra fee / service line, a real discount, unreadable lines or any missing
+// field is "not provably", so the caller preserves the invoice and alerts.
+function replacementIsDuesOnly(row, { hasPayment = false } = {}) {
+  if (!row || hasPayment) return false;
+  const status = String(row.status || "").toLowerCase();
+  if (!status || ["paid", "prepaid", "processing", "void", "refunded", "canceled", "cancelled"].includes(status)) return false;
+  if (Math.round(Number(row.credit_applied || 0) * 100) > 0) return false;
+  if (row.payment_recorded_at || row.stripe_payment_intent_id || row.paid_at) return false;
+  const lines = parseInvoiceLineItems(row.line_items);
+  if (!lines.length) return false;
+  const primary = lines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  if (!primary) return false;
+  const set = membershipDuesLineSet(lines, primary);
+  return set.length === lines.length && lines.every((li) => set.includes(li));
 }
 async function reconcileMembershipDuesRestore(ctx) {
   if (!ctx || (!ctx.replacement && !ctx.collectedPaymentId)) return;
@@ -2255,7 +2306,11 @@ async function reconcileMembershipDuesRestore(ctx) {
     const settled = !!ctx.collectedPaymentId
       || ["paid", "prepaid", "processing"].includes(String(ctx.replacement?.status));
     let voidFailed = false;
-    if (!settled) {
+    // An unpaid replacement is auto-voided ONLY when it is provably nothing but
+    // the duplicate dues; anything else (a fee / service line, credit applied, a
+    // partial payment, any doubt) is preserved untouched and alerted.
+    const preserved = !settled && ctx.replacement && ctx.replacement.dueOnly !== true;
+    if (!settled && !preserved) {
       try {
         // Canonical void: its own guards, credit restore and release alert apply
         // (the restored original covers the month again, so no rebill alert).
@@ -2274,7 +2329,13 @@ async function reconcileMembershipDuesRestore(ctx) {
     const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
     const replacementLabel = ctx.replacement ? (ctx.replacement.invoice_number || ctx.replacement.id) : `payment ${ctx.collectedPaymentId}`;
     const originalLabel = ctx.invoiceNumber || ctx.invoiceId;
-    const spec = voidFailed
+    const spec = preserved
+      ? {
+        action: fitAction("Billing", name, [(who) => `adjust ${who}'s extra ${monthName} dues invoice`, (who) => `adjust ${who}'s extra dues invoice`]),
+        why: `A refund bounced and the original dues are paid again; the replacement invoice also has other charges.`,
+        doneWhen: "month_billed_once",
+      }
+      : voidFailed
       ? {
         action: fitAction("Billing", name, [(who) => `void ${who}'s extra ${monthName} dues invoice`, (who) => `void ${who}'s extra dues invoice`]),
         why: `A refund bounced, so the original dues invoice is paid again; a replacement still bills ${monthName}.`,
@@ -2293,7 +2354,7 @@ async function reconcileMembershipDuesRestore(ctx) {
       subject: { type: "invoice", id: String(ctx.replacement?.id || ctx.invoiceId) },
       who: "person",
     }, {
-      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was restored to paid. ${ctx.replacement ? `Replacement dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. ${voidFailed ? `The replacement could not be voided automatically; void it if the original stands.` : `Nothing was refunded automatically; refund the extra payment.`}`,
+      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was restored to paid. ${ctx.replacement ? `Replacement dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. ${preserved ? `It was left untouched because it carries more than the dues (an extra line, a credit or a payment): remove the duplicate dues from it by hand, or void it if nothing else is owed.` : voidFailed ? `The replacement could not be voided automatically; void it if the original stands.` : `Nothing was refunded automatically; refund the extra payment.`}`,
       bell: true,
       dedupeKey: `dues_restore_conflict:${ctx.invoiceId}:${ctx.replacement?.id || ctx.collectedPaymentId}`,
     });
@@ -13401,6 +13462,7 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
 InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
 InvoiceService.prepareMembershipDuesRestore = prepareMembershipDuesRestore;
+InvoiceService.replacementIsDuesOnly = replacementIsDuesOnly;
 InvoiceService.reconcileMembershipDuesRestore = reconcileMembershipDuesRestore;
 InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec };
 // Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).

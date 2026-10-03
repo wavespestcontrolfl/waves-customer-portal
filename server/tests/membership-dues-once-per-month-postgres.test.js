@@ -1579,6 +1579,38 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       } finally { await cleanup(f); }
     });
 
+    test('a replacement with an extra fee line is PRESERVED (not voided) and ONE alert asks the office to adjust it; the original is restored', async () => {
+      const f = await seedMember();
+      try {
+        const { a, b, refund } = await refundedThenReplaced(f);
+        await mockPg('invoices').where({ id: b.invoice.id }).update({
+          line_items: JSON.stringify([...b.invoice.line_items, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }]),
+        });
+        await handleRefundFailed(refund);
+        expect((await reload(a.invoice.id)).status).toBe('paid');
+        expect((await reload(b.invoice.id)).status).not.toBe('void');
+        const rows = await conflictAlerts(a.invoice.id);
+        expect(rows).toHaveLength(1);
+        expect(JSON.stringify(rows[0])).toContain(b.invoice.invoice_number);
+      } finally { await cleanup(f); }
+    });
+
+    test('a collector holding the customer collection claim refuses the restore retryably: nothing is restored, so Stripe redelivers', async () => {
+      const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+      const f = await seedMember();
+      try {
+        const { a, refund } = await refundedThenReplaced(f);
+        let error = null;
+        await withCustomerBillingLock(f.customerId, async () => {
+          error = await handleRefundFailed(refund).then(() => null, (e) => e);
+        });
+        expect(error).toMatchObject({ code: 'MEMBERSHIP_DUES_COLLECTION_BUSY' });
+        expect((await reload(a.invoice.id)).status).toBe('refunded');
+        await handleRefundFailed(refund); // redelivered once the collector is done
+        expect((await reload(a.invoice.id)).status).toBe('paid');
+      } finally { await cleanup(f); }
+    });
+
     test('a busy month lock (a completion is relying on the month) refuses the restore retryably: nothing is restored, so Stripe redelivers', async () => {
       const f = await seedMember();
       try {

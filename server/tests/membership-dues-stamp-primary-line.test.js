@@ -109,7 +109,7 @@ describe('reconcileMembershipDuesRestore', () => {
   const db = require('../models/db');
   const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
   const ctx = (over = {}) => ({ invoiceId: 'inv-orig', invoiceNumber: 'WPC-1', customerId: 'cust-1', month: '2026-09',
-    replacement: { id: 'inv-repl', status: 'sent', invoice_number: 'WPC-2' }, collectedPaymentId: null, ...over });
+    replacement: { id: 'inv-repl', status: 'sent', invoice_number: 'WPC-2', dueOnly: true }, collectedPaymentId: null, ...over });
   let voidSpy;
   beforeEach(() => {
     jest.clearAllMocks();
@@ -125,10 +125,24 @@ describe('reconcileMembershipDuesRestore', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
-  test('an UNPAID replacement is voided through the canonical void, with no alert', async () => {
+  test('an UNPAID replacement that is provably dues-only is voided through the canonical void, with no alert', async () => {
     await InvoiceService.reconcileMembershipDuesRestore(ctx());
     expect(voidSpy).toHaveBeenCalledWith('inv-repl');
     expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('an unpaid replacement that is NOT provably dues-only (a fee line, credit, a payment, any doubt) is left untouched: no void, ONE adjust-by-hand alert', async () => {
+    for (const dueOnly of [false, undefined]) {
+      jest.clearAllMocks();
+      await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: { id: 'inv-repl', status: 'sent', invoice_number: 'WPC-2', dueOnly } }));
+      expect(voidSpy).not.toHaveBeenCalled();
+      expect(mockRaise).toHaveBeenCalledTimes(1);
+      const [, spec, opts] = mockRaise.mock.calls[0];
+      expect(spec.action).toMatch(/adjust/);
+      expect(spec.why).toMatch(/other charges/);
+      expect(opts.dedupeKey).toBe('dues_restore_conflict:inv-orig:inv-repl');
+      expect(() => composeAdminAlert(spec)).not.toThrow();
+    }
   });
 
   test('a refused void raises ONE alert to void it by hand', async () => {
@@ -143,7 +157,7 @@ describe('reconcileMembershipDuesRestore', () => {
   });
 
   test.each([['paid'], ['prepaid'], ['processing']])('a %s replacement is never voided: ONE "paid twice" alert, no automatic refund', async (status) => {
-    await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: { id: 'inv-repl', status, invoice_number: 'WPC-2' } }));
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: { id: 'inv-repl', status, invoice_number: 'WPC-2', dueOnly: false } }));
     expect(voidSpy).not.toHaveBeenCalled();
     expect(mockRaise).toHaveBeenCalledTimes(1);
     const [, spec] = mockRaise.mock.calls[0];
@@ -156,5 +170,71 @@ describe('reconcileMembershipDuesRestore', () => {
     await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: null, collectedPaymentId: 'pay-9' }));
     expect(voidSpy).not.toHaveBeenCalled();
     expect(mockRaise.mock.calls[0][2].dedupeKey).toBe('dues_restore_conflict:inv-orig:pay-9');
+  });
+});
+
+// The "provably nothing but the duplicate dues" decision, made under the locks.
+describe('replacementIsDuesOnly', () => {
+  const dues = { client_id: 'scheduled_v2_primary', description: 'Pest', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: '2026-09' };
+  const row = (over = {}) => ({ status: 'sent', credit_applied: 0, payment_recorded_at: null, stripe_payment_intent_id: null, paid_at: null, line_items: [dues], ...over });
+  const decide = (over, opts) => InvoiceService.replacementIsDuesOnly(row(over), opts);
+
+  test('only the stamped dues line, unpaid, nothing applied or in flight: dues-only (also its price-reconciliation lines, and a JSON string)', () => {
+    expect(decide()).toBe(true);
+    expect(decide({ line_items: JSON.stringify([dues]) })).toBe(true);
+    expect(decide({ line_items: [dues, { client_id: 'scheduled_price_topup_v2', description: 'Scheduled price adjustment', quantity: 1, unit_price: 5, amount: 5 }] })).toBe(true);
+  });
+
+  test('dues plus a fee or service line is NOT dues-only', () => {
+    expect(decide({ line_items: [dues, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }] })).toBe(false);
+    expect(decide({ line_items: [dues, { client_id: 'scheduled_v2_addon_1', description: 'Add-on', quantity: 1, unit_price: 20, amount: 20 }] })).toBe(false);
+    expect(decide({ line_items: [dues, { description: 'Loyalty discount', quantity: 1, unit_price: -5, amount: -5, _kind: 'discount' }] })).toBe(false);
+  });
+
+  test('credit applied, a recorded payment, an intent in flight, a payment row, a paid status, or an unreadable / unstamped invoice is NOT dues-only', () => {
+    expect(decide({ credit_applied: 10 })).toBe(false);
+    expect(decide({ payment_recorded_at: new Date() })).toBe(false);
+    expect(decide({ stripe_payment_intent_id: 'pi_1' })).toBe(false);
+    expect(decide({ paid_at: new Date() })).toBe(false);
+    expect(decide({}, { hasPayment: true })).toBe(false);
+    for (const status of ['paid', 'prepaid', 'processing', 'void', 'refunded']) expect(decide({ status })).toBe(false);
+    expect(decide({ line_items: 'not json' })).toBe(false);
+    expect(decide({ line_items: [] })).toBe(false);
+    expect(decide({ line_items: [{ ...dues, membership_dues_month: undefined }] })).toBe(false);
+    expect(InvoiceService.replacementIsDuesOnly(null)).toBe(false);
+  });
+});
+
+// The restore also fences the monthly collectors: month try-lock, then the
+// customer collection claim, both tries; a busy claim refuses retryably before
+// any coverage read.
+describe('prepareMembershipDuesRestore — the customer collection claim', () => {
+  function fakeTrx({ monthFree = true, claimFree = true } = {}) {
+    const tables = [];
+    const answers = [monthFree, claimFree];
+    const trx = (table) => {
+      tables.push(table);
+      const q = { where: () => q, whereIn: () => q, whereRaw: () => q, first: async () => ({ id: 'inv-orig', invoice_number: 'WPC-1', customer_id: 'cust-1', line_items: [{ amount: 49, membership_dues_month: '2026-09' }] }) };
+      return q;
+    };
+    trx.raw = jest.fn(async (sql) => ({ rows: [{ acquired: answers.shift() }], sql }));
+    trx.tables = tables;
+    return trx;
+  }
+
+  test('a collector holding the claim refuses the restore retryably (503) before any coverage or payment read', async () => {
+    const trx = fakeTrx({ claimFree: false });
+    await expect(InvoiceService.prepareMembershipDuesRestore(trx, 'inv-orig'))
+      .rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_COLLECTION_BUSY', statusCode: 503, isOperational: true });
+    expect(trx.raw).toHaveBeenCalledTimes(2); // month try, then claim try, in that order
+    expect(trx.raw.mock.calls[0][1][0]).toBe('membership.dues_month');
+    expect(String(trx.raw.mock.calls[1][1][0])).toMatch(/^cron:/);
+    expect(trx.tables).toEqual(['invoices']); // only the invoice's own stamp read; no payments / coverage lookup
+  });
+
+  test('a busy month lock refuses first, without trying the claim', async () => {
+    const trx = fakeTrx({ monthFree: false });
+    await expect(InvoiceService.prepareMembershipDuesRestore(trx, 'inv-orig')).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_MONTH_BUSY' });
+    expect(trx.raw).toHaveBeenCalledTimes(1);
   });
 });
