@@ -2200,6 +2200,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const comboLengthChanged = slotCheckDuration !== comboOpened.duration
     || spanOf(comboStart, comboEnd) !== spanOf(comboOpened.start, comboOpened.end);
   const comboSlotChanged = !!comboVisit && !comboDoneRef.current.separated && (comboPlaceChanged || comboLengthChanged);
+  // The whole-stop move re-dates THIS visit's stop only: the server never
+  // widens a grouped recurring visit to its series (admin-dispatch.js
+  // seriesPolicy 'single'), so no later visit moves and no series ack is
+  // owed. Separate leaves an ordinary row, with the ordinary series rules.
+  const comboTogether = comboSlotChanged && comboMove === "together";
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3505,7 +3510,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               newDate: form.scheduledDate,
               ...(comboStart ? { newWindow: { start: comboStart, end: comboEnd || undefined }, deriveWindowFromCurrentVisit: true } : {}),
               notifyCustomer: notifyOnMove,
-              ...seriesAckPayload(seriesPreview.preview),
             }),
           });
           // 200 with needsAttention = only part of the stop moved (a
@@ -5950,15 +5954,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} />
                     Separate: move only this service
                   </label>
+                  {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
+                    <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
+                      Only this visit moves. Later visits in the plan stay where they are.
+                    </div>
+                  ) : null}
                 </div>
               )}
-              <SeriesMoveNotice
-                tone="inline"
-                preview={seriesPreview.preview}
-                loading={seriesPreview.loading}
-                stale={seriesStale}
-                style={{ marginTop: -2, marginBottom: 14 }}
-              />{" "}
+              {!comboTogether && (
+                <SeriesMoveNotice
+                  tone="inline"
+                  preview={seriesPreview.preview}
+                  loading={seriesPreview.loading}
+                  stale={seriesStale}
+                  style={{ marginTop: -2, marginBottom: 14 }}
+                />
+              )}{" "}
               <SlotConflictNotice
                 // The strip states the route problem itself; the
                 // double-booking notice (no `warning`) always stays.

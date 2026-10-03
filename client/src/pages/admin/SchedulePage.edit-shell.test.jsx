@@ -291,3 +291,30 @@ it('a partly finished whole-stop move is reported and nothing else is saved', as
   expect(screen.getByRole('alert')).not.toHaveTextContent('Both services were moved');
 });
 
+it('a recurring combo moved together moves this visit only: no "later visits" line, no series ack', async () => {
+  const preview = {
+    enabled: true, collective: true, deltaDays: 1, movableCount: 2, occurrenceIds: ['occ-1', 'occ-2'],
+    skippedCount: 0, exceptionCount: 0, conflictCount: 0, firstAffectedDate: '2035-01-16', lastAffectedDate: '2035-01-30',
+  };
+  fetch.mockImplementation(async (url) => (String(url).includes('/series-move-preview')
+    ? { ok: true, status: 200, json: async () => preview, text: async () => JSON.stringify(preview) }
+    : okJson(url)));
+  render(<EditServiceModal service={{ ...combo, isRecurring: true }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  expect(screen.getByTestId('combo-move-scope')).toHaveTextContent('Only this visit moves. Later visits in the plan stay where they are.');
+  // Separate is an ordinary row again: its recurring-plan line comes back.
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  expect(await screen.findByTestId('series-move-notice')).toBeInTheDocument();
+  expect(screen.queryByTestId('combo-move-scope')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText('Move all of them together'));
+  expect(screen.queryByTestId('series-move-notice')).not.toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  for (const [, options] of writes()) {
+    const body = JSON.parse(options.body);
+    expect(body.seriesAck).toBeUndefined();
+    expect(body.seriesAckIds).toBeUndefined();
+  }
+});
+
