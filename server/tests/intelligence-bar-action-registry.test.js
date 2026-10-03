@@ -330,6 +330,8 @@ const SCOPE_SNAPSHOT = {
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
     'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
+    // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
+    'get_customer_invoices', 'get_invoice_detail',
     'get_stop_details', 'query_revenue', 'search_messages', 'list_queued_messages',
     // writes: specific customer records proven by validateRecordTarget
     // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
