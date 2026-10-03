@@ -117,7 +117,12 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   try {
     const episodes = require('./admin-alert-episodes');
     const since = await activationBoundary(conn);
-    const reviews = await needsAnswerQuery(conn, since);
+    const { isInternalTestCustomerId } = require('./internal-test-customers');
+    // A review linked to an internal test account never needs an answer from
+    // the office: left out of the live set, so an item it already has (raised
+    // while it was still unlinked) is closed below (Codex #5659 r2).
+    const reviews = (await needsAnswerQuery(conn, since))
+      .filter((review) => !(review.customer_id && isInternalTestCustomerId(review.customer_id)));
     const live = new Set();
     for (const review of reviews) {
       const key = keyFor(review.id);
@@ -142,7 +147,7 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
     }
     const settled = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((key) => !live.has(key));
     if (settled.length) {
-      out.closed = Number(await episodes.closeAdminAlertKeys(conn, settled, 'review answered', { now, resolution: 'The review was answered, dismissed or left Google' })) || 0;
+      out.closed = Number(await episodes.closeAdminAlertKeys(conn, settled, 'review answered', { now, resolution: 'The review no longer needs an answer' })) || 0;
     }
   } catch (err) {
     logger.warn(`[review-alert] low-rating pass failed: ${err.message}`);

@@ -4,6 +4,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() };
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
+jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts } = require('../services/review-low-rating-alert');
@@ -120,6 +121,16 @@ describe('syncLowRatingReviewAlerts', () => {
     const { conn } = fakeConn({ reviews: [{ id: R1, star_rating: 2, reviewer_name: 'Pat Example', customer_id: null }] });
     const out = await syncLowRatingReviewAlerts({ conn });
     expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R2}`], 'review answered', expect.objectContaining({ resolution: expect.any(String) }));
+    expect(out.closed).toBe(1);
+  });
+
+  test('a review linked to an internal test account is left out, so an item raised before the link is closed', async () => {
+    mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R1}`]);
+    mockEpisodes.closeAdminAlertKeys.mockResolvedValue(1);
+    const { conn } = fakeConn({ reviews: [{ id: R1, star_rating: 2, reviewer_name: 'Pat Example', customer_id: 'test-cust' }] });
+    const out = await syncLowRatingReviewAlerts({ conn });
+    expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R1}`], 'review answered', expect.any(Object));
     expect(out.closed).toBe(1);
   });
 
