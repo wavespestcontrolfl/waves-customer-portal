@@ -254,3 +254,40 @@ it('a failed whole-stop move saves nothing else; a failed edit after it says the
   expect(writeUrls().filter((u) => u.includes('/reschedule'))).toHaveLength(2);
 });
 
+it('after a move whose edit failed, going back to the original date is a move again', async () => {
+  let putFails = true;
+  fetch.mockImplementation(async (url, options) => {
+    if (String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT' && putFails) {
+      return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+    }
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  const date = dialog.querySelector('input[type="date"]');
+  fireEvent.change(date, { target: { value: '2035-01-03' } });
+  await clickSave();
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Both services were moved'));
+  putFails = false;
+  fireEvent.change(date, { target: { value: '2035-01-02' } });
+  expect(screen.getByTestId('combo-move-choice')).toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(4));
+  expect(writeUrls().slice(2)).toEqual([
+    'POST /admin/dispatch/fixture-visit/reschedule',
+    'PUT /admin/schedule/fixture-visit/update-details',
+  ]);
+  expect(JSON.parse(writes()[2][1].body).newDate).toBe('2035-01-02');
+});
+
+it('a partly finished whole-stop move is reported and nothing else is saved', async () => {
+  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
+    ? { ok: true, json: async () => ({ needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop finished moving: fixture repair text.' } }) }
+    : okJson(url)));
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Only part of this stop finished moving: fixture repair text.');
+  expect(writeUrls()).toEqual(['POST /admin/dispatch/fixture-visit/reschedule']);
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Both services were moved');
+});
+

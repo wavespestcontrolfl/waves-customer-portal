@@ -2176,13 +2176,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const comboVisit = service.visit && service.visit.id && Number(service.visit.serviceCount) > 1 ? service.visit : null;
   const [comboMove, setComboMove] = useState("together");
   // What this modal already did, so a retried save never moves or splits twice.
-  const comboDoneRef = useRef({ movedTo: null, separated: false });
-  const comboOpened = useRef({
+  const comboDoneRef = useRef({ moved: false, separated: false });
+  // Where the stop IS: the slot the form opened on, then the slot of each
+  // whole-stop move this modal committed. Every comparison is against this,
+  // so after a move whose follow-up edit failed, going back to the original
+  // time is a move again (pre-push audit P1).
+  const comboBaseRef = useRef({
     date: form.scheduledDate,
     start: String(form.windowStart || "").slice(0, 5),
     end: String(form.windowEnd || "").slice(0, 5),
     duration: slotCheckDuration,
-  }).current;
+  });
+  const comboOpened = comboBaseRef.current;
   const comboStart = String(form.windowStart || "").slice(0, 5);
   const comboEnd = String(form.windowEnd || "").slice(0, 5);
   const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
@@ -3493,8 +3498,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         if (comboLengthChanged) {
           throw new Error("Moving both services keeps each one's length. Save the move first, or choose Separate to change this service's length.");
         }
-        const moveKey = `${form.scheduledDate}|${comboStart}`;
-        if (comboDoneRef.current.movedTo !== moveKey) {
+        if (comboPlaceChanged) {
           const moved = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
             method: "POST",
             body: JSON.stringify({
@@ -3504,7 +3508,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               ...seriesAckPayload(seriesPreview.preview),
             }),
           });
-          comboDoneRef.current.movedTo = moveKey;
+          // 200 with needsAttention = only part of the stop moved (a
+          // sibling stayed behind, or the visit record was not retargeted).
+          // Not a completed move: say what the server says and save nothing
+          // else; the stop is repaired from the board, as its message tells.
+          if (moved?.needsAttention) {
+            throw new Error(moved.needsAttention.message || "Only part of this stop finished moving. Fix it on the schedule before editing it here.");
+          }
+          comboDoneRef.current.moved = true;
+          comboBaseRef.current = { ...comboBaseRef.current, date: form.scheduledDate, start: comboStart, end: comboEnd };
           comboMovedThisSave = true;
           if (Array.isArray(moved?.warnings) && moved.warnings.length) comboMoveWarnings = moved.warnings;
           if (notifyOnMove && moved?.notificationSent === false) {
@@ -3512,7 +3524,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           }
         }
       }
-      const comboMovedByUnit = !!comboVisit && comboDoneRef.current.movedTo === `${form.scheduledDate}|${comboStart}`;
+      // The stop sits where a whole-stop move from this modal put it: the
+      // PUT moves nothing, so it must not text or re-ack (also on a retry).
+      const comboMovedByUnit = !!comboVisit && comboDoneRef.current.moved
+        && comboBaseRef.current.date === form.scheduledDate && comboBaseRef.current.start === comboStart;
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
