@@ -260,6 +260,25 @@ describe('buildBusinessIdentity', () => {
     expect(noSuite.matched).toMatchObject({ placeId: 'places/EXAMPLE3' });
   });
 
+  test('a typed unit that no tenant matches never borrows the neighbors\' type: shared-building evidence stays, the type is generic', () => {
+    const places = [
+      place({ id: 'places/EXAMPLE1', subpremise: '101' }),
+      place({ id: 'places/EXAMPLE2', primaryType: 'hair_salon', subpremise: '102' }),
+    ];
+    const identity = buildBusinessIdentity({ address: '100 Example Plaza Dr Ste 999, Examplecity, FL 00000', places });
+    expect(identity).toMatchObject({ matched: null, ambiguous: true, tenantsAtNumber: 2, ambiguousType: 'office_retail' });
+  });
+
+  test('suite-compatible tenants (no subpremise of their own) still lend a shared type; incompatible ones do not', () => {
+    const places = [
+      place({ id: 'places/EXAMPLE1' }),
+      place({ id: 'places/EXAMPLE2', primaryType: 'hair_salon' }),
+      place({ id: 'places/EXAMPLE3', primaryType: 'dentist', subpremise: '102' }),
+    ];
+    const identity = buildBusinessIdentity({ address: '100 Example Plaza Dr Ste 999, Examplecity, FL 00000', places });
+    expect(identity.ambiguousType).toBe('salon_spa');
+  });
+
   test('an address with no street number has no identity', () => {
     expect(buildBusinessIdentity({ address: 'Example Plaza Dr, Examplecity, FL', places: [place()] })).toBeNull();
   });

@@ -215,6 +215,26 @@ describe('gate on', () => {
     expect(p.homeSqFt).toBe(1200);
   });
 
+  test('a typed Ste 999 with tenants only in other suites: still a shared-building suite, sized by the generic bucket, never the neighbors\' type', async () => {
+    placesReply = () => ({
+      ok: true,
+      json: async () => ({
+        places: [
+          placeAt({ id: 'places/EXAMPLE1', subpremise: '101' }),
+          placeAt({ id: 'places/EXAMPLE2', name: 'Example Hair', primaryType: 'hair_salon', subpremise: '102' }),
+        ],
+      }),
+    });
+    const result = await performPropertyLookup('100 Example Plaza Dr Ste 999, Examplecity, FL 00000', {
+      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true,
+    });
+    const p = result.enriched;
+    expect(p.serviceScopeDecision).toBe('commercial_suite');
+    expect(p.commercialSubtype).toBe('office_retail');
+    expect(p.homeSqFt).toBe(1500);
+    expect(p.businessIdentity.type).toBe('office_retail');
+  });
+
   test('a matched place that carries its own subpremise is a suite with nothing typed', async () => {
     placesReply = () => ({ ok: true, json: async () => ({ places: [placeAt({ subpremise: '103' })] }) });
     const p = (await run()).enriched;

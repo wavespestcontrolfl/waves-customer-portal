@@ -225,16 +225,18 @@ function pickMatched(atNumber, typedUnit) {
   const compatible = token
     ? atNumber.filter((p) => !unitToken(p.subpremise) || unitToken(p.subpremise) === token)
     : atNumber;
-  if (compatible.length === 1) return { matched: compatible[0], ambiguous: false };
+  if (compatible.length === 1) return { matched: compatible[0], ambiguous: false, compatible };
   if (compatible.length > 1 && token) {
     const byUnit = compatible.filter((p) => unitToken(p.subpremise) === token);
-    if (byUnit.length === 1) return { matched: byUnit[0], ambiguous: false };
+    if (byUnit.length === 1) return { matched: byUnit[0], ambiguous: false, compatible };
   }
-  return { matched: null, ambiguous: atNumber.length > 1 };
+  return { matched: null, ambiguous: atNumber.length > 1, compatible };
 }
 
-// One subtype for a multi-tenant address with no single match: the tenants'
-// shared subtype when they all agree, else the generic storefront bucket.
+// One subtype for a multi-tenant address with no single match: the shared
+// subtype of the SUITE-COMPATIBLE tenants when they all agree, else the
+// generic storefront bucket. Places that name another suite than the typed
+// one never lend their type (they still prove a shared building).
 function sharedSubtype(places) {
   const subtypes = new Set(places.map((p) => businessTypeFor(p.primaryType, p.types)));
   return subtypes.size === 1 ? [...subtypes][0] : SUBTYPE_GENERIC;
@@ -252,7 +254,7 @@ function buildBusinessIdentity({ places, address, now = new Date() }) {
     .map(parsePlace)
     .filter((p) => p && p.operational && p.isBusiness);
   const atNumber = parsed.filter((p) => placeIsAtStreetNumber(p, typed));
-  const { matched, ambiguous } = pickMatched(atNumber, typedUnitOf(address));
+  const { matched, ambiguous, compatible } = pickMatched(atNumber, typedUnitOf(address));
   const neighbors = parsed.length - atNumber.length;
   return {
     source: 'google_places',
@@ -267,7 +269,7 @@ function buildBusinessIdentity({ places, address, now = new Date() }) {
     } : null,
     matchedCount: atNumber.length,
     ambiguous,
-    ambiguousType: ambiguous ? sharedSubtype(atNumber) : null,
+    ambiguousType: ambiguous ? sharedSubtype(compatible) : null,
     // Stable key for a multi-tenant address with no single match, so a
     // persisted suite stamp is reused for the same set of tenants only.
     tenantPlaceKey: ambiguous ? atNumber.map((p) => p.id).filter(Boolean).sort().join('|') || null : null,
