@@ -160,7 +160,10 @@ async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = 
     // Sending again from here would risk a second text.
     const synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
     if (synced) {
-      await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') });
+      // The claim stays whether or not this stamp lands: the sync ran, and a
+      // released claim would send the text again.
+      await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') })
+        .catch((err) => logger.warn(`[sms-scheduling-act] effects stamp failed for ${decisionId}: ${errorCode(err)}`));
       return true;
     }
   } catch (err) {

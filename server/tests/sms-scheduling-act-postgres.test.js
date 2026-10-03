@@ -150,6 +150,33 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     expect(reminders.handleReschedule).toHaveBeenCalledTimes(1);
   }));
 
+  test('a sync that ran keeps its claim even when the completion stamp cannot be written: no second text', () => inTrx(async (trx) => {
+    const s = await seed(trx);
+    const reminders = { handleReschedule: jest.fn(async () => ({ id: 'reminder-1' })) };
+    await trx('sms_offer_decisions').where({ id: s.decisionId })
+      .update({ execution_status: 'moved', execution: JSON.stringify({ ...TARGET, series: false, snapshot_synced_at: 'x' }), executed_at: new Date('2040-03-01T15:00:00Z') });
+    // The third write on the decision in a sweep is the completion stamp
+    // (after the claim): it fails once.
+    let updates = 0;
+    const flaky = new Proxy(trx, {
+      apply(target, thisArg, argv) {
+        const q = target(...argv);
+        if (argv[0] !== 'sms_offer_decisions') return q;
+        const update = q.update.bind(q);
+        q.update = (...args) => { updates += 1; return updates === 2 ? Promise.reject(new Error('stamp failed')) : update(...args); };
+        return q;
+      },
+      get(target, prop) { return target[prop]; },
+    });
+    expect(await act.finishMoveEffects({ now: new Date('2040-03-01T15:10:00Z'), dbh: flaky, deps: { reminders } })).toEqual({ finished: 1 });
+    const row = await trx('sms_offer_decisions').where({ id: s.decisionId }).first('execution');
+    expect(row.execution.effects_started_at).toBeTruthy();
+    expect(row.execution.effects_done_at).toBeUndefined();
+    // Still claimed: the next sweep sends nothing.
+    expect(await act.finishMoveEffects({ now: new Date('2040-03-01T15:25:00Z'), dbh: trx, deps: { reminders } })).toEqual({ finished: 0 });
+    expect(reminders.handleReschedule).toHaveBeenCalledTimes(1);
+  }));
+
   test('a notice that reports failure gives its claim back and is retried, at most three times', () => inTrx(async (trx) => {
     const s = await seed(trx);
     // handleReschedule returns null when it could not sync (it never throws).
