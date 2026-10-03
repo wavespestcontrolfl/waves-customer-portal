@@ -1223,7 +1223,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
@@ -1237,6 +1237,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // a preset swapped for one that happens to net the same dollars —
       // must refuse the same way a net-price mismatch already does, not
       // silently commit a visit the card never actually showed.
+      // The reason as it will be saved (trimmed, capped) is what the card
+      // shows and what the executor stamps; an empty one leaves the params.
+      if (booking.customerRequest) params.customer_request = booking.customerRequest;
+      else delete params.customer_request;
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
