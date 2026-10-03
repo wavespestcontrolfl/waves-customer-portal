@@ -472,9 +472,15 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
         ? 'One customer action would help strengthen the service plan.'
         : overallLabel === 'action_required'
           ? 'One recommendation needs attention to reduce recurring activity.'
-          : (applications.length
-            ? 'We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.'
-            : 'We’re tracking the documented areas between visits — the breakdown below shows exactly what we’re watching.'),
+          // With nothing documented this visit, the summary never claims a
+          // treated "documented activity" (owner report review 2026-10-03).
+          : findings.length
+            ? (applications.length
+              ? 'We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.'
+              : 'We’re tracking the documented areas between visits — the breakdown below shows exactly what we’re watching.')
+            : (applications.length
+              ? 'We treated your property today and are watching activity levels between visits — the breakdown below shows what we’re tracking.'
+              : 'We’re watching activity levels between visits — the breakdown below shows what we’re tracking.'),
     items,
   };
 }

@@ -1342,3 +1342,37 @@ describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {
     expect(status.result).toBe('We noted fungus — details below.');
   });
 });
+
+// Owner report review 2026-10-03: a recurring pest visit listed the tank-mix
+// surfactant as "Perimeter protection … used along treated exterior zones to
+// maintain the protective band" because the mix was a perimeter spray.
+describe('a spray adjuvant is labeled for what it does to the spray', () => {
+  const surfactant = {
+    method: 'perimeter_spray',
+    targets: [],
+    product: { name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', active_ingredient: 'Nonionic surfactant' },
+  };
+  const perimeterInsecticide = {
+    method: 'perimeter_spray',
+    targets: ['Ants'],
+    product: { name: 'Taurus SC', category: 'termiticide / insecticide', active_ingredient: 'Fipronil' },
+  };
+
+  it('on a pest visit: a spray coverage aid, never perimeter protection', () => {
+    expect(applicationPurpose(surfactant, 'pest')).toBe('Spray coverage aid');
+    expect(applicationPurposeCopy(surfactant, 'pest')).toBe('Added to the spray so it covers evenly and sticks to surfaces. It isn’t a pesticide on its own.');
+  });
+
+  it('matched by its name even with no category recorded', () => {
+    expect(applicationPurpose({ ...surfactant, product: { name: 'LESCO 90/10 Nonionic Surfactant' } }, 'pest')).toBe('Spray coverage aid');
+  });
+
+  it('the perimeter insecticide in the same mix keeps its perimeter label', () => {
+    expect(applicationPurpose(perimeterInsecticide, 'pest')).toBe('Perimeter protection');
+  });
+
+  it('tree & shrub keeps its own leaf wording', () => {
+    expect(applicationPurpose(surfactant, 'tree_shrub')).toBe('Spray coverage aid');
+    expect(applicationPurposeCopy(surfactant, 'tree_shrub')).toBe('Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.');
+  });
+});

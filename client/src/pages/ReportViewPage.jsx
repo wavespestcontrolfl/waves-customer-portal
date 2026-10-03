@@ -1234,6 +1234,11 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient/.test(hay)) return 'Plant nutrition application';
     return 'Plant health treatment';
   }
+  // A spray adjuvant (the surfactant in the tank mix) is no treatment of its
+  // own: never "Perimeter protection" because the mix it rode in was a
+  // perimeter spray (owner report review 2026-10-03). Same match as the
+  // tree & shrub branch above.
+  if (/surfactant|adjuvant|wetting/.test(`${product} ${category}`)) return 'Spray coverage aid';
   if (serviceLine === 'termite' || serviceLine === 'rodent') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
@@ -1383,7 +1388,14 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest', context =
   if (purpose === 'Trunk injection') return 'Delivered directly into the trunk so the treatment moves with the tree’s own vascular flow.';
   if (purpose === 'Disease control application') return 'Applied to protect foliage where disease-like signals or seasonal conditions called for it.';
   if (purpose === 'Plant nutrition application') return 'Applied to feed the documented plants — supporting color, density, root development, and new growth within the plant health program.';
-  if (purpose === 'Spray coverage aid') return 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.';
+  if (purpose === 'Spray coverage aid') {
+    // Tree & shrub keeps its leaf wording; on any other visit the additive
+    // rides an exterior spray, in the approved product wording (server
+    // report-product-copy.js, LESCO 90/10).
+    return serviceLine === 'tree_shrub'
+      ? 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.'
+      : 'Added to the spray so it covers evenly and sticks to surfaces. It isn’t a pesticide on its own.';
+  }
   if (purpose === 'Plant health treatment') return 'Applied as part of the documented plant health program for this visit.';
   return 'Application recorded for this visit.';
 }
