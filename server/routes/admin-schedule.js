@@ -6477,6 +6477,9 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
+    // "~N min from last stop / to next" on the day list (display only).
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;
@@ -25937,18 +25940,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
-        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
-          const named = Boolean(row?.name)
-            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
-          if (named) mentionedCatalogNames.push(row.name);
-          // Its actives too: a draft must not swap the named product for
-          // its active ingredient; and an active the prompt names on its own
-          // ("azoxystrobin" in a note) is screened even with no product name.
-          if (row?.active_ingredient && (named || activeIngredientsMentioned(fullUserMessage, row.active_ingredient))) {
-            mentionedCatalogActives.push(row.active_ingredient);
-          }
-        }
+        const catalogRows = await db('products_catalog').select('name', 'active_ingredient', 'category');
+        const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
+        mentionedCatalogNames.push(...mentioned.names);
+        mentionedCatalogActives.push(...mentioned.actives);
       } catch (err) {
         logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
         return res.status(503).json({
@@ -26088,8 +26083,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
         });
+        // Every draft came back and the report's wording checks refused it:
+        // say so, not "unavailable", so the next step is clear (prod
+        // 2026-10-02: a refused-wording failure read as an outage).
+        const everyDraftRefused = Array.isArray(generated.failures) && generated.failures.length > 0
+          && generated.failures.every((failure) => failure?.reason === 'copy_rejected');
         return res.status(503).json({
-          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          error: everyDraftRefused
+            ? 'The AI drafts did not pass the report’s wording checks, so none was used. Try again, or write the report yourself. Your existing service notes were not changed.'
+            : 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
           retryable: true,
         });
       }
@@ -27377,7 +27379,31 @@ function blackoutDateString(value) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// The catalog products, and their actives, a report prompt names: under the
+// writer rules each joins the trade-name and active screens, so a draft never
+// names a product a note mentioned. Supplies (yard signs, stakes, stickers)
+// are no products a report could name: their ordinary words ("yard sign",
+// "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
+// visit whose notes said "yard" (prod 2026-10-02).
+function catalogScreensForPrompt(catalogRows, promptText) {
+  const names = [];
+  const actives = [];
+  for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
+    const named = Boolean(row?.name)
+      && CompletionRecap.containsProductName(promptText, [{ name: row.name }], { wholeWord: true });
+    if (named) names.push(row.name);
+    // Its actives too: a draft must not swap the named product for its
+    // active ingredient; and an active the prompt names on its own
+    // ("azoxystrobin" in a note) is screened even with no product name.
+    if (row?.active_ingredient && (named || activeIngredientsMentioned(promptText, row.active_ingredient))) {
+      actives.push(row.active_ingredient);
+    }
+  }
+  return { names, actives };
+}
+
 router._test = {
+  catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split

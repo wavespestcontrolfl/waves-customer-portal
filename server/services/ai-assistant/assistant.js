@@ -885,7 +885,9 @@ class WavesAssistant {
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
         detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),
-        metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
+        // The topic lets the relevance sweep close an add-a-service bell once
+        // an estimate goes out (admin-alert-relevance.js).
+        metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id, ...(Object.hasOwn(TOPIC_WORDING, topic) ? { topic } : {}) },
       });
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
       // { id: null, suppressed: true } when the bell was withheld (a demo

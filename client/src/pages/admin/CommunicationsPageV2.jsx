@@ -1211,6 +1211,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
+  // Inbox assist for a text in another language: its English translation and the
+  // checked reply in the customer's language (null when off or nothing to show).
+  const [translationAssist, setTranslationAssist] = useState(null);
+  const translationRecipientRef = useRef("");
+  const [assistRetry, setAssistRetry] = useState(0);
+  // Changes whenever the loaded thread does (a new text in, a reply out), so the
+  // translation card is re-read and never outlives the text it answers.
+  const threadMessages = customer ? customerMessages : messages;
+  const threadVersion = `${threadMessages.length}:${threadMessages[0]?.id || ""}:${threadMessages[threadMessages.length - 1]?.id || ""}`;
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [uploading, setUploading] = useState(false);
   // Purely a label distinction — `uploading` gates the controls for the whole
@@ -1639,10 +1648,18 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setAgentDraft(null);
       setAgentDraftLoading(false);
       setSelectedAgentDraft(null);
+      setTranslationAssist(null);
       return;
     }
 
+    // The recipient changed: the previous customer's translation card (and its
+    // Use Reply) must not stay on screen while the new one loads. A message
+    // refresh for the same recipient re-reads it in place.
+    const assistRecipient = `${selectedCustomerId || ""}|${phoneKey(phone)}`;
+    if (translationRecipientRef.current !== assistRecipient) setTranslationAssist(null);
+    translationRecipientRef.current = assistRecipient;
     let cancelled = false;
+    let retry = null;
     const t = setTimeout(() => {
       const params = new URLSearchParams();
       if (selectedCustomerId) params.set("customerId", selectedCustomerId);
@@ -1652,13 +1669,21 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         .then((d) => {
           if (!cancelled) {
             setAgentDraft(d?.draft || null);
-            setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
+            // (a translation card's Use Reply anchor has no decisionId: it stays with the draft and is re-checked at send)
+            setSelectedAgentDraft((current) => current?.translationTrialId || current?.decisionId === d?.draft?.decisionId ? current : null);
+            // only for the customer it was read for (a phone-only lookup carries none)
+            const translation = d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null;
+            setTranslationAssist(translation && !translation.pending ? translation : null);
+            // the translation of a text that just arrived is still being checked: ask again shortly
+            // (the server says how soon, and stops saying so once a trial can no longer be running)
+            if (translation?.pending) retry = setTimeout(() => setAssistRetry((n) => n + 1), Math.max(Number(translation.retryInMs) || 15000, 5000));
           }
         })
         .catch(() => {
           if (!cancelled) {
             setAgentDraft(null);
-            setSelectedAgentDraft(null);
+            setSelectedAgentDraft((current) => current?.translationTrialId ? current : null);
+            setTranslationAssist(null);
           }
         })
         .finally(() => {
@@ -1669,8 +1694,29 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return () => {
       cancelled = true;
       clearTimeout(t);
+      clearTimeout(retry);
     };
-  }, [active, toNumber, selectedCustomerId]);
+  }, [active, toNumber, selectedCustomerId, threadVersion, assistRetry]);
+
+  // The suggested reply is good until the server's stated moment (a day after
+  // the text): drop it then, keep the translation.
+  useEffect(() => {
+    if (!translationAssist?.replyTranslated || !translationAssist.replyExpiresAt) return undefined;
+    const { trialId } = translationAssist;
+    const expire = () => setTranslationAssist((current) => current?.trialId === trialId
+      ? { ...current, replyEnglish: null, replyTranslated: null, replyExpiresAt: null, heldReason: "The suggested reply is out of date." }
+      : current);
+    const t = setTimeout(expire, Math.min(Math.max(new Date(translationAssist.replyExpiresAt).getTime() - Date.now(), 0), 2 ** 31 - 1));
+    return () => clearTimeout(t);
+  }, [translationAssist]);
+
+  // Any edit makes the text the staff member's own: only the checked translation itself rides with its trial
+  // (the server refuses an edited body under a trial id). While it rides, the send is immediate.
+  useEffect(() => {
+    if (!selectedAgentDraft?.translationTrialId) return;
+    if (msgBody.trim() !== String(selectedAgentDraft.suggestedMessage || "").trim()) setSelectedAgentDraft(null);
+    else if (sendTiming !== "now") setSendTiming("now");
+  }, [msgBody, selectedAgentDraft, setSelectedAgentDraft, sendTiming, setSendTiming]);
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
@@ -1981,7 +2027,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             scheduledFor,
             linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
-            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+            agentDraft: selectedAgentDraft?.decisionId ? selectedAgentDraft.suggestedMessage || undefined : undefined,
+            // Use Reply on the translation card: the server re-checks the reply is still current
+            translationTrialId: selectedAgentDraft?.translationTrialId || undefined,
           }),
         });
         setSendResult({
@@ -2023,7 +2071,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 ? attachments.map(({ previewUrl, ...a }) => a)
                 : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
-            agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+            agentDraft: selectedAgentDraft?.decisionId ? selectedAgentDraft.suggestedMessage || undefined : undefined,
+            // Use Reply on the translation card: the server re-checks the reply is still current
+            translationTrialId: selectedAgentDraft?.translationTrialId || undefined,
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
@@ -2042,6 +2092,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         }
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
+      // the text the translation card answered has now been answered
+      setTranslationAssist(null);
       notifyUnreadChanged();
       const { cleared, persisted } = clearDraft(draftRevision);
       if (cleared && persisted) {
@@ -3382,6 +3434,64 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           })()}
         </>}
         <fieldset disabled={!toNumber.trim()} className="m-0 min-w-0 border-0 p-0">
+        {translationAssist && (
+          <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm" data-testid="translation-assist">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center h-7 w-7 rounded-full bg-zinc-100 text-zinc-900">
+                <Bot size={15} strokeWidth={2} />
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="text-ui-body md:text-ui-caption font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
+                  {translationAssist.language ? `Customer wrote in ${translationAssist.language}` : "Customer wrote in another language"}
+                </div>
+              </div>
+              {/* not while an approval draft is loaded: that Send revises the draft and never reaches the re-check */}
+              {translationAssist.replyTranslated && !loadedMessageDraft?.id && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMsgBody(translationAssist.replyTranslated);
+                    // A translated reply is not the Agent Review draft: it is sent as an ordinary staff message.
+                    // The trial it came from rides with the saved draft so the server can refuse it once stale.
+                    setSelectedAgentDraft({ translationTrialId: translationAssist.trialId, suggestedMessage: translationAssist.replyTranslated });
+                    // it is sent now or not at all (the server refuses to schedule it)
+                    setSendTiming("now");
+                    // and it answers the customer's text, never a retained "Text back" target (a job applicant row on a shared phone)
+                    setReplyContext(null);
+                  }}
+                >
+                  Use Reply
+                </Button>
+              )}
+            </div>
+            {translationAssist.inboundEnglish && (
+              <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
+                <span className="text-ink-tertiary">In English: </span>
+                {translationAssist.inboundEnglish}
+              </div>
+            )}
+            {translationAssist.replyTranslated && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200">
+                <div className="text-ui-label md:text-ui-caption font-medium text-zinc-900">Suggested reply</div>
+                <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
+                  {translationAssist.replyTranslated}
+                </div>
+                {translationAssist.replyEnglish && (
+                  <div className="mt-1 text-ui-label md:text-ui-caption text-ink-secondary whitespace-pre-wrap">
+                    <span className="text-ink-tertiary">In English: </span>
+                    {translationAssist.replyEnglish}
+                  </div>
+                )}
+              </div>
+            )}
+            {translationAssist.heldReason && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption text-ink-secondary">
+                No suggested reply. {translationAssist.heldReason}
+              </div>
+            )}
+          </div>
+        )}
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
             <div className="flex items-center gap-2 mb-2">
