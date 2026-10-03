@@ -1637,6 +1637,9 @@ async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSen
       outgoingBody: input.body,
       providerMessageId: providerOutcome?.providerMessageId || null,
       to: sendInput.to,
+      // The number the provider actually sent from (twilio.js's result), so
+      // the offer's Waves line never depends on the best-effort log row.
+      from: providerOutcome?.raw?.fromNumber || null,
       sentAt: providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date(),
       preSendVisitSnapshot,
     });

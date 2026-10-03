@@ -29,6 +29,7 @@ test('gate on: the ledger gets the decision, the approved body and the destinati
   await recordSmsOfferAfterSend(input, sendInput, accepted);
   expect(mockRecord).toHaveBeenCalledWith({
     agentDecisionId: 'd-1', outgoingBody: input.body, providerMessageId: SID, to: '+19415550100', sentAt: new Date('2026-10-02T15:00:00.000Z'),
+    from: null,
     preSendVisitSnapshot: null,
   });
 });
@@ -60,4 +61,10 @@ test('the visit snapshot read before the send is handed to the ledger', async ()
   const snap = { scheduled_service_id: 'v-1', date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', pre_send: true };
   await recordSmsOfferAfterSend(input, sendInput, accepted, snap);
   expect(mockRecord.mock.calls[0][0].preSendVisitSnapshot).toBe(snap);
+});
+
+test('the number the provider sent from is handed to the ledger as the offer\'s Waves line', async () => {
+  process.env[GATE] = 'true';
+  await recordSmsOfferAfterSend(input, sendInput, { ...accepted, raw: { fromNumber: '+19415550199' } });
+  expect(mockRecord.mock.calls[0][0].from).toBe('+19415550199');
 });
