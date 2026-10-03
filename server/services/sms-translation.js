@@ -957,6 +957,7 @@ const HOLD_WORDS = [
 ];
 const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_changed_in_inbound|error$|trigger_row_unread)/;
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 
 /**
  * Inbox assist for one customer: the trial row of their LATEST text, when that text is still the last message
@@ -978,7 +979,11 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     // To number): the reply is offered only into the thread the text came in on
     if (phoneLast10 && String(last.from_phone || '').replace(/\D/g, '').slice(-10) !== phoneLast10) return null;
     const row = await db(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
-    if (!row || row.verdict === 'skipped') return null;
+    // The trial runs after the webhook answers and takes several model calls: for a text that just arrived, no
+    // row yet means "not finished", and the composer asks again. (An English text never gets a row, so this
+    // stops by itself after the window.)
+    if (!row) return now.getTime() - new Date(last.created_at).getTime() < INBOX_PENDING_WINDOW_MS ? { pending: true, customerId, smsLogId: last.id } : null;
+    if (row.verdict === 'skipped') return null;
     const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
     const ageMs = now.getTime() - new Date(row.created_at).getTime();
     const fresh = row.verdict === 'ready' && Boolean(row.reply_translated) && ageMs >= 0 && ageMs <= INBOX_REPLY_MAX_AGE_MS;

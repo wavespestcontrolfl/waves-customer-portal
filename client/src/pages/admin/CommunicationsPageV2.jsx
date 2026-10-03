@@ -1215,6 +1215,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // checked reply in the customer's language (null when off or nothing to show).
   const [translationAssist, setTranslationAssist] = useState(null);
   const translationRecipientRef = useRef("");
+  const [assistRetry, setAssistRetry] = useState(0);
   // Changes whenever the loaded thread does (a new text in, a reply out), so the
   // translation card is re-read and never outlives the text it answers.
   const threadMessages = customer ? customerMessages : messages;
@@ -1658,6 +1659,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     if (translationRecipientRef.current !== assistRecipient) setTranslationAssist(null);
     translationRecipientRef.current = assistRecipient;
     let cancelled = false;
+    let retry = null;
     const t = setTimeout(() => {
       const params = new URLSearchParams();
       if (selectedCustomerId) params.set("customerId", selectedCustomerId);
@@ -1669,7 +1671,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             setAgentDraft(d?.draft || null);
             setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
             // only for the customer it was read for (a phone-only lookup carries none)
-            setTranslationAssist(d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null);
+            const translation = d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null;
+            setTranslationAssist(translation && !translation.pending ? translation : null);
+            // the translation of a text that just arrived is still being checked: ask again shortly
+            // (the server stops saying so after a few minutes)
+            if (translation?.pending) retry = setTimeout(() => setAssistRetry((n) => n + 1), 15000);
           }
         })
         .catch(() => {
@@ -1687,8 +1693,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return () => {
       cancelled = true;
       clearTimeout(t);
+      clearTimeout(retry);
     };
-  }, [active, toNumber, selectedCustomerId, threadVersion]);
+  }, [active, toNumber, selectedCustomerId, threadVersion, assistRetry]);
 
   // The suggested reply is good until the server's stated moment (15 minutes
   // when it quotes minutes-away, otherwise a day): drop it then, keep the translation.

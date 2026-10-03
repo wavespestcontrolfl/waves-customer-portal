@@ -87,6 +87,14 @@ describe('inboxAssistFor', () => {
     expect(mockTrial).toHaveBeenCalledTimes(1);
   });
 
+  test('no row yet for a text that just arrived: pending for 3 minutes, so the composer asks again', async () => {
+    mockTrial.mockResolvedValue(undefined);
+    mockLast.mockResolvedValue({ id: 's2', direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:58:30Z') });
+    expect(await inboxAssistFor('c1', NOW)).toEqual({ pending: true, customerId: 'c1', smsLogId: 's2' });
+    mockLast.mockResolvedValue({ id: 's2', direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:56:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toBeNull();
+  });
+
   test('a read failure returns nothing and never logs the message text', async () => {
     mockLast.mockRejectedValue(Object.assign(new Error('select ... Hola secreto'), { code: '57014' }));
     expect(await inboxAssistFor('c1', NOW)).toBeNull();

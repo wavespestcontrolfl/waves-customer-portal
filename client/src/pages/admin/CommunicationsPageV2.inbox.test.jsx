@@ -746,6 +746,19 @@ it("drops the suggested reply when its time is up and keeps the translation", as
   expect(screen.getByText(/No suggested reply\. The suggested reply is out of date\./)).toBeInTheDocument();
 });
 
+it("asks again while the translation of a just-arrived text is still being checked", async () => {
+  const owner = "translation-pending-owner";
+  const ready = { trialId: 11, customerId: "customer-a", language: "Spanish", inboundEnglish: "Can you come Friday?", replyEnglish: null, replyTranslated: null, heldReason: "The reply did not pass every check." };
+  let reads = 0;
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation: ++reads === 1 ? { pending: true, customerId: "customer-a" } : ready }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
+  await tick(15000); await tick();
+  expect(screen.getByText("Can you come Friday?")).toBeInTheDocument();
+});
+
 it("a held translation shows the English and the reason, with no reply to use", async () => {
   const owner = "translation-held-owner";
   window.history.replaceState({}, "", "/?phone=9415550100");
