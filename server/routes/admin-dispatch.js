@@ -208,6 +208,32 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// Every /:serviceId route is pinned to the technician's own visit here, once,
+// before the handler (codex #5568 r2/r3 P1). The canonical row predicate
+// (technicianVisitRowInScope: assigned to the caller, not a dead status, inside
+// the 7-day window) decides; the ONE carve-out is PUT /:serviceId/status, whose
+// own terminal-transition logic must still see a same-status retry on a
+// cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1) — there only
+// assignment + window are checked. A missing row is 404; an existing visit
+// that is not the caller's answers this router's documented 403
+// service_not_assigned. Admins pass.
+router.param('serviceId', async (req, res, next, serviceId) => {
+  try {
+    if (!isTechnicianRequest(req)) return next();
+    const { techAccessCutoff } = require('../services/technician-visit-scope');
+    const { dateOnly } = require('../services/visit-groups');
+    const row = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .first('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date', 'scheduled_services.status');
+    if (!row) return res.status(404).json({ error: 'Service not found' });
+    const statusRetry = req.method === 'PUT' && /^\/[^/]+\/status\/?$/.test(req.path);
+    const assigned = statusRetry
+      ? String(row.technician_id || '') === String(req.technicianId || '') && dateOnly(row.scheduled_date) >= techAccessCutoff()
+      : technicianVisitRowInScope(req, row);
+    if (!assigned) return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    return next();
+  } catch (err) { return next(err); }
+});
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
 // Tech-readable boolean reflecting whether the rating picker should be
@@ -1210,6 +1236,14 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
 router.post('/recap-preview', async (req, res, next) => {
   try {
     const body = req.body || {};
+    // The preview runs the paid model chain: a technician needs a visit of
+    // their own; admins keep the id-less path (codex #5568 r7 P1).
+    if (isTechnicianRequest(req)) {
+      const owned = body.serviceId
+        ? await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('scheduled_services.id')
+        : null;
+      if (!owned) return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     // Season/weather/expectations context (owner directive 2026-07-21).
     // serviceId → customer geocode for the weather line; without it the
     // season + what-to-expect context still applies. Best-effort only.
@@ -1217,7 +1251,7 @@ router.post('/recap-preview', async (req, res, next) => {
     try {
       let customerId = null;
       if (body.serviceId) {
-        const svcRow = await db('scheduled_services').where({ id: body.serviceId }).first('customer_id');
+        const svcRow = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('customer_id');
         customerId = svcRow?.customer_id || null;
       }
       visitContext = await buildRecapVisitContext({ serviceType: body.serviceType, customerId });
@@ -3593,9 +3627,9 @@ async function assertRecapOwnership(req, res) {
   if (req.techRole === 'admin') return true;
   const svc = await db('scheduled_services')
     .where({ id: req.params.serviceId })
-    .first('technician_id');
+    .first('technician_id', 'status', 'scheduled_date');
   if (!svc) { res.status(404).json({ error: 'Service not found' }); return false; }
-  if (svc.technician_id !== req.technicianId) {
+  if (!technicianVisitRowInScope(req, svc)) {
     res.status(403).json({ error: 'Not assigned to this service' });
     return false;
   }
@@ -5719,7 +5753,7 @@ router.get('/weather/tomorrow', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/reschedules/log
-router.get('/reschedules/log', async (req, res, next) => {
+router.get('/reschedules/log', requireAdmin, async (req, res, next) => {
   try {
     const logs = await db('reschedule_log')
       .leftJoin('customers', 'reschedule_log.customer_id', 'customers.id')
@@ -6397,8 +6431,8 @@ const recapMedia = require('../services/service-report/recap-media');
 // 403 itself and returns false so the caller bails.
 async function recapOwnerOk(req, res) {
   if (req.techRole === 'admin') return true;
-  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id');
-  if (svc && svc.technician_id === req.technicianId) return true;
+  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id', 'status', 'scheduled_date');
+  if (svc && technicianVisitRowInScope(req, svc)) return true;
   res.status(403).json({ error: 'Not your visit' });
   return false;
 }

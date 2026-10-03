@@ -163,8 +163,9 @@ router.post('/:id/confirm-start', async (req, res, next) => {
 
     let entry;
     try {
-      entry = await timeTracking.startJob(req.technicianId, jobId, { lat, lng });
+      entry = await timeTracking.startJob(req.technicianId, jobId, { lat, lng, scopeReq: req });
     } catch (err) {
+      if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
       return res.status(409).json({ error: err.message });
     }
 
@@ -175,7 +176,10 @@ router.post('/:id/confirm-start', async (req, res, next) => {
       // startJob above already fired it as the acting tech; pass req.technicianId
       // again so that if that first send was released for retry, this no-op-or-
       // retry call still names the tech who confirmed the start, not a stale one.
-      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date(), { actingTechId: req.technicianId });
+      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date(), {
+        actingTechId: req.technicianId,
+        ...(req.techRole === 'technician' ? { expectTechnicianId: req.technicianId } : {}),
+      });
     }
 
     await db('tech_notifications')
