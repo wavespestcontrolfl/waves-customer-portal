@@ -159,6 +159,14 @@ describe('buildPhotoFindings', () => {
       expect(build(run([undetermined({ photo_refs: [9] })]))[0].confirm).toBeUndefined();
       expect(build(run([undetermined()]), { photoRows: [{ id: 'ph-front', zone: 'front', url: null }] })[0].confirm).toBeUndefined();
     });
+
+    // Codex r1: an untagged photo could be the very shot we would call missing.
+    test('prints nothing when a cited photo, or any photo of the set, has no known shot', () => {
+      expect(build(run([undetermined()]), { photoRows: [{ id: 'ph-front', zone: '', url: 'https://x.test/front' }] })[0].confirm).toBeUndefined();
+      expect(build(run([undetermined()]), { photoRows: [{ id: 'ph-front', zone: 'somewhere', url: 'https://x.test/front' }] })[0].confirm).toBeUndefined();
+      const withUntagged = [...SET, { url: 'https://x.test/untagged', shot: null, label: 'Lawn photo' }];
+      expect(build(run([undetermined()]), { photoSet: withUntagged })[0].confirm).toBeUndefined();
+    });
   });
 });
 

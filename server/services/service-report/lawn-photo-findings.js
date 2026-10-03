@@ -152,9 +152,14 @@ function buildPhotoFindings({ run, assessment, photoRows, photoSet }) {
     if (finding.canDetermine === false) {
       // Name a cause-supporting shot only when the data can say it is missing:
       // every cited photo's shot is known, and the visit has no such photo at all.
-      const citedKnown = finding.refs.length > 0 && cited.every((row) => row && row.url);
-      const citedShots = new Set(cited.map((row) => shotList.normalizeShotZone(row && row.zone)).filter(Boolean));
-      const missing = citedKnown ? CAUSE_SHOTS.find((key) => !citedShots.has(key) && !shotsInSet.has(key)) : null;
+      // An untagged photo (the capture contract accepts an empty zone) could be
+      // the very shot we would call missing, so one untagged cited photo, or one
+      // untagged photo anywhere in the set, means the data cannot say.
+      const citedShotOf = (row) => (row && row.url ? shotList.normalizeShotZone(row.zone) : null);
+      const citedKnown = finding.refs.length > 0 && cited.every((row) => !!citedShotOf(row));
+      const setKnown = photoSet.every((entry) => !!entry.shot);
+      const citedShots = new Set(cited.map(citedShotOf).filter(Boolean));
+      const missing = citedKnown && setKnown ? CAUSE_SHOTS.find((key) => !citedShots.has(key) && !shotsInSet.has(key)) : null;
       if (missing) out.confirm = photoCanConfirmSentence(SHOT_NAMES[missing]);
     }
     return out;
