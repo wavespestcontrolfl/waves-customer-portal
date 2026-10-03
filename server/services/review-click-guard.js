@@ -120,14 +120,6 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
   return dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
 }
 
-// The customer already went to Google: a tracked click since the anchor, or
-// (GATE_REVIEW_ASK_TECH_VOICE) a confirmed "I already left a review" text on
-// record (review-ask-holds.js customerSaidReviewed).
-async function alreadyReviewedSince(customerId, anchor, database, { clicksOnly = false } = {}) {
-  if (await reviewLinkClickedSince(customerId, anchor, database)) return true;
-  return !clicksOnly && require('./review-ask-holds').customerSaidReviewed(customerId, { database });
-}
-
 // The guard for an ask described by a review_requests row (sendSMS, follow-ups,
 // the inline email leg, the composer seam). The visit anchor always wins. A row
 // with no visit (a manual create(), an Intelligence Bar or composer ask) is about
@@ -146,7 +138,7 @@ async function askSuppressedByClick(request, database = db) {
     ].filter((d) => d && !Number.isNaN(d.getTime()));
     anchor = candidates.length ? new Date(Math.min(...candidates.map((d) => d.getTime()))) : null;
   }
-  return alreadyReviewedSince(request.customer_id, anchor, database);
+  return reviewLinkClickedSince(request.customer_id, anchor, database);
 }
 
 // The same guard for an ask known only by its id (a bundled completion ask):
@@ -162,14 +154,12 @@ async function askIdSuppressedByClick(reviewRequestId, database = db) {
 
 // The guard for a cadence / outreach touch that has no request row yet: the
 // visit, else `fallbackAnchor` (a cadence's own start), else — when
-// `newestVisitFallback` — the customer's newest completed visit. `clicksOnly`:
-// the sequence runner, whose review-ask holds record a reviewed claim under
-// its own reason.
-async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null, newestVisitFallback = false, clicksOnly = false } = {}, database = db) {
+// `newestVisitFallback` — the customer's newest completed visit.
+async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null, newestVisitFallback = false } = {}, database = db) {
   const anchor = (await visitAnchor({ serviceRecordId, scheduledServiceId }, database))
     || (fallbackAnchor ? new Date(fallbackAnchor) : null)
     || (newestVisitFallback ? await newestCompletedVisitAnchor(customerId, database) : null);
-  return alreadyReviewedSince(customerId, anchor, database, { clicksOnly });
+  return reviewLinkClickedSince(customerId, anchor, database);
 }
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, so no further review request is sent.';

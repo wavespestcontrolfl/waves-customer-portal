@@ -21,9 +21,8 @@ jest.mock('../config/feature-gates', () => ({
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
 const mockDraftTechVoice = jest.fn(async () => null);
-// The review-ask holds' two checks, stood in for in every test (askHold
-// itself runs for real): no hold unless a test says otherwise.
-let mockSaysReviewed;
+// The review-ask payment hold, stood in for in every test (askHold itself
+// runs for real): no hold unless a test says otherwise.
 let mockPaymentHold;
 jest.mock('../services/review-ask-drafter', () => ({
   // The real verifiers: the send path re-checks a reused older draft with them.
@@ -199,9 +198,7 @@ beforeEach(() => {
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
   const Holds = require('../services/review-ask-holds');
-  mockSaysReviewed?.mockRestore();
   mockPaymentHold?.mockRestore();
-  mockSaysReviewed = jest.spyOn(Holds, 'customerSaysReviewed').mockResolvedValue({ claim: null });
   mockPaymentHold = jest.spyOn(Holds, 'paymentHold').mockResolvedValue(null);
   delete mockGates.reviewAskTechVoice;
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
@@ -7765,60 +7762,8 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     const mock = book();
     db.mockImplementation(mock);
     await ReviewService._runSequenceStep('seq-hold');
-    expect(mockSaysReviewed).not.toHaveBeenCalled();
     expect(mockPaymentHold).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test('the customer texted that they already posted a review: the remaining asks stop, their words recorded', async () => {
-    mockGates.reviewAskTechVoice = true;
-    const mock = book();
-    db.mockImplementation(mock);
-    mockSaysReviewed.mockResolvedValueOnce({ claim: { quote: 'just posted it', at: new Date() } });
-    const out = await ReviewService._runSequenceStep('seq-hold');
-    expect(out).toMatchObject({ stopped: true, reason: 'customer_says_reviewed' });
-    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'customer_says_reviewed' });
-    expect(decisionOf(mock)).toMatchObject({ reason: 'customer_says_reviewed', detail: { quote: 'just posted it' } });
-    expect(mockSaysReviewed.mock.calls[0][0]).toBe('hold-1');
-  });
-
-  test('a claim during a cadence with a later private check-in skips this ask and keeps the check-in; the claim counts as series engagement', async () => {
-    mockGates.reviewAskTechVoice = true;
-    const mock = book({ plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]) });
-    mock.__state.rows.review_sequences.push({
-      id: 'seq-parked', customer_id: 'hold-1', status: 'stopped', stop_reason: require('../services/visit-completion-summary').PARKED_REVIEW_REASON, current_step: 0, touches_sent: 0,
-      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]),
-    });
-    db.mockImplementation(mock);
-    mockSaysReviewed.mockResolvedValueOnce({ claim: { quote: 'left you a review', at: new Date() } });
-    const out = await ReviewService._runSequenceStep('seq-hold');
-    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
-    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2 });
-    // A parked cadence with a later check-in (resumable) carries the claim too.
-    expect(JSON.parse(mock.__state.rows.review_sequences.find((r) => r.id === 'seq-parked').reviewed_claim)).toMatchObject({ quote: 'left you a review' });
-    // The claim is kept on the row: the series-final guard sees it while the cadence is still active ...
-    expect(JSON.parse(seqRow(mock).reviewed_claim)).toMatchObject({ quote: 'left you a review' });
-    expect(await ReviewService._seriesEngagement(['seq-hold'])).toBe(true);
-    // ... and the check-in step still goes out (it is not an ask).
-    seqRow(mock).next_run_at = new Date(Date.now() - 60000);
-    await ReviewService._runSequenceStep('seq-hold');
-    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(mockSaysReviewed).toHaveBeenCalledTimes(1);
-  });
-
-  test('a later ask on a cadence that already holds a confirmed claim is skipped without asking the model again', async () => {
-    mockGates.reviewAskTechVoice = true;
-    const mock = book({
-      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]),
-      reviewed_claim: JSON.stringify({ quote: 'left you a review', at: new Date().toISOString() }),
-    });
-    db.mockImplementation(mock);
-    const out = await ReviewService._runSequenceStep('seq-hold');
-    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
-    expect(mockSaysReviewed).not.toHaveBeenCalled();
-    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a held final step completes the cadence at once (never left active past its plan)', async () => {

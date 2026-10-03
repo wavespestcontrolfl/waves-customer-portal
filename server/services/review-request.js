@@ -5733,7 +5733,6 @@ const ReviewService = {
    * (review-ask-holds.js), by kind. Called under review-send:<customer>.
    */
   _applyAskHold: {
-    reviewed(seq, held, skipStep) { return this._applyReviewedClaim(seq, held, skipStep); },
     drop(seq, held, skipStep) { return skipStep("ask_dropped_payment_hold", held.detail); },
     async wait(seq, held) {
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
@@ -5742,31 +5741,6 @@ const ReviewService = {
       });
       return { ran: false, deferred: true, reason: "payment_hold", retryAt: held.retryAt };
     },
-  },
-
-  /**
-   * A confirmed "I already left a review" (review-ask-holds.js askHold),
-   * applied by the step runner under review-send:<customer>. A fresh claim is
-   * stored on every open or parked-resumable cadence of the customer
-   * (reviewed_claim: later asks and the series-final guard read it), then
-   * the same customer-wide stop a tracked click takes runs: ask-only cadences
-   * stop, one with a later private check-in stays open and skips this ask.
-   */
-  async _applyReviewedClaim(seq, held, skipStep) {
-    const detail = { quote: held.claim.quote, at: held.claim.at };
-    if (held.fresh) {
-      const Summary = require("./visit-completion-summary");
-      const stamp = { reviewed_claim: JSON.stringify(detail), updated_at: new Date() };
-      await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"]).update(stamp);
-      await db("review_sequences").where({ customer_id: seq.customer_id, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).update(stamp);
-      await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
-    } else if (this._clickDisposition(seq) === "stop") {
-      await this.stopReviewSequence(seq.id, "customer_says_reviewed");
-    }
-    const after = await db("review_sequences").where({ id: seq.id }).first("status");
-    if (after?.status === "active") return skipStep("ask_skipped_customer_says_reviewed", detail);
-    await db("review_sequences").where({ id: seq.id }).update({ decision: sequenceDecision({ reason: "customer_says_reviewed", detail }) });
-    return { ran: false, stopped: true, reason: "customer_says_reviewed" };
   },
 
   async stopFutureAsks(customerId, { reason = "clicked", lockWaitMs = 2000 } = {}) {
@@ -6839,7 +6813,6 @@ const ReviewService = {
         serviceRecordId: seq.service_record_id,
         scheduledServiceId: seq.scheduled_service_id,
         fallbackAnchor: seq.created_at || seq.started_at || null,
-        clicksOnly: true,
       })) {
       const handled = await handleClick();
       if (handled) return handled;
@@ -7448,8 +7421,7 @@ const ReviewService = {
    */
   async _seriesEngagement(seriesIds = []) {
     if (!seriesIds.length) return false;
-    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked", "customer_says_reviewed"]).first())
-      || (await db("review_sequences").whereIn("id", seriesIds).whereNotNull("reviewed_claim").first())
+    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
