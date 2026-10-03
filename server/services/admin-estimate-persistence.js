@@ -2197,11 +2197,16 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
 async function resolveContactLinkedCustomer(database, body = {}) {
   try {
     if (body.customerId) return null;
-    const digits = String(body.customerPhone || '').replace(/\D/g, '');
-    // A carrier placeholder ("restricted", "anonymous") is nobody's number.
-    if (digits.length < 10 || require('./external-phone').isSentinelPhone(body.customerPhone)) return null;
+    // The canonical phone identity (utils/phone.js phoneIdentityKey and its
+    // SQL twin): a US number matches in any stored format, and a number from
+    // another country never matches a US customer that only shares its last
+    // ten digits. A carrier placeholder ("restricted", "anonymous") and
+    // anything that is not a complete phone are nobody's number.
+    const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+    const phone = typeof body.customerPhone === 'string' ? body.customerPhone : '';
+    if (!phoneMatchDigits(phone).length || require('./external-phone').isSentinelPhone(phone)) return null;
     const rows = await database('customers').whereNull('deleted_at')
-      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)])
+      .whereRaw(`${require('./sms-response-policy').phoneIdentitySql("BTRIM(COALESCE(phone, ''))")} = ?`, [phoneIdentityKey(phone)])
       .limit(2).select('*');
     if (rows.length !== 1) return null;
     const customer = rows[0];

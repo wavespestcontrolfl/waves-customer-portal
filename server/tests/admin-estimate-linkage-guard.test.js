@@ -10,6 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { detectUnlinkedMemberAddress, resolveContactLinkedCustomer } = require('../services/admin-estimate-persistence');
 const existingServices = require('../services/waveguard-existing-services');
+const { phoneIdentityKey } = require('../utils/phone');
 
 function fakeDb({ customers = [], properties = [], propertiesThrow = false } = {}) {
   return (table) => {
@@ -128,9 +129,8 @@ describe('resolveContactLinkedCustomer', () => {
         whereNull: () => builder,
         where: () => builder,
         whereRaw: (sql, [value]) => {
-          rows = /phone/.test(sql)
-            ? rows.filter((c) => String(c.phone || '').replace(/\D/g, '').slice(-10) === value)
-            : rows.filter((c) => String(c.email || '').trim().toLowerCase() === value);
+          expect(sql).toContain('phone');
+          rows = rows.filter((c) => phoneIdentityKey(c.phone) === value);
           return builder;
         },
         limit: (n) => { rows = rows.slice(0, n); return builder; },
@@ -149,6 +149,13 @@ describe('resolveContactLinkedCustomer', () => {
   test('the typed phone of exactly one customer links it, in any phone format; no price change', async () => {
     const link = await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '(941) 555-0142', address: '12 Sample St, Bradenton, FL 34202' });
     expect(link).toMatchObject({ customer: { id: 'cust-2001' }, changesPrice: false });
+  });
+
+  // The wrong-customer class of codex #4213: a shared last-ten-digits suffix.
+  test('a number from another country never links a US customer that shares its last ten digits', async () => {
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+449415550142' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, phone: '+449415550142' }]), { customerPhone: '(941) 555-0142' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '555-0142' })).toBeNull();
   });
 
   test('two customers on the phone link nobody, and an email match never links', async () => {
