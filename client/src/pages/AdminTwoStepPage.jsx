@@ -298,7 +298,15 @@ export default function AdminTwoStepPage() {
     });
     const data = await response.json().catch(() => ({}));
     // Only an authentication failure ends the session; a wrong code is a 400.
+    // A 401 for a token another tab already replaced (a password change or a
+    // new authenticator there) never signs that newer session out: this page
+    // picks the newer token up instead.
     if (response.status === 401) {
+      const stored = localStorage.getItem('waves_admin_token');
+      if (stored && stored !== token) {
+        setToken(stored);
+        throw new Error('You signed in again in another tab. Try that once more.');
+      }
       localStorage.removeItem('waves_admin_token');
       localStorage.removeItem('waves_admin_user');
       clearStaffDeviceData();

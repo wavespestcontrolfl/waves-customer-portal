@@ -75,15 +75,18 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(pending.pending_secret_enc).not.toContain(secret);
     expect(pending.secret_enc).toBeNull();
 
-    expect(await staffMfa.confirmSetup(tech, '000000' === codeFor(secret) ? '111111' : '000000', { expectedTokenVersion: 1 })).toMatchObject({ ok: false, reason: 'invalid' });
-    const confirmed = await staffMfa.confirmSetup(tech, codeFor(secret), { expectedTokenVersion: 1 });
+    // One pinned clock for generating and checking, so a 30-second boundary
+    // between the two can never move the expected step.
+    const now = Date.now();
+    expect(await staffMfa.confirmSetup(tech, codeFor(secret, 5, now), { expectedTokenVersion: 1, nowMs: now })).toMatchObject({ ok: false, reason: 'invalid' });
+    const confirmed = await staffMfa.confirmSetup(tech, codeFor(secret, 0, now), { expectedTokenVersion: 1, nowMs: now });
     expect(confirmed.ok).toBe(true);
     expect(confirmed.recoveryCodes).toHaveLength(10);
 
     const row = await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first();
     expect(row.secret_enc).toBe(pending.pending_secret_enc);
     expect(row.pending_secret_enc).toBeNull();
-    expect(Number(row.last_used_step)).toBe(staffMfa.timeStep());
+    expect(Number(row.last_used_step)).toBe(staffMfa.timeStep(now));
     const account = await mockDatabase('technicians').where({ id: techId }).first();
     expect(account.mfa_enabled_at).not.toBeNull();
     // Like a password change: every earlier session and device is signed out.

@@ -96,6 +96,17 @@ describe('AdminTwoStepPage', () => {
     expect(screen.queryByRole('button', { name: 'Turn off two-step sign-in' })).not.toBeInTheDocument();
   });
 
+  it('a 401 for a token another tab already replaced keeps the newer session', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      store.set('waves_admin_token', 'newer-jwt-from-another-tab');
+      return reply(401, { error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }));
+    renderPage();
+    expect(await screen.findByText('You signed in again in another tab. Try that once more.')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('newer-jwt-from-another-tab');
+    expect(screen.queryByText('Sign in page')).not.toBeInTheDocument();
+  });
+
   it('a revoked session goes back to sign in', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(401, { error: 'Two-step sign-in required. Sign in again.', code: 'MFA_REQUIRED' })));
     renderPage();
