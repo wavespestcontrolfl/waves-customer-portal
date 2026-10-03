@@ -328,3 +328,10 @@ test('a spray row whose way the tech picked (stored, sticky) is not moved by a d
   expect(result.patches).toEqual({});
   expect(texts(result)).toContain('You picked spot treatment; heard perimeter spray for Product b.');
 });
+
+test('an amount the tech typed is kept even when it equals the starting amount', () => {
+  const typed = [houseRow('a', { amountPicked: true })];
+  const result = plan({ rows: typed, products: [product('a', { amount: 6, unit: 'fl_oz' })] });
+  expect(result.patches).toEqual({});
+  expect(texts(result)).toEqual(['You entered 4 fl oz; heard 6 fl oz for Product a.']);
+});

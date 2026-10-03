@@ -81,7 +81,8 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
     if (kind === 'row') {
       const { ops, products, form } = latest.current;
       const row = products.rows.find((r) => String(r.productId) === key);
-      if (row?.added) products.updateRow(row.productId, { methodPicked: true, methodInput: ops.rowMethod(row, form.method) });
+      // the confirmed amount is the tech's too
+      if (row) products.updateRow(row.productId, row.added ? { amountPicked: true, methodPicked: true, methodInput: ops.rowMethod(row, form.method) } : { amountPicked: true });
     }
     setConfirms((prev) => prev.filter((entry) => entry.id !== id));
   }, []);

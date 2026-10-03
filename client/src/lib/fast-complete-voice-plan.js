@@ -151,6 +151,8 @@ function lastTimeAmount(plan, key, row) {
 
 // The tech's own entry: an amount that is not the house mix's starting one.
 function amountIsTechs(plan, key, row) {
+  // typed (or confirmed) by the tech, even when it equals the starting amount
+  if (row.amountPicked) return true;
   const initial = plan.initial.get(key);
   return !(initial && hasAmount(initial) && sameAmount(rowAmount(row), rowAmount(initial)));
 }

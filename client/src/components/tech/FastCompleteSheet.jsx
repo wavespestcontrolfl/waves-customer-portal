@@ -2204,13 +2204,14 @@ function AmountRow({ row, rate, onChange }) {
           min="0"
           step="any"
           value={row.totalAmount ?? ''}
-          onChange={(e) => onChange({ totalAmount: e.target.value })}
+          // amountPicked: the tech's own entry, even when it equals the seeded amount
+          onChange={(e) => onChange({ totalAmount: e.target.value, amountPicked: true })}
         />
         <select
           className="ui-control tech-visit-control"
           aria-label={`Unit for ${row.name}`}
           value={row.amountUnit}
-          onChange={(e) => onChange({ amountUnit: e.target.value })}
+          onChange={(e) => onChange({ amountUnit: e.target.value, amountPicked: true })}
         >
           {UNIT_CHOICES[row.dimension].map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
         </select>
