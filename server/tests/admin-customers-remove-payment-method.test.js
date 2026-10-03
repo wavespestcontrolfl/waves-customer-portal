@@ -5,7 +5,11 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn(() => ({ where: () => ({}) })));
 const mockRemove = jest.fn();
-jest.mock('../services/payment-method-removal', () => ({ removePaymentMethod: (...a) => mockRemove(...a) }));
+const mockPreview = jest.fn();
+jest.mock('../services/payment-method-removal', () => ({
+  removePaymentMethod: (...a) => mockRemove(...a),
+  removalPreview: (...a) => mockPreview(...a),
+}));
 const mockAudit = jest.fn().mockResolvedValue('audit-1');
 jest.mock('../services/audit-log', () => ({ ...jest.requireActual('../services/audit-log'), recordAuditEvent: (...a) => mockAudit(...a) }));
 
@@ -27,7 +31,7 @@ const call = async () => {
   return { res, next };
 };
 
-beforeEach(() => { mockRemove.mockReset(); mockAudit.mockClear(); });
+beforeEach(() => { mockRemove.mockReset(); mockPreview.mockReset(); mockAudit.mockClear(); });
 
 test('is DELETE-only and admin-only', () => {
   expect(Object.keys(layer.route.methods)).toEqual(['delete']);
@@ -76,4 +80,32 @@ test('a Stripe detach failure goes to the error handler', async () => {
   const { res, next } = await call();
   expect(next).toHaveBeenCalledWith(expect.any(Error));
   expect(res.json).not.toHaveBeenCalled();
+});
+
+describe('GET .../removal-preview', () => {
+  const previewLayer = router.stack.find((l) => l.route?.path === '/:id/payment-methods/:methodId/removal-preview');
+  const previewHandler = previewLayer.route.stack.at(-1).handle;
+  const get = async () => {
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    const next = jest.fn();
+    await previewHandler({ params: { id: 'cust-1', methodId: 'pm-1' } }, res, next);
+    return { res, next };
+  };
+
+  test('is GET-only and admin-only', () => {
+    expect(Object.keys(previewLayer.route.methods)).toEqual(['get']);
+    expect(previewLayer.route.stack[0].handle).toBe(requireAdmin);
+  });
+
+  test('returns the hold facts for this customer\'s method; another customer\'s method is 404', async () => {
+    const preview = { holdsAppointment: { start: '2026-10-08T13:00:00.000Z', serviceType: 'Pest Control', feeAmount: 49 }, holdLookupFailed: false };
+    mockPreview.mockResolvedValueOnce(preview);
+    const { res } = await get();
+    expect(mockPreview).toHaveBeenCalledWith({ customerId: 'cust-1', methodId: 'pm-1' });
+    expect(res.json).toHaveBeenCalledWith(preview);
+
+    mockPreview.mockResolvedValueOnce(null);
+    const missing = await get();
+    expect(missing.res.status).toHaveBeenCalledWith(404);
+  });
 });

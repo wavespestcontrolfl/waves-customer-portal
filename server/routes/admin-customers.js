@@ -2645,6 +2645,20 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/payment-methods/:methodId/removal-preview —
+// read-only facts the Remove dialog discloses before staff confirm: the
+// future secured visit this card holds, if any (same lookup as the portal's
+// removal notice). The verified-bank warning needs no lookup — the dialog
+// reads method_type / ach_status from the row it already has.
+router.get('/:id/payment-methods/:methodId/removal-preview', requireAdmin, async (req, res, next) => {
+  try {
+    const { removalPreview } = require('../services/payment-method-removal');
+    const preview = await removalPreview({ customerId: req.params.id, methodId: req.params.methodId });
+    if (!preview) return res.status(404).json({ error: 'Payment method not found' });
+    res.json(preview);
+  } catch (err) { next(err); }
+});
+
 // DELETE /api/admin/customers/:id/payment-methods/:methodId — staff removal
 // of a saved card/bank. Same removal path as the customer portal, with the
 // Auto Pay guard always on: the method Auto Pay is using → 409

@@ -126,4 +126,37 @@ async function removePaymentMethod({ customerId, methodId, guard, source }) {
   return { status: 200, body: { success: true, message: 'Payment method removed' }, removedMethod };
 }
 
-module.exports = { removePaymentMethod };
+/**
+ * What staff should know before removing one method (admin Remove dialog):
+ * the soonest future secured visit this card holds, from the same lookup the
+ * portal's removal notice uses (liveHoldsForPaymentMethods). Removal does not
+ * cancel that visit or its agreed late-cancel fee, but the fee can no longer
+ * be charged to this card. Best-effort like the portal: a failed lookup
+ * resolves holdLookupFailed so the dialog can say it could not check.
+ * Resolves null when the method is not this customer's.
+ */
+async function removalPreview({ customerId, methodId }) {
+  const method = await db('payment_methods')
+    .where({ id: methodId, customer_id: customerId })
+    .first('id', 'stripe_payment_method_id');
+  if (!method) return null;
+  try {
+    const { liveHoldsForPaymentMethods } = require('./estimate-card-holds');
+    const { normalizeServiceType } = require('../utils/service-normalizer');
+    const byMethod = await liveHoldsForPaymentMethods({ customerId, stripePaymentMethodIds: [method.stripe_payment_method_id] });
+    const [soonest] = byMethod.get(method.stripe_payment_method_id) || [];
+    return {
+      holdsAppointment: soonest ? {
+        start: soonest.start.toISOString(),
+        serviceType: normalizeServiceType(soonest.serviceType),
+        feeAmount: soonest.feeAmount,
+      } : null,
+      holdLookupFailed: false,
+    };
+  } catch (err) {
+    logger.warn(`[payment-method-removal] hold lookup failed for customer ${customerId}: ${err.message}`);
+    return { holdsAppointment: null, holdLookupFailed: true };
+  }
+}
+
+module.exports = { removePaymentMethod, removalPreview };

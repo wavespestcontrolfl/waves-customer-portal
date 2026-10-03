@@ -286,8 +286,9 @@ async function invoicePropertyAddress(invoice, customer) {
     if (conflict) return '';
     if (linked) {
       // A visit / record pointer is present: only the visit it resolves to may
-      // name the property. Foreign or unresolvable → omit, never primary.
-      if (unresolved || !visit) return '';
+      // name the property. Foreign or unresolvable → omit, never primary
+      // (visitPropertyAddress itself answers '' for a missing visit).
+      if (unresolved) return '';
       return await visitPropertyAddress(visit, customerId);
     }
     // NO link at all: the address frozen on the invoice, else the customer's.
