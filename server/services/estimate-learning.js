@@ -123,7 +123,10 @@ const ENGINE_KEY_ALIASES = Object.freeze({
   bora_care: 'boraCare',
   pre_slab_termiticide: 'preSlabTermiticide',
   preSlab: 'preSlabTermiticide',
-  pre_slab_termidor: 'preSlabTermidor',
+  // The builder's PRESLAB emits preSlabTermiticide; the Termidor keys are
+  // the legacy spelling of the same treatment.
+  preSlabTermidor: 'preSlabTermiticide',
+  pre_slab_termidor: 'preSlabTermiticide',
   fleaExterior: 'flea',
   foam_recurring: 'foamRecurring',
 });
@@ -157,7 +160,12 @@ function sameProperty(a, b) {
   if (norm(a) === norm(b)) return true;
   // Lazy: the engine module tree is not needed by the write paths here.
   const { sameStreetAddress } = require('./estimator-engine/address-compare');
-  return sameStreetAddress(a, b, { requireExactUnit: true });
+  if (!sameStreetAddress(a, b, { requireExactUnit: true })) return false;
+  // The comparator checks street, unit, city and ZIP; a different state with
+  // neither ZIP given is a different place too.
+  const { parseRawAddress } = require('../utils/address-normalizer');
+  const [stateA, stateB] = [a, b].map((raw) => norm(parseRawAddress(raw)?.state));
+  return !(stateA && stateB && stateA !== stateB);
 }
 
 // The builder's save folds the WaveGuard setup fee into the stored one-time

@@ -233,10 +233,10 @@ describe('computeEditSummary', () => {
   test('engine key aliases are one service on both sides', () => {
     const summary = computeEditSummary({
       baseline: baselineRow({
-        baseline_estimate_data: { engineInputs: { services: { termiteBait: {}, palm: {} } } },
+        baseline_estimate_data: { engineInputs: { services: { termiteBait: {}, palm: {}, preSlabTermidor: {} } } },
       }),
       sentRow: sentRow({
-        estimate_data: { engineRequest: { profile: {}, selectedServices: ['TERMITE_BAIT', 'PALM_INJECTION'], options: {} } },
+        estimate_data: { engineRequest: { profile: {}, selectedServices: ['TERMITE_BAIT', 'PALM_INJECTION', 'PRESLAB'], options: {} } },
       }),
     });
     expect(summary.servicesComparable).toBe(true);
@@ -264,6 +264,7 @@ describe('computeEditSummary', () => {
     expect(same('123 Oak St, Bradenton, FL', '123 Oak Ave, Bradenton, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL', '123 Main St, Sarasota, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34219')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton, GA')).toBe(true);
     // A unit added, dropped or changed is a real change.
     expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBe(true);
     expect(same('123 Main St Apt 4, Bradenton, FL', '123 Main St, Bradenton, FL')).toBe(true);
