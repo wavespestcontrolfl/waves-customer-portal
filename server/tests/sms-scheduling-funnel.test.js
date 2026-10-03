@@ -180,3 +180,19 @@ test('recall counts one accept once when an offer was replaced by one carrying t
   const decisions = [{ sms_offer_id: 'new', outcome: 'would_move', would_have: JSON.stringify({ date: '2026-10-06', start: '10:00' }) }];
   expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 1, caught: 1 });
 });
+
+test('recall credits a correct decision on the original offer when a replacement with the same time came before the move', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }];
+  const offers = [
+    { id: 'a', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots },
+    { id: 'b', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T15:00:00Z', slots },
+  ];
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const would = JSON.stringify({ date: '2026-10-06', start: '10:00' });
+  expect(summarizeRecall(offers, [{ sms_offer_id: 'a', outcome: 'would_move', would_have: would, created_at: '2026-10-01T14:00:00Z' }], moves, new Date('2026-10-05T00:00:00Z')))
+    .toEqual({ real_accepts: 1, caught: 1 });
+  // A would-move recorded only after the move is not a catch.
+  expect(summarizeRecall(offers, [{ sms_offer_id: 'a', outcome: 'would_move', would_have: would, created_at: '2026-10-01T19:00:00Z' }], moves, new Date('2026-10-05T00:00:00Z')))
+    .toEqual({ real_accepts: 1, caught: 0 });
+});

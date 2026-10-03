@@ -133,10 +133,10 @@ function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt
     if (!byOffer.has(String(d.sms_offer_id))) byOffer.set(String(d.sms_offer_id), []);
     byOffer.get(String(d.sms_offer_id)).push(d);
   }
-  // One real accept per actual move: a move into an offered time is credited
-  // to the NEWEST matured offer that carried that time and went out before
-  // the move (an offer replaced by one with the same time is the same accept,
-  // and the decision rightly names the replacement).
+  // One real accept per actual move into an offered time (an offer replaced
+  // by one carrying the same time is still one accept). It counts as caught
+  // when ANY offer that carried that time before the move got a would-move
+  // for it, decided before the move happened.
   const accepts = new Map();
   for (const o of offers) {
     if (o.kind !== 'move_visit' || !o.scheduled_service_id) continue;
@@ -145,21 +145,21 @@ function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt
     const slots = typeof o.slots === 'string' ? JSON.parse(o.slots) : (o.slots || []);
     for (const m of movesByVisit.get(String(o.scheduled_service_id)) || []) {
       const t = new Date(m.created_at).getTime();
-      if (t < t0 || t > t0 + FOLLOW_WINDOW_MS) continue;
       const slot = slots.find((sl) => sl?.date && sl?.start && movedInto(new Map([[String(o.scheduled_service_id), [m]]]), o.scheduled_service_id, t0, sl.date, sl.start));
       if (!slot) continue;
       const key = `${o.scheduled_service_id}|${t}`;
-      const prior = accepts.get(key);
-      if (!prior || new Date(prior.offer.sent_at).getTime() < t0) accepts.set(key, { offer: o, slot });
+      if (!accepts.has(key)) accepts.set(key, { at: t, slot, offers: [] });
+      accepts.get(key).offers.push(o);
     }
   }
   const out = { real_accepts: accepts.size, caught: 0 };
-  for (const { offer, slot } of accepts.values()) {
-    const hit = (byOffer.get(String(offer.id)) || []).some((d) => {
+  for (const { at, slot, offers: carriers } of accepts.values()) {
+    const hit = carriers.some((offer) => (byOffer.get(String(offer.id)) || []).some((d) => {
       if (d.outcome !== 'would_move') return false;
+      if (d.created_at && new Date(d.created_at).getTime() > at) return false;
       const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
       return would.date === slot.date && would.start === slot.start;
-    });
+    }));
     if (hit) out.caught += 1;
   }
   return out;
@@ -316,7 +316,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   // fall in time (a reply can land after the report's end).
   const offerDecisions = (hasDecisions && offers?.length)
     ? await dbh('sms_offer_decisions').whereIn('sms_offer_id', offers.map((o) => o.id))
-      .select('sms_offer_id', 'outcome', 'would_have')
+      .select('sms_offer_id', 'outcome', 'would_have', 'created_at')
     : [];
   const movesByVisit = await loadMovesForScoring(dbh, decisions || [], offers || []);
   const customerIds = [...new Set([
