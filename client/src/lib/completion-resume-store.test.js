@@ -13,6 +13,9 @@ import {
   getCompletionDraft,
   deleteCompletionDraft,
   pruneCompletionDrafts,
+  pruneRecapClipDrafts,
+  putRecapClipDraft,
+  getRecapClipDraft,
   DRAFT_RETENTION_MS,
   deleteVisitCompletionDraft,
   getVisitCompletionDraft,
@@ -198,5 +201,21 @@ describe("persistCompletionResumeOwed / restore / clear (marker + body)", () => 
     await settle();
     expect(completionResumeOwed("svc-1")).toBe(false);
     expect(await getCompletionResumeBody("svc-1")).toBeNull();
+  });
+});
+
+describe("recap clip drafts", () => {
+  it("the recap sweep removes only aged recap clips, never other drafts", async () => {
+    const old = Date.now() - DRAFT_RETENTION_MS - 1000;
+    await putRecapClipDraft("svc-1", { draft: { role: "perimeter" } }, "tech-1", old);
+    await putRecapClipDraft("svc-2", { draft: { role: "eaves" } }, "tech-1");
+    await putCompletionDraft("svc-1", { notes: "aged completion draft" }, "tech-1", old);
+
+    const pruned = await pruneRecapClipDrafts();
+
+    expect(pruned).toEqual([{ serviceId: "svc-1", scope: "recap:tech-1" }]);
+    expect(await getRecapClipDraft("svc-1", "tech-1")).toBeNull();
+    expect(await getRecapClipDraft("svc-2", "tech-1")).not.toBeNull();
+    expect(await getCompletionDraft("svc-1", "tech-1")).toEqual({ notes: "aged completion draft" });
   });
 });

@@ -69,3 +69,14 @@ test.each([true, false])('the plan response never carries propertyGate.billingMo
     expect(res.body.plan.completionDefaults).toEqual({ enabled: true });
   }
 });
+
+test('a technician is pinned to an assigned visit for EVERY plan read, not only completion-default requests (codex #5568 r2 P1)', async () => {
+  db.chain.first.mockResolvedValue(null);
+  const response = await run({ tech: true, query: {} });
+  expect(response.statusCode).toBe(404);
+  expect(buildPlanForService).not.toHaveBeenCalled();
+  db.chain.first.mockResolvedValue({ id: 'visit' });
+  const ok = await run({ tech: true, query: {} });
+  expect(ok.statusCode).toBe(200);
+  expect(buildPlanForService).toHaveBeenCalledTimes(1);
+});

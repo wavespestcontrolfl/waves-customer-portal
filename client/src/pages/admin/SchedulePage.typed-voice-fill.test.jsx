@@ -83,7 +83,7 @@ describe('typed voice fill on Generate', () => {
     await openForm(ROACH);
     await generate();
     expect(calls.map((call) => call.kind)).toEqual(['typed', 'generate']);
-    expect(calls[0].body).toEqual({ note: NOTE, current: {} });
+    expect(calls[0].body).toEqual({ note: NOTE, current: {}, scoreSet: false });
     expect(generated().structuredFindings).toEqual({ type: 'cockroach', values: { species: 'German', activity_level: 'Heavy' } });
     expect(fieldSelect('species').value).toBe('German');
     expect(screen.getAllByText('Heard: “german roaches”').length).toBeGreaterThan(0);
@@ -152,5 +152,101 @@ describe('typed voice fill on Generate', () => {
     await openForm({ ...ROACH, typedVoiceFillEnabled: false });
     await generate();
     expect(calls.map((call) => call.kind)).toEqual(['generate']);
+  });
+});
+
+describe('counts and the technician\'s rating (step 4)', () => {
+  const TRAP_SCHEMA = {
+    type: 'rodent_trapping',
+    fields: [
+      { key: 'species', label: 'Species', type: 'select', required: true, options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
+      { key: 'trap_visit_type', label: 'This visit', type: 'select', required: true, internal: true, options: ['Initial setup', 'Follow-up check'] },
+      { key: 'traps_checked', label: 'Traps checked', type: 'count' },
+      { key: 'captures', label: 'Captures', type: 'count' },
+    ],
+    activity: { label: 'Rodent Activity', deriveField: null, techScoreLabels: { 0: 'None', 1: 'Very low', 2: 'Low', 3: 'Moderate', 4: 'High', 5: 'Severe' } },
+  };
+  const TRAPS = {
+    ...ROACH,
+    serviceType: 'Rodent Trapping Follow-up',
+    completionProfile: { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' },
+    findingsSchema: TRAP_SCHEMA,
+  };
+  const TRAP_READ = {
+    available: true,
+    status: 'read',
+    type: 'rodent_trapping',
+    values: { species: 'Roof rat', trap_visit_type: 'Follow-up check', traps_checked: '8', captures: '2' },
+    heard: {
+      species: [{ value: 'Roof rat', quote: 'the roof rats' }],
+      trap_visit_type: [{ value: 'Follow-up check', quote: 'follow-up check on the roof rats' }],
+      traps_checked: [{ value: '8', quote: 'checked all 8 traps' }],
+      captures: [{ value: '2', quote: '2 caught by the ac chase' }],
+    },
+    unclearFields: [],
+    score: { value: 2, quote: "i'd call it a 2" },
+  };
+  const trapField = (key) => document.getElementById(`typed-finding-rodent_trapping-${key}`);
+  const gauge = () => document.getElementById('typed-activity-rodent_trapping');
+
+  it('fills the counts and the technician\'s rating from the notes, each with its words, and writes the report from them', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => TRAP_READ });
+    await openForm(TRAPS);
+    await generate();
+    expect(calls[0].body).toEqual({ note: NOTE, current: {}, scoreSet: false });
+    expect(trapField('traps_checked').value).toBe('8');
+    expect(screen.getAllByText('Heard: “checked all 8 traps”').length).toBeGreaterThan(0);
+    expect(gauge().value).toBe('2');
+    expect(screen.getAllByText('Set by technician').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Heard: “i\'d call it a 2”').length).toBeGreaterThan(0);
+    expect(generated().typedActivityScore).toBe(2);
+    expect(generated().structuredFindings.values).toMatchObject({ traps_checked: '8', captures: '2' });
+  });
+
+  it('two values heard in the same words show those words once', async () => {
+    const schema = { ...TRAP_SCHEMA, fields: [...TRAP_SCHEMA.fields, { key: 'trap_actions', label: 'Trap actions', type: 'chips', options: ['Traps reset', 'Bait/lure refreshed'] }] };
+    typedAnswer = () => ({
+      ok: true,
+      json: async () => ({
+        ...TRAP_READ,
+        values: { ...TRAP_READ.values, trap_actions: 'Traps reset, Bait/lure refreshed' },
+        heard: {
+          ...TRAP_READ.heard,
+          trap_actions: [{ value: 'Traps reset', quote: 'reset and re-baited all of them' }, { value: 'Bait/lure refreshed', quote: 'reset and re-baited all of them' }],
+        },
+      }),
+    });
+    await openForm({ ...TRAPS, findingsSchema: schema });
+    await generate();
+    expect(screen.getAllByText('Heard: “reset and re-baited all of them”').length).toBeGreaterThan(0);
+  });
+
+  it('a rating set by hand is never filled over, and the reader is told it is set', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => TRAP_READ });
+    await openForm(TRAPS);
+    fireEvent.change(gauge(), { target: { value: '4' } });
+    await generate();
+    expect(calls[0].body.scoreSet).toBe(true);
+    expect(gauge().value).toBe('4');
+    expect(screen.queryByText('Heard: “i\'d call it a 2”')).toBeNull();
+    expect(generated().typedActivityScore).toBe(4);
+  });
+
+  it('a pick drops the words a heard rating stood on, even when the heard rating is picked again', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => TRAP_READ });
+    await openForm(TRAPS);
+    await generate();
+    fireEvent.change(gauge(), { target: { value: '3' } });
+    fireEvent.change(gauge(), { target: { value: '2' } });
+    expect(gauge().value).toBe('2');
+    expect(screen.queryByText('Heard: “i\'d call it a 2”')).toBeNull();
+  });
+
+  it('a rating the notes left unclear asks to be picked', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => ({ ...TRAP_READ, score: undefined, scoreUnclear: true }) });
+    await openForm(TRAPS);
+    await generate();
+    await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0));
+    expect(gauge().value).toBe('');
   });
 });

@@ -17504,7 +17504,23 @@ router.post('/:id/invoice', async (req, res, next) => {
 
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
-    const applyPrepaidCredit = async (invoice) => {
+    // In-lock ownership recheck: substantial async work happens between the
+    // authorized SELECT at the top of this route and any invoice write —
+    // re-verify (row-locked) that the visit is still this technician's live
+    // job. Shared by the fresh mint and the reuse branch (codex #5568 r13 P1).
+    const assertTechStillOwnsLiveVisit = async (trx) => {
+      if (!isTechnicianRequest(req)) return;
+      const still = await technicianLiveVisitFilter(
+        req,
+        trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+      ).forUpdate().first('scheduled_services.id');
+      if (!still) {
+        const e = new Error('Scheduled service not found');
+        e.status = 404;
+        throw e;
+      }
+    };
+    const applyPrepaidCredit = async (invoice, { assertInTrx = null } = {}) => {
       // Applying annual-prepay coverage to a Charge-Now invoice is deferred to a
       // dedicated follow-up (it needs non-cash accounting, an idempotency marker,
       // and add-on split-billing). This path only applies out-of-band prepayments
@@ -17532,6 +17548,16 @@ router.post('/:id/invoice', async (req, res, next) => {
           .where({ id: invoice.id })
           .forUpdate()
           .first();
+        // Ownership after the invoice lock and the customer KEY SHARE (the
+        // lock the payments FK insert below takes anyway, hoisted as in
+        // scheduled-invoice-mint.js): the billing order invoice → customer →
+        // visit every collection path takes, so a concurrent Terminal handoff
+        // cannot deadlock against it (pre-push P1). The route's own locked
+        // pre-check already ran before this credit.
+        if (assertInTrx) {
+          if (lockedInvoice?.customer_id) await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [lockedInvoice.customer_id]);
+          await assertInTrx(trx);
+        }
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
@@ -17669,7 +17695,12 @@ router.post('/:id/invoice', async (req, res, next) => {
           error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
         });
       }
-      const applied = await applyPrepaidCredit(existing);
+      // Reuse changes billing state and returns the bearer token: the former
+      // technician of a visit reassigned meanwhile gets neither. Checked
+      // before any reuse effect (the no-credit path returns the token
+      // directly) and again inside the credit transaction itself.
+      if (isTechnicianRequest(req)) await db.transaction((trx) => assertTechStillOwnsLiveVisit(trx));
+      const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });
       existing = applied.invoice;
       // Settled = nothing left to collect. A zero amount due counts too
       // (account credit fully covers an invoice that was never marked paid)
@@ -17809,18 +17840,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
       // technician's live job before an invoice is minted or replayed.
-      assertEligibleInTrx: async (trx) => {
-        if (!isTechnicianRequest(req)) return;
-        const still = await technicianLiveVisitFilter(
-          req,
-          trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
-        ).forUpdate().first('scheduled_services.id');
-        if (!still) {
-          const e = new Error('Scheduled service not found');
-          e.status = 404;
-          throw e;
-        }
-      },
+      assertEligibleInTrx: assertTechStillOwnsLiveVisit,
       buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
@@ -24773,6 +24793,12 @@ router.post('/generate-report', async (req, res) => {
     const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
+    // A technician writes a report only for a visit of their own: the id-less
+    // legacy path (notes/products only) stays for admins, since it would let
+    // any technician run the paid writer chain with no visit (codex #5568 r6 P1).
+    if (!scheduledServiceId && req.techRole !== 'admin') {
+      return res.status(400).json({ error: 'scheduledServiceId required' });
+    }
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }

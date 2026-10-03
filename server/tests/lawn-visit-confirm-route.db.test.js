@@ -4,7 +4,7 @@ const { migrations } = require('./helpers/lawn-visit-db');
 
 let mockKnex;
 jest.mock('../models/db', () => mockKnex);
-jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (_req, _res, next) => next(), requireTechOrAdmin: (_req, _res, next) => next() }));
+jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (_req, _res, next) => next(), requireTechOrAdmin: (_req, _res, next) => next(), requireAdmin: (_req, _res, next) => next() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/knowledge-bridge', () => ({ generateAssessmentRecommendations: jest.fn() }));

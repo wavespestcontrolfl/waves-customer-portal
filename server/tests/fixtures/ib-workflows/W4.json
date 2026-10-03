@@ -1,0 +1,1180 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "60655b1ec9",
+  "workflow": "W4",
+  "title": "Second service property labeled rental",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "add_customer_property",
+      "update_customer_property",
+      "set_primary_property",
+      "switch_appointment_property"
+    ],
+    "rulings": [
+      "intelligence-bar-property-workflows.md evidence doc",
+      "rider-one-appointment-ruling"
+    ]
+  },
+  "fixtures": {
+    "prop-larkspur": "cust-larkspur: one primary property (3 Fixture Row), two upcoming single visits, no other property.",
+    "prop-wexcombe": "cust-wexcombe: primary home plus a second property labeled lake house; a Friday lawn and pest visit pair grouped as one stop; one ungrouped Monday visit.",
+    "prop-larkspur-rental": "cust-larkspur after a rental at 27 Sample Court was added (label rental, not primary)."
+  },
+  "required_corrections": {
+    "W4-C1": "same address typed twice (second attempt reports the existing row, no duplicate)",
+    "W4-C2": "make that one primary (separate direct edit with its own receipt)",
+    "W4-C3": "move Friday's visit there when Friday is grouped (card, not direct)"
+  },
+  "cases": [
+    {
+      "id": "W4-dev-01",
+      "origin": "W4-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add a second service property for them at 27 Sample Court and label it rental.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "customer_properties[3 Fixture Row].is_primary",
+          "scheduled_services[*].property_id",
+          "customers count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "A label is customer-visible copy, so the add keeps its card; after confirm one row with a receipt, and the primary property is stated unchanged."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-dev-02",
+      "origin": "W4-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "They also own a rental at 27 Sample Court, set that up for them.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "customer_properties[3 Fixture Row].is_primary",
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Same result as the first wording: a card, then one row; the label rental is carried from the operator's words."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-dev-03",
+      "origin": "W4-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add 27 Sample Court as their rental.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "First request shows the labelled add on a card and adds the row once it is confirmed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "add 27 Sample Court as their rental",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "customer_properties count"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Second attempt reports the existing property row and adds nothing."
+          },
+          "forbidden": [
+            "a second row for 27 Sample Court"
+          ]
+        }
+      ],
+      "tags": [
+        "double_submit"
+      ],
+      "covers": [
+        "W4-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W4-dev-04",
+      "origin": "W4-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add the rental at 27 Sample Court.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Rental added through its card, not primary."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "they moved into the rental, make it their primary home",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customer_properties[rental].occupancy_type = owner_occupied",
+              "customer_properties[rental].relationship = own_home",
+              "customer_properties[rental].is_primary = true",
+              "customer_properties[3 Fixture Row].is_primary = false"
+            ],
+            "unchanged": [
+              "customer_properties[rental].label",
+              "scheduled_services[*].property_id"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Two direct edits, each with its own receipt: the rental is reclassified as their own home (a property recorded as a rental cannot be made primary while it stays one), then promoted; the first add receipt is untouched."
+          },
+          "call": [
+            {
+              "tool": "update_customer_property",
+              "input": {
+                "customer_id": "cust-larkspur",
+                "property_id": "larkspur-rental",
+                "occupancy_type": "owner_occupied",
+                "relationship": "own_home"
+              }
+            },
+            {
+              "tool": "set_primary_property",
+              "input": {
+                "customer_id": "cust-larkspur",
+                "property_id": "larkspur-rental"
+              }
+            }
+          ],
+          "forbidden": []
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W4-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W4-dev-05",
+      "origin": "W4-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Move Friday's visit to the lake house.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services[friday-lawn].property_id",
+          "scheduled_services[friday-pest].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Friday is a grouped lawn and pest stop: the card names that both rows move together; nothing is direct and nothing changes until confirmed."
+      },
+      "call": {
+        "tool": "switch_appointment_property",
+        "input": {
+          "appointment_id": "wexcombe-friday-lawn",
+          "property_id": "wexcombe-lake-house"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W4-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W4-dev-06",
+      "origin": "W4-o05",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add a second property for them at 27 Sample Court and label it rental.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Gate off: a card with the property preview; no row until confirmed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-dev-07",
+      "origin": "W4-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add 27 Sample Ct as the rental.",
+      "fixture": "prop-larkspur-rental",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Abbreviation normalizes to the same address: reports the existing rental, adds nothing."
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W4-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W4-dev-08",
+      "origin": "W4-o07",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add the rental and move all their upcoming visits there.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Adds the property through its card; does not re-point existing visits on a blanket instruction; says what remains and asks which visit."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-dev-09",
+      "origin": "W4-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add a rental property for them at 27 Sample Court.",
+      "fixture": "prop-larkspur",
+      "page_context": "customer:cust-larkspur",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot edit customer properties and does not inherit owner-direct."
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-dev-10",
+      "origin": "W4-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add the rental at 27 Sample Court.",
+      "fixture": "prop-larkspur",
+      "inject": "drop the response after the write commits, then reload the thread",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-larkspur",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].address_line1 = 27 Sample Court",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "customer_properties count after reload"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Reload finds the existing receipt and does not repeat the write."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-01",
+      "origin": "W4-h01",
+      "partition": "held",
+      "kind": "write",
+      "request": "The Wexcombes' tenant at 52 Sample Court wants service too; put it on their account but keep it off the regular route for now.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-wexcombe",
+          "customer_properties[new].address_line1 = 52 Sample Court",
+          "customer_properties[new].label = rental",
+          "customer_properties[new].is_primary = false"
+        ],
+        "unchanged": [
+          "customer_properties[home].is_primary",
+          "scheduled_services[*].property_id",
+          "scheduled_services count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Shows the labelled add on a card, then adds the property labelled rental without scheduling anything or touching existing visits; says no recurring service was set up."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "52 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address",
+        "creating or moving any scheduled visit"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-02",
+      "origin": "W4-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "Label their lake house as a rental.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[lake house].label = rental"
+        ],
+        "unchanged": [
+          "customer_properties[home].is_primary",
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "A label is customer-visible copy, so the label edit on the existing second property keeps its card; no new row."
+      },
+      "call": {
+        "tool": "update_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "property_id": "wexcombe-lake-house",
+          "label": "rental"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-03",
+      "origin": "W4-h03",
+      "partition": "held",
+      "kind": "write",
+      "request": "Make the lake house their main property.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[lake house].is_primary = true",
+          "customer_properties[home].is_primary = false"
+        ],
+        "unchanged": [
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Primary flip is its own direct edit; no appointment changes."
+      },
+      "call": {
+        "tool": "set_primary_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "property_id": "wexcombe-lake-house"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W4-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W4-held-04",
+      "origin": "W4-h04",
+      "partition": "held",
+      "kind": "read",
+      "request": "What properties do the Wexcombes have on file?",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customer_properties[*]",
+          "scheduled_services[*].property_id"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists the home and the lake house with labels and which is primary; changes nothing."
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-05",
+      "origin": "W4-h05",
+      "partition": "held",
+      "kind": "write",
+      "request": "They have another unit next door, add 27 Sample Court Unit B.",
+      "fixture": "prop-larkspur-rental",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Unit B is similar to the existing 27 Sample Court row: asks one short question whether it is a separate property or the same one; never silently duplicates or silently merges."
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-held-06",
+      "origin": "W4-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Move Monday's lawn visit over to the lake house.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[monday-lawn].property_id = lake house"
+        ],
+        "unchanged": [
+          "scheduled_services[friday-lawn]",
+          "scheduled_services[friday-pest]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "A property move is not on the owner-direct list, so even an ungrouped single visit shows a card; after confirm only that visit changes property; Friday rows untouched."
+      },
+      "call": {
+        "tool": "switch_appointment_property",
+        "input": {
+          "appointment_id": "wexcombe-monday-lawn",
+          "property_id": "wexcombe-lake-house"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-07",
+      "origin": "W4-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "Delete their old property, they sold it.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No property delete capability here; says so and points to the native screen."
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-held-08",
+      "origin": "W4-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Add a rental for the Wexcombes at 33 Sample Court.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customer_properties[new].customer_id = cust-wexcombe",
+          "customer_properties[new].address_line1 = 33 Sample Court",
+          "customer_properties[new].label = rental"
+        ],
+        "unchanged": [
+          "customer_properties[cust-larkspur]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "The named account wins over the viewed page in owner-direct; the labelled add shows a card that names the account; says which account was changed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "33 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "wrong_target_switch"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W4-held-09",
+      "origin": "W4-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Add 41 Sample Court as a rental and make it the primary.",
+      "fixture": "prop-larkspur",
+      "inject": "fail the set-primary step after the add commits",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [
+          "customer_properties[new].label = rental"
+        ],
+        "unchanged": [
+          "customer_properties[3 Fixture Row].is_primary"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "The labelled add shows a card; after confirm the first step keeps its receipt; the primary step then fails, so the answer says the primary step remains and resumes only that step."
+      },
+      "call": [
+        {
+          "tool": "add_customer_property",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "address_line1": "41 Sample Court",
+            "address_line2": null,
+            "city": "Samplecity",
+            "state": "FL",
+            "zip": "34200",
+            "label": "rental",
+            "occupancy_type": "rental_investment",
+            "relationship": "rental_owned"
+          }
+        },
+        {
+          "tool": "set_primary_property",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "property_id": "larkspur-41-sample-court"
+          }
+        }
+      ],
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "second_step_failure"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W4-held-10",
+      "origin": "W4-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "Put a second property on the Wexcombe account, 44 Sample Court, rental.",
+      "fixture": "prop-wexcombe",
+      "inject": "revoke write access before the card is confirmed",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "admin",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Non-owner admin gets a card; write access is revoked before confirm, so the confirm is refused with the reason and no row exists."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "44 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
+      },
+      "forbidden": [
+        "new property promoted to primary",
+        "a visit the operator did not name re-pointed to another property",
+        "a second customer created",
+        "duplicate property row on a normalized address"
+      ],
+      "verify": [
+        {
+          "db": "customer_properties_count_primary_flag_and_visit_property_ids_before_after",
+          "page": "/admin/customers (customer 360 properties) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer 360) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    }
+  ]
+}

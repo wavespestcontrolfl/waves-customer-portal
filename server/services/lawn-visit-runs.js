@@ -267,6 +267,8 @@ async function confirmLockedRun(args, customerId, trx) {
 // passes its existing protocol writer so it commits in this transaction too.
 async function confirmRun(args, knex) {
   return knex.transaction(async (trx) => {
+    // The caller's visit-ownership fence, first under this transaction.
+    if (args.assertOwned) await args.assertOwned(trx);
     const original = await trx('lawn_assessments').where({ id: args.assessmentId }).first('customer_id');
     if (!original) throw Object.assign(new Error('Assessment not found'), { status: 404 });
     await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
