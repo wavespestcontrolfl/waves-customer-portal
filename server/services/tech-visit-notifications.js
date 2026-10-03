@@ -675,7 +675,7 @@ async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
       // land): the batch is done. Every device failed: keep it for a retry
       // (pre-push audit P1 — the sender reports provider failures, it does
       // not throw them).
-      const total = Number(result?.total) || 0;
+      const total = Number(result?.subscriptions) || 0;
       if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
       await db('tech_notifications').whereIn('id', ids)
         .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
