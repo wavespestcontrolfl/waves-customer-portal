@@ -209,4 +209,50 @@ describe("useSpeechDictation upload fallback", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  describe("clip mode (clipHandler)", () => {
+    it("always records, even where SpeechRecognition exists, and never asks availability or transcribes", async () => {
+      const recognition = vi.fn();
+      window.SpeechRecognition = recognition;
+      const clipHandler = vi.fn(async () => {});
+      const onTranscript = vi.fn();
+      const { result } = renderHook(() => useSpeechDictation(onTranscript, { clipHandler }));
+      expect(result.current.mode).toBe("upload");
+      expect(result.current.supported).toBe(true);
+
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      expect(recognition).not.toHaveBeenCalled();
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      const [blob, seconds] = clipHandler.mock.calls[0];
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.size).toBeGreaterThan(0);
+      expect(typeof seconds).toBe("number");
+      expect(fetch).not.toHaveBeenCalled();
+      expect(onTranscript).not.toHaveBeenCalled();
+      expect(track.stop).toHaveBeenCalled();
+      delete window.SpeechRecognition;
+    });
+
+    it("is uploading while the handler runs", async () => {
+      let finish;
+      const clipHandler = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.uploading).toBe(true));
+      await act(async () => { finish(); });
+      await waitFor(() => expect(result.current.uploading).toBe(false));
+    });
+
+    it("is unsupported where the browser cannot record", () => {
+      delete window.MediaRecorder;
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler: vi.fn() }));
+      expect(result.current.supported).toBe(false);
+      expect(result.current.mode).toBe(null);
+    });
+  });
 });
+

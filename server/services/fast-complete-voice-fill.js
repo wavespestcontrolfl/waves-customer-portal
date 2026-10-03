@@ -1466,15 +1466,8 @@ function fillCounts(fill) {
  *   not_eligible | catalog_unavailable | model_failed.
  * `call` is injectable for tests (defaults to the shared Anthropic adapter).
  */
-async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callAnthropic }) {
-  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
-  const text = typeof transcript === 'string' ? transcript.trim() : '';
-  if (!text || text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'bad_transcript' };
-
-  const loaded = await loadPestReserviceContext(serviceId, knex);
-  if (!loaded.ok) return { ok: false, reason: loaded.reason };
-  const { context } = loaded;
-
+// The fill for words already in hand, against a loaded sheet context.
+async function fillFromContext(context, text, call) {
   let result;
   try {
     result = await call({
@@ -1501,6 +1494,70 @@ async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callA
   return { ok: true, fill: validateFill(result.json, context, text) };
 }
 
+async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callAnthropic }) {
+  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
+  const text = typeof transcript === 'string' ? transcript.trim() : '';
+  if (!text || text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'bad_transcript' };
+
+  const loaded = await loadPestReserviceContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  return fillFromContext(loaded.context, text, call);
+}
+
+// ── Voice fill from a recorded clip ───────────────────────────────────────
+// Owner ruling 2026-10-03 ("always our transcriber"): the mic records and the
+// clip is transcribed HERE, primed with this sheet's own product names, on every
+// device. Measured on 32 recorded visits: the browser's speech recognition
+// filled 6 forms perfectly, an unprimed transcriber 9, this route's setup 19-20.
+// The words exist only inside this call: never logged, stored or returned.
+const VOICE_FILL_TRANSCRIBE_MODEL = 'gpt-transcribe';
+const TRANSCRIBE_SHEET_WORDS = 'perimeter, foundation, spot treatment, bait placement, granules, lanai, linear feet, re-service, no wait, same as last time';
+const TRANSCRIBE_PROMPT_MAX_CHARS = 1800;
+
+/** The transcriber's hint: the sheet's product names and aliases, then its own words. */
+function transcriptionPrompt(ctx) {
+  const names = [...new Set(ctx.products.flatMap((product) => [product.name, ...product.aliases]).map((name) => String(name).trim()).filter(Boolean))];
+  let list = '';
+  for (const name of names) {
+    if (list.length + name.length + 2 > TRANSCRIBE_PROMPT_MAX_CHARS) break;
+    list += list ? `, ${name}` : name;
+  }
+  return `A pest control technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${TRANSCRIBE_SHEET_WORDS}.`;
+}
+
+/**
+ * Fill one sheet from a recorded clip.
+ * Returns { ok: true, fill, chars } or { ok: false, reason }: voiceFill's reasons,
+ * plus transcription_failed | transcription_unreliable | nothing_heard.
+ * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ */
+async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
+  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
+  const loaded = await loadPestReserviceContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  const { transcribeWithOpenAI, isImplausibleTranscript } = require('./call-recording-processor');
+  let heard;
+  try {
+    heard = await (transcribe || transcribeWithOpenAI)(audio, {
+      model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || VOICE_FILL_TRANSCRIBE_MODEL,
+      prompt: transcriptionPrompt(loaded.context),
+      mimeType,
+      filename,
+    });
+  } catch (err) {
+    logger.warn(`[voice-fill] transcription threw: ${err?.name || 'Error'}`);
+    return { ok: false, reason: 'transcription_failed' };
+  }
+  if (!heard) return { ok: false, reason: 'transcription_failed' };
+  const text = String(heard.text || '').trim();
+  // Same guard as field dictation: far more characters than the clip's seconds can
+  // hold is a fabricated transcript. Unknown duration fails open.
+  if (isImplausibleTranscript(text, Number(durationSeconds) || 0)) return { ok: false, reason: 'transcription_unreliable' };
+  if (!text) return { ok: false, reason: 'nothing_heard' };
+  const result = await fillFromContext(loaded.context, text.slice(0, MAX_TRANSCRIPT_CHARS), call);
+  return result.ok ? { ...result, chars: text.length } : result;
+}
+
 module.exports = {
   catalogMethodOf,
   VOICE_FILL_TIER,
@@ -1521,4 +1578,6 @@ module.exports = {
   validateFill,
   fillCounts,
   voiceFill,
+  voiceFillFromClip,
+  transcriptionPrompt,
 };

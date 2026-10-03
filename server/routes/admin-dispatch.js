@@ -4589,6 +4589,61 @@ router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillGate, f
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
+// multipart: audio (the recording), sheet, duration_seconds
+// Owner ruling 2026-10-03 ("always our transcriber"): the sheet's mic records and
+// this route transcribes the clip with the sheet's own product names, then
+// returns the same validated fill as the transcript route above. Same gate, same
+// limiter, same ownership fence. Nothing is stored; the audit line carries counts
+// only: never the audio, the transcript or either note.
+const VOICE_FILL_AUDIO_TYPES = new Map([
+  ['audio/webm', 'clip.webm'], ['audio/mp4', 'clip.mp4'], ['audio/x-m4a', 'clip.m4a'], ['audio/m4a', 'clip.m4a'],
+  ['audio/mpeg', 'clip.mp3'], ['audio/ogg', 'clip.ogg'], ['audio/wav', 'clip.wav'],
+]);
+const VOICE_FILL_CLIP_MAX_BYTES = 15 * 1024 * 1024;
+const voiceFillClipUpload = require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: VOICE_FILL_CLIP_MAX_BYTES } });
+const voiceFillClipParse = (req, res, next) => {
+  voiceFillClipUpload.single('audio')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)', code: 'clip_too_large' });
+    return next(err);
+  });
+};
+// Ownership before the body is read: a technician never uploads against a visit that is not theirs.
+const voiceFillClipOwner = async (req, res, next) => {
+  try {
+    if (await assertRecapOwnership(req, res)) next();
+  } catch (err) { next(err); }
+};
+const VOICE_FILL_CLIP_UNAVAILABLE = new Set(['model_failed', 'catalog_unavailable', 'transcription_failed', 'transcription_unreliable']);
+router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGate, fastCompleteVoiceFillLimiter, voiceFillClipOwner, voiceFillClipParse, async (req, res, next) => {
+  try {
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const sheet = req.body?.sheet;
+    if (sheet !== VoiceFill.SHEET) return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
+    const baseType = String(req.file.mimetype || '').split(';')[0].trim().toLowerCase();
+    const filename = VOICE_FILL_AUDIO_TYPES.get(baseType);
+    if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
+    const result = await VoiceFill.voiceFillFromClip({
+      serviceId: req.params.serviceId, sheet, audio: req.file.buffer, mimeType: baseType, filename,
+      durationSeconds: Number(req.body?.duration_seconds) || 0,
+    });
+    const size = `bytes=${req.file.buffer.length} type=${baseType}`;
+    if (!result.ok) {
+      logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} ok=false reason=${result.reason}`);
+      if (VOICE_FILL_CLIP_UNAVAILABLE.has(result.reason)) return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
+      // Nothing was said: an empty fill, so the sheet simply stays as it is.
+      if (result.reason === 'nothing_heard') return res.json({ enabled: true, heardNothing: true, products: [], visit: null, customerNote: '', officeNote: '', unclear: [] });
+      const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible' ? 409 : recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const counts = VoiceFill.fillCounts(result.fill);
+    logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} chars=${result.chars} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
+    return res.json({ enabled: true, ...result.fill });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the

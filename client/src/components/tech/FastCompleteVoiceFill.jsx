@@ -1,11 +1,12 @@
 // client/src/components/tech/FastCompleteVoiceFill.jsx
 //
 // Fast Complete voice fill (GATE_FAST_COMPLETE_VOICE_FILL), the sheet half: the
-// "Tell me what you did" mic, the Check chips, the muted "Heard: ..." lines and
-// the office note. The words go to hooks/useVoiceFill.js; the answer becomes
-// ordinary taps through lib/fast-complete-voice-plan.js and the sheet's own
-// state setters. Nothing is completed from here, and the transcript is never
-// kept: it is passed to the fill and dropped.
+// "Tell me what you did" mic, the Confirm and Check lists, the muted "Heard: ..."
+// lines and the office note. The mic's recording goes to hooks/useVoiceFill.js
+// (our own transcriber, never the browser's speech recognition); the answer
+// becomes taps through lib/fast-complete-voice-plan.js and the sheet's own state
+// setters. Nothing is completed from here, and no transcript ever reaches the
+// browser.
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 import useVoiceFill from '../../hooks/useVoiceFill';
@@ -21,8 +22,8 @@ export const OFFICE_NOTE_MAX_CHARS = 800;
 // The sheet's voice-fill state: Checks, Heard lines, the office note, and
 // `apply`, which turns one fill into taps. `sheet` carries the sheet's own
 // pieces: { ops, ctx, products, form, setForm, chooseMethod, appendNote }.
-export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
-  const { fill, status, error, unavailable } = useVoiceFill({ request, serviceId, sheet: VOICE_SHEET });
+export function useVoiceFillSheet({ enabled, serviceId, sheet }) {
+  const { fillFromClip, status, error, unavailable } = useVoiceFill({ serviceId, sheet: VOICE_SHEET });
   const [checks, setChecks] = useState([]);
   // What the fill set, until the tech taps ✓ or changes it (one tap per product,
   // visit taps too: owner 2026-10-02).
@@ -53,11 +54,11 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
     setChecks((prev) => [...prev, ...plan.checks.map((check) => ({ ...check, id: ++nextId.current }))]);
   }, []);
 
-  // What the tech said, once: a fill that answers is applied, nothing else is.
-  const onWords = useCallback(async (words) => {
-    const result = await fill(words);
+  // The recording, once: a fill that answers is applied, nothing else is.
+  const onClip = useCallback(async (blob, durationSeconds) => {
+    const result = await fillFromClip(blob, durationSeconds);
     if (result) apply(result);
-  }, [fill, apply]);
+  }, [fillFromClip, apply]);
 
   // Fixing the field a Check points at clears it.
   const { rows } = sheet.products;
@@ -107,7 +108,7 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
     officeNote,
     setOfficeNote,
     dismiss,
-    onWords,
+    onClip,
   };
 }
 
@@ -123,35 +124,20 @@ function MicIcon() {
 
 function micLabel({ listening, uploading, filling }) {
   if (filling) return 'Filling from your words…';
-  if (uploading) return 'Transcribing…';
+  if (uploading) return 'Filling from your words…';
   return listening ? 'Tap when you are done' : 'Tell me what you did';
 }
 
-// The words so far are kept in this component only until the mic is idle; then
-// they are handed on once and dropped. Browser speech gives chunks as you talk;
-// the clip upload gives one transcript after you stop.
-function VoiceFillMic({ serviceId, locked, filling, error, onWords, onPendingChange }) {
-  const chunks = useRef([]);
-  const { listening, supported, toggle, starting, uploading } = useSpeechDictation(
-    (text) => chunks.current.push(text),
-    { uploadServiceId: serviceId },
-  );
-  // Words still being heard, recorded or transcribed would miss the save: in
-  // browser speech too, since a Complete tap would stop it before its words
-  // are filled in (unlike plain field dictation, the fill is not instant).
+// The mic always records and sends the clip to our own transcriber (owner ruling
+// 2026-10-03): never the browser's speech recognition. Nothing is kept here.
+function VoiceFillMic({ locked, filling, error, onClip, onPendingChange }) {
+  const { listening, supported, toggle, starting, uploading } = useSpeechDictation(null, { clipHandler: onClip });
+  // A clip still being recorded or sent would miss the save.
   const pending = starting || listening || uploading;
   useEffect(() => {
     onPendingChange?.(pending);
     return () => onPendingChange?.(false);
   }, [pending, onPendingChange]);
-
-  const idle = !listening && !uploading && !starting;
-  useEffect(() => {
-    if (!idle || !chunks.current.length) return;
-    const words = chunks.current.join(' ').trim();
-    chunks.current = [];
-    if (words) onWords(words);
-  }, [idle, onWords]);
 
   const label = micLabel({ listening, uploading, filling });
   return (
@@ -236,9 +222,9 @@ function HeardLine({ children }) {
 // The mic sits OUTSIDE the sheet's form block: while it is live that whole block
 // is disabled (any other tap or keystroke ends the browser's speech session and
 // drops the words in flight), and the mic must stay tappable to stop.
-export function VoiceFillMicBar({ voice, serviceId, locked, onPendingChange }) {
+export function VoiceFillMicBar({ voice, locked, onPendingChange }) {
   if (!voice.micEnabled) return null;
-  return <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />;
+  return <VoiceFillMic locked={locked} filling={voice.filling} error={voice.error} onClip={voice.onClip} onPendingChange={onPendingChange} />;
 }
 
 // Inside the form block: what the fill set (to confirm) and could not settle.

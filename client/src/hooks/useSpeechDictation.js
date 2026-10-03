@@ -48,9 +48,19 @@ const IDLE_STOP_MS = 60000;
  * from the tap until the microphone opens or is refused (a permission prompt
  * can hold it open); `uploading` is true while a clip is in flight. Browsers
  * with SpeechRecognition never change behavior.
+ *
+ * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
+ * the mic ALWAYS records, on every browser that can record, and hands the
+ * finished clip to the handler instead of transcribing it here: no speech
+ * recognition, no availability request, no transcript callback. `uploading` is
+ * true while the handler runs. (Fast Complete voice fill: owner ruling
+ * 2026-10-03, "always our transcriber".)
  */
 export default function useSpeechDictation(onTranscript, options = {}) {
   const uploadServiceId = options.uploadServiceId ?? null;
+  const clipMode = typeof options.clipHandler === "function";
+  const clipHandlerRef = useRef(options.clipHandler);
+  clipHandlerRef.current = options.clipHandler;
   const [listening, setListening] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadAvailable, setUploadAvailable] = useState(false);
@@ -100,7 +110,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // Upload availability is only worth asking about where speech recognition
   // is missing — the gate never changes a SpeechRecognition browser.
   useEffect(() => {
-    if (speechSupported || !recorderSupported || !uploadServiceId) {
+    if (clipMode || speechSupported || !recorderSupported || !uploadServiceId) {
       setUploadAvailable(false);
       return undefined;
     }
@@ -121,13 +131,24 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     return () => {
       disposed = true;
     };
-  }, [speechSupported, recorderSupported, uploadServiceId]);
+  }, [clipMode, speechSupported, recorderSupported, uploadServiceId]);
 
-  const mode = speechSupported ? "speech" : uploadAvailable ? "upload" : null;
+  const clipOrSpeech = clipMode ? (recorderSupported ? "upload" : null) : "speech";
+  const mode = clipMode || speechSupported ? clipOrSpeech : uploadAvailable ? "upload" : null;
   const supported = mode !== null;
 
   const uploadClip = useCallback(
     async (blob, durationSeconds) => {
+      if (clipHandlerRef.current) {
+        if (!blob || !blob.size) return;
+        setUploading(true);
+        try {
+          await clipHandlerRef.current(blob, durationSeconds);
+        } finally {
+          if (mountedRef.current) setUploading(false);
+        }
+        return;
+      }
       const token = localStorage.getItem("waves_admin_token");
       if (!token || !blob || !blob.size) return;
       setUploading(true);
@@ -251,11 +272,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       typeof window !== "undefined"
         ? window.SpeechRecognition || window.webkitSpeechRecognition
         : null;
+    if (mode === "upload") {
+      toggleUpload();
+      return;
+    }
     if (!SR) {
-      if (mode === "upload") {
-        toggleUpload();
-        return;
-      }
       alert(
         "Voice dictation isn't supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.",
       );
