@@ -583,8 +583,9 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
     const { searchReportBlogPosts } = require('../services/service-report/report-blog-post');
     const posts = await searchReportBlogPosts(db, req.query?.q);
     // `suggest`: whether a search no post covers can be suggested as a new
-    // post (GATE_BLOG_SEARCH_SUGGEST).
-    res.json({ available: true, posts, suggest: gates.blogSearchSuggestLive() });
+    // post (GATE_BLOG_SEARCH_SUGGEST): only to the office (an admin login),
+    // the one the suggestion route takes.
+    res.json({ available: true, posts, suggest: gates.blogSearchSuggestLive() && req.techRole === 'admin' });
   } catch (err) { next(err); }
 });
 
@@ -599,7 +600,11 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
 // 'not_available' } for a visit that carries no post. Every refusal names
 // itself in `code`, so the form tells a final answer from a passing failure
 // (GitHub Codex P2 on 45144528b8). Never logs the phrase.
-router.post('/:serviceId/blog-suggestions', async (req, res, next) => {
+// Admin only: suggestions belong to the office form (owner 2026-10-03: the
+// tech screen is going away and new work goes to the admin UI), and hiding
+// the button from a technician does not keep one from calling the route
+// (GitHub Codex P1 on e8a1e9e876).
+router.post('/:serviceId/blog-suggestions', requireAdmin, async (req, res, next) => {
   try {
     const gates = require('../config/feature-gates');
     if (!gates.reportBlogPostLive() || !gates.blogSearchSuggestLive()) return res.status(404).json({ enabled: false, code: 'suggestions_off' });

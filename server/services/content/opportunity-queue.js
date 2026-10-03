@@ -142,6 +142,25 @@ function aeoQuestionLaneOpen() {
   }
 }
 
+// Same kill-switch contract for "Suggest a post" rows (signal_metadata.source
+// 'tech_blog_search', report-blog-suggestion.js SOURCE): the route's
+// GATE_BLOG_SEARCH_SUGGEST check fences WRITES; this fences CONSUMPTION, so
+// turning the gate off stops queued suggestions from being written and
+// published too (GitHub Codex P1 on e8a1e9e876). They stay pending: turning
+// it back on resumes them, and expireStale ages them out. Read at call time;
+// fail CLOSED.
+function blogSearchSuggestLaneOpen() {
+  try {
+    const { blogSearchSuggestLive } = require('../../config/feature-gates');
+    return blogSearchSuggestLive() === true;
+  } catch {
+    return false;
+  }
+}
+// A row that is no suggestion: any other source, or none (IS DISTINCT FROM
+// keeps a row whose signal_metadata or source is NULL).
+const NOT_A_SUGGESTION_SQL = "(signal_metadata->>'source') IS DISTINCT FROM 'tech_blog_search'";
+
 // Lifetime claim budget per opportunity. A row that keeps failing returns
 // to pending (release / stale-claim recovery) and, as the top-scored row,
 // gets re-claimed by the daily batch forever — one wasted LLM dispatch per
@@ -308,6 +327,7 @@ class OpportunityQueue {
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
       if (!citabilityBackfillLaneOpen()) q = q.whereNot('bucket', 'citability_backfill');
       if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
+      if (!blogSearchSuggestLaneOpen()) q = q.whereRaw(NOT_A_SUGGESTION_SQL);
       q = q.whereRaw(aeoRouteFenceSql());
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
@@ -363,6 +383,8 @@ class OpportunityQueue {
     const whereCitabilityGate = citabilityBackfillLaneOpen() ? '' : `AND bucket <> 'citability_backfill'`;
     // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
     const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
+    // See blogSearchSuggestLaneOpen — gate-off suggestions are unclaimable.
+    const whereSuggestGate = blogSearchSuggestLaneOpen() ? '' : `AND ${NOT_A_SUGGESTION_SQL}`;
 
     // Claims are serialized: the route fence below is a NOT EXISTS over OTHER
     // rows, and FOR UPDATE SKIP LOCKED locks only the chosen row — two
@@ -413,6 +435,7 @@ class OpportunityQueue {
            ${whereFamilyGate}
            ${whereCitabilityGate}
            ${whereAeoQuestionGate}
+           ${whereSuggestGate}
            AND ${aeoRouteFenceSql()}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
@@ -756,6 +779,8 @@ module.exports._internals = {
   maxClaimAttempts,
   listicleFamilyLaneOpen,
   citabilityBackfillLaneOpen,
+  blogSearchSuggestLaneOpen,
+  NOT_A_SUGGESTION_SQL,
   pageEditRouteIdentity,
   pageEditSuperseded,
   supersedeCitabilityBackfillsForPage,

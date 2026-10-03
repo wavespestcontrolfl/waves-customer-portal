@@ -183,6 +183,18 @@ describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
     expect(phraseProblem(normalizePhrase(phrase))).toBe(problem);
   });
 
+  test('a letter outside a-z is refused before anything is read, though every other word is one the site uses; curly quotes and dashes are taken (GitHub Codex P1 on e8a1e9e876)', async () => {
+    for (const phrase of ['ants lawn 李', 'ants lawn иван', 'ants at josé', 'ánts in the lawn', 'ants 🐜 lawn']) {
+      const knex = queueKnex();
+      expect(await suggestReportBlogPost(knex, { phrase, actorId: 'admin-1' })).toEqual({ error: 'not_a_topic' });
+      expect(knex.calls).toEqual([]);
+    }
+    expect(siteWords).not.toHaveBeenCalled();
+    for (const phrase of ['what’s in standing water', 'standing water – mosquitoes', '“standing water” mosquitoes']) {
+      expect(phraseProblem(normalizePhrase(phrase))).toBeNull();
+    }
+  });
+
   test('only text is a phrase: an object or a list is refused before anything is read (GitHub Codex P2 on 45144528b8)', async () => {
     for (const phrase of [{ topic: 'standing water' }, ['standing', 'water'], 42, null]) {
       const knex = queueKnex();
@@ -283,9 +295,12 @@ describe('POST /:serviceId/blog-suggestions', () => {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
   });
-  function invoke(body, actor = { techRole: 'technician', technicianId: 'tech-1' }) {
+  // The route's whole chain, its own guards included (requireAdmin), in
+  // order; a guard that answers ends it. The office is an admin login.
+  function invoke(body, actor = { techRole: 'admin', technicianId: 'admin-1' }) {
     const layer = router.stack.find((l) => l.route && l.route.path === '/:serviceId/blog-suggestions' && l.route.methods.post);
-    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+    const handlers = layer.route.stack.map((l) => l.handle);
+    const req = { params: { serviceId: 'svc-1' }, body, ...actor };
     const res = {
       statusCode: 200,
       body: null,
@@ -293,9 +308,13 @@ describe('POST /:serviceId/blog-suggestions', () => {
       json(payload) { this.body = payload; return this; },
     };
     return new Promise((resolve, reject) => {
-      handler({ params: { serviceId: 'svc-1' }, body, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
-        .then(() => resolve(res))
-        .catch(reject);
+      const run = (i) => {
+        if (i >= handlers.length) { resolve(res); return; }
+        let advanced = false;
+        const next = (err) => { advanced = true; if (err) reject(err); else run(i + 1); };
+        Promise.resolve(handlers[i](req, res, next)).then(() => { if (!advanced) resolve(res); }, reject);
+      };
+      run(0);
     });
   }
 
@@ -312,7 +331,7 @@ describe('POST /:serviceId/blog-suggestions', () => {
     expect(queue.raw).not.toHaveBeenCalled();
   });
 
-  test('the assigned technician suggests a phrase: 201 queued, logged without the phrase', async () => {
+  test('the office (an admin login) suggests a phrase: 201 queued, logged without the phrase', async () => {
     const res = await invoke({ phrase: 'standing water' });
     expect(res.statusCode).toBe(201);
     expect(res.body).toEqual({ status: 'queued' });
@@ -321,9 +340,14 @@ describe('POST /:serviceId/blog-suggestions', () => {
     expect(logged).not.toMatch(/standing/i);
   });
 
-  test('another technician\'s visit is refused', async () => {
-    const res = await invoke({ phrase: 'standing water' }, { techRole: 'technician', technicianId: 'tech-2' });
+  test.each([
+    ['the visit\'s own technician', 'tech-1'],
+    ['another technician', 'tech-2'],
+  ])('%s is refused: suggestions are the office form\'s, and nothing is read (GitHub Codex P1 on e8a1e9e876)', async (_label, technicianId) => {
+    const res = await invoke({ phrase: 'standing water' }, { techRole: 'technician', technicianId });
     expect(res.statusCode).toBe(403);
+    expect(res.body).toEqual({ error: 'Admin access required' });
+    expect(mockResolveProfile).not.toHaveBeenCalled();
     expect(queue.raw).not.toHaveBeenCalled();
   });
 

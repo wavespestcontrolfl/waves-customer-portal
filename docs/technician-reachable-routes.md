@@ -52,7 +52,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
-| POST | `/api/admin/dispatch/:serviceId/blog-suggestions` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/complete` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/complete-preview` | admin-dispatch |

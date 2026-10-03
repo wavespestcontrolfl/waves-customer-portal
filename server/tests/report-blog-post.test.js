@@ -794,6 +794,20 @@ describe('GET /:serviceId/blog-posts', () => {
     expect(probe.body).toEqual({ available: true, posts: [], suggest: false });
     expect(calls).toEqual(['scheduled_services']);
   });
+
+  test('suggest is offered to the office only: an admin login with GATE_BLOG_SEARCH_SUGGEST on, never a technician (GitHub Codex P1 on e8a1e9e876)', async () => {
+    process.env.GATE_REPORT_BLOG_POST = 'true';
+    const saved = process.env.GATE_BLOG_SEARCH_SUGGEST;
+    process.env.GATE_BLOG_SEARCH_SUGGEST = 'true';
+    try {
+      mockDbCurrent = scriptedDb(SERVICE, [LIVE], [], [REGISTRY_LIVE]);
+      expect((await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' })).body.suggest).toBe(true);
+      mockDbCurrent = scriptedDb(SERVICE, [LIVE], [], [REGISTRY_LIVE]);
+      expect((await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' }, { techRole: 'technician', technicianId: 'tech-1' })).body.suggest).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_BLOG_SEARCH_SUGGEST; else process.env.GATE_BLOG_SEARCH_SUGGEST = saved;
+    }
+  });
 });
 
 // The completion function is pinned by source, like the tip freeze

@@ -5,7 +5,7 @@
  * automatically, no approval step).
  *
  * When no live post holds every word of a search (report-blog-post.js
- * searchReportBlogPosts, `exact`), the technician or the office can send the
+ * searchReportBlogPosts, `exact`), the office (an admin login) can send the
  * search as a topic. It becomes one opportunity_queue row the existing
  * autonomous chain claims, writes, gates and publishes:
  *  - bucket 'operator_intercept' with signal_metadata.operator_pinned: the
@@ -24,8 +24,9 @@
  * publish caps) still run on every post; no approval step is added.
  *
  * A phrase that is no topic is refused before anything is written: a
- * "near me" (transactional) phrase, a place out of the service area, or one
- * holding personal data (a phone, an email, an address, a name). A phrase
+ * "near me" (transactional) phrase, a place out of the service area, one
+ * holding personal data (a phone, an email, an address, a name), or one with a
+ * letter outside a-z. A phrase
  * already queued from any source (the same query on a live or finished
  * new-blog row) or suggested before answers already_queued; a suggestion
  * that expired unclaimed is revived; one the chain tried and skipped stays
@@ -41,6 +42,12 @@ const MAX_PER_DAY = 10;
 const SOURCE = 'tech_blog_search';
 // The statuses a new-blog row keeps its topic in (any source).
 const HELD_STATUSES = ['pending', 'claimed', 'pending_review', 'done'];
+// What a topic is written in: the letters a-z, digits, spaces, and the
+// punctuation a search box takes, a phone keyboard's curly quotes and dashes
+// included. Any other letter ("李", "josé") is refused: the site-word rule
+// reads only a-z and 0-9, so such a word would pass it unread into a published
+// topic (GitHub Codex P1 on e8a1e9e876).
+const PLAIN_PHRASE_RE = /^[a-z0-9 '‘’"“”\-–—.,?!&\/():;]+$/;
 
 // The phrase as a query: trimmed, one space between words, lower case.
 function normalizePhrase(phrase) {
@@ -72,7 +79,7 @@ function personContext(text) {
 // person typed it.
 function phraseProblem(phrase, typed = phrase) {
   const { searchTerms } = require('./report-blog-post');
-  if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !searchTerms(phrase).length) return 'not_a_topic';
+  if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !PLAIN_PHRASE_RE.test(phrase) || !searchTerms(phrase).length) return 'not_a_topic';
   const { isTransactionalQuery } = require('../content/scoring-config');
   if (isTransactionalQuery(phrase)) return 'not_a_topic';
   const { geoBlockReason } = require('../content/topic-targeting-gate');
