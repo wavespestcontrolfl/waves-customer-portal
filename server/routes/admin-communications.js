@@ -514,6 +514,8 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
+      // Use Reply on the translation card (GATE_SMS_ANY_LANGUAGE_INBOX): the trial the body came from.
+      translationTrialId,
       // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
@@ -577,6 +579,11 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // A translation card's reply is a customer-service reply: the applicant rail sends without its
+      // freshness, fact and claim checks, so it never goes out there.
+      if (translationTrialId) {
+        return res.status(409).json({ error: 'This suggested reply is for the customer thread and cannot go out on a job applicant thread. Clear the message box and write the reply yourself.' });
+      }
       // Codex #4709 r3 P1: a consultation link never goes out on the
       // applicant rail — that path skips the gate/expiry/lead checks and the
       // lead audit. Refuse rather than divert.
@@ -662,6 +669,25 @@ router.post('/sms', async (req, res, next) => {
       providerCoordinationCustomerId = trustedCustomerId;
     };
 
+    // A reply taken from the translation card (Use Reply) is re-checked and claimed UNDER THE THREAD LOCK
+    // below, as an Agent Review draft is. It is never also an Agent Review draft.
+    if (translationTrialId && agentDecisionId) return res.status(400).json({ error: 'A suggested reply cannot also be an Agent Review draft.' });
+    let translationClaim = translationTrialId ? 'stale' : null;
+    // Its facts are re-read first, with the Agent Review send checks and before the lock as those run: an
+    // offered time that is gone, a balance that changed, a technician no longer on the way.
+    // The same facts are read once more at the provider boundary (translationProviderPreSendCheck, below).
+    let translationProviderPreSendCheck;
+    if (translationTrialId) {
+      const sendChecks = await require('../services/sms-translation').translationReplySendChecks({ trialId: translationTrialId, customerId: trustedCustomerId, outgoingBody: body });
+      translationProviderPreSendCheck = sendChecks.providerPreSendCheck;
+      if (sendChecks.reason) {
+        logger.info(`[communications] translated reply refused at send: ${String(sendChecks.reason).slice(0, 80)}`);
+        return res.status(409).json({ error: sendChecks.reason === 'body_edited'
+          ? 'This suggested reply was edited, so it can no longer be checked. Clear the message box and write the reply yourself.'
+          : 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
+      }
+    }
+
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
@@ -716,6 +742,13 @@ router.post('/sms', async (req, res, next) => {
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (translationTrialId) {
+            // Same final gate for a translation card's reply: under the thread lock, the customer's latest
+            // text must still be the one it answers, unanswered and unexpired, and one guarded UPDATE lets
+            // only one sender through. Nothing is parked or reserved for a refused send.
+            translationClaim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to, dbi: trx });
+            if (translationClaim !== 'ok') return [];
+          }
           if (claimedDecisionId) {
             // FINAL freshness gate, under the thread lock and AFTER the
             // claim: Twilio inbound inserts don't take this lock, so an
@@ -770,6 +803,11 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (translationClaim === 'claimed') return res.status(409).json({ error: 'This suggested reply was already sent or is being sent. Clear the message box and refresh the thread before replying.' });
+    if (translationClaim && translationClaim !== 'ok') {
+      return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
     }
 
     if (staleAtClaim) {
@@ -1170,7 +1208,8 @@ router.post('/sms', async (req, res, next) => {
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),
-      } : {}),
+      // a translation card's reply: the same boundary checks, from the trial's stored snapshot
+      } : translationProviderPreSendCheck ? { providerPreSendCheck: translationProviderPreSendCheck } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
@@ -2362,10 +2401,20 @@ router.get('/agent-draft', async (req, res, next) => {
     }
 
     const row = await q.first();
-    if (!row) return res.json({ draft: null });
+    // Inbox assist for a text in another language (GATE_SMS_ANY_LANGUAGE_INBOX, read inside; null when off): the
+    // translation and the checked reply staff may send through this composer. Same customer guard as the draft.
+    // It can never break the draft card: any failure reads as no translation.
+    let translation = null;
+    try {
+      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId, new Date(), phoneLast10 ? String(req.query.phone) : null) : null;
+    } catch (err) {
+      logger.warn(`[communications] translation assist skipped: ${err.code || err.name || 'error'}`);
+    }
+    if (!row) return res.json({ draft: null, translation });
 
     const input = parseJson(row.input_snapshot, {});
     res.json({
+      translation,
       draft: {
         decisionId: row.id,
         workflow: row.workflow,
@@ -3961,7 +4010,10 @@ router.post('/schedule-sms', async (req, res, next) => {
     // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
     // lookup or insert, with the staff default-deny gate on or off.
     if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId, translationTrialId } = req.body || {};
+    // A reply taken from the translation card answers the customer's latest text as of now; nothing re-checks
+    // it when a queued send fires, so it is sent now or not at all.
+    if (translationTrialId) return res.status(409).json({ error: 'A suggested reply in the customer\'s language can only be sent now, not scheduled.' });
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
