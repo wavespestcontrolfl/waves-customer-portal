@@ -25909,6 +25909,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // The same wall-clock ceiling the provider chain keeps: the last-resort
+    // copy's meaning check below is charged against it too.
+    const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
@@ -25970,10 +25973,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // The lawn meaning check reads the last-resort copy too: it echoes the
       // technician's own structured observations, which can carry a result
       // promise the pattern screen exempts (codex #5734 r1). Fails open.
-      const fallbackTiming = report && lawnTimingOn && lawnDraftTimingCheckLive()
-        ? await lawnDraftTimingRejection(report)
+      // The cheap screens first: a copy they already refuse costs no model call.
+      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report));
+      const fallbackTiming = report && !fallbackScreened && lawnTimingOn && lawnDraftTimingCheckLive()
+        ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
         : null;
-      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report) || fallbackTiming) ? null : report;
+      const fallbackReport = report && (fallbackScreened || fallbackTiming) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,

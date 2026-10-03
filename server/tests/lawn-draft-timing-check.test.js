@@ -85,6 +85,19 @@ describe('lawnDraftTimingRejection', () => {
     expect(none.dispatch).not.toHaveBeenCalled();
   });
 
+  test('a draft over twenty sentences is refused, never silently skipped', async () => {
+    const deps = answering([]);
+    const long = Array.from({ length: 21 }, (_, i) => `Sentence number ${i} about the lawn.`).join(' ');
+    expect(await lawnDraftTimingRejection(long, deps)).toBe('lawn_draft_too_long');
+    expect(deps.dispatch).not.toHaveBeenCalled();
+  });
+
+  test('both providers share the ceiling (the fallback keeps real time when the primary stalls)', async () => {
+    const deps = answering([0, 1, 2].map((index) => ({ index, states_result_timing: false })));
+    await lawnDraftTimingRejection(DRAFT, deps);
+    expect(deps.dispatch.mock.calls[0][2]).toEqual({ hardDeadline: true, reserveFallbackBudget: true });
+  });
+
   test('an empty draft asks no model', async () => {
     const deps = answering([]);
     expect(await lawnDraftTimingRejection('WHAT WE DID\n', deps)).toBeNull();
@@ -116,7 +129,8 @@ describe('generate-report runs the check on lawn drafts that carried the timing 
     expect(source).toMatch(/await extraRejection\(report, \{ remainingMs: deadline - Date\.now\(\) \}\)/);
     expect(source).toMatch(/\|\| writerRulesScreen\(text\)\s+\|\| \(lawnTimingOn && lawnDraftTimingCheckLive\(\) \? lawnDraftTimingRejection\(text, \{ remainingMs \}\) : null\)/);
     // The last-resort deterministic copy is checked too.
-    expect(source).toMatch(/const fallbackTiming = report && lawnTimingOn && lawnDraftTimingCheckLive\(\)\s+\? await lawnDraftTimingRejection\(report\)/);
-    expect(source).toMatch(/writerRulesScreen\(report\) \|\| fallbackTiming\) \? null : report/);
+    // The last-resort copy: cheap screens first, then the check, inside the chain's deadline.
+    expect(source).toMatch(/const fallbackScreened = report && \(screenTradeNames\(report\) \|\| writerRulesScreen\(report\)\);/);
+    expect(source).toMatch(/const fallbackTiming = report && !fallbackScreened && lawnTimingOn && lawnDraftTimingCheckLive\(\)\s+\? await lawnDraftTimingRejection\(report, \{ remainingMs: reportChainDeadline - Date\.now\(\) \}\)/);
   });
 });

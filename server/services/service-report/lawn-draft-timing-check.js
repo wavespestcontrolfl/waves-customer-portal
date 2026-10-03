@@ -88,11 +88,18 @@ function lawnDraftTimingCheckLive() {
  * @param {object} [deps] { dispatch? (tests), remainingMs? (what is left of the
  *   caller's own deadline: the check never runs past it) }
  * @returns {Promise<string|null>} 'lawn_timing_ai' when a sentence states
- *   result timing, else null (including when the checker is unavailable)
+ *   result timing, 'lawn_draft_too_long' for a draft over the sentence limit,
+ *   else null (including when the checker is unavailable)
  */
 async function lawnDraftTimingRejection(text, deps = {}) {
   const sentences = sentencesOf(text);
-  if (!sentences.length || sentences.length > MAX_SENTENCES) return null;
+  if (!sentences.length) return null;
+  // A lawn draft is two short paragraphs. One this long is malformed, and
+  // skipping the check for it would be a silent bypass: refuse it instead.
+  if (sentences.length > MAX_SENTENCES) {
+    logger.warn(`[lawn-draft-timing-check] draft has ${sentences.length} sentences (limit ${MAX_SENTENCES}), refused unchecked`);
+    return 'lawn_draft_too_long';
+  }
   const dispatch = deps.dispatch || dispatchWithFallback;
   const budgetMs = Number.isFinite(deps.remainingMs) ? Math.min(CHECK_TIMEOUT_MS, deps.remainingMs) : CHECK_TIMEOUT_MS;
   if (budgetMs < MIN_CHECK_BUDGET_MS) {
@@ -108,7 +115,9 @@ async function lawnDraftTimingRejection(text, deps = {}) {
       jsonSchema: SCHEMA,
       maxTokens: 600,
       timeoutMs: budgetMs,
-    }, { hardDeadline: true });
+    // Both configured providers share the one ceiling: a stalled primary must
+    // leave the fallback real time, or the check fails open in an outage.
+    }, { hardDeadline: true, reserveFallbackBudget: true });
   } catch (err) {
     logger.warn(`[lawn-draft-timing-check] check failed, draft accepted on the pattern screen: ${err.message}`);
     return null;
