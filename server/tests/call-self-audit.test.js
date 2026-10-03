@@ -417,28 +417,31 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
   });
 });
 
-describe('voicemail triage evidence (voicemail.v1: every inbound voicemail of the day beside what production did)', () => {
+describe('voicemail triage evidence (voicemail.v1: every inbound voicemail beside what production decided)', () => {
   const JEV = { ok: true, answers: { callback_requested: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
-  const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', transcription: 'Hi, this is about my termites, please call me back.', ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
+  const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', disposition: null, voicemail_callback_alerted_at: null, transcription: 'Hi, this is about my termites, please call me back.', ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
 
-  function vmDb({ rows = [], belled = [], leadSids = [] } = {}) {
+  function vmDb({ rows = [], leadSids = [], triageIds = [] } = {}) {
     const seen = {};
     db.raw = (sql) => sql;
     db.mockImplementation((table) => {
+      const push = (a) => { (seen[table] = seen[table] || []).push(a); };
       const b = {
-        modify(fn) { fn(b); return b; }, whereRaw(...a) { (seen[table] = seen[table] || []).push(a); return b; }, whereIn(...a) { (seen[table] = seen[table] || []).push(a); return b; },
-        where(...a) { (seen[table] = seen[table] || []).push(a); return b; }, whereNot() { return b; }, orderBy() { return b; },
+        modify(fn) { fn(b); return b; }, whereRaw(...a) { push(a); return b; }, whereIn(...a) { push(a); return b; },
+        where(...a) { push(a); return b; }, whereNot() { return b; }, orderBy() { return b; },
+        whereNotExists(fn) { const sub = { select() { return sub; }, from(t) { push(['notExists', t]); return sub; }, where(...a) { push(['notExists', ...a]); return sub; }, whereRaw(...a) { push(['notExists', ...a]); return sub; } }; fn.call(sub); return b; },
         select: async () => {
           if (table === 'call_log') return rows;
-          if (table === 'notifications') return belled.map((id) => ({ call_id: id }));
           if (table === 'leads') return leadSids.map((sid) => ({ twilio_call_sid: sid }));
           return [];
         },
+        distinct: async () => (table === 'triage_items' ? triageIds.map((id) => ({ call_log_id: id })) : []),
       };
       return b;
     });
     return seen;
   }
+  const bySubject = () => Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
 
   beforeEach(() => {
     typedDecisionsLive.mockReturnValue(true);
@@ -455,41 +458,54 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail of th
     expect(askPackage).not.toHaveBeenCalled();
   });
 
-  test('a voicemail that rang the callback bell or minted a lead reached a person; one that did neither did not', async () => {
-    vmDb({ rows: [VM({ id: 'vm-1', twilio_call_sid: 'CA_1' }), VM({ id: 'vm-2', twilio_call_sid: 'CA_2' }), VM({ id: 'vm-3', twilio_call_sid: 'CA_3' })], belled: ['vm-1'], leadSids: ['CA_2'] });
+  test('reached a person = the callback alert claim (delivery-independent), a lead, or a triage item; none of them = not', async () => {
+    vmDb({
+      rows: [
+        VM({ id: 'vm-alert', twilio_call_sid: 'CA_1', voicemail_callback_alerted_at: new Date() }),
+        VM({ id: 'vm-lead', twilio_call_sid: 'CA_2', processing_status: 'processed' }),
+        VM({ id: 'vm-failed-lead', twilio_call_sid: 'CA_3', processing_status: 'lead_creation_failed' }),
+        VM({ id: 'vm-silent', twilio_call_sid: 'CA_4' }),
+      ],
+      leadSids: ['CA_2'], triageIds: ['vm-failed-lead'],
+    });
     const tally = await shadowVoicemails();
-    const bySubject = Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
-    expect(bySubject['vm-1'].baselines.callback_requested).toEqual({ production: true });
-    expect(bySubject['vm-2'].baselines.callback_requested).toEqual({ production: true });
-    expect(bySubject['vm-3'].baselines.callback_requested).toEqual({ production: false });
-    expect(bySubject['vm-3']).toMatchObject({ capability: 'voicemail', subjectType: 'call_log', provider: 'typesafe' });
-    // urgency has no production decision today: no baseline, never a false one
-    expect(bySubject['vm-3'].baselines).not.toHaveProperty('needs_attention_today');
-    expect(tally).toEqual({ asked: 3, recorded: 3, failed: 0, skippedLong: 0 });
+    const s = bySubject();
+    expect(s['vm-alert'].baselines.callback_requested).toEqual({ production: true });
+    expect(s['vm-lead'].baselines.callback_requested).toEqual({ production: true });
+    expect(s['vm-failed-lead'].baselines.callback_requested).toEqual({ production: true });
+    expect(s['vm-silent'].baselines.callback_requested).toEqual({ production: false });
+    expect(s['vm-silent']).toMatchObject({ capability: 'voicemail', subjectType: 'call_log', provider: 'typesafe' });
+    expect(s['vm-silent'].baselines).not.toHaveProperty('needs_attention_today'); // no production decision: no baseline
+    expect(tally).toEqual({ asked: 4, recorded: 4, failed: 0, skippedLong: 0 });
   });
 
-  test('spam status or the extraction\'s is_spam is the spam baseline; a processed call is a voicemail only when the extraction says so', async () => {
+  test('spam baseline: spam status, the extraction\'s is_spam, or the vendor disposition; a processed call is a voicemail only when the extraction says so', async () => {
     vmDb({ rows: [
       VM({ id: 'vm-s', processing_status: 'spam' }),
       VM({ id: 'vm-x', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: true, is_spam: true }) }),
+      VM({ id: 'vm-vendor', disposition: 'vendor_logged' }),
+      VM({ id: 'vm-real' }),
       VM({ id: 'call-live', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: false }) }),
     ] });
     await shadowVoicemails();
-    const bySubject = Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
-    expect(Object.keys(bySubject).sort()).toEqual(['vm-s', 'vm-x']);
-    expect(bySubject['vm-s'].baselines.is_vendor_or_spam).toEqual({ production: true });
-    expect(bySubject['vm-x'].baselines.is_vendor_or_spam).toEqual({ production: true });
+    const s = bySubject();
+    expect(Object.keys(s).sort()).toEqual(['vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
+    for (const id of ['vm-s', 'vm-x', 'vm-vendor']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: true });
+    expect(s['vm-real'].baselines.is_vendor_or_spam).toEqual({ production: false });
   });
 
-  test('only inbound, a 24-hour window; a voicemail longer than the span is counted, never asked', async () => {
+  test('a 7-day lookback over terminal voicemails, inbound only, skipping any already answered; a long voicemail is counted, never asked', async () => {
     const seen = vmDb({ rows: [VM({ id: 'vm-long', transcription: 'Hi please call me back about the termites. '.repeat(200) })] });
     const tally = await shadowVoicemails({ now: new Date('2026-10-03T08:00:00Z') });
     expect(tally).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
     expect(askPackage).not.toHaveBeenCalled();
-    const raws = (seen.call_log || []).map((a) => String(a[0]));
-    expect(raws).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
-    const since = (seen.call_log || []).find((a) => a[0] === 'created_at');
-    expect(since[2]).toEqual(new Date('2026-10-02T08:00:00Z'));
+    const calls = seen.call_log || [];
+    expect(calls.map((a) => String(a[0]))).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
+    expect(calls.find((a) => a[0] === 'created_at')[2]).toEqual(new Date('2026-09-26T08:00:00Z'));
+    expect(calls.find((a) => a[0] === 'processing_status')[1]).toEqual(['voicemail', 'processed', 'spam', 'lead_creation_failed']);
+    // already answered = any decision_reviews row for this voicemail
+    expect(calls).toContainEqual(['notExists', 'decision_reviews as dr']);
+    expect(calls).toContainEqual(['notExists', 'dr.capability', 'voicemail']);
   });
 
   test('a read failure is logged, never thrown', async () => {

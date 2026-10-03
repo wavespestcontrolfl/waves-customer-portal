@@ -133,16 +133,24 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
 }
 
 // Voicemail triage evidence (voicemail.v1, Clef second wave idea 6): every
-// INBOUND voicemail of the last 24 hours (not a sample: ~44 a month), put to
-// the same providers and recorded beside what production did with it:
-//   callback_requested  production = it reached a person (a
-//                       customer_voicemail_callback bell carrying its call id,
-//                       or a lead minted from its call)
-//   is_vendor_or_spam   production = spam status or the extraction's is_spam
+// INBOUND voicemail (not a sample: ~44 a month), put to the same providers
+// once it has finished processing and recorded beside what production decided:
+//   callback_requested  production = production put it in front of a person:
+//                       the callback alert's durable claim
+//                       (call_log.voicemail_callback_alerted_at, stamped before
+//                       delivery, so a push-only or bell-silenced alert counts),
+//                       a lead minted from the call, or a triage item opened
+//                       for it (a failed lead creation opens one)
+//   is_vendor_or_spam   production = spam status, the extraction's is_spam, or
+//                       the vendor disposition (vendor_logged)
 //   needs_attention_today  no baseline: nothing decides urgency today
-// A voicemail longer than the span the models and reviewer see is counted,
-// never asked (as for the gate checks). Never throws; evidence only.
-const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam'];
+// Idempotent over a 7-day lookback (Codex #5655 r1): a voicemail is asked once
+// it is terminal and never again once any answer for it is recorded, so one
+// that was still processing at run time, or a missed nightly run, is picked up
+// next time. A voicemail longer than the span the models and reviewer see is
+// counted, never asked (as for the gate checks). Never throws; evidence only.
+const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam', 'lead_creation_failed'];
+const VOICEMAIL_LOOKBACK_DAYS = 7;
 async function shadowVoicemails({ now = new Date() } = {}) {
   const tally = { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
   if (!typedDecisionsLive()) return tally;
@@ -151,30 +159,34 @@ async function shadowVoicemails({ now = new Date() } = {}) {
       .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
       .whereRaw(INBOUND_DIRECTION_SQL)
       .whereIn('processing_status', VOICEMAIL_STATUSES)
-      .where('created_at', '>', new Date(now.getTime() - 24 * 60 * 60 * 1000))
+      .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
       .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
+      // Already answered by any provider: asked once, never again.
+      .whereNotExists(function answered() {
+        this.select(db.raw('1')).from('decision_reviews as dr')
+          .where('dr.capability', 'voicemail').where('dr.subject_type', 'call_log')
+          .whereRaw('dr.subject_id = call_log.id');
+      })
       .orderBy('created_at', 'asc')
-      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'duration_seconds');
-    // A lead-path voicemail ends 'processed'; only the extraction says it was a voicemail.
+      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'disposition', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'duration_seconds');
+    // A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only the extraction says it was a voicemail.
     const voicemails = rows.filter((c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true);
     if (!voicemails.length) return tally;
-    const ids = voicemails.map((c) => String(c.id));
+    const ids = voicemails.map((c) => c.id);
     const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
-    const [belled, leads] = await Promise.all([
-      db('notifications').where({ category: 'voicemail_callback' })
-        .whereRaw("metadata -> 'payload' ->> 'callLogId' = ANY(?)", [ids])
-        .select(db.raw("metadata -> 'payload' ->> 'callLogId' AS call_id")),
+    const [leads, triage] = await Promise.all([
       sids.length ? db('leads').whereIn('twilio_call_sid', sids).select('twilio_call_sid') : [],
+      db('triage_items').whereIn('call_log_id', ids).distinct('call_log_id'),
     ]);
-    const belledIds = new Set(belled.map((r) => String(r.call_id)));
     const leadSids = new Set(leads.map((r) => r.twilio_call_sid));
+    const triaged = new Set(triage.map((r) => String(r.call_log_id)));
     const clef = typedDecisionsClefLive();
     for (const call of voicemails) {
       if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
       const ex = safeParse(call.ai_extraction);
       const baselines = {
-        callback_requested: { production: belledIds.has(String(call.id)) || leadSids.has(call.twilio_call_sid) },
-        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true },
+        callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
+        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || call.disposition === 'vendor_logged' },
       };
       count(tally, clef, await askAndRecord(call, { packageId: 'voicemail.v1', baselines }, clef));
     }
