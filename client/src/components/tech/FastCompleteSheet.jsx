@@ -757,7 +757,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
-        <VoiceFillMicBar voice={voice} serviceId={service?.id} locked={locked} onPendingChange={setVoiceMicPending} />
+        {/* One mic at a time: the note's mic recording (the upload path is not stopped
+            by another tap) holds this one. */}
+        <VoiceFillMicBar voice={voice} serviceId={service?.id} locked={locked || dictationPending} onPendingChange={setVoiceMicPending} />
         {/* Disabled as one block while the voice mic is live, so no control inside
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>

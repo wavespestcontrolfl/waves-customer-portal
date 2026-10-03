@@ -203,11 +203,21 @@ export function amountText(amount, unit) {
  * bait reads in grams, as the picker writes it.
  */
 export function usualAmountFor(product, common) {
-  const amount = Number(common?.usualAmount);
-  if (!common?.usualUnit || !(amount > 0)) return null;
-  const unit = measureUnit(common.usualUnit, productDimension(product, common));
-  if (!unit) return null;
-  return isGelProduct(product) && GRAMS_PER_UNIT[unit] ? { amount: amount * GRAMS_PER_UNIT[unit], unit: "g" } : { amount, unit };
+  // The very reading the picker shows ("1½ tsp", "5 g", a legacy ml amount in
+  // its truck measure), as a number in that row unit: what the tech sees is what
+  // "same as last time" fills.
+  const reading = usualReading(product, common, productDimension(product, common));
+  if (!reading?.unit) return null;
+  const amount = readingAmount(reading.text);
+  return amount > 0 ? { amount, unit: reading.unit } : null;
+}
+
+// The number a reading starts with: "1½ tsp" → 1.5, "4 fl oz" → 4, "¼ tsp" → 0.25.
+const READING_FRACTIONS = { "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
+function readingAmount(text) {
+  const match = String(text || "").match(/^(\d*\.?\d*)([⅛¼⅜½⅝¾⅞])?/);
+  if (!match) return 0;
+  return (Number(match[1]) || 0) + (READING_FRACTIONS[match[2]] || 0);
 }
 
 /** "5 g", "1½ tsp": the usual amount on these visits, in the product's measure. */

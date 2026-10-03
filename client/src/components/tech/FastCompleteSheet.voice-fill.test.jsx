@@ -478,5 +478,34 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     });
     expect(screen.getByRole('button', { name: '✓ Got it' }).disabled).toBe(false);
   });
+
+  test('✓ on an added product keeps its way against a later fill', async () => {
+    let calls = 0;
+    const request = makeRequest({ fill: { ...FILL, unclear: [], visit: { ...FILL.visit, method: '' } } });
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/voice-fill') && ++calls > 1) {
+        request.calls.push({ path, options });
+        return { enabled: true, products: [{ productId: 'extra', amount: null, unit: '', sameAsLast: false, method: 'granular_broadcast', heard: 'broadcast the Advion' }], visit: { pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' }, customerNote: '', officeNote: '', unclear: [] };
+      }
+      return base(path, options);
+    });
+    await openSheet(request);
+    say('first');
+    fireEvent.click(await screen.findByRole('button', { name: /^Confirm Advion Ant Bait Gel/ }));
+    say('second');
+    const check = await screen.findByRole('region', { name: 'Check' });
+    expect(within(check).getByText(/You picked bait placement; heard granular broadcast for Advion Ant Bait Gel\./)).toBeTruthy();
+  });
+
+  test('the voice mic waits while the note\'s mic is recording', async () => {
+    await openSheet(makeRequest());
+    expect(screen.getByRole('button', { name: 'Tell me what you did' }).disabled).toBe(false);
+    React.act(() => {
+      dictation.perSlot[1] = { listening: true, mode: 'upload' };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Tell me what you did' }).disabled).toBe(true);
+  });
 });
 

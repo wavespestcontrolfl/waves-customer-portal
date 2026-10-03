@@ -69,7 +69,22 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
   }, [rows, form]);
 
   const dismiss = useCallback((id) => setChecks((prev) => prev.filter((check) => check.id !== id)), []);
-  const confirm = useCallback((id) => setConfirms((prev) => prev.filter((item) => item.id !== id)), []);
+  // ✓ on a product row makes the row the tech's own: its way (even the standard
+  // one) is then a pick a later fill raises a Check against, never replaces.
+  // An added product's way is stored as picked (like the picker's own pick with
+  // voice fill on); a house-mix row has no picker and keeps following How.
+  const confirmsRef = useRef(confirms);
+  confirmsRef.current = confirms;
+  const confirm = useCallback((id) => {
+    const item = confirmsRef.current.find((entry) => entry.id === id);
+    const [kind, key] = String(item?.watch || '').split(':');
+    if (kind === 'row') {
+      const { ops, products, form } = latest.current;
+      const row = products.rows.find((r) => String(r.productId) === key);
+      if (row?.added) products.updateRow(row.productId, { methodPicked: true, methodInput: ops.rowMethod(row, form.method) });
+    }
+    setConfirms((prev) => prev.filter((entry) => entry.id !== id));
+  }, []);
 
   // A 404 later (gate turned off) takes the mic away, never what is already on
   // the sheet: open Checks, confirms and the office note stay reachable while
