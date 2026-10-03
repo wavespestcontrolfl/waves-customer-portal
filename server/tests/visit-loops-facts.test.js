@@ -674,12 +674,20 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
     ['moved to another day', { ss_scheduled_date: '2026-10-06' }],
     ['moved to a later window that day', { ss_window_start: '14:00:00', ss_window_end: '15:00:00' }],
     ['gone', { ss_status: null }],
+    ['under way', { ss_status: 'en_route' }],
+    ['complete on the tracker while its status lags', { ss_status: 'confirmed', ss_track_state: 'complete' }],
+    ['cancelled on the tracker while its status lags', { ss_status: 'confirmed', ss_track_state: 'cancelled' }],
+    ['live on the tracker', { ss_status: 'pending', ss_track_state: 'on_property' }],
   ])('a row not settled yet whose visit is already %s is never called "not rebooked"', async (_label, visitNow) => {
     expect((await run([miss(visitNow)])).out.missedVisit).toBeNull();
   });
 
   test('nothing confirmed: no missed visit', async () => {
     expect((await run([])).out.missedVisit).toBeNull();
+  });
+
+  test('an unstarted tracker (unset or scheduled) keeps the miss listed', async () => {
+    expect((await run([miss({ ss_track_state: 'scheduled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
   test('a same-day miss stays hidden until the PROMISED window has passed, not the internal job block (Codex #5610 r9)', async () => {

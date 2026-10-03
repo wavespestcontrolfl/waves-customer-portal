@@ -452,10 +452,14 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
     .limit(5)
     .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.occurrence_service_type',
-      'ss.status as ss_status', 'ss.scheduled_date as ss_scheduled_date', 'ss.window_start as ss_window_start', 'ss.window_end as ss_window_end')) || [];
+      'ss.status as ss_status', 'ss.track_state as ss_track_state', 'ss.scheduled_date as ss_scheduled_date', 'ss.window_start as ss_window_start', 'ss.window_end as ss_window_end')) || [];
   const { settlementFromVisit } = require('./not-closed-out');
   for (const miss of misses) {
     if (!miss.ss_status) continue; // the visit row is gone: nothing to stand on
+    // Only a visit that still has not started: an unstarted status AND tracker (the
+    // tracker can lead a lagging status — under way, complete, cancelled or skipped
+    // there means the visit is not waiting to be rebooked).
+    if (!NOT_STARTED_STATUSES.includes(miss.ss_status) || !trackNotStarted(miss.ss_track_state)) continue;
     if (settlementFromVisit(
       { status: miss.ss_status, scheduled_date: miss.ss_scheduled_date, window_start: miss.ss_window_start, window_end: miss.ss_window_end },
       { original_date: miss.original_date, original_window: miss.original_window },
