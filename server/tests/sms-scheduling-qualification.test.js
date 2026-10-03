@@ -214,7 +214,7 @@ test('every selected move offer requires a complete before-visit snapshot', () =
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 
-test('an accepted move offer scores only when the adjudicated slot is complete', () => {
+test('an accepted move decision requires its selected slot to be complete', () => {
   const c = cohort(new Map([[5, {
     action: 'accept_slot', outcome: 'confirm_only', expectedAction: 'accept_slot', expectedOutcome: 'confirm_only',
   }]]));
@@ -225,7 +225,7 @@ test('an accepted move offer scores only when the adjudicated slot is complete',
   reseal(c, 5);
   const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
   expect(result.status).toBe('inconclusive');
-  expect(result.epochs[0]).toMatchObject({ reviewed: 41, distinctOffersReviewed: 40, distinctOffersScored: 39 });
+  expect(result.epochs[0]).toMatchObject({ reviewed: 40, incompleteEvidence: 1, distinctOffersScored: 39 });
 });
 
 test('malformed persisted would-have JSON cannot match a null decision plan', () => {
@@ -339,6 +339,27 @@ test.each(INVALID_MODEL_PAIRS)(
 );
 
 test.each([
+  ['move_visit', 'would_book'],
+  ['book_new', 'would_move'],
+  ['book_new', 'confirm_only'],
+])('model outcome %s/%s cannot contradict the selected offer family', (kind, outcome) => {
+  const c = cohort(new Map([[1, {
+    kind, action: 'accept_slot', outcome, expectedAction: 'decline', expectedOutcome: 'no_action',
+  }]]));
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('an accepted decision plan kind must match the selected offer kind', () => {
+  const c = cohort();
+  c.rows[0].would_have.kind = 'book_new';
+  c.rows[0].decision_evidence.decision.wouldHave.kind = 'book_new';
+  reseal(c, 0);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test.each([
   ['future_action', 'no_action'],
   ['decline', 'future_outcome'],
 ])('unknown model decision pairing %s/%s is incomplete evidence', (action, outcome) => {
@@ -367,6 +388,23 @@ test.each([null, 'plan', 1, []])('an accepted decision plan must be a record, no
   reseal(c, 0);
   expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('a null model-selected slot is incomplete evidence instead of throwing', () => {
+  const c = cohort();
+  c.rows[0].decision_evidence.offers[0].slots = [null];
+  reseal(c, 0);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('a null independently selected move slot is an invalid review instead of throwing', () => {
+  const c = cohort();
+  c.rows[0].decision_evidence.offers[0].slots.push(null);
+  reseal(c, 0);
+  c.adjudications[0].expected.slotNumber = 2;
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
 });
 
 test.each([
@@ -434,14 +472,13 @@ test('one missed repeated accept misses that offer, and any wrong would-move fai
   expect(summarizeQualification(unexpectedMove.rows, { ...source, adjudications: unexpectedMove.adjudications }, unexpectedMove.bodies)
     .epochs[0]).toMatchObject({ wrongProposedMoves: 1, trueAccepts: { caughtDecisions: 1, offerRecall: 0 } });
 
-  // The first 40 decisions retain 40 distinct, correctly scored move offers.
-  // A wrong would-move in a booking-family decision still blocks that lane.
+  // An outcome that contradicts the selected offer family is incomplete
+  // evidence and cannot be used to qualify the lane.
   const wrongBooking = cohort(new Map([[40, { kind: 'book_new', expectedAction: 'accept_slot', action: 'accept_slot', outcome: 'would_move' }]]));
   const wrongBookingResult = summarizeQualification(wrongBooking.rows, { ...source, adjudications: wrongBooking.adjudications }, wrongBooking.bodies);
-  expect(wrongBookingResult.status).toBe('not_qualified');
+  expect(wrongBookingResult.status).toBe('inconclusive');
   expect(wrongBookingResult.epochs[0]).toMatchObject({
-    distinctOffersScored: 40, proposedMoves: 2, wrongProposedMoves: 1,
-    notEvaluated: { decisions: 1, distinctOffers: 1, byKind: { book_new: 1 } },
+    incompleteEvidence: 1, distinctOffersScored: 40, proposedMoves: 1, wrongProposedMoves: 0,
   });
 });
 

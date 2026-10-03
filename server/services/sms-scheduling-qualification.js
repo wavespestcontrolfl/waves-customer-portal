@@ -31,6 +31,11 @@ const DECISION_OUTCOMES_BY_ACTION = new Map([
   ['unclear', new Set(['no_action'])],
   ['unsupported', new Set(['unsupported'])],
 ]);
+const ACCEPT_OUTCOMES_BY_OFFER_KIND = new Map([
+  ['move_visit', new Set(['would_move', 'confirm_only', 'staff'])],
+  ['book_estimate', new Set(['would_book', 'staff'])],
+  ['book_new', new Set(['would_book', 'staff'])],
+]);
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OFFSET_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const CALENDAR_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -120,7 +125,20 @@ function currentBodyMatches(ref, smsBodiesById) {
     && sha256Text(smsBodiesById.get(String(ref.smsLogId))) === ref.bodySha256;
 }
 
-function decisionMatchesRow(decision, row) {
+function decisionPick(decision, offers) {
+  const numbered = offers.flatMap((offer) => (Array.isArray(offer.slots) ? offer.slots : [])
+    .map((slot) => ({ offer, slot })));
+  return numbered[decision.slotNumber - 1] || null;
+}
+
+function acceptedDecisionMatchesOffer(decision, linked) {
+  if (!ACCEPT_OUTCOMES_BY_OFFER_KIND.get(linked.selected.kind)?.has(decision.outcome)) return false;
+  if (decision.wouldHave.kind !== linked.selected.kind) return false;
+  const pick = decisionPick(decision, linked.offers);
+  return Boolean(pick) && String(pick.offer.id) === String(linked.selected.id) && completeSlot(pick.slot);
+}
+
+function decisionMatchesRow(decision, row, linked) {
   if (!decision || decision.model !== row.model || decision.promptVersion !== row.prompt_version) return false;
   if (!isNonblankString(decision.servedModel) || decision.servedModel !== row.model) return false;
   const permittedOutcomes = DECISION_OUTCOMES_BY_ACTION.get(decision.action);
@@ -133,7 +151,8 @@ function decisionMatchesRow(decision, row) {
   if (!persistedWouldHave.ok) return false;
   if (fingerprintEvidence(decision.wouldHave) !== fingerprintEvidence(persistedWouldHave.value)) return false;
   const shouldHavePlan = decision.action === 'accept_slot' && PLANNED_DECISION_OUTCOMES.has(decision.outcome);
-  return shouldHavePlan ? isRecord(decision.wouldHave) : decision.wouldHave === null;
+  if (!shouldHavePlan) return decision.wouldHave === null;
+  return isRecord(decision.wouldHave) && acceptedDecisionMatchesOffer(decision, linked);
 }
 
 function linkedOffers(evidence, row, smsBodiesById) {
@@ -177,7 +196,7 @@ function evidenceFor(row, smsBodiesById) {
   const linked = linkedOffers(evidence, row, smsBodiesById);
   if (!linked || !completeDecisionFacts(evidence, row.outcome)) return null;
   if (linked.selected.kind === 'move_visit' && !completeVisit(evidence.before.visit)) return null;
-  if (!decisionMatchesRow(evidence.decision, row)) return null;
+  if (!decisionMatchesRow(evidence.decision, row, linked)) return null;
   return { evidence, offers: linked.offers };
 }
 
@@ -187,13 +206,14 @@ function numberedPick(expected, offers) {
   const numbered = offers.flatMap((offer) => (Array.isArray(offer.slots) ? offer.slots : [])
     .map((slot) => ({ offer, slot })));
   const pick = numbered[expected.slotNumber - 1];
-  return pick && String(pick.offer.id) === expected.offerId ? pick : null;
+  return pick && completeSlot(pick.slot) && String(pick.offer.id) === expected.offerId ? pick : null;
 }
 
 function exactExpectedMove(expected, pick) {
   const move = expected.move;
   if (!move || !isNonblankString(move.scheduledServiceId)) return null;
   if (!isNonblankString(move.date) || !isNonblankString(move.start) || !isNonblankString(move.arrivalEnd)) return null;
+  if (!completeSlot(pick.slot)) return null;
   if (pick.offer.kind !== 'move_visit') return null;
   if (move.scheduledServiceId !== String(pick.offer.scheduledServiceId || '')) return null;
   if (move.date !== pick.slot.date || move.start !== pick.slot.start || move.arrivalEnd !== pick.slot.end) return null;
