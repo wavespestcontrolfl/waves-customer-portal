@@ -66,6 +66,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // ─────────────────────────────────────────────
 const GOOGLE_STATIC_MAP = 'https://maps.googleapis.com/maps/api/staticmap';
 const GOOGLE_GEOCODE = 'https://maps.googleapis.com/maps/api/geocode/json';
+// Every service address is a Florida address. Without a components filter a
+// city-less street string geocoded to the same street name in another state or
+// country (live: Illinois, New York, Nigeria), and every later county gate then
+// read that point. With it a non-Florida result comes back ZERO_RESULTS, the
+// honest "geocode failed" the lookup already handles (status geocode_failed).
+const GOOGLE_GEOCODE_COMPONENTS = 'country:US|administrative_area:FL';
 const DEFAULT_LOOKUP_TOTAL_BUDGET_MS = 60000;
 const DEFAULT_LOOKUP_RESPONSE_MARGIN_MS = 2500;
 const DEFAULT_STORIES_MIN_REMAINING_MS = 12000;
@@ -1361,7 +1367,7 @@ function parseGeocodeResult(result) {
 async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) throw new Error('No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured');
-  const url = `${GOOGLE_GEOCODE}?address=${encodeURIComponent(address)}&key=${mapsKey}`;
+  const url = `${GOOGLE_GEOCODE}?address=${encodeURIComponent(address)}&components=${encodeURIComponent(GOOGLE_GEOCODE_COMPONENTS)}&key=${mapsKey}`;
   const timeout = createFetchTimeout(timeoutMs);
   try {
     const resp = await fetch(url, { signal: timeout.signal });
@@ -5854,6 +5860,7 @@ module.exports._private = {
   mergeAiAnalyses,
   mergePool,
   parcelTurfBoundSqft,
+  geocodeAddress,
   parseGeocodeResult,
   poolRecordContext,
   poolSource,
