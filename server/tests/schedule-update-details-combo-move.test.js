@@ -37,7 +37,7 @@ jest.mock('../routes/admin-dispatch', () => mockDispatch);
 const fs = require('fs');
 const path = require('path');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange } = require('../routes/admin-schedule')._test;
+const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation } = require('../routes/admin-schedule')._test;
 
 const FUTURE = etDateString(addETDays(new Date(), 10));
 const TARGET = etDateString(addETDays(new Date(), 12));
@@ -200,6 +200,18 @@ describe("comboMove 'separate'", () => {
   });
 });
 
+describe('a split that committed is disclosed on every later refusal', () => {
+  test('any error answer after the split says so, however it is sent; a success answer is untouched', () => {
+    const sent = [];
+    const res = { statusCode: 200, json(payload) { sent.push(payload); return this; }, status(code) { this.statusCode = code; return this; } };
+    discloseComboSeparation(res);
+    res.status(409).json({ error: 'That service is retired.', code: 'RETIRED_SERVICE_NOT_SELLABLE' });
+    expect(sent[0]).toEqual({ error: 'This service was separated from the stop, but the other changes were not saved. That service is retired.', code: 'RETIRED_SERVICE_NOT_SELLABLE', comboSeparated: true });
+    res.status(200).json({ success: true });
+    expect(sent[1]).toEqual({ success: true });
+  });
+});
+
 describe('commitComboEditMove: the move outcome is part of the saved answer', () => {
   test('moved, partly moved, refused, and unknown', async () => {
     expect(await commitComboEditMove({ commit: async () => ({ status: 200, body: { success: true, warnings: ['w'] } }) }, 'svc-a'))
@@ -239,5 +251,6 @@ describe('handler wiring (source guards)', () => {
     expect(commit).toBeGreaterThan(src.indexOf('seriesMove = await seriesMovePlan.commit();', handler));
     expect(commit).toBeLessThan(notice);
     expect(src.slice(notice, src.indexOf("router.post('/:id/update-details/preview'", handler))).toContain('...(comboMove ? { comboMove } : {}),');
+    expect(src.slice(plan, series)).toContain('if (comboMovePlan?.separated) discloseComboSeparation(res);');
   });
 });

@@ -10991,6 +10991,17 @@ function comboShownStopChanged(shown, live) {
     || ids(shown.liveMemberIds) !== ids(live.liveMemberIds);
 }
 
+// The split is its own committed action. Every refusal the request answers
+// after it — thrown, sent directly by the handler, or sent by the error
+// middleware — goes out through res.json, so that is where it is disclosed:
+// nobody closes on an unnoticed separation.
+function discloseComboSeparation(res) {
+  const send = res.json.bind(res);
+  res.json = (payload) => send(res.statusCode >= 400 && payload && typeof payload.error === 'string'
+    ? { ...payload, error: `This service was separated from the stop, but the other changes were not saved. ${payload.error}`, comboSeparated: true }
+    : payload);
+}
+
 // 'separate': the service leaves its stop here; the handler then runs the
 // ordinary single-row edit.
 async function separateComboService(req, row) {
@@ -12971,7 +12982,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Before the series planner: a shared stop moved 'together' leaves no
     // date on the body for it to plan.
     const comboMovePlan = await planComboEditMove(req);
-    if (comboMovePlan?.separated) req.comboSeparatedThisRequest = true;
+    if (comboMovePlan?.separated) discloseComboSeparation(res);
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan && propertyId !== undefined) {
       // An address change regroups relocated occurrences on their OLD dates
@@ -16593,11 +16604,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       ...(comboMovePlan?.separated ? { comboSeparated: true } : {}),
     });
   } catch (err) {
-    // The split is its own committed action: an edit that fails after it
-    // says so, so nobody closes on an unnoticed separation.
-    if (req.comboSeparatedThisRequest && err && typeof err.message === 'string') {
-      err.message = `This service was separated from the stop, but the other changes were not saved. ${err.message}`;
-    }
     // The in-transaction duplicate-series backstop rolled the spawn back —
     // present the SAME 409 the POST creator returns.
     if (Array.isArray(err.duplicateRecurringSeries)) {
@@ -27639,7 +27645,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange,
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,

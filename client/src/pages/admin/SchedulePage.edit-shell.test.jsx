@@ -274,28 +274,33 @@ it('a text that could not be sent is said so', async () => {
   expect(saveNotice.shown[0]).toContain('The customer was not texted about the move: the message log could not be read, so no text was sent.');
 });
 
-it('a move the server refused after saving the rest: the form stays open and says which half happened', async () => {
-  putAnswers(() => saved({ comboMove: { moved: false, error: 'That window is past the end of the workday', code: 'INVALID_APPOINTMENT_WINDOW' } }));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
+it('a move the server refused after saving the rest: the save counts (the details are saved) and the notice says the stop did not move', async () => {
+  putAnswers(() => saved({ comboMove: { moved: false, error: 'That window is past the end of the workday.', code: 'INVALID_APPOINTMENT_WINDOW' } }));
+  const onSaved = vi.fn();
+  render(<EditServiceModal service={combo} technicians={[]} onClose={vi.fn()} onSaved={onSaved} />);
+  setDate(screen.getByRole('dialog', { name: 'Edit appointment' }), '2035-01-03');
   await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('The other changes were saved, but the stop was not moved. Save failed: That window is past the end of the workday');
-  expect(dialog).toBeInTheDocument();
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(saveNotice.shown).toEqual(['The other changes were saved, but the stop was not moved: That window is past the end of the workday. Reopen the appointment to move it.']);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
 it('a partly finished move and a move that did not confirm are each reported as such, never as "not moved"', async () => {
   let answer = { moved: false, needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop finished moving: fixture repair text.' } };
   putAnswers(() => saved({ comboMove: answer }));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
+  const first = openCombo();
+  setDate(first, '2035-01-03');
   await clickSave();
-  const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent('The other changes were saved. Save failed: Only part of this stop finished moving: fixture repair text.');
-  expect(alert).not.toHaveTextContent('the stop was not moved');
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
+  expect(saveNotice.shown[0]).toBe('The other changes were saved. Only part of this stop finished moving: fixture repair text.');
+  cleanup();
   answer = { moved: null, error: 'connection reset' };
+  const second = openCombo();
+  setDate(second, '2035-01-03');
   await clickSave();
-  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The move did not confirm, so the stop may or may not have moved: check the schedule'));
-  expect(screen.getByRole('alert')).not.toHaveTextContent('but the stop was not moved');
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(2));
+  expect(saveNotice.shown[1]).toContain('The move did not confirm, so the stop may or may not have moved: check the schedule.');
+  expect(saveNotice.shown[1]).not.toContain('was not moved');
 });
 
 it('a refusal before anything was written is shown as the server said it', async () => {

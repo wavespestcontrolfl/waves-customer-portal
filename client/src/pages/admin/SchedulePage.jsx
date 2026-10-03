@@ -3669,13 +3669,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // The whole-stop move's outcome rides in the saved answer: the other
       // changes are saved either way.
       const stopMove = result?.comboMove || null;
+      // Not moved (refused, partly, or not confirmed): the details ARE saved,
+      // so the form closes on them like any save and the notice says what
+      // happened to the move. Reopening reads the appointment fresh; nothing
+      // is retried from this form's now-stale state.
       if (stopMove && stopMove.moved !== true) {
-        throw Object.assign(new Error(stopMove.needsAttention?.message || stopMove.error || "The stop was not moved."), {
-          comboMoveOutcome: stopMove.needsAttention ? "partly" : (stopMove.moved === null ? "unknown" : "refused"),
-        });
+        const reason = stopMove.needsAttention?.message || stopMove.error || "The stop was not moved.";
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule. If it moved and the customer has not been told, text them. (${reason})`
+            : `The other changes were saved, but the stop was not moved: ${reason} Reopen the appointment to move it.`);
       }
-      let comboMoveWarnings = Array.isArray(stopMove?.warnings) ? stopMove.warnings : [];
-      if (stopMove && notifyOnMove && stopMove.notificationSent === false) {
+      let comboMoveWarnings = stopMove?.moved === true && Array.isArray(stopMove.warnings) ? stopMove.warnings : [];
+      if (stopMove?.moved === true && notifyOnMove && stopMove.notificationSent === false) {
         comboMoveWarnings = [...comboMoveWarnings, stopMove.notificationSkipped === "already_at_target"
           ? "The customer already has the text for this move, so no new one was sent."
           : `The customer was not texted about the move: ${stopMove.notificationError || "the text could not be sent"}.`];
@@ -3838,14 +3845,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
-      // The request saved the other changes and then could not finish the
-      // whole-stop move: say which of the two happened.
-      const committed = {
-        partly: "The other changes were saved. ",
-        unknown: "The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule, and save again if it is still at its old time (the customer is not texted twice). ",
-        refused: "The other changes were saved, but the stop was not moved. ",
-      }[e.comboMoveOutcome] || "";
-      const setSaveError = (message) => setSaveErrorState(committed + message);
       const ack = parseSeriesAckError(e);
       // The server refused a date/time change because the stop is shared and
       // this form did not know it (the read on open was slow, failed, or the
