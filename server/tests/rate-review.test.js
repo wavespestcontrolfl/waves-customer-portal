@@ -1190,12 +1190,15 @@ describe('engine replay guards', () => {
     expect(bodyOf('loadFirstCompletedVisits')).not.toMatch(/\$\{PLAN_ROW_SQL\}/);
     // one-off inspections/assessments ('other') never date a line or set the account's import baseline
     expect(bodyOf('loadFirstCompletedVisits')).toMatch(/\$\{LINE_SQL\} <> 'other'/);
-    // null-safe booster test: a legacy child (is_recurring NULL + parent) must not fall out of the NOT (...)
-    expect(P.DATING_ROW_SQL).toMatch(/NOT \(s\.is_recurring IS FALSE AND s\.recurring_parent_id IS NOT NULL\)/);
+    // allow-list: a plan row, or a standalone (no parent) non-recurring-flagged booking of a
+    // recurring catalog service that is not an inspection / assessment / WDO
+    expect(P.DATING_ROW_SQL.startsWith(`(${P.PLAN_ROW_SQL} OR (`)).toBe(true);
+    expect(P.DATING_ROW_SQL).toMatch(/s\.is_recurring IS FALSE AND s\.recurring_parent_id IS NULL/);
+    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(sv\.billing_type, ''\) <> 'one_time'/);
+    for (const word of ['inspection', 'assessment', 'wdo']) expect(P.DATING_ROW_SQL).toMatch(new RegExp(`NOT ILIKE '%${word}%'`));
     expect(P.DATING_ROW_SQL).not.toMatch(/is_recurring = false/);
-    expect(P.DATING_ROW_SQL).not.toMatch(/s\.is_recurring = true/);
-    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.is_callback, false\) = false/);
-    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.followup_included, false\) = false/);
+    // the standalone arm carries its own callback / follow-up exclusions (PLAN_ROW_SQL's do not reach it)
+    expect(P.DATING_ROW_SQL.split('COALESCE(s.is_callback, false) = false').length - 1).toBe(2);
     expect(src).not.toMatch(/RECURRING_SQL/);
     expect(planQuery).toMatch(/c\.active = true/);
     expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);
