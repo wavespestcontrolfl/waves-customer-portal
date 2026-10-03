@@ -879,9 +879,9 @@ class WavesAssistant {
         status: 'escalated',
         updated_at: new Date(),
       });
-      const teamNotified = await this.notifyTeamOfEscalation({
-        escalation, topic, conversation, customer, customerMessage, trx,
-      });
+      const teamNotified = await trx.transaction((bellTrx) => this.notifyTeamOfEscalation({
+        escalation, topic, conversation, customer, customerMessage, trx: bellTrx,
+      })).catch(() => false);
       const reply = escalationReply({
         isPortal: true,
         teamNotified,
@@ -972,6 +972,7 @@ class WavesAssistant {
       return Boolean(result?.id) && !result.suppressed;
     } catch (err) {
       logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
+      if (trx) throw err;
       return false;
     }
   }

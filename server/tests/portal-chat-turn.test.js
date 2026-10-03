@@ -168,7 +168,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
   const escalation = { id: 'esc-1' };
   const cards = [{ type: 'payments', title: 'Your most recent payment', rows: [{ id: 'p1' }] }];
   const actions = [{ type: 'tab', label: 'Open Billing', tab: 'billing' }];
-  const trx = jest.fn((table) => {
+  const trx = Object.assign(jest.fn((table) => {
     if (table === 'customers') return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(customer) };
     if (table === 'ai_escalations') return {
       where: jest.fn().mockReturnThis(),
@@ -182,7 +182,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
       }),
     };
     throw new Error(`unexpected table ${table}`);
-  });
+  }), { transaction: async (work) => work(trx) });
   let insideTransaction = false;
   const turn = {
     requestRowId: 'request-row-handoff',
@@ -198,7 +198,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
       try { return await work(trx); } finally { insideTransaction = false; }
     },
   };
-  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockResolvedValue(true);
+  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockRejectedValue(new Error('bell write failed'));
 
   const result = await assistant.escalatePortalTurn(
     { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
@@ -210,7 +210,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
   expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
     escalated: true,
     escalationId: 'esc-1',
-    teamNotified: true,
+    teamNotified: false,
     generated: false,
     actions,
     cards,
