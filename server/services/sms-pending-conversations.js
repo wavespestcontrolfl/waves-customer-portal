@@ -233,14 +233,20 @@ async function loadPendingSmsConversations({
       -- nothing. The call must END after the text arrived: a row is inserted
       -- when dialing starts, so a text sent while the phone rings, or during
       -- the conversation, is answered by it.
+      -- Only calls from the day before the oldest candidate text onward are
+      -- read and normalized (a call row is inserted at or after its start,
+      -- and no call runs a day), so the scan is bounded like the SMS scans.
       SELECT DISTINCT li.id AS inbound_id
       FROM enriched_inbound li
-      JOIN call_log spoken ON ${callPeer} = li.peer
-        AND ${callEndedAt} > li.created_at
-      WHERE spoken.status = 'completed'
-        AND COALESCE(spoken.source, '') <> '${VOICE_RELAY_SANDBOX_SOURCE}'
-        AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
-          OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
+      JOIN (
+        SELECT ${callPeer} AS peer, ${callEndedAt} AS ended_at
+        FROM call_log spoken
+        WHERE spoken.created_at > (SELECT MIN(created_at) FROM enriched_inbound) - ${REPLY_LOOKBACK}
+          AND spoken.status = 'completed'
+          AND COALESCE(spoken.source, '') <> '${VOICE_RELAY_SANDBOX_SOURCE}'
+          AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
+            OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
+      ) call ON call.peer = li.peer AND call.ended_at > li.created_at
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
