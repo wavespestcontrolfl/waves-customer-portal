@@ -863,6 +863,24 @@ describe('stopRetriesForReplacedEmail', () => {
     expect(chain.whereNull).toHaveBeenCalledWith('sent_at');
   });
 
+  test('clears the acceptance-time sent_at only for an attempt the provider rejected, never delivery evidence', async () => {
+    const blocked = message({ status: 'failed', send_attempt_token: 'attempt-1', provider_handoff_attempt_token: 'attempt-1',
+      provider_handoff_phase: 'rejected', sent_at: new Date(), delivered_at: null });
+    chain.select.mockImplementation(async (column) => (column === '*' ? [blocked] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', sent_at: null }));
+
+    chain.update.mockClear();
+    chain.select.mockImplementation(async (column) => (column === '*' ? [{ ...blocked, delivered_at: new Date() }] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update.mock.calls.find(([patch]) => patch.status === 'failed')[0]).not.toHaveProperty('sent_at');
+
+    chain.update.mockClear();
+    chain.select.mockImplementation(async (column) => (column === '*' ? [{ ...blocked, provider_handoff_phase: null }] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update.mock.calls.find(([patch]) => patch.status === 'failed')[0]).not.toHaveProperty('sent_at');
+  });
+
   test('a row naming another customer is never theirs, whatever it links to', async () => {
     await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
 

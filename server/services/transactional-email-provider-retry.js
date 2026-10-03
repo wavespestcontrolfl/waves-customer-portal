@@ -453,7 +453,8 @@ function mailToReplacedAddress(database, customerId, replaced) {
 //   1. A row scheduled, or claimed with no provider request yet (pending
 //      phase: the worker loses its pending-to-started marker CAS and sends
 //      nothing, the lost-claim path), settles as `failed` with its handoff
-//      evidence kept. Not `blocked`: that status makes the library dedupe the
+//      evidence kept (and, for a provider-rejected attempt, the acceptance-time
+//      sent_at cleared). Not `blocked`: that status makes the library dedupe the
 //      row's idempotency key, so the owner's re-issue would never go out,
 //      while a failed, definitely-unsent row is reclaimed to the live address.
 //      A billing replay's reservation stays claimable (see
@@ -486,10 +487,19 @@ async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now
     if (isSenderRenderedEmail(row)) continue;
     const replay = billingReplay.isBillingEmailProviderReplay(row);
     const requote = replay && billingReservation.isPrevisitReissue(row);
+    // A block event re-arms the row it blocked with the acceptance-time `sent_at` still on it. When the
+    // row carries positive evidence that its current attempt was rejected and no delivery evidence, the
+    // stamp describes an attempt that never reached a mailbox: clear it, as a claim does, so no repair
+    // reads the stopped row as accepted and re-stamps the reservation delivered. Delivery evidence
+    // (delivered, opened, clicked) is never cleared, and keeps the reservation closed.
+    const rejected = row.provider_handoff_phase === HANDOFF_PHASE_REJECTED && !!row.send_attempt_token
+      && row.provider_handoff_attempt_token === row.send_attempt_token
+      && !row.delivered_at && !row.opened_at && !row.clicked_at;
     const [updated] = await database('email_messages')
       .where({ id: row.id, send_attempt_token: row.send_attempt_token, status: row.status })
       .update({
         status: 'failed',
+        ...(rejected ? { sent_at: null } : {}),
         error_message: requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
         provider_retry_next_at: null,
         provider_retry_exhausted_at: now,

@@ -32,8 +32,8 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const retry = require('../services/transactional-email-provider-retry');
 const sendgrid = require('../services/sendgrid-mail');
-const { BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX } = require('../services/billing-email-reservation');
-const { claimVerdict } = require('../services/collections/contact-ledger');
+const Reservation = require('../services/billing-email-reservation');
+const { claimVerdict, claimAttempt } = require('../services/collections/contact-ledger');
 const { shouldRetryExistingMessage } = require('../services/email-template-library');
 
 const postgres = SKIP ? describe.skip : describe;
@@ -292,7 +292,7 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
   });
 
   // A billing replay row and the reservation its sender holds.
-  async function billingReplay(customerId, { previsit = false } = {}) {
+  async function billingReplay(customerId, { previsit = false, delivered = previsit, resolved = false, row: rowOverrides = {} } = {}) {
     const ledgerId = randomUUID();
     const invoiceId = randomUUID();
     const appointmentId = randomUUID();
@@ -301,10 +301,11 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await mockDatabase('collections_contact_ledger').insert({
       id: ledgerId, customer_id: customerId, channel: 'email', purpose: 'late_payment',
       invoice_ids: JSON.stringify([invoiceId]), source, occurred_at: new Date(),
-      metadata: JSON.stringify({ notificationEventKey: eventKey, ...(previsit ? { delivered: true } : {}) }),
+      metadata: JSON.stringify({ notificationEventKey: eventKey, ...(delivered ? { delivered: true } : {}), ...(resolved ? { resolved: true } : {}) }),
     });
     if (previsit) await mockDatabase('scheduled_services').insert({ id: appointmentId, customer_id: customerId, balance_reminder_sent_at: new Date() });
     const row = scheduled(customerId, {
+      ...rowOverrides,
       template_key: 'billing.notice',
       suppression_group_key_snapshot: 'transactional_required',
       trigger_event_id: eventKey,
@@ -350,7 +351,7 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect(await rowOf(row.id)).toMatchObject({
       status: 'failed', error_message: 'Billing email old quote retired: ' + REASON,
     });
-    expect(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX).toBe('Billing email re-quote required: ');
+    expect(Reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX).toBe('Billing email re-quote required: ');
     const metadata = await ledgerMetadata(ledgerId);
     expect(metadata.send_failed).toBe(true);
     expect(metadata.delivered).toBeUndefined();
@@ -368,5 +369,102 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     await expect(correct(customerId)).resolves.toBe(0);
 
     expect(await rowOf(followup.id)).toMatchObject({ status: 'failed', error_message: null });
+  });
+
+  // SendGrid accepted the email (the sender stamped the reservation delivered and the row carries sent_at),
+  // then the recipient's server blocked it: the webhook re-armed the row with the acceptance-time stamps intact.
+  const acceptedThenBlocked = { sent_at: new Date(Date.now() - 60000), provider_message_id: 'provider-accepted' };
+
+  test('an accepted-then-blocked billing email reopens its delivered reservation, and no repair re-stamps it delivered', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId } = await billingReplay(customerId, { delivered: true, row: acceptedThenBlocked });
+
+    await expect(correct(customerId)).resolves.toBe(1);
+
+    const stopped = await rowOf(row.id);
+    // The acceptance-time stamp is cleared with the stop; the provider id stays for webhook matching.
+    expect(stopped).toMatchObject({ status: 'failed', sent_at: null, provider_message_id: 'provider-accepted', error_message: REASON });
+    const metadata = await ledgerMetadata(ledgerId);
+    expect(metadata.delivered).toBeUndefined();
+    expect(metadata).toMatchObject({ send_failed: true, code: 'email_not_sent' });
+    expect(claimVerdict({ id: ledgerId, metadata, reused: true })).toEqual({ allowed: true, reopen: true });
+    // The accepted-evidence repair must not read the blocked attempt as delivered again.
+    const loaded = await mockDatabase('collections_contact_ledger').where({ id: ledgerId }).first();
+    await Reservation.repairAcceptedBillingEmailReservations([loaded], mockDatabase);
+    expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+    // The owning sender's next attempt claims it, and the row is reclaimable to the corrected address.
+    expect(shouldRetryExistingMessage(stopped)).toBe(true);
+    await expect(claimAttempt({ id: ledgerId, metadata, reused: true })).resolves.toEqual({ allowed: true });
+  });
+
+  test('a scheduled blocked previsit reminder with its original sent_at frees the appointment claim', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId, appointmentId } = await billingReplay(customerId, { previsit: true, row: acceptedThenBlocked });
+
+    await expect(correct(customerId)).resolves.toBe(1);
+
+    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', sent_at: null, error_message: 'Billing email old quote retired: ' + REASON });
+    expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeNull();
+  });
+
+  test('a previsit release the cron lease deferred is completed by stale-claim recovery', async () => {
+    const customerId = randomUUID();
+    const { row, appointmentId } = await billingReplay(customerId, { previsit: true, row: acceptedThenBlocked });
+    const lease = await mockDatabase.transaction(async (holder) => {
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['cron:previsit-balance-reminder']);
+      await correct(customerId);
+      return (await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at;
+    });
+    // The lease was busy: the row is stopped and marked for the re-quote release, the claim still held.
+    expect(lease).toBeInstanceOf(Date);
+    expect((await rowOf(row.id)).error_message).toBe(`${Reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${REASON}`);
+
+    await retry.recoverStaleClaims();
+
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeNull();
+    expect((await rowOf(row.id)).error_message).toBe('Billing email old quote retired: ' + REASON);
+  });
+
+  test('a genuinely delivered billing email is never reopened or released, and a resolved or newer reservation is left alone', async () => {
+    const customerId = randomUUID();
+    // Delivered: no schedule, so the stop does not even select it.
+    const delivered = await billingReplay(customerId, { delivered: true, row: {
+      status: 'delivered', provider_retry_next_at: null, sent_at: new Date(), delivered_at: new Date(), provider_message_id: 'provider-d',
+    } });
+    // A block event after a delivery event: still scheduled, but delivery evidence keeps the leg closed and the stamp.
+    const deliveredThenBlocked = await billingReplay(customerId, { delivered: true, row: { ...acceptedThenBlocked, delivered_at: new Date() } });
+    const deliveredPrevisit = await billingReplay(customerId, { previsit: true, row: { ...acceptedThenBlocked, delivered_at: new Date() } });
+    // Resolved by an earlier terminal refusal.
+    const resolved = await billingReplay(customerId, { delivered: true, resolved: true, row: acceptedThenBlocked });
+
+    await expect(correct(customerId)).resolves.toBe(3);
+
+    expect(await rowOf(delivered.row.id)).toMatchObject({ status: 'delivered', error_message: null });
+    expect((await ledgerMetadata(delivered.ledgerId)).delivered).toBe(true);
+    expect((await rowOf(deliveredThenBlocked.row.id)).sent_at).toBeInstanceOf(Date);
+    expect(await ledgerMetadata(deliveredThenBlocked.ledgerId)).toMatchObject({ delivered: true });
+    expect((await ledgerMetadata(deliveredThenBlocked.ledgerId)).send_failed).toBeUndefined();
+    expect((await mockDatabase('scheduled_services').where({ id: deliveredPrevisit.appointmentId }).first()).balance_reminder_sent_at).toBeInstanceOf(Date);
+    expect(await ledgerMetadata(resolved.ledgerId)).toMatchObject({ delivered: true, resolved: true });
+    expect((await ledgerMetadata(resolved.ledgerId)).send_failed).toBeUndefined();
+  });
+
+  test('a reopen for an attempt a newer one has replaced changes nothing', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId } = await billingReplay(customerId, { delivered: true, row: acceptedThenBlocked });
+    await correct(customerId);
+    // The owner reclaimed the row with a new attempt (new token, in flight again) and its acceptance stamped delivered.
+    const newer = randomUUID();
+    await mockDatabase('email_messages').where({ id: row.id }).update({
+      status: 'sent', send_attempt_token: newer, provider_handoff_attempt_token: newer, provider_handoff_phase: 'started', sent_at: new Date(),
+    });
+    await mockDatabase('collections_contact_ledger').where({ id: ledgerId })
+      .update({ metadata: mockDatabase.raw("(metadata - 'send_failed') || '{\"delivered\": true}'::jsonb") });
+    const stale = { ...(await rowOf(row.id)), send_attempt_token: row.send_attempt_token, status: 'failed' };
+
+    await expect(Reservation.reopenBillingEmailReservationForReissue(stale, mockDatabase)).resolves.toBe(false);
+
+    expect(await ledgerMetadata(ledgerId)).toMatchObject({ delivered: true });
   });
 });
