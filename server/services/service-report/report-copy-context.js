@@ -19,6 +19,9 @@ const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
+const {
+  techFindingsPromptLines, hasTechFindingLines, techFindingsCopyLive,
+} = require('./tree-shrub-tech-findings');
 const { redactAccessCodes } = require('../context-aggregator');
 const { buildWriterRecords } = require('./report-writer-records');
 const {
@@ -724,6 +727,23 @@ async function buildReportCopyContext({
         + ' These are reviewed photo signals, never a confirmed pest, disease, deficiency, cause, or diagnosis, and never proof of completed work. Do not infer or repeat a cause from these signals unless a separate technician-recorded finding names it. Hidden signals and any aggregate observation affected by a hidden signal are omitted.',
       );
     }
+    // GATE_TS_TECH_FINDINGS_COPY: the technician's own confirmed / edited
+    // findings and the ground-level-photo rule (grounding.techFindings exists
+    // only while the gate is on).
+    if (Array.isArray(treeShrubReviewGrounding.techFindings)) {
+      const techLines = techFindingsPromptLines(treeShrubReviewGrounding.techFindings);
+      // Every category replaced or hidden: no photo score is left to cite. Say
+      // so explicitly rather than let the writer infer plant condition from photos.
+      if (!scoreLine && techLines) {
+        sections.push(
+          'TREE & SHRUB TECHNICIAN-REVIEWED PHOTOS (source: reviewed_photo_signals; no photo scores): the technician reviewed this visit\'s photos and replaced or hid every photo-read finding, so no photo-model score or summary is available. Describe plant condition only from the technician findings below.',
+        );
+      }
+      sections.push(
+        'TECHNICIAN FINDINGS FOR THIS VISIT (these override the photo signals above; technician-recorded):'
+        + `${techLines ? `\n${techLines}` : ' none beyond the photo signals.'}`,
+      );
+    }
   }
 
   // The current visit isn't scored at generate time, so buildPressureTrendContext
@@ -863,7 +883,8 @@ async function buildReportCopyContext({
     hasCurrentLawnAssessment: !!lawnAssessments?.today,
     hasTreeShrubReviewedPhotoSignals: line === 'tree_shrub'
       && treeShrubReviewGrounding?.source === 'reviewed_photo_signals'
-      && Object.keys(treeShrubReviewGrounding.scores || {}).length > 0,
+      && (Object.keys(treeShrubReviewGrounding.scores || {}).length > 0
+        || hasTechFindingLines(treeShrubReviewGrounding.techFindings)),
     // The technician's marked promises reached the writer's PROMISES record.
     hasVisitPromises: writerPromiseCount > 0,
     targets,

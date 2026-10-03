@@ -20,6 +20,9 @@ const { mowingAlertText } = require('../utils/mowing-schedule');
  * @param {boolean} args.genuinelyNew            isNewCustomer verdict
  * @param {object|string|null} args.servicePreferences scheduled_services.service_preferences (jsonb or string)
  * @param {string} args.normalizedServiceType    normalizeServiceType(service_type)
+ * @param {Array<object>|null} args.neighborhoodGate neighborhood directory entries
+ *   (neighborhood-access.js neighborhoodGateEntriesForVisits), used only when
+ *   the customer has no neighborhood gate code of their own
  * @returns {Array<{type: string, text: string}>}
  */
 function compilePropertyAlerts({
@@ -28,11 +31,23 @@ function compilePropertyAlerts({
   genuinelyNew = false,
   servicePreferences = null,
   normalizedServiceType = '',
+  neighborhoodGate = null,
 } = {}) {
   const cleanedNotes = (notes || '').trim();
 
   const alerts = [];
   if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
+  else {
+    // The customer has no code: the neighborhood's shared entry, labeled as
+    // the neighborhood's (and "confirm on site" while unconfirmed).
+    for (const e of neighborhoodGate || []) {
+      const label = e.gate_label && e.gate_label !== 'Main gate' ? e.gate_label : 'Gate';
+      const value = e.code || e.instructions;
+      if (!value) continue;
+      const tag = e.status === 'active' ? 'neighborhood' : 'neighborhood, confirm on site';
+      alerts.push({ type: 'gate', text: `${label}: ${value} (${tag})` });
+    }
+  }
   if (prefs?.property_gate_code) alerts.push({ type: 'gate', text: `Yard: ${prefs.property_gate_code}` });
   if (prefs?.garage_code) alerts.push({ type: 'gate', text: `Garage: ${prefs.garage_code}` });
   if (prefs?.lockbox_code) alerts.push({ type: 'gate', text: `Lockbox: ${prefs.lockbox_code}` });

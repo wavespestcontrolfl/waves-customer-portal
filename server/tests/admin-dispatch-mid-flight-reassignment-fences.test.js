@@ -87,7 +87,7 @@ jest.mock('../models/db', () => {
       // recognize it by its SQL text and answer with the ET date string.
       const colKey = (c) => (typeof c === 'string' && c.includes('as day') ? 'day' : c);
       const out = cols.length
-        ? Object.fromEntries(cols.map((c) => [colKey(c), colKey(c) === 'day' ? String(found.scheduled_date).slice(0, 10) : found[c]]))
+        ? Object.fromEntries(cols.map((c) => [norm(colKey(c)), colKey(c) === 'day' ? String(found.scheduled_date).slice(0, 10) : found[norm(c)]]))
         : { ...found };
       // Fires a scripted concurrent reassignment right after THIS read
       // returns its (pre-race) snapshot — models a dispatcher's
@@ -95,9 +95,14 @@ jest.mock('../models/db', () => {
       // and its later write, so the write's own predicate (not a stale
       // earlier check) is what has to catch it.
       if (state.raceAfterNextRead && table === 'scheduled_services') {
-        const { to } = state.raceAfterNextRead;
-        state.raceAfterNextRead = null;
-        found.technician_id = to;
+        // skip: reads to let pass first (the router-level serviceId guard
+        // reads the row once before the handler's own provisional read).
+        const { to, skip = 0 } = state.raceAfterNextRead;
+        if (skip > 0) state.raceAfterNextRead.skip = skip - 1;
+        else {
+          state.raceAfterNextRead = null;
+          found.technician_id = to;
+        }
       }
       return out;
     };
@@ -284,7 +289,7 @@ test('codex round-3: PUT /:id/reorder now rejects a stale visit for a technician
 // tech-day advisory lock makes the write miss (0 rows → STALE_OPTIMIZE 409)
 // instead of stamping the former technician's route_order on the row.
 test('fallback-audit: PUT /:id/reorder — a reassignment landing right after the provisional read makes the technician-pinned CAS miss (409), route_order untouched', async () => {
-  db.__state.raceAfterNextRead = { to: 'tech-B' };
+  db.__state.raceAfterNextRead = { to: 'tech-B', skip: 1 };
   const res = await fetch(`${baseUrl}/api/admin/dispatch/svc-1/reorder`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ routeOrder: 3 }),
   });

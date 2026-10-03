@@ -337,7 +337,7 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js tests/intelligence-bar-workflow-matrix.test.js
       - name: Intelligence Bar task recovery transaction tests
         working-directory: server
         env:
@@ -552,6 +552,8 @@ jobs:
         run: npm run check:domain-rules
       - name: Intelligence Bar capability coverage drift
         run: npm run check:ib-coverage
+      - name: Technician-reachable routes list is current
+        run: npm run check:technician-routes
       - name: Local session supervisor lifecycle tests
         run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)

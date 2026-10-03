@@ -7,6 +7,8 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   isStaffAccessToken: jest.fn(() => true),
   staffTokenVersionMatches: jest.fn(() => true),
+  // /capture mounts with requireAdmin; the router needs it defined to load.
+  requireAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../services/audit-log', () => ({

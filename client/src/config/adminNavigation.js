@@ -12,6 +12,7 @@ import {
   FileText,
   Gift,
   Home,
+  KeyRound,
   Landmark,
   LayoutDashboard,
   Megaphone,
@@ -63,6 +64,17 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/customers",
     label: "Customers",
     icon: Users,
+  },
+  // The neighborhood gate-code directory: its own admin-only destination, so
+  // both the grouped workspace nav and the section nav list it (server is
+  // requireAdmin; the path is in OWNER_ONLY_NESTED_PATHS).
+  gateCodes: {
+    id: "gateCodes",
+    path: "/admin/customers/gate-codes",
+    label: "Gate codes",
+    icon: KeyRound,
+    adminOnly: true,
+    keywords: ["gate", "gate code", "neighborhood", "community", "access"],
   },
   pipeline: {
     id: "pipeline",
@@ -312,7 +324,7 @@ export const ADMIN_NAV_ITEMS = {
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
   { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-  { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
   { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
   { section: "People", itemIds: ["staff", "recruiting"] },
@@ -400,7 +412,7 @@ export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)
 const WORKSPACE_GROUPS = [
   { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily" },
   { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["schedule"], section: "Daily" },
-  { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts"], section: "Daily" },
+  { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts", "gateCodes"], section: "Daily" },
   { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate"], section: "Daily" },
   { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily" },
   { id: "billing", label: "Billing", target: "invoices", itemIds: ["invoices", "recovery", "payers"], section: "Daily" },
@@ -498,6 +510,7 @@ const TECH_ALLOWED_PATH_PREFIXES = [
 // match alone would admit them (codex P1). Both backend routers requireAdmin.
 const OWNER_ONLY_NESTED_PATHS = [
   "/admin/customers/duplicates",
+  "/admin/customers/gate-codes",
   "/admin/settings/pest-pressure",
 ];
 
@@ -548,5 +561,13 @@ export function isAdminNavItemActive(item, pathname, search = "") {
       );
     });
   }
-  return pathname.startsWith(`${itemPathname}/`);
+  if (!pathname.startsWith(`${itemPathname}/`)) return false;
+  // A nested route that is its own destination (Customers → Gate codes)
+  // belongs to that destination alone, never to its parent as well.
+  return !Object.values(ADMIN_NAV_ITEMS).some((other) => {
+    const otherPathname = pathnameFor(other.path);
+    return otherPathname
+      && otherPathname.startsWith(`${itemPathname}/`)
+      && (pathname === otherPathname || pathname.startsWith(`${otherPathname}/`));
+  });
 }

@@ -483,6 +483,48 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
+lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
+read at call time, no redeploy to flip): on the tree/shrub service-report
+payload (`/api/reports/:token/data` and the PDF, which share
+`buildReportV1Data` → `buildTreeShrubReportV2`), gate on lets the technician's
+own decisions on the photo-read findings (frozen at completion in the service
+record's `structured_notes.treeShrubTechFindings`, written whether or not the
+signed preview was accepted) override the photo read in customer copy. The
+payload gains no new field or route: only the existing `reportV2` strings and
+scores change. Per finding: **hide** — the category score, the overall score it
+influenced, the photo-read summary, any insight card built on it, any photo
+caption tied to it, and its point in the visit's (and later reports') trend
+history are withheld; the category reads "tracking", never healthy. **Confirm**
+— the diagnosis row and insight read as the technician's finding ("Your
+technician confirmed …"), still in signals language (no infestation or
+diagnosis claim). **Edit** — the technician's own text replaces the system
+sentence, with the photo-read prose and captions withheld.
+It is the ONLY free technician text this change can add to the public payload:
+it is capped at 400 characters, run through `redactAccessCodes`
+(`context-aggregator.js`, the report-egress access-code redactor) both when
+frozen and when rendered, so gate, garage, lockbox and alarm codes never
+egress, and it passes the customer-copy compliance screen
+(`customerCopyViolations`): completion refuses wording that fails it, and an
+edit with no printable text reads as a hide. **Monitor** keeps today's
+signals-only wording. The photo read itself stays on the stored assessment row
+for the office; admin views are unchanged. The same overlay governs the other
+photo-read surfaces of the payload for tree/shrub visits: any hidden or edited
+finding withholds every `data.photos[].caption` (the PDF gallery), the
+`data.typedReport.photoSummary` and the photo-read plant groups (the photos
+themselves stay). Palm-crown rule (owner 2026-10-01, photos are ground level):
+the photo read and the AI report writer are instructed on every tree/shrub
+generation never to state or imply that a palm's crown, spear leaf or newest
+fronds look healthy; the strong leaf-color and fullness sentences no longer say
+"healthy new growth". Owner 2026-10-02: the instruction is the guard — there is
+no word filter over customer copy, so a saved pre-gate report is not rewritten.
+The portal Trees & Shrubs score omits an overall whose read the technician hid,
+and withholds the score when the decisions cannot be read. The stored-PDF cache
+key carries `-tsfind<revision>` while the gate is on, so flipping it
+re-renders tree/shrub PDFs. Gate off (or unset) is byte-identical to before:
+nothing is frozen, no copy changes and the PDF key is unchanged. Auth, token
+gates, rate limits and headers are unchanged.
+
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
 (`/api/reports/:token/data`, the only caller that opts in with
@@ -653,10 +695,40 @@ an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
 version, creditPending? }` only when `ZELLE_RECIPIENT` is set (unset ⇒ key
 absent, payload byte-identical — that is the kill switch; `VENMO_HANDLE` /
 `PAYPAL_ME_HANDLE` are ignored and cannot resurrect a tender) AND the
-invoice is collectible, not saved-method-required, not fully covered by
-account credit, not riding a combined-balance session, has no saved-card
-charge reconciliation pending, and any stamped PaymentIntent is still
-cancelable (inspect-only, fail-closed — unverifiable ⇒ key withheld). The
+invoice clears `payPageZelleVisibility` (`pay-v2.js`; PR #5331) — the ONE
+function this route, the SMS drafter's draft-time eligibility fetch, and
+the send-time recheck all call, so none of them can quietly disagree.
+EVERY caller first runs ONE dedicated payer-ownership step (`zellePayerOwnership`)
+that always executes, independent of `payIncludeBalance` / combined-balance
+gating: a stamped `payer_id` or `payer_statement_id` (including one stamped
+after an SMS reply was drafted) withholds the key (`payer_owned`); otherwise
+the LIVE payer resolver is called directly (`throwOnError`) — a resolved
+third-party payer on an UNSTAMPED invoice withholds it (`payer_owned`), and a
+resolver error or an invoice with no customer withholds it
+(`payer_unverifiable`, fail closed). Withholding means the `manualPayOptions`
+key is ABSENT; status, headers and every other payload field are unchanged
+(and with `ZELLE_RECIPIENT` unset the step never runs).
+Exhaustively, every condition it applies: the invoice is not payer-owned (the ownership step above), is collectible, not
+withdrawn from the customer (a Bill-To move to a payer after the homeowner
+already held this link, see THIRD-PARTY BILL-TO WITHDRAWAL below), not
+saved-method-required, not fully covered by account credit, not riding a
+combined-balance session — this arm ALSO denies Zelle the instant a live
+payer resolves while probing for a sibling balance, even when that probe
+finds no sibling itself (`payerOwnedLive`: a payer discovered live during
+the combined-siblings lookup withholds Zelle exactly as an already-stamped
+`payer_id` would, so a Bill-To resolved mid-request can never leave a
+Zelle transfer offered to the wrong party) — has no saved-card charge
+reconciliation pending, and any stamped PaymentIntent is still cancelable
+(inspect-only, fail-closed — unverifiable ⇒ key withheld). An account-credit lookup that ERRORS is likewise unverifiable, never zero: the key is withheld (`credit_unverifiable`) — key absent, rest of the payload unchanged. Partial account
+credit is NOT a withholding condition on this route: when a positive PARTIAL
+projected account credit applies (one that would not itself fully cover the
+invoice — a credit that WOULD fully cover it is already excluded above), the
+server STILL INCLUDES `manualPayOptions` and sets `creditPending: true` on it.
+The client (`PayPageV2.jsx`, `creditPending && !stripeSetup`) then HIDES its
+transfer controls until `/setup` resolves the real post-credit amount, since a
+projection is not a reservation. (The SMS drafter and send-time recheck, which
+have no client to hide anything, treat that same state as not-visible and never
+offer Zelle while a partial credit is pending.) The
 recipient is the business's own Zelle contact, never customer data. The
 client re-reads this payload on expand / tab re-focus / 45 s cadence and
 keeps every control disabled until a fresh read succeeds; no pre-filled
@@ -2102,7 +2174,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits. The web report mounts the lead card right under the watering
+until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2178,6 +2250,51 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that). The block itself never reaches the payload; the only
 thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
+`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
+also live, so gate off, or lead off, leaves the lawn payload, render and PDF
+unchanged, key for key, and makes no read or write) swaps the old
+`LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
+(`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
+shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
+sentence built from the visit's facts; no model writes any of it (owner ruling
+2026-10-02). It adds NO top-level payload key: its fields reach the customer only
+through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
+`lead.applied` is the deterministic treatment summary of the recorded products
+(`treatment-summary.js`), never the AI treatment narrative that later overwrites
+`snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
+optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
+42 words: the visible-change sentence of the first two expectation rows the owner
+has approved for today's products, printed word for word, a sentence that would
+pass the cap left out whole; no by-next-visit timing yet, since that needs the
+next visit at this property, which the report's own next-visit line does not
+resolve; every row ships `approved: false`, so the key is absent until the owner
+approves one) and
+`watching` ("We are also keeping an eye on <topics>." for the watched issues
+after the one the headline names, at most three). The lead's word budget gives
+these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
+`whatToExpect`, then `sinceLast`. The fields freeze into
+`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, copyVersion,
+assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
+migration, written at the first healthy render, which the completion write gate
+performs) and replay byte for byte afterwards, so a later product edit or row
+approval never changes a sent report; a stored entry replays even when a later
+read fails, and its headline also replaces `snapshot.statusHeadline` on that
+render, so the lead's banner fallback and the PDF's Overall line replay it too. A degraded read (any input read failed) or an unverifiable treatment
+creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
+such a render's lead keeps the snapshot headline and has no applied line (never
+the AI treatment narrative). A render whose copy a retry could still freeze
+differently (a failed read, an unverifiable treatment, or a failed freeze write)
+sets
+`lawnAssessment.lawnCopyV6Unfrozen`, and the pinned (emailed) PDF defers with a
+retryable `lawn_copy_v6_unfrozen` error instead of sending it.
+The fields reach the lead through a non-enumerable
+in-process hand-off (`reportV2.copyV6`, read first by
+`applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
+under this gate, so a later assessment correction cannot make the PDF and the
+live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
+as a "What to expect" line (the insights it already lists cover `watching`),
+and its cache signature carries a `:copyv6=1` stamp while the gate is live.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
@@ -4611,6 +4728,32 @@ payload and the existing no-pests `customer_notes` fallbacks are
 byte-identical to before this gate existed. The columns themselves are
 additive and stamped from the details box regardless of this gate — only
 the pest-chip normalization is gated.
+Required details box (GATE_RESERVICE_DETAILS_REQUIRED, owner 2026-10-02:
+any text counts, a pest chip alone does not replace it): with the gate live,
+GET's `base` payload carries `detailsRequired: true` (bookable lanes only)
+and POST answers `400 { code: 'DETAILS_REQUIRED' }` for a missing, empty or
+whitespace-only `details` once the token resolves (an unknown token stays the
+generic 404) and before any booking work. Gate off: the key is
+omitted and POST is byte-identical.
+Re-service photos (GATE_RESERVICE_PHOTOS, honoured only while
+GATE_VISIT_PREP_PHOTOS is also live): a successful POST's response carries
+an optional `prepPhotos: { visitId, photosRemaining }` for the visit just
+booked (omitted when the gate is off or the visit is not visit-prep
+eligible). `POST /:token/visits/:visitId/photos` (multipart: up to 3
+`photos`, optional `note`) attaches them through `services/visit-prep.js`'s
+`createVisitPrepSubmission` (entry `reservice_page`, topic = the visit's
+pest/lawn lane) — the same caps, dedupe, storage, Visit Brief, office feed
+item and tech alert as the appointment page's `POST /:token/photos`. The
+visit must be the token customer's own pest/lawn re-service callback (the
+`openReserviceCallbacks` row predicate) and pass visit-prep eligibility with
+the recurring-plan rule waived for re-service callbacks; the locked recheck
+re-proves it on the write's transaction with the customer row FOR SHARE
+(still holding this `reservice_token`) and the visit FOR UPDATE, and refuses
+a visit whose `property_id` moved. Every refusal — malformed token or visit
+id, gate off, a non-multipart body (answered by
+`reservicePhotosPreParserGuard` ahead of the shared body parsers), another
+customer's or a non-re-service visit, an ineligible visit — is the generic
+404. Sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

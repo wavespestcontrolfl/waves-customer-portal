@@ -14,7 +14,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
-const { sendCustomerMessage } = require('../messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../messaging/send-manual-customer-sms');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
@@ -582,7 +582,8 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
     }
 
-    const smsResult = await sendCustomerMessage({
+    // Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
+    const smsResult = await sendManualCustomerSms({
       to: phone,
       body: message,
       channel: 'sms',

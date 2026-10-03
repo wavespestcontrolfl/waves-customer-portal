@@ -361,6 +361,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     err.retryable = true;
     throw err;
   }
+  // GATE_LAWN_REPORT_COPY_V6: the lawn lead copy could not be FROZEN on this
+  // render (a failed read or a failed freeze write). The live report will
+  // freeze it on a later render, possibly with different words, so an emailed
+  // attachment now could disagree with it forever. Retryable: defer the send.
+  if (renderedData?.lawnAssessment?.lawnCopyV6Unfrozen && isDeliveryPin) {
+    const err = new Error('lawn v6 copy could not be frozen — deferring pinned render');
+    err.code = 'lawn_copy_v6_unfrozen';
+    err.retryable = true;
+    throw err;
+  }
   if (isDeliveryPin) {
     // The delivery forced a fresh render precisely because the cached object
     // may hold an older assessment or recommendation version, so leaving that

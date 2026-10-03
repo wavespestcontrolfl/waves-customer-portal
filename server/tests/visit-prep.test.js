@@ -151,6 +151,23 @@ describe('visitPrepEligibility', () => {
     expect(visitPrepEligibility({ svc, state: 'upcoming', visitUnknown: false, dispatchOwnedUnreviewed: true }).reason).toBe('dispatch_owned_unreviewed');
   });
 
+  test('reserviceCallback waives only the recurring-plan rule (GATE_RESERVICE_PHOTOS)', () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    const callback = { id: 'svc-cb', customer_id: 'cust-1', is_recurring: false, recurring_pattern: null, is_callback: true, customer_active: true };
+    const base = { state: 'upcoming', visitUnknown: false };
+    // Without the flag a standalone re-service visit is refused, as before.
+    expect(visitPrepEligibility({ svc: callback, ...base }).reason).toBe('one_time_visit');
+    expect(visitPrepEligibility({ svc: { ...callback, recurring_pattern: 'one_time' }, ...base, reserviceCallback: true }))
+      .toEqual({ eligible: true, reason: null });
+    // Every other condition still applies.
+    expect(visitPrepEligibility({ svc: callback, ...base, state: 'past', reserviceCallback: true }).reason).toBe('not_upcoming');
+    expect(visitPrepEligibility({ svc: callback, ...base, visitUnknown: true, reserviceCallback: true }).reason).toBe('visit_unknown');
+    expect(visitPrepEligibility({ svc: { ...callback, customer_active: false }, ...base, reserviceCallback: true }).reason).toBe('customer_inactive');
+    expect(visitPrepEligibility({ svc: callback, ...base, reserviceCallback: true, dispatchOwnedUnreviewed: true }).reason).toBe('dispatch_owned_unreviewed');
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    expect(visitPrepEligibility({ svc: callback, ...base, reserviceCallback: true }).reason).toBe('gate_off');
+  });
+
   test('eligible only when every condition clears', () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     const svc = { ...RECURRING_SVC, customer_active: true };

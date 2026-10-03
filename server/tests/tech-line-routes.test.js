@@ -56,7 +56,7 @@ async function call(method, path, req) {
 }
 const chains = {};
 const CLAIM_SQL = /INSERT INTO sms_send_claims/;
-function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1' }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
+function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
   for (const k of Object.keys(chains)) delete chains[k];
   db.mockImplementation((table) => {
     const chain = {};

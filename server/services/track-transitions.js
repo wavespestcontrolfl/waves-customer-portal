@@ -921,7 +921,7 @@ function classifyArrivalSend(result) {
  * not funnel a suppressed signal here — the flip leaves the guard NULL so a
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
-async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
+async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null, expectTechnicianId = null) {
   if (svc.arrival_sms_sent_at) return 'already_handled';
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
@@ -941,6 +941,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       scheduled_date: svc.scheduled_date ?? null,
     })
     .whereNull('arrival_sms_sent_at');
+  // A technician's own start claims only while the visit is still theirs: a
+  // miss leaves the guard NULL for the newly assigned technician's arrival
+  // (codex #5568 r9 pre-push P1).
+  if (expectTechnicianId) claimQuery.where('technician_id', expectTechnicianId);
   // ms-truncated on both sides: claimArrivedAt can be a row-read value
   // (pg returns Dates at ms precision) compared against a column that
   // may carry microseconds from a SQL now() write.
@@ -1005,6 +1009,14 @@ async function markOnProperty(serviceId, opts = {}) {
   }
 
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  // A technician's own start passes expectTechnicianId: a reassignment that
+  // committed after their timer insert must not let the former technician
+  // advance the visit or text the customer an arrival naming them (codex
+  // #5568 r9 P1). The flip below carries the same predicate, so a
+  // reassignment landing after this read misses the CAS instead.
+  if (opts.expectTechnicianId && String(svc.technician_id || '') !== String(opts.expectTechnicianId)) {
+    return { ok: false, reason: 'technician_changed' };
+  }
   // Terminal operational status rejects on EVERY load (same guard as
   // markEnRoute): the stale-attempt repair below reloads and re-enters,
   // and a completion can commit its status between the heal and that
@@ -1140,17 +1152,17 @@ async function markOnProperty(serviceId, opts = {}) {
     // the re-read below distinguishes a genuine arrival race from a
     // conflicting rewrite.
     const { applyTrackLifecycleCas } = require('./rebooker');
-    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => applyTrackLifecycleCas(
-      trx('scheduled_services')
-        .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null })
-        .whereIn('track_state', ['scheduled', 'en_route']),
-      svc,
-    )
-      .update({
-        track_state: 'on_property',
-        ...onSiteUpdates,
-        updated_at: now,
-      }));
+    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => {
+      const flip = trx('scheduled_services')
+        .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null });
+      if (opts.expectTechnicianId) flip.where('technician_id', opts.expectTechnicianId);
+      return applyTrackLifecycleCas(flip.whereIn('track_state', ['scheduled', 'en_route']), svc)
+        .update({
+          track_state: 'on_property',
+          ...onSiteUpdates,
+          updated_at: now,
+        });
+    });
     if (updated === null) {
       logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
       return { ok: false, reason: 'street_level_hold' };
@@ -1167,6 +1179,12 @@ async function markOnProperty(serviceId, opts = {}) {
       const fresh = await loadService(serviceId);
       if (fresh?.track_state !== 'on_property') {
         return { ok: false, reason: 'concurrent_update' };
+      }
+      // The miss may be the technician predicate: another signal already put
+      // a reassigned visit on property. Never funnel the former technician
+      // into the arrival send (codex #5568 r9 pre-push P1).
+      if (opts.expectTechnicianId && String(fresh.technician_id || '') !== String(opts.expectTechnicianId)) {
+        return { ok: false, reason: 'technician_changed' };
       }
       if (fresh?.technician_id && fresh.track_state === 'on_property') {
         try {
@@ -1226,7 +1244,7 @@ async function markOnProperty(serviceId, opts = {}) {
     if (visitClaim === 'owner' && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'on_site', claimToken))) {
       arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
     } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
-      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt, opts.expectTechnicianId || null);
     } else if (visitClaim === 'taken') {
       arrivalSms = 'covered';
       try {

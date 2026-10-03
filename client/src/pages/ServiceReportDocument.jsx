@@ -684,7 +684,11 @@ export default function ServiceReportDocument({ data, token }) {
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
-        value: v2.snapshot.statusHeadline,
+        // The lead's headline when it has one: under GATE_LAWN_REPORT_COPY_V6
+        // that is the FROZEN headline the live report replays, which a later
+        // assessment correction must not make the PDF contradict. Without the
+        // v6 copy the lead headline is this same statusHeadline (or null).
+        value: (v2Lead && v2Lead.headline) || v2.snapshot.statusHeadline,
         // The PDF has no word budget: a lead "why" the web dropped for its
         // budget or watering wording falls back to the score explanation
         // (Fable P2 #5517).
@@ -1161,6 +1165,14 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
+            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+                lead prints. Its headline is the Overall line above, and its
+                watching line names insights this list already prints in full. */}
+            {v2Lead?.whatToExpect ? (
+              <Bullet>
+                <strong>What to expect:</strong> {v2Lead.whatToExpect}
+              </Bullet>
+            ) : null}
             {v2Diagnosis.map((row) => (
               <Bullet key={row.key || row.label}>
                 <strong>{row.label}{row.score != null ? ` (${row.score})` : ''}:</strong> {row.customerExplanation}

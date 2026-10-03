@@ -8,7 +8,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer, TECH_DEAD_ASSIGNMENT_STATUSES } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
@@ -368,6 +369,32 @@ async function attachOutcomePhotoRefs(outcome, assessmentId) {
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
 
+// The analysis above is long-running (photo checks + model calls): dispatch
+// can reassign or cancel the visit meanwhile. Re-check the canonical
+// assignment under a row lock inside the insert transaction so persistence
+// and reassignment serialize (codex #5568 r6 P1). Admins pass.
+async function assertVisitStillOwned(req, trx, serviceId) {
+  if (!serviceId || !isTechnicianRequest(req)) return;
+  const owned = await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where('scheduled_services.id', serviceId),
+  ).forUpdate().first('scheduled_services.id');
+  // status for the /confirm catch, statusCode + isOperational for the shared
+  // error handler /assess falls through to (otherwise a 500).
+  if (!owned) throw Object.assign(new Error('serviceId not found'), { status: 404, statusCode: 404, isOperational: true });
+}
+
+// The same fence for a row with no visit: some current visit of this
+// technician's for the customer, under its row lock.
+async function assertCustomerVisitStillOwned(req, trx, customerId) {
+  if (!isTechnicianRequest(req)) return;
+  const owned = customerId ? await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where('scheduled_services.customer_id', customerId),
+  ).forUpdate().first('scheduled_services.id') : null;
+  if (!owned) throw Object.assign(new Error('Assessment not found'), { status: 404, statusCode: 404, isOperational: true });
+}
+
 // =========================================================================
 // GET /customers — list lawn care customers (active lawn service)
 // =========================================================================
@@ -377,15 +404,26 @@ router.get('/customers', async (req, res, next) => {
     const today = etDateString();
 
     let query;
-    const hasScheduled = await applyLawnServiceFilter(
+    // A technician sees only the lawn stops on their OWN route today (codex
+    // #5568 r1 P1): the unscoped list handed every technician the name,
+    // phone, email and address of every lawn customer scheduled that day,
+    // and the no-schedule fallback was the whole lawn customer directory.
+    const ownRoute = (q) => (isTechnicianRequest(req)
+      ? q.where('ss.technician_id', req.technicianId).whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      : q);
+    const hasScheduled = await ownRoute(applyLawnServiceFilter(
       db('scheduled_services as ss')
         .where('ss.scheduled_date', today)
         .whereNotIn('ss.status', ['cancelled', 'completed']),
       'ss'
-    ).first();
+    )).first();
+
+    if (!hasScheduled && isTechnicianRequest(req)) {
+      return res.json({ customers: [] });
+    }
 
     if (hasScheduled) {
-      query = applyLawnServiceFilter(
+      query = ownRoute(applyLawnServiceFilter(
         db('scheduled_services as ss')
           .join('customers as c', 'ss.customer_id', 'c.id')
           .where('ss.scheduled_date', today)
@@ -397,7 +435,7 @@ router.get('/customers', async (req, res, next) => {
             'ss.service_type as serviceType', 'ss.window_start as windowStart'
           ),
         'ss'
-      ).orderBy('ss.window_start', 'asc');
+      )).orderBy('ss.window_start', 'asc');
     } else {
       query = db('customers as c')
         .leftJoin('customer_turf_profiles as ctp', function () {
@@ -452,6 +490,10 @@ router.post('/assess', async (req, res, next) => {
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
+    // Technician scope: only a customer on the technician's current/recent
+    // route. 404, not 403 — existence must not leak (same contract as the
+    // schedule and customer routers).
+    if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     // Gate on: up to six photos, each optionally labeled with the zone the
     // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
@@ -486,7 +528,10 @@ router.post('/assess', async (req, res, next) => {
     // validated visit's date instead of the current clock.
     let scheduledService = null;
     if (serviceId) {
-      const svc = await db('scheduled_services').where({ id: serviceId }).first();
+      // A technician may bind the assessment only to a visit on their own
+      // current/recent route — not another technician's visit for the same
+      // customer (codex #5568 r4 P1).
+      const svc = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', serviceId)).first();
       if (!svc) return res.status(404).json({ error: 'serviceId not found' });
       if (svc.customer_id !== customerId) {
         return res.status(400).json({ error: 'serviceId does not belong to customerId' });
@@ -861,11 +906,17 @@ router.post('/assess', async (req, res, next) => {
     let visitRun = null;
     const [assessment] = visitAssessmentEnabled
       ? await db.transaction(async (trx) => {
+        // No serviceId: fenced on a current visit for the customer (r11 pre-push P1).
+        if (serviceId) await assertVisitStillOwned(req, trx, serviceId);
+        else await assertCustomerVisitStillOwned(req, trx, customerId);
         const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
         visitRun = await visitRuns.recordRun({ assessment: rows[0], analysis: visitAnalysis, adjustedScores }, trx);
         return rows;
       })
       : await db.transaction(async (trx) => {
+        // No serviceId: fenced on a current visit for the customer (r11 pre-push P1).
+        if (serviceId) await assertVisitStillOwned(req, trx, serviceId);
+        else await assertCustomerVisitStillOwned(req, trx, customerId);
         // Legacy (property history off): the baseline decision and the insert
         // under the customer's baseline lock — the one a run-backed confirm's
         // legacy baseline check takes — so a legacy row replacing a pending
@@ -1144,8 +1195,9 @@ function normalizeStressFlags(input) {
 // scores merge instead of overwriting each other. A blank score keeps it
 // pending: scores, notes, flags and checks are saved; nothing is confirmed,
 // no baseline is installed, and adjusted_scores (the AI read) is untouched.
-async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks }, knex) {
+async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks, assertOwned }, knex) {
   return knex.transaction(async (trx) => {
+    if (assertOwned) await assertOwned(trx);
     const original = await trx('lawn_assessments').where({ id: assessmentId }).first('customer_id');
     if (!original) throw Object.assign(new Error('Assessment not found'), { status: 404 });
     await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
@@ -1215,15 +1267,31 @@ router.post('/confirm', async (req, res, next) => {
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
+    if (!(await technicianServicesCustomer(req, assessment.customer_id))) return res.status(404).json({ error: 'Assessment not found' });
+    if (assessment.service_id && isTechnicianRequest(req)) {
+      const owned = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', assessment.service_id)).first('scheduled_services.id');
+      if (!owned) return res.status(404).json({ error: 'Assessment not found' });
+    }
 
     // Persisted provenance selects the workflow, even after the visit gate is
     // turned off. Legacy rows retain their existing confirmation behavior.
+    // Re-check the visit under its row lock inside each confirmation
+    // transaction, first (the /assess lock order: visit row, then baseline),
+    // so a reassignment between the check above and the write cannot let the
+    // former technician's confirmation commit (codex #5568 r8 P1).
+    // A legacy row with no service_id is fenced on the customer instead: a
+    // current visit of this technician's for that customer, locked inside the
+    // transaction (codex #5568 r11 P1).
+    const assertOwned = !isTechnicianRequest(req) ? undefined
+      : assessment.service_id
+        ? (trx) => assertVisitStillOwned(req, trx, assessment.service_id)
+        : (trx) => assertCustomerVisitStillOwned(req, trx, assessment.customer_id);
     const visitRun = await visitRuns.loadRun(assessmentId, db);
     let updated;
     let confirmation;
     if (visitRun) {
       confirmation = await visitRuns.confirmRun({
-        assessmentId, adjustedScores, review: req.body, technicianId: req.technicianId,
+        assessmentId, adjustedScores, review: req.body, technicianId: req.technicianId, assertOwned,
         observationEdit, propertyHistoryEnabled, scoreValue, calculateOverallScore,
         stressFlags: normalizedStressFlags === null ? undefined : normalizedStressFlags,
         persistChecks: protocolFieldChecksProvided
@@ -1239,7 +1307,7 @@ router.post('/confirm', async (req, res, next) => {
       }
     } else {
       confirmation = await confirmLegacyAssessment({
-        assessmentId, adjustedScores, propertyHistoryEnabled,
+        assessmentId, adjustedScores, propertyHistoryEnabled, assertOwned,
         stressFlags: normalizedStressFlags,
         persistChecks: protocolFieldChecksProvided
           ? async (current, trx) => {
@@ -1365,6 +1433,13 @@ router.post('/confirm', async (req, res, next) => {
 // =========================================================================
 router.get('/service/:serviceId', async (req, res, next) => {
   try {
+    if (isTechnicianRequest(req)) {
+      const owned = await technicianCurrentVisitFilter(
+        req,
+        db('scheduled_services').where('scheduled_services.id', req.params.serviceId),
+      ).first('scheduled_services.id');
+      if (!owned) return res.status(404).json({ error: 'Service not found' });
+    }
     const assessment = await applyServiceAssessmentOrder(
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
@@ -1397,6 +1472,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
 // =========================================================================
 router.get('/history/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const history = await lawnAssessment.getCustomerHistory(req.params.customerId);
     res.json({ history });
   } catch (err) {
@@ -1409,6 +1485,7 @@ router.get('/history/:customerId', async (req, res, next) => {
 // =========================================================================
 router.get('/baseline/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const baseline = await lawnAssessment.getBaseline(req.params.customerId);
     res.json({ baseline: baseline || null });
   } catch (err) {
@@ -1420,7 +1497,7 @@ router.get('/baseline/:customerId', async (req, res, next) => {
 // POST /reset-baseline/:customerId — reset baseline (admin only)
 // Body: { reason }
 // =========================================================================
-router.post('/reset-baseline/:customerId', async (req, res, next) => {
+router.post('/reset-baseline/:customerId', requireAdmin, async (req, res, next) => {
   try {
     const { reason, propertyId } = req.body;
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -1450,6 +1527,7 @@ router.post('/reset-baseline/:customerId', async (req, res, next) => {
 // =========================================================================
 router.get('/latest/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const latest = await db('lawn_assessments')
       .where({ customer_id: req.params.customerId })
       .orderBy('service_date', 'desc')
