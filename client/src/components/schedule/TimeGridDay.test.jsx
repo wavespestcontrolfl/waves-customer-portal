@@ -350,3 +350,109 @@ describe('TimeGridDay visit-group office actions', () => {
     expect(screen.queryByRole('button', { name: 'Separate' })).toBeNull();
   });
 });
+
+describe('TimeGridDay open hours', () => {
+  it('draws an Open block on each empty hour, only when slots are bookable', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const props = { date: '2026-07-15', services: SERVICES, technicians: [{ id: 'tech-1', name: 'Alex Tech' }], onChange: vi.fn() };
+    const { rerender } = render(<TimeGridDay {...props} />);
+    expect(screen.queryByText(/^Open · /)).toBeNull();
+    rerender(<TimeGridDay {...props} onCreateSlot={vi.fn()} />);
+    vi.useRealTimers();
+    // SERVICES book 8–9 and 10–11 AM: 10 of the 12 hours from 7 AM to 7 PM stay open.
+    expect(screen.queryByText('Open · 8–9 AM')).toBeNull();
+    expect(screen.getByText('Open · 9–10 AM')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(10);
+  });
+
+  it('counts an unassigned booking as filling its hour', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, {
+          id: 'svc-unassigned', customerName: 'Unassigned Customer', status: 'confirmed',
+          windowStart: '09:00', windowEnd: '10:00', windowDisplay: '9–10 AM', technicianId: null,
+        }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByText('Open · 9–10 AM')).toBeNull();
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(9);
+  });
+
+  it('offers a keyboard-reachable Open button, and none for a tech marked out', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    const { rerender } = render(
+      <TimeGridDay date="2026-07-15" services={SERVICES} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} onCreateSlot={onCreateSlot} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' }));
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-07-15', techId: 'tech-1', windowStart: '09:00', windowEnd: '10:00' }));
+    rerender(
+      <TimeGridDay date="2026-07-15" services={SERVICES} technicians={[{ id: 'tech-1', name: 'Alex Tech', outToday: true }]} onChange={vi.fn()} onCreateSlot={onCreateSlot} />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByText(/^Open · /)).toBeNull();
+  });
+
+  it('lets the Open marker take the click over a skipped visit, not the visit', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, {
+          id: 'svc-skipped', customerName: 'Skipped Customer', status: 'skipped',
+          windowStart: '09:00', windowEnd: '10:00', windowDisplay: '9–10 AM', technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).not.toHaveClass('pointer-events-none');
+    expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toHaveClass('pointer-events-none');
+  });
+
+  it("gives no open hours to a column kept only for a non-rostered tech's visits", () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z'));
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, { id: 'svc-gone', customerName: 'Leftover', status: 'confirmed', windowStart: '12:00', windowEnd: '13:00', technicianId: 'tech-gone', technicianName: 'Former Tech' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByRole('button', { name: /for Former Tech$/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).toBeInTheDocument();
+  });
+
+  it('leaves a completed block clickable: no Open marker drawn over it', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z'));
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, { id: 'svc-done', customerName: 'Done Early', status: 'completed', windowStart: '12:00', windowEnd: '13:00', technicianId: 'tech-1', technicianName: 'Alex Tech' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByRole('button', { name: 'Book open hour 12–1 PM for Alex Tech' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toBeInTheDocument();
+  });
+});

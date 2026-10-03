@@ -2,7 +2,7 @@ const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -6497,7 +6497,12 @@ router.get('/', async (req, res, next) => {
     });
 
     // Assignment picker roster: assignable staff only (technician-eligibility.js).
-    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    const roster = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    // Marked out for this date (GATE_TECH_OUT_REDISTRIBUTE): the day list
+    // shows no open hours for them, since assertAssignableTechnician would
+    // refuse the booking. An unreadable absence table hides nothing.
+    const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
+    const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
@@ -6547,6 +6552,10 @@ router.get('/', async (req, res, next) => {
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
+      // The booking hours the office's create check enforces (capacity mode:
+      // the shift), so the day list's Open blocks never offer a refused hour.
+      // null = no shift bound.
+      bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay(),
       weather,
       rainChance,
       ...(zoneRain ? { zoneRain } : {}),
@@ -7017,7 +7026,17 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
-    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
+    // Techs marked out per day, so the mobile week list offers no open hour
+    // the booking check would refuse. Unreadable = nothing hidden.
+    try {
+      const absent = await absentTechDays(db, { dateFrom: days[0].date, dateTo: days[days.length - 1].date });
+      for (const day of days) {
+        const suffix = `:${day.date}`;
+        day.outTechIds = [...absent].filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
+      }
+    } catch { /* absences are optional here */ }
+
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
   } catch (err) { next(err); }
 });
 

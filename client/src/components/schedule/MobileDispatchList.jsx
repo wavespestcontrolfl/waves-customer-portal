@@ -19,6 +19,7 @@ import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
+import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -422,8 +423,80 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   );
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+// An empty hour in the day list: tapping it opens New appointment with the
+// day and hour filled in.
+function OpenHourRow({ hour, onBook }) {
+  return (
+    <div className="bg-zinc-50 border-b border-hairline border-zinc-200" style={{ padding: '6px 10px' }}>
+      <button
+        type="button"
+        onClick={onBook}
+        className="flex items-center w-full text-left rounded-xs border border-dashed border-zinc-300 bg-zinc-50 hover:border-zinc-900 hover:bg-white active:bg-white u-focus-ring"
+        style={{ height: 44, padding: '0 12px', gap: 12 }}
+        aria-label={`Book open hour ${formatOpenHour(hour)}`}
+      >
+        <span className="u-nums font-medium text-zinc-900" style={{ fontSize: 14, minWidth: 92 }}>
+          {formatOpenHour(hour)}
+        </span>
+        <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
+        <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 14 }}>+ Book</span>
+      </button>
+    </div>
+  );
+}
+
+// Appointments in list order with each open hour placed before the first
+// visit that starts after it. Windowless visits sort last, after the whole
+// hourly timeline, so any hours still pending go in ahead of them.
+function withOpenHours(sorted, openHours) {
+  const rows = [];
+  const pending = [...openHours];
+  sorted.forEach((svc) => {
+    const start = parseHHMM(svc.windowStart);
+    while (pending.length && (start == null || pending[0] * 60 < start)) {
+      rows.push({ hour: pending.shift() });
+    }
+    rows.push({ svc });
+  });
+  pending.forEach((hour) => rows.push({ hour }));
+  return rows;
+}
+
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
+  const now = useHourClock();
+  // Techs marked out for the day can't take a booking; with the whole roster
+  // out there is no open hour to offer. A week segment names its own day's
+  // absences (outTechIds); the day list's roster carries outToday.
+  const working = (technicians || []).filter((t) => (outTechIds ? !outTechIds.includes(t.id) : !t.outToday));
+  const allOut = (technicians || []).length > 0 && working.length === 0;
+  const workingKey = working.map((t) => t.id).join(',');
+  // An hour is open when ANY working tech is free in it (their own visits
+  // plus every unassigned one, as the desktop grid judges each column);
+  // `freeTechs` names who, so a single free tech is preselected. With no
+  // roster, the whole day's visits decide.
+  const { openHours, freeTechs } = useMemo(() => {
+    if (!onCreateSlot || allOut) return { openHours: [], freeTechs: new Map() };
+    const opts = { now, bookingHours };
+    if (!working.length) return { openHours: openHoursForDay(dateStr, services || [], opts), freeTechs: new Map() };
+    const unassigned = (services || []).filter((s) => !s.technicianId);
+    const free = new Map();
+    for (const t of working) {
+      const own = (services || []).filter((s) => s.technicianId === t.id);
+      for (const h of openHoursForDay(dateStr, [...own, ...unassigned], opts)) {
+        if (!free.has(h)) free.set(h, []);
+        free.get(h).push(t.id);
+      }
+    }
+    return { openHours: [...free.keys()].sort((a, b) => a - b), freeTechs: free };
+    // workingKey stands in for the filtered roster array.
+  }, [onCreateSlot, allOut, dateStr, services, now, bookingHours, workingKey]);
+  const rows = useMemo(() => withOpenHours(sorted, openHours), [sorted, openHours]);
+  // The one tech free in that hour, if only one is.
+  const soleFreeTech = (hour) => {
+    const ids = freeTechs.get(hour);
+    return ids && ids.length === 1 ? ids[0] : undefined;
+  };
   const today = isETToday(dateStr);
   return (
     <section>
@@ -458,9 +531,12 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         </span>
         <span className="u-nums text-ink-tertiary" style={{ fontSize: 11 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
+          {openHours.length > 0 && (
+            <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
+          )}
         </span>
       </header>
-      {sorted.length === 0 ? (
+      {rows.length === 0 ? (
         <div
           className="text-ink-tertiary italic"
           style={{ padding: '14px', fontSize: 13 }}
@@ -468,7 +544,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           No appointments
         </div>
       ) : (
-        sorted.map((svc) => (
+        rows.map(({ svc, hour }) => (svc ? (
           <AppointmentRow
             key={svc.id}
             service={svc}
@@ -482,13 +558,24 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
           />
-        ))
+        ) : (
+          <OpenHourRow
+            key={`open-${hour}`}
+            hour={hour}
+            onBook={() => onCreateSlot({
+              date: dateStr,
+              windowStart: hourToHHMM(hour),
+              windowEnd: hourToHHMM(hour + 1),
+              techId: soleFreeTech(hour),
+            })}
+          />
+        )))
       )}
     </section>
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -499,18 +586,24 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
   );
 
   useEffect(() => {
-    if (mode !== 'week') return;
+    if (mode !== 'week') return undefined;
+    // A superseded request (the user moved on to another week) must not
+    // land late and replace the newer week's rows.
+    let current = true;
     setLoading(true);
     setError(null);
     adminFetch(`/admin/schedule/week?start=${weekStart}`)
       .then((j) => {
+        if (!current) return;
         setWeekData(j);
         setLoading(false);
       })
       .catch((e) => {
+        if (!current) return;
         setError(e.message || 'Failed to load week');
         setLoading(false);
       });
+    return () => { current = false; };
     // refreshKey bumps when a parent mutation (e.g. a rain-out that moves a
     // stop to another day) invalidates the cached week list.
   }, [mode, weekStart, refreshKey]);
@@ -548,6 +641,8 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
+          onCreateSlot={onCreateSlot}
+          bookingHours={bookingHours}
         />
       </div>
     );
@@ -584,6 +679,10 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
+          // A week still loading shows the previous week's rows: no booking from them.
+          onCreateSlot={loading || weekData?.startDate !== weekStart ? undefined : onCreateSlot}
+          outTechIds={d.outTechIds || []}
+          bookingHours={weekData?.bookingHours || null}
         />
       ))}
     </div>

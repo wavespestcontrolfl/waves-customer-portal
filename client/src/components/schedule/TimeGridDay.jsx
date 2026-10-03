@@ -31,6 +31,7 @@ import {
   seriesMoveSummary,
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
+import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -615,7 +616,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, routeStale = false }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, openHours = [], routeStale = false }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -661,6 +662,18 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
     window.addEventListener('pointerup', onUp);
   }, [onCreateSlot, tech.id]);
 
+  // Hours an open marker shares with a freed block. Over a skipped or
+  // cancelled block the marker takes the click (that visit has nothing
+  // left to open); a completed or no-show block keeps its own click (it
+  // can still owe a closeout), so no marker is drawn over it.
+  const freedBy = (statuses) => new Set(openHours.filter((h) => services.some((svc) => {
+    if (!statuses.includes(svc.status)) return false;
+    const start = parseHHMM(svc.windowStart);
+    return start != null && start < (h + 1) * 60 && start + effectiveDuration(svc) > h * 60;
+  })));
+  const freedHours = freedBy(['cancelled', 'skipped']);
+  const doneHours = freedBy(['completed', 'no_show']);
+
   const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
   const selHeight = sel
     ? (Math.max(sel.startIdx, sel.endIdx) - Math.min(sel.startIdx, sel.endIdx) + 1) * SLOT_HEIGHT
@@ -695,6 +708,27 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             style={{ top: selTop, height: selHeight }}
           />
         )}
+        {/* Open hours: the mouse passes through (pointer-events-none) to the
+            slot rows underneath, which already open New appointment on click
+            or drag; the button itself is the keyboard / screen-reader way in.
+            Over a skipped or cancelled block (which frees its hour) the
+            button takes the click itself, so it never opens that visit. */}
+        {openHours.filter((h) => !doneHours.has(h)).map((h) => (
+          <button
+            key={`open-${h}`}
+            type="button"
+            onClick={() => onCreateSlot?.({ techId: tech.id, windowStart: hourToHHMM(h), windowEnd: hourToHHMM(h + 1) })}
+            aria-label={`Book open hour ${formatOpenHour(h)} for ${tech.name}`}
+            className={cn(
+              'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
+              freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
+            )}
+            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
+          >
+            <span className="u-nums">Open · {formatOpenHour(h)}</span>
+            <span className="font-medium">+ Book</span>
+          </button>
+        ))}
         {showNowLine && <NowLine />}
         {(() => {
           const lanes = computeLanes(services);
@@ -1154,8 +1188,14 @@ export default function TimeGridDay({
   // grouping is off (the group route 404s); Separate stays available on
   // visits that already exist.
   canGroup = false,
+  // Open-hour blocks are a booking prompt: only for staff who can create
+  // appointments (POST /admin/schedule is admin-only).
+  showOpenHours = true,
+  // The server's enforced booking hours (day feed `bookingHours`), if any.
+  bookingHours = null,
 }) {
   const todayIso = toISODate(new Date());
+  const hourClock = useHourClock();
   const handleCreateSlot = useCallback((slot) => {
     onCreateSlot?.({ date, ...slot });
   }, [onCreateSlot, date]);
@@ -1193,7 +1233,7 @@ export default function TimeGridDay({
     const seen = new Set();
     const list = [];
     (technicians || []).forEach((t) => {
-      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name }); }
+      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name, outToday: t.outToday === true, rostered: true }); }
     });
     allServices.forEach((s) => {
       if (s.technicianId && !seen.has(s.technicianId)) {
@@ -1653,6 +1693,15 @@ export default function TimeGridDay({
                     onToggleSelect={toggleSelection}
                     accent={techAccent(idx)}
                     showNowLine={date === todayIso}
+                    // An unassigned booking holds its hour in every column:
+                    // any tech may end up taking it.
+                    // A tech marked out for the day gets none (the booking
+                    // would be refused).
+                    // Only rostered (assignable) techs: a column kept for a
+                    // deactivated tech's leftover visits takes no booking.
+                    openHours={onCreateSlot && showOpenHours && !tech.outToday && tech.rostered
+                      ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock, bookingHours })
+                      : []}
                     routeStale={Boolean(optimistic)}
                   />
                 ))}
