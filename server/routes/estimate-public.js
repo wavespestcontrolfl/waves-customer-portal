@@ -15721,7 +15721,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // this accept is about to issue (none is issued yet here, so this is
         // "what would be issued now": gate + active wording).
         annualChargeAfterInstallation: invoiceKind === 'annual_prepay_deferred'
-          && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id }),
+          && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id }),
         // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
@@ -15830,7 +15830,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // installation, not at signing. Present only when true (gate-off
       // payload byte-identical).
       ...(invoiceKind === 'annual_prepay_deferred'
-        && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id })
+        && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
         ? { annualChargeAfterInstallation: true } : {}),
     });
   } catch (err) {
@@ -21068,7 +21068,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     ...(invoiceKind === 'annual_prepay_deferred'
-      && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id })
+      && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
       ? { annualChargeAfterInstallation: true } : {}),
     alreadyAccepted: true,
   };

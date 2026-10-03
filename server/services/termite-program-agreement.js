@@ -122,8 +122,17 @@ function agreementAuthorizesAfterInstallCharge(contractText) {
 // holds. With none issued yet, the answer is what would be issued now: the
 // gate on AND the ACTIVE annual version carrying that wording. Any failure
 // reads false (the page then says nothing about charge timing).
-async function annualAgreementChargesAfterInstallation({ estimateId = null, conn = db } = {}) {
+async function annualAgreementChargesAfterInstallation({ estimateId = null, customerId = null, conn = db } = {}) {
   try {
+    // An account billed through a third-party payer never waits for the
+    // installation (termite-annual-signature-charge.js recordInstallationWait
+    // keeps its payer route at signature), whatever wording its agreement
+    // carries — so its page and office notice make no after-installation
+    // claim (GitHub Codex #5816 r6). An unreadable payer reads as "no claim".
+    if (customerId) {
+      const payer = await require('./payer').resolveForInvoice({ database: conn, customerId, throwOnError: true });
+      if (payer?.payerId) return false;
+    }
     if (estimateId) {
       const issued = await conn('customer_contracts')
         .where({ document_template_key: ANNUAL_TEMPLATE_KEY })

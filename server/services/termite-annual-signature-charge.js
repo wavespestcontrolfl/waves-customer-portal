@@ -346,6 +346,18 @@ async function preflightClaimedCharge({ conn, ctx, trigger }) {
     return { outcome: { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true } };
   }
 
+  // After installation the wait record names the agreement that deferred
+  // the charge. If staff cancelled it since, NOTHING is authorized — not the
+  // charge, and not the pay-link fallbacks just below (charging off, no
+  // saved method). Checked before any of them; the office owns it (pre-push
+  // audit P1 on #5816).
+  if (trigger === INSTALLATION_TRIGGER && ctx.contractId) {
+    const agreement = await conn('customer_contracts').where({ id: ctx.contractId }).first('status');
+    if (agreement && String(agreement.status || '') !== 'signed') {
+      return { outcome: { status: 'deferred', reason: 'agreement_no_longer_signed', detail: 'the signed agreement was cancelled; nothing was charged and no pay link was sent' } };
+    }
+  }
+
   if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { outcome: { status: 'skipped', reason: 'gate_off' } };
 
   const method = await RecurringCards.resolvePrepayChargeMethod({
@@ -455,7 +467,15 @@ async function submitClaimedCharge({ conn, ctx, trigger, installation, invoice, 
     // The locked installation guards above refused (pre-Stripe, nothing
     // charged): the plan goes back to waiting — never a decline, never a pay
     // link beside a visit that is no longer this plan's installation.
+    // The office is told (one deduped alert): a refusal that never clears —
+    // an invoice linked to the visit after its closeout, a payment recorded
+    // another way — would otherwise wait silently, because the plan keeps
+    // its completed stamp and so never reaches the never-released alert.
     if (installation && err?.code === 'VISIT_NOT_COMPLETED') {
+      await ringBell('charge_deferred', {
+        ...ctx,
+        reason: `the installation visit no longer qualifies for the automatic charge (${err.message}) The plan is still waiting; collect this invoice by hand, or correct the visit and the daily sweep will charge it`,
+      });
       return { release: true, reason: 'installation_no_longer_eligible' };
     }
     // The agreement stopped being signed before money moved (pre-Stripe):

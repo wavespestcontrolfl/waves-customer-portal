@@ -485,7 +485,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     });
 
     test('the charge transaction refuses a visit that stopped being the installation (reopened, payer, paid another way): back to waiting, no pay link', async () => {
-      const { atSigning, sweep, sendViaSMSAndEmail, db } = load({
+      const { atSigning, sweep, sendViaSMSAndEmail, notifyAdmin, db } = load({
         chargeImpl: async () => { throw Object.assign(new Error('The visit is no longer held by this annual prepay. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }); },
       });
       await atSigning();
@@ -495,6 +495,24 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 0, installPayLinked: 0, installChargeHeld: 1 });
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(await chargeState(db)).toEqual(waiting);
+      // Never silent: the office is told the plan is waiting on a visit that no longer qualifies.
+      expect(bellTitles(notifyAdmin)).toContain('Termite annual plan — after-installation charge not attempted');
+    });
+
+    test.each([
+      ['no saved method', { method: null }],
+      ['a saved method', {}],
+    ])('the agreement was cancelled before the sweep (%s): no charge and NO pay link — the office owns it', async (_label, opts) => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, sendViaSMSAndEmail, notifyAdmin, db } = load(opts);
+      await atSigning();
+      await addInstall(db);
+      await db('customer_contracts').where({ id: ids.contractId }).update({ status: 'cancelled' });
+
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 0, installPayLinked: 0, installChargeHeld: 1 });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(await chargeState(db)).toMatchObject({ status: 'deferred', reason: 'agreement_no_longer_signed' });
+      expect(bellTitles(notifyAdmin)).toContain('Termite annual plan — after-installation charge not attempted');
     });
 
     test('the agreement was cancelled before money moved: nothing charged, no pay link, the office owns it', async () => {

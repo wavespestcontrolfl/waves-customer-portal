@@ -174,8 +174,21 @@ describeOrSkip('20261003130000_termite_annual_v3_charge_after_installation_claus
       if (termite) process.env.GATE_PAF_TERMITE = 'true';
       jest.doMock('../models/db', () => db);
       jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/payer', () => ({
+        resolveForInvoice: jest.fn(async ({ customerId }) => (customerId === 'payer-billed' ? { payerId: 'payer-1' } : null)),
+      }));
       return require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation;
     }
+
+    test('an account billed through a third-party payer never gets the after-installation claim', async () => {
+      const { db } = fixture;
+      await seedThroughR3(db);
+      await revision.up(db);
+      await publish(db);
+      const read = reader(db, { master: true, termite: true });
+      expect(await read({ conn: db, customerId: 'self-pay' })).toBe(true);
+      expect(await read({ conn: db, customerId: 'payer-billed' })).toBe(false);
+    });
 
     test('true only with the gate on AND the after-installation wording active', async () => {
       const { db } = fixture;

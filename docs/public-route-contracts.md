@@ -1818,8 +1818,9 @@ that customer's document still says so. Only when no agreement is issued yet doe
 the field is then present when the gate is on AND the ACTIVE annual agreement version carries the
 after-installation wording. The React success card then adds: "Nothing is charged when you sign.
 Billing for your plan starts after your station installation is completed." The wording names no
-payment method and no payer: the same agreement also goes to payer-billed accounts and to
-customers with no saved method. The office accept notification names the after-installation
+payment method: the same agreement also goes to customers with no saved method. An account billed
+through a third-party payer never carries the field (its billing keeps the payer route at
+signature). The office accept notification names the after-installation
 timing. After the signature, while the plan's charge record on the estimate
 (`annual_plan_signature_charge`) reads `awaiting_installation` (or its after-installation charge
 is in flight), the already-accepted retry carries NO `invoicePayUrl`, `invoiceMode: false`,
