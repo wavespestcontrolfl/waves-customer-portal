@@ -77,7 +77,7 @@ async function put(customerId, body) {
     const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
     jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
     const same = await put(customerId, { firstName: 'Fixture', payerId: retained });
-    expect([200, 500]).toContain(same.status);
+    expect(same.status).toBe(200);
     expect(cancel).not.toHaveBeenCalled();
     expect(await db('invoices').where({ id: invoiceId }).first()).toMatchObject({ stripe_payment_intent_id: piId, scheduled_send_error: null });
   });
@@ -91,14 +91,14 @@ async function put(customerId, body) {
 
     // The full form resubmits the same (inactive) payer: nothing moves.
     const same = await put(customerId, { firstName: 'Fixture', payerId: retained });
-    expect([200, 500]).toContain(same.status);
+    expect(same.status).toBe(200);
     expect(cancel).not.toHaveBeenCalled();
     expect(await db('invoices').where({ id: invoiceId }).first()).toMatchObject({ stripe_payment_intent_id: piId, scheduled_send_error: null });
 
     // An active payer assigned: the invoice moves to AP, its checkout is cancelled.
     const active = await payer(true);
     const moved = await put(customerId, { firstName: 'Fixture', payerId: active });
-    expect([200, 500]).toContain(moved.status);
+    expect(moved.status).toBe(200);
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: active });
     expect(cancel).toHaveBeenCalledWith(piId);
     expect(await db('invoices').where({ id: invoiceId }).first()).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: `payer_billed:${active}` });
