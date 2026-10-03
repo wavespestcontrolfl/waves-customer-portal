@@ -245,6 +245,77 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
       .toBe('completed');
   });
 
+  test('a successful result survives an unavailable receipt checkpoint', async () => {
+    const requestId = randomUUID();
+    let processCalls = 0;
+    const normal = {
+      reply: 'This exact successful answer must still be returned.',
+      conversationId: null,
+      escalated: false,
+      generated: true,
+    };
+    await mockApp.raw(`
+      CREATE FUNCTION reject_portal_reply_checkpoint() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.response IS NOT NULL AND OLD.response IS NULL THEN
+          RAISE EXCEPTION 'synthetic checkpoint failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await mockApp.raw(`
+      CREATE TRIGGER reject_portal_reply_checkpoint_trigger
+      BEFORE UPDATE ON portal_chat_requests
+      FOR EACH ROW EXECUTE FUNCTION reject_portal_reply_checkpoint()
+    `);
+
+    try {
+      const response = await runPortalTurn(args(requestId, async () => {
+        processCalls += 1;
+        return normal;
+      }));
+      expect(response).toEqual({ ...normal, requestId });
+      expect(response).not.toHaveProperty('retryable');
+      expect(processCalls).toBe(1);
+
+      const receipt = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
+      expect(receipt.state).toBe('processing');
+      expect(receipt.response).toBeNull();
+    } finally {
+      await mockApp.raw('DROP TRIGGER IF EXISTS reject_portal_reply_checkpoint_trigger ON portal_chat_requests');
+      await mockApp.raw('DROP FUNCTION IF EXISTS reject_portal_reply_checkpoint()');
+    }
+  });
+
+  test('queue polling that reaches its work deadline returns pending and retryable', async () => {
+    const blockerId = randomUUID();
+    const requestId = randomUUID();
+    const scopeKey = turnScopeKey({ customerId, channelIdentifier: 'browser-session', propertyId: null });
+    await mockApp('portal_chat_requests').insert({
+      request_id: blockerId,
+      customer_id: customerId,
+      channel_identifier: 'browser-session',
+      scope_key: scopeKey,
+      message_hash: createHash('sha256').update('blocking turn').digest('hex'),
+      state: 'processing',
+      attempt_id: randomUUID(),
+      lease_expires_at: new Date(Date.now() + 10_000),
+    });
+
+    let processCalls = 0;
+    const response = await runPortalTurn(args(requestId, async () => {
+      processCalls += 1;
+      return { reply: 'must not run', escalated: false };
+    }, { budgetMs: 2_000 }));
+
+    expect(response).toMatchObject({ pending: true, retryable: true, requestId });
+    expect(response.reply).toMatch(/still finishing/);
+    expect(processCalls).toBe(0);
+    expect(await mockApp('portal_chat_requests').where({ request_id: requestId }).first())
+      .toMatchObject({ state: 'pending', response: null });
+  });
+
   test('a claim that finishes after the work deadline remains retryable and never runs the turn', async () => {
     const requestId = randomUUID();
     let processCalls = 0;
