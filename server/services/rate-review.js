@@ -1660,9 +1660,11 @@ async function loadEstimates(dbh, estimateIds) {
 // signal each round when these were judged piecemeal):
 //   • an accepted estimate on the account, by status OR timestamp (a legacy
 //     row can be status accepted with accepted_at NULL), linked or not;
-//   • a completed scheduled_services row of ANY kind — any family, an
-//     inspection, a specialty visit (the per-line dating map filters these;
-//     the account gate must not) — or a completed service_records row
+//   • ANY scheduled_services row that is not a live upcoming one — completed,
+//     cancelled (a program swept before its first completion keeps its
+//     rows as status cancelled: cancellation-processor.js), skipped, or
+//     simply in the past — of any family or kind (the per-line dating map
+//     filters these; the account gate must not) — or a completed service_records row
 //     (imported / legacy history often lives ONLY there:
 //     estimate-conversion-guard.js);
 //   • a live upcoming row carrying a recurring add-on program
@@ -1678,7 +1680,7 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
   const { rows } = await dbh.raw(`
     SELECT c.id AS customer_id,
       (EXISTS (SELECT 1 FROM estimates e WHERE e.customer_id = c.id AND (e.accepted_at IS NOT NULL OR e.status = 'accepted'))
-       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
+       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?))
        OR EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed')
        OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
                   LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
@@ -1686,7 +1688,7 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
                     AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys}))
       ) AS account_activity
     FROM customers c WHERE c.id = ANY(?::uuid[])
-  `, [today, customerIds]);
+  `, [today, today, customerIds]);
   const ids = new Set(customerIds.map(String));
   return new Set(rows.filter((r) => r.account_activity === true).map((r) => String(r.customer_id)).filter((id) => ids.has(id)));
 }

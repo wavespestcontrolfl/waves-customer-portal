@@ -857,7 +857,10 @@ describe('anniversary and tenure', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const body = src.slice(src.indexOf('async function loadAccountActivity'), src.indexOf('async function loadLiveTerms'));
     expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
-    expect(body).toMatch(/s\.status = 'completed'\)/); // no family / kind filter on the account gate
+    // any row that is NOT a live upcoming one — completed, cancelled, skipped, past — of any family or kind
+    expect(body).toMatch(/FROM scheduled_services s WHERE s\.customer_id = c\.id AND NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\)/);
+    expect(body).not.toMatch(/s\.status = 'completed'\)/);
+    expect(body).toMatch(/\[today, today, customerIds\]/); // two date bindings, in order
     expect(body).toMatch(/FROM service_records sr WHERE sr\.customer_id = c\.id AND sr\.status = 'completed'/); // imported history often lives only there
     expect(body).not.toMatch(/LINE_SQL/);
     expect(body).toMatch(/scheduled_service_addons/);
