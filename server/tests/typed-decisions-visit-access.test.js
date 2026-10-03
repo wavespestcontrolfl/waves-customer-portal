@@ -59,6 +59,9 @@ describe('visit access shadow: rules that need no database', () => {
     ['a letters-and-digits code', 'Use AB12 at the box', 'AB12'],
     ['a code spelled out', 'Use four five four five at the keypad', 'four five'],
     ['a code stated after its access point', 'Garage is sesame', 'sesame'],
+    ['a code after a separator with no space', 'Garage:sesame', 'sesame'],
+    ['a code after an equals sign', 'Gate=BLUE', 'BLUE'],
+    ['a capitalised code with no access word', 'Use BLUE at the box', 'BLUE'],
   ])('%s never reaches the state', (_name, text, secret) => {
     const out = access.redactForState(text);
     expect(out).not.toContain(secret);
@@ -69,9 +72,14 @@ describe('visit access shadow: rules that need no database', () => {
     expect(access.redactForState('Side gate code 5512, latch sticks. Our dog is friendly.')).toBe('[access detail withheld: mentions code, gate] Our dog is friendly.');
   });
 
-  test('what a technician needs to read survives: a time, a count, a date, a past access problem', () => {
-    const kept = 'Come after 2 pm, we have 2 dogs, back on 10/15. Gate was locked, could not reach the back yard.';
+  test('what a technician needs to read survives: a time, a count, a date', () => {
+    const kept = 'Come after 2 pm, we have 2 dogs, back on 10/15.';
     expect(access.redactForState(kept)).toBe(kept);
+  });
+
+  test('a past access problem is kept as a fixed phrase, never the writer\'s words', () => {
+    expect(access.redactForState('Gate was locked, could not reach the back yard.')).toBe('[access detail withheld: mentions gate; reports a problem getting in]');
+    expect(access.redactForState('WE HAVE ANTS ALL OVER THE KITCHEN')).toBe('WE HAVE ANTS ALL OVER THE KITCHEN');
   });
 
   test('texts stop at the visit\'s own start: its window, else 8 AM Eastern on its date', () => {
@@ -183,7 +191,7 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state).toMatchObject({
       service_line: 'pest', visit_count: 2,
       structured: { pet_count: 2, has_codes: true, contact_preference: 'text', away_mode: true, side_gate: true, chemical_sensitivity: true },
-      last_tech_notes: 'Gate was locked, could not reach the back yard.',
+      last_tech_notes: '[access detail withheld: mentions gate; reports a problem getting in]',
     });
     expect(built.state.recent_texts).toContain('the baby naps at noon');
     expect(built.state.recent_texts).not.toMatch(/Liked|Before the last pest visit|After the visit started|Evening before/);

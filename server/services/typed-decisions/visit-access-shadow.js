@@ -16,8 +16,10 @@
  *
  * No code leaves: the state says only WHETHER codes are on file
  * (`structured.has_codes`), and every free-text field passes redactForState:
- * a sentence about getting in is replaced by a marker naming the access
- * nouns it mentioned, and any other token holding a digit is masked.
+ * a sentence naming any access point or credential is replaced by a marker
+ * built from closed vocabularies (which access points; whether a problem is
+ * reported), and in any other sentence digit-bearing and code-shaped tokens
+ * are masked.
  *
  * property_preferences is the primary home's row, so a visit stamped at
  * another address (stamped-address.js) is left out: its pets, codes and
@@ -50,17 +52,19 @@ const DEFAULT_START = '08:00';
 
 const compact = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
-// Two passes, sentence by sentence, after redactAccessCodes:
-//  1. A sentence about getting in (completion-comms-context isAccessSentence:
-//     a code, a keypad, working a gate or door) never leaves as written. A
-//     credential can be any word ("use BLUE at the keypad", "four five four
-//     five"), so no token mask is safe there; the sentence becomes a marker
-//     naming only the access nouns it mentioned, which is what the questions
-//     need.
+// Sentence by sentence, after redactAccessCodes:
+//  1. A sentence that names ANY access point or credential noun (ACCESS_NOUNS),
+//     or that completion-comms-context's isAccessSentence reads as being about
+//     getting in, never leaves as written. A credential can be any word in any
+//     notation ("use BLUE at the keypad", "Garage:sesame", "four five four
+//     five"), so no token rule is safe there (pre-push P0, 2026-10-03). The
+//     sentence becomes a marker built from two closed vocabularies only: the
+//     access nouns it mentioned and whether it reports a problem. None of the
+//     writer's own words survive.
 //  2. In every other sentence, a token holding a digit is masked unless it is
 //     a one- or two-digit number, an ordinal, a clock time or a day/month
-//     date. That also masks house numbers, phone numbers and years: none of
-//     them answers these questions.
+//     date (house numbers, phone numbers and years go too), and so is a
+//     capitalised code-shaped token ("BLUE") unless the sentence is shouted.
 const ACCESS_NOUNS = [
   ['code', /\b(?:codes?|pins?|pass(?:code|word|phrase)s?|combos?|combinations?)\b/i],
   ['key', /\bkeys?\b/i],
@@ -73,18 +77,26 @@ const ACCESS_NOUNS = [
   ['alarm', /\balarms?\b/i],
   ['remote', /\b(?:fobs?|remotes?|openers?)\b/i],
 ];
+const ACCESS_PROBLEM_RE = /\b(?:locked|stuck|jammed|blocked|broken|closed|no\s+access|not?\s+(?:get|reach|access|open|enter)|(?:could|can|did|would|was|were)(?:\s+not|n['’]?t)\s+(?:get|reach|access|open|enter|able)|unable|nobody\s+(?:was\s+)?home|no\s+one\s+(?:was\s+)?home)\b/i;
 const PLAIN_NUMBER_RE = /^(?:\d{1,2}|\d+(?:st|nd|rd|th)|\d{1,2}(?::\d{2})?(?:am|pm)?|\d{1,2}\/\d{1,2})$/i;
-// "Garage is blue", "lockbox: sesame": an access point followed at once by
-// is / = / : / - states its credential, whatever the word.
-const ACCESS_POINT_STATED_RE = /\b(?:codes?|pins?|pass(?:code|word|phrase)s?|combos?|combinations?|keypads?|lock\s*box(?:es)?|gates?|garages?|doors?|locks?|alarms?)\s*(?:is|are|=|:|-)(?:\s|$)/i;
+const CAPS_CODE_RE = /^[A-Z][A-Z#*-]{2,}$/;
+function shouted(sentence) {
+  const words = sentence.match(/[A-Za-z]{2,}/g) || [];
+  return words.length >= 3 && words.filter((word) => word === word.toUpperCase()).length / words.length >= 0.6;
+}
 function redactSentence(sentence, isAccessSentence) {
-  if (isAccessSentence(sentence) || ACCESS_POINT_STATED_RE.test(sentence)) {
-    const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(sentence)).map(([name]) => name);
-    return nouns.length ? `[access detail withheld: mentions ${nouns.join(', ')}]` : '[access detail withheld]';
+  const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(sentence)).map(([name]) => name);
+  if (nouns.length || isAccessSentence(sentence)) {
+    const parts = [];
+    if (nouns.length) parts.push(`mentions ${nouns.join(', ')}`);
+    if (ACCESS_PROBLEM_RE.test(sentence)) parts.push('reports a problem getting in');
+    return parts.length ? `[access detail withheld: ${parts.join('; ')}]` : '[access detail withheld]';
   }
+  const loud = shouted(sentence);
   return sentence.replace(/\S+/g, (word) => {
     const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
-    return /\d/.test(token) && !PLAIN_NUMBER_RE.test(token) ? `${lead}[redacted]${trail}` : word;
+    const masked = /\d/.test(token) ? !PLAIN_NUMBER_RE.test(token) : (!loud && CAPS_CODE_RE.test(token));
+    return masked ? `${lead}[redacted]${trail}` : word;
   });
 }
 function redactForState(text) {
