@@ -493,9 +493,17 @@ function perThousandRate(product, { forTech, hasDefaultRate }) {
     min: product.min_label_rate_per_1000,
     max: product.max_label_rate_per_1000,
   };
-  const usable = Boolean(product.label_verified_at)
-    && Object.values(fields).some(isPresent)
-    && !(forTech && isMlUnit(product.rate_unit));
+  // The label's own words travel with the range: min-max is the whole
+  // envelope, and the top of it can be legal only for listed pests or sites
+  // (Bifen XTS).
+  const notes = [product.rate_notes, product.label_source_note]
+    .filter(isPresent)
+    .map((note) => (typeof note === 'string' ? note : JSON.stringify(note)));
+  // A tech never reads an mL figure. A range whose unit is mL, or whose
+  // notes carry one, is withheld whole rather than shown without the
+  // conditions those notes hold: the tech is sent to the label.
+  const mlForTech = forTech && (isMlUnit(product.rate_unit) || notes.some((note) => ML_TEXT.test(note)));
+  const usable = Boolean(product.label_verified_at) && Object.values(fields).some(isPresent) && !mlForTech;
   const out = {};
   if (usable) {
     const rate = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
@@ -505,14 +513,6 @@ function perThousandRate(product, { forTech, hasDefaultRate }) {
     // The yearly cap travels with the per-application range: two
     // applications at `max` can exceed it (Celsius WG 0.113 vs 0.17).
     if (isPresent(product.max_annual_per_1000)) rate.max_per_year = product.max_annual_per_1000;
-    // min-max is the label's whole envelope; the top of it can be legal only
-    // for listed pests or sites (Bifen XTS). The label's own words say which,
-    // so they travel with the range. A tech never reads an mL figure, so a
-    // note carrying one is left out for them.
-    const notes = [product.rate_notes, product.label_source_note]
-      .filter(isPresent)
-      .map((note) => (typeof note === 'string' ? note : JSON.stringify(note)))
-      .filter((note) => !(forTech && ML_TEXT.test(note)));
     if (notes.length) rate.label_notes = notes;
     rate.conditions = 'min and max are the whole label range. A rate above default may apply only to the pests or sites named in label_notes: state that condition with the rate, or send the tech to the label.';
     out.label_rate_per_1000 = rate;

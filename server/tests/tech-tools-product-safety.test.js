@@ -295,13 +295,20 @@ describe('get_product_info product match', () => {
     expect(rate.conditions).toMatch(/only to the pests or sites named in label_notes/);
   });
 
-  test('for a technician, a label note carrying an mL figure is left out', async () => {
-    mockRows = [{
+  test('for a technician, a range whose label note carries an mL figure is withheld whole, never shown without its conditions', async () => {
+    const row = {
       name: 'Sample Turf', active: true, label_verified_at: VERIFIED, rate_unit: 'fl_oz',
-      default_rate_per_1000: '1', label_source_note: 'Mix 30 mL per gallon for spot use.',
-    }];
+      min_label_rate_per_1000: '0.46', max_label_rate_per_1000: '0.6',
+      label_source_note: 'Grubs: 0.46-0.6 fl oz (13.6-17.7 mL) per 1,000 sq ft; higher rate for listed pests only.',
+    };
+    mockRows = [row];
     const result = await ask('Sample Turf');
-    expect(result.label_rate_per_1000.label_notes).toBeUndefined();
+    expect(result.label_rate_per_1000).toBeUndefined();
+    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
     expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
+    // An admin workflow keeps the range with the whole note.
+    mockRows = [row];
+    const admin = await executeTechTool('get_product_info', { product_name: 'Sample Turf' }, {});
+    expect(admin.label_rate_per_1000.label_notes).toEqual([row.label_source_note]);
   });
 });
