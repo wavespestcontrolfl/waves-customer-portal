@@ -872,7 +872,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'Property' }));
     await screen.findByTestId('customer-properties-panel');
-    const propertyFetches = () => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/properties')).length;
+    const propertyFetches = () => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/admin/customers/customer-a/properties')).length;
     await waitFor(() => expect(propertyFetches()).toBe(1));
 
     // Edit → Save with nothing changed (address tuple identical).
