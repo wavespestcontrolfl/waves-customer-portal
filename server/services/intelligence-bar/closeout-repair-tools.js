@@ -70,7 +70,7 @@ const CLOSEOUT_REPAIR_TOOLS = [
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
 Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), bill a completed self-pay visit that was never invoiced (the Billing Recovery "Bill" checks; the card shows the exact invoice total) and send that invoice to the customer by email/text exactly as the Invoices "Send" button does — nothing is charged — queue a paid receipt that was never queued (the receipt worker emails it — to the payer's billing inbox for a payer-billed invoice — and may text it per the customer's receipt settings), and book a follow-up visit the completion called for but nobody booked (a PENDING $0 visit on the program-interval date, exactly as the Dispatch follow-up button books it — no text now; the usual reminders go out before the visit).
-Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, re-sends of invoices or receipts that already went out, follow-ups whose date has passed, completion texts, and exhausted/failed deliveries.
+Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, re-sends of invoices or receipts that already went out (resend_receipt re-sends a paid receipt), follow-ups whose date has passed, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -175,13 +175,21 @@ function maskPhone(phone) {
 // A phone-less customer is still reachable when they chose App for payment
 // receipts (sendReceipt's own explicitBillingAppSelected admission).
 // A paid, unsent invoice with no receipt job — else why not.
-async function receiptInvoiceOrBlocker(invoiceId, knex) {
+// resend (the resend_receipt tool, the Invoices "Resend receipt" button's own
+// rules): an already-sent receipt and a finished or queued job are fine — only
+// a job being delivered right now blocks.
+async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false } = {}) {
   const invoice = await knex('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { blocker: 'invoice not found' };
   if (String(invoice.status || '').toLowerCase() !== 'paid') return { blocker: `invoice is ${invoice.status}, not paid` };
-  if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
-  const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');
-  if (job) return { blocker: 'a receipt job already exists' };
+  if (resend) {
+    const running = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'running' }).first('id');
+    if (running) return { blocker: 'the automatic receipt for this invoice is being delivered right now — try again in a minute' };
+  } else {
+    if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
+    const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');
+    if (job) return { blocker: 'a receipt job already exists' };
+  }
   const optOut = await receiptEmailOptOutState(invoice);
   if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
   if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
@@ -193,8 +201,10 @@ async function receiptInvoiceOrBlocker(invoiceId, knex) {
 // channel) mean "no email, on purpose". Any other refusal — a settings
 // lookup outage, an aborted resolution — is unknown, not "nobody": the
 // worker could still email someone the card didn't name.
-async function receiptEmailLeg(invoice) {
-  const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: 'payment_receipt' });
+// resend: the manual send's own resolver call (sendReceiptEmail passes no
+// billing category), so the card names the inbox that send reaches.
+async function receiptEmailLeg(invoice, { resend = false } = {}) {
+  const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, resend ? {} : { billingDeliveryCategory: 'payment_receipt' });
   if (resolved.ok) return { email: String(resolved.recipient.email).trim().toLowerCase(), customer: resolved.customer };
   if (!expectedEmailSkip(resolved)) {
     return { blocker: `the receipt email recipient could not be verified (${String(resolved.error || resolved.code || 'unknown').replace(/\.$/, '')})` };
@@ -217,11 +227,11 @@ async function receiptMayReachApp(customerId, emailAvailable, knex) {
   return (billingChannelsPayload(prefs || {}, { emailAvailable }).paymentConfirmationChannels || []).includes('push');
 }
 
-async function receiptRecipients(invoiceId, knex) {
-  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex);
+async function receiptRecipients(invoiceId, knex, { resend = false } = {}) {
+  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex, { resend });
   if (eligible.blocker) return eligible;
   const { invoice } = eligible;
-  const emailLeg = await receiptEmailLeg(invoice);
+  const emailLeg = await receiptEmailLeg(invoice, { resend });
   if (emailLeg.blocker) return emailLeg;
   const payerBilled = Boolean(invoice.payer_id);
   const phone = payerBilled ? null
@@ -235,8 +245,10 @@ async function receiptRecipients(invoiceId, knex) {
   } catch {
     return { blocker: 'the receipt amount could not be verified (payment lookup failed)' };
   }
-  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
+  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount, invoice };
 }
+
+const receiptRecipientsKey = (who) => crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone, who.app === true])).digest('hex').slice(0, 16);
 
 // The card's plain-words description of where a queued receipt can go.
 function receiptReach(s) {
@@ -422,7 +434,7 @@ async function planReceiptStep(status, knex) {
       app: who.app === true,
       payer_billed: who.payerBilled,
       // Binds the FULL email + phone + App choice (masks can collide).
-      recipients_key: crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone, who.app === true])).digest('hex').slice(0, 16),
+      recipients_key: receiptRecipientsKey(who),
     },
   };
 }
@@ -846,4 +858,9 @@ module.exports = {
   planCloseoutRepair,
   executeCloseoutRepair,
   STEP_EFFECTS,
+  // Shared with the resend_receipt tool (receipt-resend-tools.js).
+  receiptRecipients,
+  receiptRecipientsKey,
+  maskEmail,
+  maskPhone,
 };

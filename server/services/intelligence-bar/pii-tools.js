@@ -24,6 +24,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'cancel_plan',
   // repair_closeout previews name the customer and masked recipients.
   'repair_closeout',
+  // resend_receipt previews name the customer and masked recipients.
+  'resend_receipt',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

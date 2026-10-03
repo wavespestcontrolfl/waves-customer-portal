@@ -47,6 +47,14 @@ describe('billing reader definitions', () => {
     expect(BILLING_READER_TOOLS[1].description).toMatch(/needs reconciliation — check the Invoices page/);
   });
 
+  test('both descriptions state the receipt fact from receipt_sent_at and point at resend_receipt, not the Invoices page', () => {
+    for (const tool of BILLING_READER_TOOLS) {
+      expect(tool.description).toMatch(/receipt_sent_at/);
+      expect(tool.description).toMatch(/never guess/);
+      expect(tool.description).toMatch(/use resend_receipt/);
+    }
+  });
+
   test('no underscore metadata, no model-facing confirmed field', () => {
     for (const tool of BILLING_READER_TOOLS) {
       expect(Object.keys(tool).filter((key) => key.startsWith('_'))).toEqual([]);

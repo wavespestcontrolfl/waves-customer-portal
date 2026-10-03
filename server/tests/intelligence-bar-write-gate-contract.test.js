@@ -150,6 +150,7 @@ const WRITE_TWO_STEP = [
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'resend_receipt',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -616,6 +617,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
       service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
     }],
+    // resend_receipt's preview reads the paid invoice and the receipt resolvers
+    // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
+    ['receipt-resend-tools', 'executeReceiptResendTool', 'resend_receipt', { invoice_id: '00000000-0000-0000-0000-00000000f001' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f001', invoice_number: 'WPC-2026-0900', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null, paid_at: new Date('2026-10-01T15:00:00Z') }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' }],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -803,6 +810,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    const receiptResolvers = toolName === 'resend_receipt'
+      ? [
+        jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
+          .mockResolvedValue({ ok: true, recipient: { email: 'pat@example.com' }, customer: { id: 'cust-1', phone: '9415550100' } }),
+        jest.spyOn(require('../services/invoice'), 'receiptAmountFor').mockResolvedValue('129.00'),
+      ] : [];
     // Outside-write previews call a real third-party API (fetch), never the
     // DB — install this row's token env vars + a fetch mock that answers its
     // calls in order, and restore both afterward so nothing leaks to the
@@ -823,6 +836,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
+      receiptResolvers.forEach((spy) => spy.mockRestore());
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
@@ -962,8 +976,9 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     expect(wrongly_smokable).toEqual([]);
 
     // Existing pure previews remain smokable. The optional address writer
-    // explicitly opts out of live smoke; its preview is exercised above.
+    // explicitly opts out of live smoke; its preview is exercised above. So does
+    // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt']);
   });
 });

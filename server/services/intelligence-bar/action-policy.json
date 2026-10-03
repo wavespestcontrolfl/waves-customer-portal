@@ -439,6 +439,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "resend_receipt": {
+    "module": "receipt-resend-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "get_cloudflare_edge_errors": {
     "module": "cloudflare-ops-tools.js",
     "domain": "cloudflare-ops",

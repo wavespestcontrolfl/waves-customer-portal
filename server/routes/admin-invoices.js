@@ -6,6 +6,7 @@ const multer = require('multer');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
+const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
 const logger = require('../services/logger');
@@ -2538,100 +2539,10 @@ router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
 // Body: { memo?: string (≤400 chars), via?: 'email'|'sms'|'both' (default 'both') }
 router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
   try {
-    const { id } = req.params;
     const { memo, via = 'both' } = req.body || {};
-    if (!['email', 'sms', 'both'].includes(via)) {
-      return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
-    }
-    const trimmedMemo = typeof memo === 'string' ? memo.trim().slice(0, 400) : '';
-
-    const invoice = await db('invoices').where({ id }).first();
-    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status !== 'paid') {
-      return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid invoices' });
-    }
-
-    const { sendReceiptEmail } = require('../services/invoice-email');
-    const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
-
-    // The invoice's queued receipt job (if any) is claimed before anything
-    // else runs, so it cannot deliver a second receipt around this send.
-    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !invoice.receipt_sent_at });
-    if (claim.inFlight) {
-      return res.status(409).json({
-        error: 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
-        code: 'receipt_delivery_in_flight',
-      });
-    }
-    if (claim.alreadySent) {
-      return res.status(409).json({
-        error: 'This receipt was already sent — refresh the page.',
-        code: 'receipt_already_sent',
-      });
-    }
-
-    let emailResult = { ok: false, skipped: true };
-    let smsResult = { ok: false, skipped: true };
-
-    try {
-      // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-      // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
-      // the reachable retry for a payment-triggered closeout that did not
-      // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
-      // email-only resend retries too; a completed visit refuses quietly.
-      {
-        const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-        await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: req.technicianId || null });
-      }
-
-      if (via === 'email' || via === 'both') {
-        emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
-        if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
-      }
-      if (via === 'sms' || via === 'both') {
-        // Manual operator resend — pass force:true to override the auto-send
-        // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
-        // for invoices already auto-receipted by the Stripe webhook).
-        // recordActivity:false because this route writes its own activity_log
-        // row below with the memo and channel mix.
-        try {
-          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
-          smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
-        } catch (err) {
-          smsResult = { ok: false, error: err.message };
-        }
-        if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
-      }
-
-      // Stamp receipt metadata whenever at least one channel succeeded. If
-      // both failed, leave receipt_sent_at NULL so the operator can retry.
-      if (emailResult.ok || smsResult.ok) {
-        await db('invoices').where({ id }).update({
-          receipt_sent_at: db.fn.now(),
-          receipt_memo: trimmedMemo || null,
-        });
-      }
-    } finally {
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult });
-    }
-
-    if (emailResult.ok || smsResult.ok) {
-      await db('activity_log').insert({
-        customer_id: invoice.customer_id,
-        action: 'invoice_receipt_sent',
-        description: `Receipt sent for invoice ${invoice.invoice_number}`
-          + ` (${[emailResult.ok && 'email', smsResult.ok && 'sms'].filter(Boolean).join(' + ')})`
-          + (trimmedMemo ? ` — memo: ${trimmedMemo.slice(0, 80)}${trimmedMemo.length > 80 ? '…' : ''}` : ''),
-      }).catch((err) => logger.warn(`[admin-invoices] activity_log insert failed: ${err.message}`));
-    }
-
-    const updated = await db('invoices').where({ id }).first();
-    res.json({
-      ok: emailResult.ok || smsResult.ok,
-      email: emailResult,
-      sms: smsResult,
-      invoice: updated,
-    });
+    // The one writer, shared with the Intelligence Bar resend_receipt tool.
+    const { status, body } = await sendInvoiceReceipt(req.params.id, { memo, via, actorTechnicianId: req.technicianId || null });
+    res.status(status).json(body);
   } catch (err) { next(err); }
 });
 

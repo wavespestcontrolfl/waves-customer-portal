@@ -341,7 +341,8 @@ const SCOPE_SNAPSHOT = {
     // cancel_queued_message carries customer_id directly (its message_id is
     // not a mapped selector — the executor's own read binds the message to
     // that customer and refuses a mismatch before ever reaching a card).
-    'repair_closeout', 'cancel_queued_message',
+    // resend_receipt's invoice_id (or invoice_number, bound by validateRecordTarget) is the invoice record.
+    'repair_closeout', 'resend_receipt', 'cancel_queued_message',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
