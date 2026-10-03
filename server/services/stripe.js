@@ -3839,6 +3839,16 @@ const StripeService = {
             stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
         }
+        // Customer BEFORE invoice when this setup is going to apply the customer's account credit (the
+        // apply locks the customer row FOR UPDATE, and every Bill-To writer and charge takes customer,
+        // then visit, then invoice): the credit-bearing customer is locked first, on the pre-transaction
+        // read of its owner, which the locked invoice's own owner is re-checked against by the apply.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit && invoice.customer_id) {
+          const earlyCredit = await trx('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+          if (earlyCredit?.auto_apply_account_credit === true && Number(earlyCredit.account_credits) > 0) {
+            await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+          }
+        }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()

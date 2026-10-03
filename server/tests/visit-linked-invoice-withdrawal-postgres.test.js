@@ -652,6 +652,30 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     }
   });
 
+  test('reversing applied credit locks the customer before the invoice (committed fixture, three connections)', async () => {
+    const { reverseAppliedCredit } = require('../services/customer-credit');
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Reverse', phone: '+12025550111', email: `${customerId}@example.invalid` });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft', total: 50, credit_applied: 10 });
+    const billToWriter = await database.transaction();
+    let reversal;
+    try {
+      await billToWriter('customers').where({ id: customerId }).forUpdate().first('id');
+      const reverseTrx = await database.transaction();
+      reversal = reverseAppliedCredit({ invoiceId, amount: 10, createdBy: 'test' }, reverseTrx).finally(() => reverseTrx.commit().catch(() => {}));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const probe = await database.transaction();
+      try { expect(await probe('invoices').where({ id: invoiceId }).forUpdate().noWait().first('id')).toBeTruthy(); } finally { await probe.rollback(); }
+    } finally {
+      await billToWriter.rollback();
+      if (reversal) await reversal;
+      await database('customer_credit_ledger').where({ customer_id: customerId }).del();
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('customers').where({ id: customerId }).del();
+    }
+  });
+
   test('the fence takes the PENDING payer row FOR SHARE before it reads its active flag, so a concurrent deactivation waits (committed fixture, second connection)', async () => {
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const customerId = randomUUID();

@@ -690,9 +690,16 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
   const want = round2(amount);
   if (!(want > 0)) return { reversed: 0 };
   const run = async (t) => {
+    // Customer before invoice (the order every Bill-To writer and charge takes): the credit movement
+    // below locks the customer row, so it is locked first, on an unlocked read of the invoice's owner,
+    // and that owner is re-checked once the invoice is held.
+    const ownerRead = await t('invoices').where({ id: invoiceId }).first('customer_id');
+    if (!ownerRead) return { reversed: 0 };
+    if (ownerRead.customer_id) await t('customers').where({ id: ownerRead.customer_id }).forUpdate().first('id');
     const inv = await t('invoices').where({ id: invoiceId }).forUpdate()
       .first('id', 'customer_id', 'invoice_number', 'credit_applied', 'status', 'stripe_payment_intent_id');
     if (!inv) return { reversed: 0 };
+    if (String(inv.customer_id) !== String(ownerRead.customer_id)) return { reversed: 0, skipped: 'customer_changed' };
     // Refuse to reverse once a payment is in flight / settled against the REDUCED
     // amount. The send paths apply credit before they finish, so a concurrent
     // /pay setup, charge-card, or webhook may have already charged
