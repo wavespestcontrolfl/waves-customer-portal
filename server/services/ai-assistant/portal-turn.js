@@ -474,11 +474,8 @@ async function recoverCommittedResult(context) {
   if (remembered) return remembered;
   try {
     const row = await context.query(
-      db('portal_chat_requests').where({
-        id: context.requestRowId,
-        state: 'processing',
-        attempt_id: context.attemptId,
-      }).whereNotNull('response').first('response'),
+      db('portal_chat_requests').where({ id: context.requestRowId })
+        .whereNotNull('response').first('response'),
       'committed response recovery',
       true,
     );
