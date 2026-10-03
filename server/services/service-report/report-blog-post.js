@@ -178,14 +178,14 @@ function formsOf(word) {
 }
 
 // The words a search matches on: each word of three characters or more
-// (punctuation dropped, filler words left out), each with the forms a post
-// may use for it, at most four. A word matches only as a whole word: "rat"
-// never finds "rates".
+// (any punctuation separates words, as it does in a title: "bed-bug" is bed
+// and bug, "ants/roaches" ants and roaches; GitHub Codex P2 on 6fda3eb2fb;
+// filler words left out), each with the forms a post may use for it, at most
+// four. A word matches only as a whole word: "rat" never finds "rates".
 function searchTerms(query) {
   const words = String(query || '')
     .toLowerCase()
-    .split(/\s+/)
-    .map((word) => word.replace(/[^a-z0-9'-]/g, '').replace(/^['-]+|['-]+$/g, ''))
+    .split(/[^a-z0-9]+/)
     .filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
   const terms = [];
   for (const word of words) {

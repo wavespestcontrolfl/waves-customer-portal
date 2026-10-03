@@ -199,6 +199,12 @@ describe('searchTerms', () => {
     expect(words('')).toEqual([]);
   });
 
+  test('any punctuation separates words: "bed-bug" is bed and bug, "ants/roaches" ants and roaches (GitHub Codex P2 on 6fda3eb2fb)', () => {
+    expect(words('bed-bug')).toEqual(['bed', 'bug']);
+    expect(words('ants/roaches')).toEqual(['ant', 'roach']);
+    expect(words("ant's trail, wasps.nest")).toEqual(['ant', 'trail', 'wasp', 'nest']);
+  });
+
   test('a singular that ends in s keeps its own plural (GitHub Codex P2 on #5652)', () => {
     expect(searchTerms('virus')[0].forms).toEqual(expect.arrayContaining(['virus', 'viruses']));
     expect(searchTerms('mantis')[0].forms).toEqual(expect.arrayContaining(['mantis', 'mantises']));
@@ -323,6 +329,11 @@ describe('searchReportBlogPosts', () => {
     const control = [11, 12].map((i) => registryRow(`dddddddd-0000-4000-8000-0000000000${i}`, `Weed Control Tips ${i}`, { published_at: '2026-09-01T00:00:00Z' }));
     const knex = recordingKnex({ content_registry: [...spokeTicks, ...control, tick] });
     expect((await searchReportBlogPosts(knex, 'tick control')).map((post) => post.id)).toEqual([tick.id, ...control.map((row) => row.id)]);
+  });
+
+  test('a "bed-bug" search finds a post about bed bugs (GitHub Codex P2 on 6fda3eb2fb)', async () => {
+    const post = registryRow('aaaaaaaa-0000-4000-8000-000000000051', 'Bed Bugs After Travel: What to Check');
+    expect((await searchReportBlogPosts(recordingKnex({ content_registry: [post] }), 'bed-bug')).map((found) => found.id)).toEqual([post.id]);
   });
 
   test('a "mouse" search finds a post about mice', async () => {
