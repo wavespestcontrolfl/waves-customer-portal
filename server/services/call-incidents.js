@@ -42,6 +42,9 @@ const FAILURE_MODES = Object.freeze(FIELDS.flatMap((f) => [`${f}_false_positive`
 const TRANSCRIPT_CHARS = 5000; // what the auditor was shown
 const MIN_EXCERPT_CHARS = 12;
 const LOOKBACK_DAYS = 14;
+// finding id + 12 hex of md5(what the finding says): production's value, the
+// auditor's value, the auditor's model and the snapshotted extraction version.
+const EVIDENCE_KEY_SQL = "(f.id)::text || ':' || left(md5(coalesce(f.old_value, '') || '|' || coalesce(f.new_value, '') || '|' || coalesce((f.detail::jsonb) ->> 'auditor_model', '') || '|' || coalesce((f.detail::jsonb) ->> 'extraction_prompt_version', '')), 12)";
 
 const envNum = (name, def) => {
   const v = Number(process.env[name]);
@@ -201,7 +204,7 @@ async function adjudicateOne({ dbi, row, reader }) {
   const base = {
     area: AREA,
     evidence_type: EVIDENCE_TYPE,
-    evidence_id: String(row.finding_id),
+    evidence_id: String(row.evidence_key),
     incident_key: String(row.call_id),
     surface: SURFACE,
     failure_mode: failureModeFor(row.field, prodValue),
@@ -250,10 +253,15 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
   if (!callIncidentsLive()) return { skipped: 'gate_off' };
   if (!(batchLimit > 0)) return { skipped: 'batch_zero' };
   const since = new Date(now.getTime() - LOOKBACK_DAYS * 86400 * 1000);
+  // The self-audit updates a finding in place when it re-audits a call, so
+  // the evidence key is the finding id plus a fingerprint of what it says:
+  // a changed finding is new evidence (adjudicated again, and the one
+  // confirmed row per call and cell still holds), an unchanged one is done.
+  const evidenceKey = dbi.raw(EVIDENCE_KEY_SQL);
   const rows = await dbi({ f: 'call_audit_findings' })
     .join({ c: 'call_log' }, 'c.id', 'f.call_log_id')
     .leftJoin({ i: 'ai_incidents' }, function done() {
-      this.on('i.evidence_id', dbi.raw('(f.id)::text')).andOnVal('i.evidence_type', EVIDENCE_TYPE).andOnVal('i.area', AREA);
+      this.on('i.evidence_id', evidenceKey).andOnVal('i.evidence_type', EVIDENCE_TYPE).andOnVal('i.area', AREA);
     })
     .whereNull('i.id')
     .where('f.audit_source', 'self_audit')
@@ -264,6 +272,7 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .limit(batchLimit)
     .select(
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',
+      dbi.raw(`${EVIDENCE_KEY_SQL} as evidence_key`),
       'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at'
     );
 
