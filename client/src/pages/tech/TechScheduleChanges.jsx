@@ -8,7 +8,10 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 // The server marks `soon` (routes/tech-notifications.js /schedule-changes).
 
 const API = import.meta.env.VITE_API_URL || '';
-const POLL_MS = 60_000;
+// Same cadence as the notification feed (GeofenceArrivalPrompt): with the
+// floating cards off on Today, this read is how a new change shows up
+// (Codex #5786 P2).
+const POLL_MS = 10_000;
 const VERB = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' };
 const AUTO_DISPATCH = 'by auto-dispatch';
 
@@ -89,7 +92,9 @@ function SoonCard({ change, onDismiss, busy }) {
 // returns); the breakdown reads the rows on hand.
 function summaryOf(changes, total = changes.length) {
   const n = Math.max(total, changes.length);
-  const allAuto = changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
+  // Named after auto-dispatch only when the rows on hand show it (none on
+  // hand: the plain count).
+  const allAuto = changes.length > 0 && changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
   const title = allAuto ? `Auto-dispatch moved ${plural(n, 'visit')}` : plural(n, 'schedule change');
   const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
   const days = changes.map((c) => c.payload?.date).filter(Boolean).sort();
@@ -100,7 +105,7 @@ function summaryOf(changes, total = changes.length) {
   if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
   const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
   if (moved) parts.push(moved);
-  const allMoves = changes.every((c) => c.type === 'visit_rescheduled');
+  const allMoves = changes.length > 0 && changes.every((c) => c.type === 'visit_rescheduled');
   return { title, detail: parts.join(' · '), counts, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
 }
 
@@ -222,12 +227,12 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     }
   };
 
-  if (!changes.length) return null;
+  if (!changes.length && !feed.laterTotal) return null;
   return (
     <div className="tf-changes">
       {error && <div role="alert" className="tf-alert tf-error">{error}</div>}
       {soon.map((c) => <SoonCard key={c.id} change={c} onDismiss={dismissOne} busy={busy} />)}
-      {later.length > 0 && (reviewing
+      {(later.length > 0 || feed.laterTotal > 0) && (reviewing
         ? <ReviewList changes={later} summary={summary} onClearAll={clearAll} onBack={() => setReviewing(false)} busy={busy} canOpenDispatch={canOpenDispatch} />
         : (
           <section className="tf-card" aria-label="Schedule changes" data-testid="schedule-changes-summary">

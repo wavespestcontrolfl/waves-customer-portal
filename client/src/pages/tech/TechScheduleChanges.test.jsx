@@ -173,6 +173,27 @@ describe('TechScheduleChanges', () => {
     expect(onReady).toHaveBeenCalledWith(true);
   });
 
+  it('still shows the summary when the folded changes are counted but none came back in the rows', async () => {
+    stubApi([SOON], 5);
+    await renderChanges();
+    expect(await screen.findByTestId('schedule-changes-summary')).toHaveTextContent('5 schedule changes');
+    expect(screen.getByTestId('schedule-change-soon')).toBeInTheDocument();
+  });
+
+  it('polls on the notification feed\'s 10-second cadence', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const calls = stubApi([]);
+      await renderChanges();
+      const reads = () => calls.filter((c) => c.method === 'GET').length;
+      const first = reads();
+      await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+      expect(reads()).toBe(first + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders nothing when there are no schedule changes', async () => {
     stubApi([]);
     await renderChanges();
