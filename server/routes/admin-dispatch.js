@@ -5859,7 +5859,7 @@ async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, b
 // window the rebooker will persist with its CAS pins, the shown-stop fence
 // and the collective-move disclosure contract. Nothing is written. Answers a
 // refusal ({ status, body }) or the plan the move runs on.
-async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor }) {
+async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board' }) {
   // Staff-initiated reschedules may override live lifecycle states
   // (en_route / on_site) — rain starts mid-route, or the customer calls
   // to push the visit while the tech is already there. The rebooker
@@ -5902,7 +5902,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = true;
-  rescheduleOptions.sourceSurface = 'dispatch_board';
+  rescheduleOptions.sourceSurface = sourceSurface;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
   const expectVisit = body.expectVisit;
@@ -6032,6 +6032,37 @@ async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow
   return moveReply(200, { ...result, notificationSent: notice.sent, notificationError: notice.error });
 }
 
+// Effects: Edit appointment (expectVisit) repeats its move when a save is
+// retried, and the repeat finds the stop already at the target. Whether the
+// customer was told about that move is read from the message log, never
+// assumed: the stop-wide notice is recorded under the stop's event key with
+// the slot it quoted. On record = no second text. Not on record (the first
+// attempt died between the move and the send) = this request sends it. A log
+// that cannot be read sends nothing and says so, so staff text the customer.
+// Null = not a repeat: the ordinary notice applies.
+async function repeatedMoveNoticeVerdict({ result, expectVisit, newDate, effectiveWindow }) {
+  const visitMove = result?.visitMove;
+  if (expectVisit == null || visitMove?.alreadyAtTarget !== true || (visitMove.moved || []).length) return null;
+  const dateStr = String(newDate).split('T')[0];
+  try {
+    const visit = await db('service_visits').where({ id: visitMove.visitId }).first('window_start');
+    const slots = [...new Set([parseRescheduleWindow(effectiveWindow).start, visit?.window_start].map(normalizeHHMM).filter(Boolean))]
+      .map((start) => parseETDateTime(`${dateStr}T${start}`).getTime())
+      .filter(Number.isFinite);
+    const onRecord = slots.length ? await db('messaging_audit_log as a')
+      .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
+      .whereRaw("a.metadata->>'notificationEventKey' LIKE ?", [`visit:${visitMove.visitId}:${dateStr}:%`])
+      .whereRaw("a.metadata->>'rendered_slot_ms' = ANY(?::text[])", [slots.map(String)])
+      .whereNull('a.blocked_code').whereNull('a.provider_error')
+      .where(require('../services/no-show-detector').textActuallyWentOut)
+      .first('a.id') : null;
+    return onRecord ? { notificationSkipped: 'already_at_target' } : null;
+  } catch (err) {
+    logger.error(`[dispatch] repeated move notice check failed for visit ${visitMove.visitId}: ${err.message}`);
+    return { notificationSkipped: 'record_unreadable', notificationError: 'the message log could not be read, so no text was sent' };
+  }
+}
+
 // Stage 3 — everything AFTER the rebooker committed: series effects when the
 // collective choke point widened the move, reminder sync, board broadcasts,
 // the partial-move answer and the one customer notice.
@@ -6048,18 +6079,13 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
   // stranded sweep owns the (corrected) text once the stop is whole.
   const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
     || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
-  // Edit appointment (expectVisit) repeats this request when a save is
-  // retried. A stop already at the target moved nothing this time, so the
-  // "your visit moved" text is not sent again.
-  const repeatOfCommittedMove = expectVisit != null && result?.visitMove?.alreadyAtTarget === true
-    && !(result.visitMove.moved || []).length;
-  const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatOfCommittedMove;
+  const repeatNotice = notifyCustomer !== false && !partialVisitMove
+    ? await repeatedMoveNoticeVerdict({ result, expectVisit, newDate, effectiveWindow }) : null;
+  const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatNotice;
   await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
   await broadcastVisitMove({ result, serviceId, actor, qualityDates });
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
-  if (repeatOfCommittedMove) {
-    return moveReply(200, { ...result, ...(notifyCustomer !== false ? { notificationSent: false, notificationSkipped: 'already_at_target' } : {}) });
-  }
+  if (repeatNotice) return moveReply(200, { ...result, notificationSent: false, ...repeatNotice });
   if (notifyCustomer === false) return moveReply(200, result);
   return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow });
 }
@@ -6069,8 +6095,15 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
 async function moveVisitForStaff({ serviceId, newDate, newWindow, reasonCode, reasonText, notifyCustomer, operationKey, body, actor }) {
   const planned = await planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor });
   if (!planned.plan) return planned;
-  const result = await SmartRebooker.reschedule(serviceId, newDate, planned.plan.effectiveWindow, reasonCode || 'admin', 'admin', planned.plan.rescheduleOptions);
-  return applyVisitMoveEffects({ result, plan: planned.plan, serviceId, newDate, notifyCustomer, reasonText, actor });
+  return runPlannedVisitMove({ plan: planned.plan, serviceId, newDate, reasonCode, reasonText, notifyCustomer, actor });
+}
+
+// Stages 2 and 3 for a plan made earlier. The appointment save plans the
+// move before its own writes (a refusal then saves nothing) and runs it
+// after them.
+async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reasonText, notifyCustomer, actor }) {
+  const result = await SmartRebooker.reschedule(serviceId, newDate, plan.effectiveWindow, reasonCode || 'admin', 'admin', plan.rescheduleOptions);
+  return applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyCustomer, reasonText, actor });
 }
 
 router.post('/:serviceId/reschedule', async (req, res, next) => {
@@ -7095,7 +7128,8 @@ module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 // Test surface for the reminder-time normalization (series-move incident).
 module.exports.normalizeHHMM = normalizeHHMM;
 module.exports.rescheduleReminderTime = rescheduleReminderTime;
-module.exports.moveVisitForStaff = moveVisitForStaff;
+module.exports.planVisitMoveForStaff = planVisitMoveForStaff;
+module.exports.runPlannedVisitMove = runPlannedVisitMove;
 module.exports._test = {
   pastRescheduleDateError,
   technicianPestRatingAllowedForService,

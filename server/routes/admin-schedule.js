@@ -10917,6 +10917,159 @@ async function refuseCarriedStopInEditMove(ackedIds) {
   }
 }
 
+// ---- update-details: a stop shared by two or more services (a combo) -----
+//
+// update-details writes ONE row, so a date, time or technician change on a
+// shared stop would leave the other services behind. The request says how to
+// handle it (owner rulings 2026-10-03: Edit appointment can move a combo, and
+// a technician-only change asks too):
+//   comboMove 'together' — the whole stop moves or is reassigned. Everything
+//     is checked BEFORE any write (planVisitMoveForStaff: the same staff move
+//     the schedule runs, against the stop's live membership read here); the
+//     date, window and technician keys are then taken off the body, so the
+//     per-row edit below saves the other fields on the current slot; the
+//     move itself runs after that edit commits (commit()).
+//   comboMove 'separate' — the service is split off its stop here, and the
+//     rest is the ordinary single-row edit.
+// No comboMove (every other caller), a row that is not on a shared stop, or
+// a request that changes none of the three: null, the handler is unchanged.
+function comboEditChanges(body, row) {
+  const b = body || {};
+  let intake;
+  try {
+    intake = windowIntakeFromBody(b);
+  } catch {
+    return null; // a half-cleared window is the handler's own 422
+  }
+  const dateTarget = b.scheduledDate !== undefined && b.scheduledDate !== '' ? dateOnly(b.scheduledDate) : null;
+  const start = intake.clearBoth ? null : (intake.windowStart !== undefined ? normalizeHHMM(intake.windowStart) : undefined);
+  return {
+    intake,
+    date: !!dateTarget && dateTarget !== dateOnly(row.scheduled_date),
+    start: intake.clearBoth
+      ? !!row.window_start
+      : (start !== undefined && start !== (normalizeHHMM(row.window_start) || null)),
+    technician: b.technicianId !== undefined && (b.technicianId || null) !== (row.technician_id || null),
+  };
+}
+
+// The whole-stop move keeps every service's own length.
+function comboLengthChange(body, row, intake) {
+  const posted = parseInt(body.estimatedDuration, 10);
+  if (Number.isInteger(posted) && posted > 0 && row.estimated_duration_minutes != null
+    && posted !== Number(row.estimated_duration_minutes)) return true;
+  const span = (a, z) => {
+    const [h1, m1] = String(normalizeHHMM(a) || '').split(':').map(Number);
+    const [h2, m2] = String(normalizeHHMM(z) || '').split(':').map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? (h2 * 60 + m2) - (h1 * 60 + m1) : null;
+  };
+  const stored = span(row.window_start, row.window_end);
+  return stored != null && !!intake.windowStart && !!intake.windowEnd && span(intake.windowStart, intake.windowEnd) !== stored;
+}
+
+// A stop with no stored span takes the start only: each service's end is
+// derived from its own length. No time change = a date-only (or
+// technician-only) move, which keeps the stored window.
+function comboMoveWindow(row, changes) {
+  if (!changes.start) return undefined;
+  const keepsSpan = !!(row.window_start && row.window_end);
+  const end = keepsSpan && changes.intake.windowEnd ? normalizeHHMM(changes.intake.windowEnd) : null;
+  return { start: normalizeHHMM(changes.intake.windowStart), ...(end ? { end } : {}) };
+}
+
+async function planComboEditMove(req) {
+  const body = req.body || {};
+  const choice = body.comboMove;
+  if (choice === undefined) return null;
+  if (choice !== 'together' && choice !== 'separate') {
+    throw httpError(400, "comboMove must be 'together' or 'separate'");
+  }
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id');
+  if (!row || !row.visit_id) return null;
+  const vg = require('../services/visit-groups');
+  if ((await vg.openMembers(db, row.visit_id)).length < 2) return null;
+  const changes = comboEditChanges(body, row);
+  if (!changes || !(changes.date || changes.start || changes.technician)) return null;
+
+  if (choice === 'separate') {
+    try {
+      await vg.splitChild({
+        visitId: row.visit_id,
+        scheduledServiceId: row.id,
+        createdBy: `admin:${req.technicianId || 'unknown'}`,
+      });
+    } catch (err) {
+      // The split's own refusals (a frozen visit, a row that just left the
+      // stop) are the operator's to read, not a 500. Nothing was changed.
+      const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
+      if (!known) throw err;
+      throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    }
+    return { separated: true };
+  }
+  return planComboTogetherMove(req, row, changes);
+}
+
+// 'together': every refusal comes before any write.
+async function planComboTogetherMove(req, row, changes) {
+  const body = req.body;
+  const vg = require('../services/visit-groups');
+  const refuse = (status, message, code) => {
+    throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
+  };
+  if (changes.intake.clearBoth) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
+  if (comboLengthChange(body, row, changes.intake)) {
+    refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
+  }
+  if (body.propertyId !== undefined) {
+    refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
+  }
+  const newDate = validScheduleDate(changes.date ? body.scheduledDate : row.scheduled_date);
+  if (!newDate) refuse(400, 'That date is not a current or future date.');
+  const newWindow = comboMoveWindow(row, changes);
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
+  const actor = { techRole: req.techRole, technicianId: req.technicianId };
+  const shown = await vg.visitSummaryForService(db, row.id);
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
+  const planned = await planVisitMoveForStaff({
+    serviceId: row.id,
+    newDate,
+    newWindow,
+    notifyCustomer,
+    body: {
+      ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
+    },
+    actor,
+    sourceSurface: 'edit_modal',
+  });
+  if (!planned.plan) {
+    throw Object.assign(httpError(planned.status, `${planned.body.error} Nothing was changed.`), planned.body.code ? { code: planned.body.code } : {});
+  }
+  // The per-row edit below must not move, reassign or text: the move does.
+  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId', 'assignmentScope', 'notifyCustomer']) delete req.body[key];
+  return {
+    commit: () => runPlannedVisitMove({ plan: planned.plan, serviceId: row.id, newDate, reasonCode: 'admin', notifyCustomer, actor }),
+  };
+}
+
+// The details are saved by the time the move runs, so its outcome is part of
+// the 200 answer, never an error status: `moved` (true / false / null when it
+// is not known whether the move went through) plus whatever the move
+// answered (warnings, needsAttention, notificationSent...).
+async function commitComboEditMove(plan, serviceId) {
+  try {
+    const out = await plan.commit();
+    const moved = out.status < 300 && !out.body?.needsAttention;
+    return { ...out.body, moved, ...(out.status >= 300 ? { error: out.body?.error || 'The stop was not moved.' } : {}) };
+  } catch (err) {
+    const refused = err?.statusCode >= 400 && err.statusCode < 500;
+    logger.error(`[schedule/update-details] whole-stop move after the edit ${refused ? 'was refused' : 'failed'} for ${serviceId}: ${err.message}`);
+    return { moved: refused ? false : null, error: err.message, ...(err.code ? { code: err.code } : {}) };
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -12782,6 +12935,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw httpError(422, 'Choose a saved customer address.');
       }
     }
+    // Before the series planner: a shared stop moved 'together' leaves no
+    // date on the body for it to plan.
+    const comboMovePlan = await planComboEditMove(req);
+    if (comboMovePlan?.separated) req.comboSeparatedThisRequest = true;
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan && propertyId !== undefined) {
       // An address change regroups relocated occurrences on their OLD dates
@@ -16281,6 +16438,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // A shared stop moved 'together': the edit above saved the other fields
+    // on the stop's current slot; the whole-stop move runs now and sends the
+    // one customer text itself.
+    const comboMove = comboMovePlan?.commit ? await commitComboEditMove(comboMovePlan, req.params.id) : null;
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -16394,8 +16556,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — present only when this save
       // stacked over an existing visit.
       ...(editWarnings.length ? { warnings: editWarnings } : {}),
+      ...(comboMove ? { comboMove } : {}),
+      ...(comboMovePlan?.separated ? { comboSeparated: true } : {}),
     });
   } catch (err) {
+    // The split is its own committed action: an edit that fails after it
+    // says so, so nobody closes on an unnoticed separation.
+    if (req.comboSeparatedThisRequest && err && typeof err.message === 'string') {
+      err.message = `This service was separated from the stop, but the other changes were not saved. ${err.message}`;
+    }
     // The in-transaction duplicate-series backstop rolled the spawn back —
     // present the SAME 409 the POST creator returns.
     if (Array.isArray(err.duplicateRecurringSeries)) {
@@ -27437,6 +27606,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
