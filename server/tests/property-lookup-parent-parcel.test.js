@@ -8,8 +8,14 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+jest.mock('../services/property-lookup/county-parcel-gis', () => {
+  const actual = jest.requireActual('../services/property-lookup/county-parcel-gis');
+  return { ...actual, lookupCountyParcelByPoint: jest.fn() };
+});
+
 const { pointToPolygonEdgeMeters } = require('../services/property-lookup/parcel-gis');
-const { _private } = require('../services/property-lookup/ai-property-lookup');
+const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
+const { _private, lookupPropertyFromAITrio, hasCountyEvidence } = require('../services/property-lookup/ai-property-lookup');
 const { buildBusinessScopeContext } = require('../services/property-lookup/business-scope');
 
 const { applyGisParcelGuards } = _private;
@@ -152,5 +158,29 @@ describe('the scope suggestion', () => {
     });
     expect(ctx.decision).toBe('scope_unresolved');
     expect(ctx.profileFields.serviceScopeSuggestion).toBe('suite');
+  });
+});
+
+describe('the whole lookup when every fact provider fails', () => {
+  const realFetch = global.fetch;
+  beforeEach(() => { global.fetch = jest.fn().mockRejectedValue(new Error('provider down')); });
+  afterEach(() => { global.fetch = realFetch; lookupCountyParcelByPoint.mockReset(); });
+  const geo = { lat: LAT, lng: LNG, locationType: 'ROOFTOP', county: 'Examplecounty' };
+
+  test('gate on: a facts-free record carries the parent parcel, and does not read as county evidence', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
+    const record = await lookupPropertyFromAITrio(TYPED, geo);
+    expect(record).not.toBeNull();
+    expect(record._parentParcel).toMatchObject({ parcelId: 'EXAMPLE-PARCEL', situsAddress: '900 Example Rd' });
+    expect(record.squareFootage || 0).toBe(0);
+    expect(record.lotSize || 0).toBe(0);
+    expect(record._parcel).toBeUndefined();
+    expect(hasCountyEvidence(record)).toBe(false);
+  });
+
+  test('gate off: no record at all, as before', async () => {
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
+    expect(await lookupPropertyFromAITrio(TYPED, geo)).toBeNull();
   });
 });

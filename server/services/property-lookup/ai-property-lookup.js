@@ -2525,6 +2525,20 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   ].filter(Boolean);
 
   if (!records.length) {
+    if (!parkParcelSignal && parentParcel) {
+      // Every fact provider failed or found nothing — the usual state of an
+      // unlisted storefront, the case the parent parcel exists for. Ship a
+      // facts-free record carrying only that context. Its source stays the
+      // shaped default: the roll did NOT vouch for this address, so it must
+      // not read as county evidence.
+      const contextOnly = shapeAsPropertyRecord(
+        { confidence: 'low', county: parentParcel.county || geoContext?.county || '' },
+        searchAddress,
+        'county_gis',
+      );
+      contextOnly._parentParcel = parentParcel;
+      return contextOnly;
+    }
     if (!parkParcelSignal) return null;
     // Every fact provider failed or timed out, but the GIS point positively
     // identified a park — returning null here would collapse to the generic
