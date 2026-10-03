@@ -762,21 +762,25 @@ function checkServiceClaims(ctx) {
 // object, or null when every experience claim (and the interaction gate) is
 // clear.
 // "kind" in a thank-you aimed at the reviewer is not a claim (owner
-// 2026-10-03). Exactly three AFFIRMATIVE shapes pass: "kind of you", "your
-// kind <words|review|note|...>", and "thanks / thank you for the kind words".
-// Any other "kind" (staff, the service, "our team had kind words", a negated
-// "not kind of you") still needs the reviewer's own words (codex #5788 r1-r3).
-const KIND_THANKS_BEFORE_RE = /(?:\byour\s+$|\b(?:thank\s+you|thanks)\s+(?:so\s+much\s+)?for\s+(?:the|those|these|such)\s+$)/;
-const KIND_NOUN_AFTER_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message|recommendation|referral)\b/;
+// 2026-10-03). The AFFIRMATIVE shapes that pass: "kind of you", "your kind
+// <words|review|note|feedback|comments|remarks|message>" (all names for the
+// review itself: a referral or recommendation is a separate act and is not
+// listed), and "<thanks|appreciate|grateful|thankful> ... the kind words" in
+// one clause. Any other "kind" (staff, the service, a negated "not kind of
+// you") still needs the reviewer's own words, and "kind words" outside these
+// shapes is refused even when the review says "kind": "Marcus had kind words
+// for you" invents an interaction (codex #5788 r1-r4).
+const KIND_YOUR_BEFORE_RE = /\byour\s+$/;
+const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,24}\b(?:the|those|these|such)\s+$/;
+const KIND_REVIEW_NOUN_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message)\b/;
+const KIND_WORDS_RE = /^kind\s+words\b/;
 function isReviewerThanksKind(bodyLower, idx, bodyNeg) {
   if (isNegatedAt(idx, bodyNeg)) return false;
   const after = bodyLower.slice(idx);
   if (/^kind\s+of\s+you\b/.test(after)) return true;
-  const before = bodyLower.slice(Math.max(0, idx - 40), idx);
-  const m = before.match(KIND_THANKS_BEFORE_RE);
-  if (!m || !KIND_NOUN_AFTER_RE.test(after)) return false;
-  // "your kind <noun>" takes any listed noun; the thanks-for shape is "kind words" only.
-  return /your\s+$/.test(m[0]) || /^kind\s+words\b/.test(after);
+  const before = bodyLower.slice(Math.max(0, idx - 60), idx);
+  if (KIND_YOUR_BEFORE_RE.test(before)) return KIND_REVIEW_NOUN_RE.test(after);
+  return KIND_ACK_BEFORE_RE.test(before) && KIND_WORDS_RE.test(after);
 }
 function checkExperienceClaims(ctx) {
   const {
@@ -791,7 +795,10 @@ function checkExperienceClaims(ctx) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
     const flat = t.replace(/[- ]+/g, ' ');
-    if (t === 'kind' && isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
+    if (t === 'kind') {
+      if (isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
+      if (KIND_WORDS_RE.test(bodyLower.slice(termIdx))) return reject('unlisted_experience_claim', 'kind words');
+    }
     const support = (() => {
       const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
       const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);

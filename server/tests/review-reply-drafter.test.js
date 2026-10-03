@@ -601,9 +601,15 @@ describe('verifyReplyText — public-surface safety net', () => {
     for (const line of ['that was not kind of you', "we don't think that was kind of you", 'we never got your kind words']) {
       expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
     }
-    for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words']) {
+    for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words', 'we appreciate the kind words and your rating', 'we are grateful for the kind words']) {
       expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
     }
+    // A referral or recommendation is a separate act, not the review (codex #5788 r4).
+    expect(verify(good('Hello there, thank you for your kind referral. We are glad to help.'), g)).toBe('unlisted_experience_claim');
+    // Staff "kind words" is refused even when the review itself says "kind" (codex #5788 r4).
+    const saidKind = grounding({ text: 'Marcus was kind and the ants are gone.', topics: [], account: null });
+    expect(verify(good('Hi Dana, Marcus had kind words for you and the ants are gone.'), saidKind)).toBe('unlisted_experience_claim');
+    expect(verify(good('Hi Dana, we are glad Marcus was kind and the ants are gone.'), saidKind)).toBeNull();
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
