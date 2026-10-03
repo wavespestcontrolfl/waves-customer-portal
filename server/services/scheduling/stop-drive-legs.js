@@ -44,7 +44,9 @@ function stopOrder(a, b) {
  * `firstStop` / `lastStop` in place on one technician's services.
  */
 function attachDriveLegs(services) {
-  const rows = (services || []).filter((s) => !NOT_A_STOP.has(s.status));
+  // A stop with no start time (the grid's all-day strip) has no place in
+  // the timed route: it gets no legs and is skipped between its neighbours.
+  const rows = (services || []).filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart)));
   for (const s of services || []) {
     s.driveFromPrevMin = null;
     s.driveToNextMin = null;
@@ -52,36 +54,45 @@ function attachDriveLegs(services) {
     s.lastStop = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
-  // physicalStops groups every visit_id the same way): gather it first,
-  // placed at its earliest member. Then back-to-back stops at the same pin
-  // merge too (two services at one address without a group).
+  // physicalStops groups every visit_id the same way): placed at its
+  // earliest member, located by its first member with a pin (groupUnit's
+  // rule). Its legs show on that earliest card only (`legs`): the list
+  // renders each member at its own time, so a later member's card would
+  // otherwise claim legs that point backwards. Then back-to-back stops at
+  // the same pin merge too (two services at one address without a group).
   const units = [];
   const groups = new Map();
   for (const s of [...rows].sort(stopOrder)) {
-    if (!s.visitId) { units.push({ anchor: s, members: [s] }); continue; }
+    if (!s.visitId) { units.push({ anchor: s, members: [s], legs: [s] }); continue; }
     if (!groups.has(s.visitId)) {
-      const unit = { anchor: s, members: [] };
+      const unit = { anchor: s, members: [], legs: [s] };
       groups.set(s.visitId, unit);
       units.push(unit);
     }
-    groups.get(s.visitId).members.push(s);
+    const unit = groups.get(s.visitId);
+    unit.members.push(s);
+    if (!hasGeo(unit.anchor) && hasGeo(s)) unit.anchor = s;
   }
   const stops = [];
   for (const unit of units) {
     const last = stops[stops.length - 1];
-    if (last && samePlace(last.anchor, unit.anchor)) last.members.push(...unit.members);
-    else stops.push(unit);
+    if (last && samePlace(last.anchor, unit.anchor)) {
+      last.members.push(...unit.members);
+      last.legs.push(...unit.legs);
+    } else stops.push(unit);
   }
   if (stops.length) {
-    stops[0].members.forEach((s) => { s.firstStop = true; });
-    stops[stops.length - 1].members.forEach((s) => { s.lastStop = true; });
+    stops[0].legs.forEach((s) => { s.firstStop = true; });
+    stops[stops.length - 1].legs.forEach((s) => { s.lastStop = true; });
   }
   for (let i = 1; i < stops.length; i += 1) {
     const prev = stops[i - 1];
     const cur = stops[i];
-    const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? driveMin(prev.anchor, cur.anchor) : null;
-    prev.members.forEach((s) => { s.driveToNextMin = leg; });
-    cur.members.forEach((s) => { s.driveFromPrevMin = leg; });
+    // Distinct pins are never "~0 min" apart: the estimator rounds a very
+    // short hop to 0, so it floors at one minute.
+    const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
+    prev.legs.forEach((s) => { s.driveToNextMin = leg; });
+    cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
   }
 }
 

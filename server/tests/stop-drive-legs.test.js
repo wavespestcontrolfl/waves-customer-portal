@@ -30,10 +30,9 @@ describe('attachDriveLegs', () => {
     ];
     attachDriveLegs(services);
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
-    expect(by.b1.driveFromPrevMin).toBe(driveMin(A, B));
-    expect(by.b2.driveFromPrevMin).toBe(driveMin(A, B));
-    expect(by.b1.driveToNextMin).toBe(driveMin(B, C));
-    expect(by.b2.driveToNextMin).toBe(driveMin(B, C));
+    // The group's legs ride on its first card only.
+    expect(by.b1).toMatchObject({ driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
+    expect(by.b2).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
     expect(by.x).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
   });
 
@@ -69,7 +68,8 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
     expect(by.g1).toMatchObject({ firstStop: true, driveToNextMin: driveMin(A, B) });
-    expect(by.g2).toMatchObject({ firstStop: true, lastStop: false, driveToNextMin: driveMin(A, B) });
+    // The later member's card claims nothing, so nothing points backwards.
+    expect(by.g2).toMatchObject({ firstStop: false, lastStop: false, driveFromPrevMin: null, driveToNextMin: null });
     expect(by.mid).toMatchObject({ driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
   });
 
@@ -78,5 +78,21 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     expect(services[0].driveToNextMin).toBeNull();
     expect(services[1].driveFromPrevMin).toBeNull();
+  });
+
+  it('locates a group by a member with a pin, skips all-day stops, and floors a short hop at 1 min', () => {
+    const near = { lat: A.lat + 0.0001, lng: A.lng };
+    const services = [
+      stop('g1', '08:00', null, { visitId: 'v1' }),
+      stop('g2', '08:00', A, { visitId: 'v1' }),
+      stop('allday', null, C),
+      stop('n', '10:00', near),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.g1.driveToNextMin).toBe(Math.max(1, driveMin(A, near)));
+    expect(by.g1.driveToNextMin).toBeGreaterThanOrEqual(1);
+    expect(by.allday).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
+    expect(by.n).toMatchObject({ lastStop: true, driveFromPrevMin: by.g1.driveToNextMin });
   });
 });

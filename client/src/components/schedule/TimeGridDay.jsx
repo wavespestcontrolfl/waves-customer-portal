@@ -342,7 +342,10 @@ function driveLegsLabel(service) {
   return [into, out].filter(Boolean).join(' · ') || null;
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
+  // A move awaiting confirmation changes the route: the server's legs are
+  // stale until the refresh, so they hide.
+  const drive = routeStale ? null : driveLegsLabel(service);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -423,7 +426,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         borderLeft: accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${driveLegsLabel(service) ? `\nDrive: ${driveLegsLabel(service)}` : ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && (
         <div
@@ -535,8 +538,8 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
       )}
-      {driveLegsLabel(service) && effectiveHeight > SLOT_HEIGHT * 2 && (
-        <div className="opacity-70 truncate u-nums">{driveLegsLabel(service)}</div>
+      {drive && effectiveHeight > SLOT_HEIGHT * 2 && (
+        <div className="opacity-70 truncate u-nums">{drive}</div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
@@ -612,7 +615,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, routeStale = false }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -728,6 +731,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
               <AppointmentBlock
                 key={svc.id}
                 service={svc}
+                routeStale={routeStale}
                 top={top}
                 height={height}
                 durationMin={dur}
@@ -1649,6 +1653,7 @@ export default function TimeGridDay({
                     onToggleSelect={toggleSelection}
                     accent={techAccent(idx)}
                     showNowLine={date === todayIso}
+                    routeStale={Boolean(optimistic)}
                   />
                 ))}
               </div>
