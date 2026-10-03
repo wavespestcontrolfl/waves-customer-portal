@@ -2192,6 +2192,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     start: String(form.windowStart || "").slice(0, 5),
     end: String(form.windowEnd || "").slice(0, 5),
     duration: slotCheckDuration,
+    // The technician the stop is on: the one it opened with, then the one
+    // each committed whole-stop move put it on.
+    technicianId: service.technicianId || "",
   });
   const comboOpened = comboBaseRef.current;
   const comboStart = String(form.windowStart || "").slice(0, 5);
@@ -3530,7 +3533,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               // A technician change rides the whole-stop move, so every
               // service lands on the new technician; on the PUT alone it
               // would reassign this row only and detach it from the stop.
-              ...(form.technicianId !== (service.technicianId || "") ? { technicianId: form.technicianId || null } : {}),
+              ...(form.technicianId !== comboBaseRef.current.technicianId ? { technicianId: form.technicianId || null } : {}),
               // The stop the operator was shown. The server refuses the move
               // if a service joined or left it since.
               ...(Array.isArray(comboVisit.memberIds)
@@ -3546,7 +3549,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             throw new Error(moved.needsAttention.message || "Only part of this stop finished moving. Fix it on the schedule before editing it here.");
           }
           comboDoneRef.current.moved = true;
-          comboBaseRef.current = { ...comboBaseRef.current, date: form.scheduledDate, start: comboStart, end: comboEnd };
+          comboBaseRef.current = { ...comboBaseRef.current, date: form.scheduledDate, start: comboStart, end: comboEnd, technicianId: form.technicianId };
           comboMovedThisSave = true;
           if (Array.isArray(moved?.warnings) && moved.warnings.length) comboWarningsRef.current = [...comboWarningsRef.current, ...moved.warnings];
           if (notifyOnMove && moved?.notificationSent === false) {

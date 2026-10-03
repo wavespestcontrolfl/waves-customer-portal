@@ -391,6 +391,24 @@ it('a technician change rides the whole-stop move, and the move names the stop t
   expect(move.expectVisit).toEqual({ id: 'fixture-stop', memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2 });
 });
 
+it('after a move that reassigned the stop, moving again with the original technician reassigns the whole stop back', async () => {
+  const state = putFailsOnce();
+  render(<EditServiceModal service={{ ...combo, technicianId: 'tech-1' }} technicians={[{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  const date = dialog.querySelector('input[type="date"]');
+  const techSelect = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'tech-2'));
+  fireEvent.change(date, { target: { value: '2035-01-03' } });
+  fireEvent.change(techSelect, { target: { value: 'tech-2' } });
+  await clickSave();
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Both services were moved'));
+  state.putFails = false;
+  fireEvent.change(date, { target: { value: '2035-01-04' } });
+  fireEvent.change(techSelect, { target: { value: 'tech-1' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(4));
+  expect(JSON.parse(writes()[2][1].body)).toMatchObject({ newDate: '2035-01-04', technicianId: 'tech-1' });
+});
+
 it('an unchanged technician is not sent on the whole-stop move', async () => {
   const dialog = openCombo();
   fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
