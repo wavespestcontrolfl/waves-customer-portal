@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/contact-report-text.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',
+  },
+  {
     file: 'services/visit-completion-packets.js',
     snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
     reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',

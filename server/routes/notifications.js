@@ -54,6 +54,14 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
   };
 }
 
+// Whether the contact card may say contacts also get the report text: the
+// gate is on AND this profile's own visit-complete text can go out (the
+// report text follows it; texts off or Service Complete off = none).
+function contactReportTextsOn(prefs) {
+  return require('../config/feature-gates').contactReportTextLive()
+    && !!prefs && prefs.sms_enabled !== false && prefs.service_completed !== false;
+}
+
 function serviceContactPayload(slot = {}) {
   const name = String(slot.name || '').trim();
   return {
@@ -676,6 +684,7 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
+      contactReportTexts: contactReportTextsOn(customerPrefs),
     };
   });
 }
@@ -735,6 +744,7 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
+        contactReportTexts: contactReportTextsOn(byCustomerId.get(String(p.id))),
       })),
     });
   } catch (err) {

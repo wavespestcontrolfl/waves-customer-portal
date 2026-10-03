@@ -1616,6 +1616,39 @@ const REGISTRY = {
     },
   },
 
+  // The report text to an on-location contact (GATE_CONTACT_REPORT_TEXT,
+  // services/contact-report-text.js). Same frozen-recipient contract as the
+  // held contact notice above: the row belongs to the contact's phone, and
+  // the recheck proves that phone is still a confirmed contact, the gate is
+  // on, the report is recent and a combined-stop summary is not revoked. The
+  // same check runs again at the true provider boundary, so a contact
+  // removed or replaced during the executor's own awaits does not get the
+  // bearer link. A failed read holds the row for a bounded retry (ids and an
+  // error code in the log: a query error can carry the phone and the link).
+  contact_report_ready_deferred: {
+    async recheck(meta, { conn } = {}) {
+      try {
+        return await require('../contact-report-text').recheckContactReportText(meta, { conn: conn || db });
+      } catch (err) {
+        logger.warn(`[deferred-replay] contact-report recheck failed for customer ${meta.customer_id || 'unknown'} (holding for retry): ${err.code || err.name || 'error'}`);
+        return { eligible: false, reason: 'recheck-failed', retryable: true };
+      }
+    },
+    providerPreSendCheck(meta) {
+      return async ({ dbi } = {}) => {
+        const again = await REGISTRY.contact_report_ready_deferred.recheck(meta, { conn: dbi || db });
+        if (again && again.eligible !== false) return { ok: true };
+        const retryable = again?.retryable === true;
+        return {
+          ok: false,
+          code: retryable ? 'CONTACT_REPORT_CHECK_FAILED_AT_BOUNDARY' : 'CONTACT_REPORT_STALE_AT_BOUNDARY',
+          reason: (again && again.reason) || 'ineligible',
+          ...(retryable ? { retryable: true } : {}),
+        };
+      };
+    },
+  },
+
   appointment_tagger_prep_deferred: {
     async recheck(meta) {
       // Prep instructions are for an upcoming visit — a cancellation or

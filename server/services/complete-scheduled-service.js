@@ -13315,6 +13315,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // merge, an event insert) must never be reported as "not delivered"
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
+      // On-location contacts get a plain report text when this completion
+      // text goes out (GATE_CONTACT_REPORT_TEXT, contact-report-text.js). Set
+      // only when the text carries a real report link. Called on every path
+      // that records the text as sent or queued, the accepted-send recovery
+      // included; a repeat for the same record queues nothing. Never throws.
+      let contactReportUrl = null;
+      const notifyContactsOfReport = async (notBefore = null) => {
+        if (!contactReportUrl) return;
+        await require('./contact-report-text').notifyContactsReportReady({
+          customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: contactReportUrl,
+          scheduledServiceId: svc.id, notBefore, excludePhone: svc.cust_phone,
+        });
+      };
       // What the attempted text IS (body/type/channel/review/pay-link), taken
       // before the provider call so the catch can stamp the honest 'sent'
       // state when acceptance is known only from the thrown error
@@ -13760,6 +13773,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               smsMetadata.service_report_preview_asset_id = serviceReportPreviewAsset.id;
             }
           }
+          if (reportToken && smsMetadata.report_url) contactReportUrl = smsMetadata.report_url;
           const attemptedMms = Array.isArray(smsMetadata.mediaUrls) && smsMetadata.mediaUrls.length > 0;
           let sentSmsChannel = attemptedMms ? 'mms' : 'sms';
           let mmsFallbackToSms = false;
@@ -13964,6 +13978,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // above — only sync the in-memory snapshot here.
             record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            await notifyContactsOfReport(new Date(smsResult.nextAllowedAt));
           } else if (!smsResult.sent) {
             // A quiet-hours hold whose scheduled-SMS enqueue FAILED is not a
             // policy block even though the result still says blocked: the
@@ -14042,6 +14057,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
             }
           } else {
+            // Before the route-local writes below: one that throws jumps to
+            // the accepted-send recovery, which calls this again.
+            await notifyContactsOfReport();
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               completionSmsDeliveryUnverifiedAt: null,
@@ -14136,6 +14154,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           record.structured_notes = unverifiedNotes;
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
+          await notifyContactsOfReport();
           const snap = completionSmsAcceptedSnapshot || {};
           if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
           // The normal result never arrived to switch the snapshot to push:
