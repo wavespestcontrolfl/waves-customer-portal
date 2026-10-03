@@ -150,4 +150,17 @@ const USPS_PRIMARY_BY_STANDARD = {
   WAYS: 'WAYS', WL: 'WELL', WLS: 'WELLS', XING: 'CROSSING', XRD: 'CROSSROAD', XRDS: 'CROSSROADS',
 };
 
-module.exports = { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD };
+// Where this codebase's canonical key deliberately differs from the USPS
+// standard (live roll evidence in ai-property-lookup.js: the rolls spell
+// these out). Standard abbreviation → the key used. Shared by the normalizer
+// and the roll-query spelling variants.
+const STREET_SUFFIX_CANON_OVERRIDES = {
+  CRK: 'CREEK',
+  HOLW: 'HOLLOW',
+  IS: 'ISLAND',
+  KY: 'KEY',
+  MDWS: 'MDW',
+  VIS: 'VISTA',
+};
+
+module.exports = { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD, STREET_SUFFIX_CANON_OVERRIDES };

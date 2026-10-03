@@ -18,7 +18,13 @@ const LEADING_AVENUE_RE = /^((?:\d+[A-Z]?\s+)?(?:(?:N|S|E|W|NE|NW|SE|SW)\s+)?)AV
 // spelling of a terminal USPS suffix word (standard → its USPS primary
 // name: LK → LAKE, VW → VIEW, VLG → VILLAGE) rides along as a second query (live audit
 // P1 10-02). A word whose two forms are equal adds nothing.
-const { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD } = require('./usps-street-suffixes');
+const { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
+// The spelled-out canonical keys ("ISLAND", "CREEK", …) → their USPS
+// abbreviation: a name-only street keyed "W ISLAND" must also search a roll
+// row written "W IS".
+const ABBREVIATION_BY_SPELLED_KEY = Object.fromEntries(
+  Object.entries(STREET_SUFFIX_CANON_OVERRIDES).filter(([abbr, key]) => key.length > abbr.length).map(([abbr, key]) => [key, abbr]),
+);
 
 // Only when the suffix word IS the whole name (optional house number and
 // directions around it) — every other street reaches the roll with its
@@ -26,6 +32,7 @@ const { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD } = require('./usps-stree
 const TERMINAL_WORD_RE = /^((?:\d+[A-Z]?\s+)?(?:(?:NE|NW|SE|SW|N|S|E|W)\s+)?)([A-Z]+)(\s+(?:NE|NW|SE|SW|N|S|E|W))?$/;
 function otherSuffixSpelling(text) {
   const m = TERMINAL_WORD_RE.exec(text);
+  if (m && ABBREVIATION_BY_SPELLED_KEY[m[2]]) return `${m[1]}${ABBREVIATION_BY_SPELLED_KEY[m[2]]}${m[3] || ''}`;
   const standard = m && USPS_STREET_SUFFIXES[m[2]];
   if (!standard) return null;
   // Only abbreviated → spelled: the normalizer only ever WRITES the

@@ -260,3 +260,21 @@ describe('bare-unit guard ignores a lone direction', () => {
     expect(_private.stripUnitDesignators('100 E EXAMPLE CT 3', { bareUnit: true })).toBe('100 E EXAMPLE CT');
   });
 });
+
+describe('codex r2: spelled-out keys and Charlotte situs locality', () => {
+  const { routeSpellingVariants } = require('../services/property-lookup/route-spellings');
+  test('a name-only street whose key is spelled out also searches the abbreviation', () => {
+    expect(routeSpellingVariants('100 W ISLAND')).toEqual(['100 W ISLAND', '100 W IS']);
+    expect(routeSpellingVariants('CREEK')).toEqual(['CREEK', 'CRK']);
+    // Not name-only: an ordinary street ending in the word is untouched.
+    expect(routeSpellingVariants('EXAMPLE ISLAND')).toEqual(['EXAMPLE ISLAND']);
+  });
+
+  test('the Charlotte record parser exposes the verified situs city and ZIP', () => {
+    const html = '<table><tr><td>Property Address:</td><td>100 EXAMPLE TER</td></tr><tr><td>Property City &amp; Zip:</td><td>PORT CHARLOTTE 33948</td></tr></table>';
+    const parsed = _private.parseCharlottePaoRecord({ address: '100 Example Ter, Port Charlotte, FL 33948', search: { parcelId: '400000000001', situsAddress: '100 EXAMPLE TER', city: null, zipCode: null }, detailHtml: html, ownership: { attributes: { city: 'OWNERTOWN', zipcode: '10001' } } });
+    // Never the ownership layer's mailing locality.
+    expect(parsed._situsCity).not.toBe('OWNERTOWN');
+    expect(parsed._situsZip).not.toBe('10001');
+  });
+});

@@ -24,7 +24,7 @@ const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 const { routeSpellingVariants } = require('./route-spellings');
-const { USPS_STREET_SUFFIXES } = require('./usps-street-suffixes');
+const { USPS_STREET_SUFFIXES, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -652,15 +652,15 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
     _provider: 'charlotte_pao',
     parcelId: search.parcelId,
     situsAddress: search.situsAddress,
-    postalCity: search.city,
-    zipCode: search.zipCode,
+    postalCity: parsed._situsCity,
+    zipCode: parsed._situsZip,
     ownership: ownership?.attributes || null,
     detailUrl: charlotteRecordUrl(search.parcelId),
   };
   record.addressLine1 = search.situsAddress || '';
-  record.city = search.city || '';
+  record.city = parsed._situsCity || '';
   record.state = 'FL';
-  record.zipCode = search.zipCode || '';
+  record.zipCode = parsed._situsZip || '';
   record.county = 'Charlotte';
   record._provider = 'charlotte_pao';
   record._aiProviders = ['charlotte_pao'];
@@ -2884,14 +2884,6 @@ function normalizeCountyCityName(value) {
 // TRACE/BEND/CROSSING/COVE keep the USPS standard (TRCE/BND/XING/CV, as
 // before): Manatee writes the standard, Sarasota spells them out — the key
 // is the same on both sides either way.
-const STREET_SUFFIX_CANON_OVERRIDES = {
-  CRK: 'CREEK',
-  HOLW: 'HOLLOW',
-  IS: 'ISLAND',
-  KY: 'KEY',
-  MDWS: 'MDW',
-  VIS: 'VISTA',
-};
 // TRAILER's standard (TRLR) is also a secondary-unit designator that
 // stripUnitDesignators peels off the end of a street line, so rewriting a
 // terminal "Trailer" to TRLR would erase the word. It is left exactly as typed.
@@ -4245,6 +4237,11 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     confidence: 'high',
     county: 'Charlotte',
     formattedAddress: [situsAddress, city, 'FL', zipCode].filter(Boolean).join(', ') || address,
+    // The verified situs locality (address-search row, else the record page's
+    // "Property City & Zip") for the shaped record — the GIS parcel path has
+    // no city/ZIP of its own to pass in.
+    _situsCity: city,
+    _situsZip: zipCode,
     ...charlottePoolFeatures(detailHtml),
     ...(sqftDetailed.pricingAdjustment
       ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
