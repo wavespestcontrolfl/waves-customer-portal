@@ -2159,6 +2159,31 @@ separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
+`GATE_LAWN_WATERING_FORECAST` (dark; also requires `GATE_LAWN_WATERING_RULE`; gate
+off leaves the payload unchanged, key for key) adds two LIVE-VIEW-ONLY optional keys
+to `reportV2.banner` of a plain `water_in` banner (never `hold`, `hold_then_water_in`
+or `none`), both finished customer sentences in inches, never a probability or a
+percent, chosen by code with no model. `forecastLine` (string): a sentence frozen
+at completion beside the instruction (`structured_notes.lawnWateringFreeze
+.wateringInstruction.forecast`, first writer wins with the rest of the freeze,
+replayed verbatim) when the property's hourly forecast for the water-in window
+reached the label amount ("About 0.4 inch of rain is forecast by Thu 2 PM. If at
+least ¼ inch actually falls by then, it counts as watering in today's treatment.
+If it does not, run the watering above."); absent when the forecast was
+unavailable, incomplete or below the amount, and it is never part of `lines`.
+`observedRain` (`{ inches, line, source: 'mrms', days }`): computed per live
+`/api/reports/:token/data` request from radar-measured (MRMS daily) rain on whole
+Eastern days that lie inside the frozen water-in window (a one-hour margin at each
+edge), only once those days have ended, only while the banner has not expired, and
+only when the measured total reaches the water-in amount ("Done: radar measured at
+least 0.5 inch of rain at your home since your visit, which counts as watering in
+today's treatment. There is no need to run your sprinklers for it."); the client
+shows it in place of the instruction. A forecast never produces it, and a radar
+miss or timeout leaves the banner as it was. Both keys are deleted from every
+non-live render (`stripLiveOnlyScheduleFields`: PDF, static, sms_preview), so the
+printed record, the lawn PDF cache key, the completion email, the watering text
+(`lines` only), the hero task and Ask Waves are unchanged. No new route, query
+parameter or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to

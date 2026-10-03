@@ -468,6 +468,52 @@ describe('LawnWateringBanner', () => {
     expect(screen.getByTestId('lawn-watering-banner-mow')).toHaveTextContent(MOW.line);
   });
 
+  // GATE_LAWN_WATERING_FORECAST: live-view additions the server only sends on the live payload.
+  const FORECAST_LINE = 'About 0.4 inch of rain is forecast by Thu 2 PM. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.';
+  const CLOSE_OUT = { inches: 0.5, source: 'mrms', days: ['2026-10-07'], line: 'Done: radar measured at least 0.5 inch of rain at your home since your visit, which counts as watering in today’s treatment. There is no need to run your sprinklers for it.' };
+
+  it('forecast sentence: shown after the unchanged lines on the live view, in inches', () => {
+    renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE });
+    expect(screen.getByTestId('lawn-watering-banner-forecast')).toHaveTextContent(FORECAST_LINE);
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.water_in.lines[0]);
+    expect(screen.getByTestId('lawn-watering-banner')).toHaveTextContent(BANNERS.water_in.lines[1]);
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent(/%|chance/i);
+  });
+
+  it('forecast sentence: never printed, never on an ended note, never on a hold', () => {
+    renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE }, { print: true });
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    cleanup();
+    renderBanner({ ...BANNERS.water_in, expiresAt: PAST, forecastLine: FORECAST_LINE });
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    cleanup();
+    renderBanner({ ...BANNERS.hold, forecastLine: FORECAST_LINE });
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    cleanup();
+    renderBanner({ ...BANNERS.hold_then_water_in, forecastLine: FORECAST_LINE, observedRain: CLOSE_OUT });
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold_then_water_in.lines[0]);
+  });
+
+  it('measured close-out: replaces the instruction with the measured inches, wins over the forecast sentence', () => {
+    renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE, observedRain: CLOSE_OUT });
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(CLOSE_OUT.line);
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent('Run each zone');
+  });
+
+  it('measured close-out: printed copy keeps the instruction as written', () => {
+    renderBanner({ ...BANNERS.water_in, observedRain: CLOSE_OUT }, { print: true });
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.water_in.lines[0]);
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent('radar');
+  });
+
+  it('no forecast / close-out fields: the banner is exactly today\'s', () => {
+    const { container } = renderBanner(BANNERS.water_in);
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    expect(container.textContent).not.toMatch(/forecast|radar/i);
+  });
+
   it('null or empty banner renders nothing', () => {
     for (const banner of [null, undefined, { state: 'hold', lines: [] }]) {
       const { unmount } = renderBanner(banner);
