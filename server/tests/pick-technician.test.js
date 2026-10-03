@@ -1,7 +1,10 @@
 // Technician pick for a fixed-time visit (owner 2026-10-03: closest route that
 // day among the technicians who are free; no territories; no new-hire guard).
-const mockState = { active: true, techs: [], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {} };
+const mockState = { active: true, techs: [], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() };
 
+jest.mock('../services/tech-out-auto-move', () => ({
+  blockedBySchedule: jest.fn(async (techId) => mockState.blocked.has(techId)),
+}));
 jest.mock('../services/stops-ahead', () => ({ NOT_A_ROUTE_STOP_STATUSES: ['cancelled'] }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -29,7 +32,7 @@ const findTime = require('../services/scheduling/find-time');
 
 // conn('technicians').select(...) → techs; conn('scheduled_services')…first() → last visit.
 function makeConn() {
-  return jest.fn((table) => {
+  const conn = jest.fn((table) => {
     const chain = {};
     ['where', 'whereNotNull', 'orderBy', 'whereIn', 'whereNotIn', 'groupBy'].forEach((m) => { chain[m] = jest.fn(() => chain); });
     chain.select = jest.fn(() => (table === 'technicians' ? Promise.resolve(mockState.techs) : chain));
@@ -37,6 +40,8 @@ function makeConn() {
     chain.first = jest.fn(async () => (mockState.last ? { technician_id: mockState.last } : undefined));
     return chain;
   });
+  conn.fn = { now: () => 'now()' };
+  return conn;
 }
 
 const A = { id: 'tech-a', name: 'Tech A' };
@@ -47,7 +52,7 @@ const slot = (tech, detour, start = '10:00') => ({
 });
 
 beforeEach(() => {
-  Object.assign(mockState, { active: true, techs: [A, B], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {} });
+  Object.assign(mockState, { active: true, techs: [A, B], absent: new Set(), off: [], clashes: {}, slots: [], last: null, findTimeThrows: false, stops: {}, blocked: new Set() });
   jest.clearAllMocks();
 });
 
@@ -144,6 +149,15 @@ describe('pickTechnicianForVisit', () => {
     mockState.stops = { 'tech-a': 7 };
     const pick = await pickTechnicianForVisit({ conn: makeConn(), ...base, lat: null, lng: null });
     expect(pick).toMatchObject({ technician: { id: 'tech-b' }, reason: 'availability_only' });
+  });
+
+  test('a schedule block over the window removes the technician, even with no route estimate', async () => {
+    mockState.blocked = new Set(['tech-a']);
+    const pick = await pickTechnicianForVisit({ conn: makeConn(), ...base, lat: null, lng: null });
+    expect(pick.technician.id).toBe('tech-b');
+    expect(require('../services/tech-out-auto-move').blockedBySchedule).toHaveBeenCalledWith('tech-a', base.date, 600, 660, expect.anything());
+    mockState.blocked = new Set(['tech-a', 'tech-b']);
+    expect(await pickTechnicianForVisit({ conn: makeConn(), ...base })).toMatchObject({ technician: null, reason: 'none_free' });
   });
 
   test('a measured technician ranks ahead of an unmeasured one', () => {

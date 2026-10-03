@@ -189,6 +189,8 @@ describe('wiring', () => {
     // A pick taken before the fence is re-made under it when the fenced read clashes.
     expect(src).toContain('if (bookingTechnicianPicked && bookingTechnicianId && bookingTimeConflicts.length) {');
     expect(src).toContain('const repick = await pickBookingTechnician();');
+    // A picked technician's capability is re-read under the share lock at save (fresh + reused).
+    expect(src.match(/assertCapabilitiesActive\(trx, (insertData\.technician_id|reuseTechId),/g)).toHaveLength(2);
     // Post-commit recheck judges each fresh row on its own technician.
     expect(src).toContain('technicianId: svc.technician_id || null,');
     expect(src).toContain('technicianId: followUpCreated.technician_id || null,');

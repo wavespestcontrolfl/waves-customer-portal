@@ -17959,6 +17959,7 @@ const CallRecordingProcessor = {
                   // The row itself is excluded: unassigned, it would otherwise
                   // read as a clash for every technician.
                   let reuseCandidateTechId = defaultTechnicianId;
+                  let reuseTechPicked = false;
                   if (!isAttachedManualBooking && !existing.technician_id && !reuseHeldForAddress) {
                     try {
                       const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
@@ -17982,7 +17983,10 @@ const CallRecordingProcessor = {
                         excludeServiceIds: [existing.id],
                         excludeCustomerId: null,
                       }));
-                      if (reusePick.active) reuseCandidateTechId = reusePick.technician?.id || null;
+                      if (reusePick.active) {
+                        reuseCandidateTechId = reusePick.technician?.id || null;
+                        reuseTechPicked = true;
+                      }
                     } catch (pickErr) {
                       logger.warn(`[call-proc] technician pick failed for reused booking ${maskSid(callSid)} (default technician kept): ${pickErr.message}`);
                     }
@@ -18010,6 +18014,14 @@ const CallRecordingProcessor = {
                     let reuseTechId = reuseCandidateTechId;
                     try {
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
+                      // A PICKED technician passed the capability filter on a
+                      // plain read; re-read it under the technician share lock
+                      // so an Off saved since cannot receive this visit.
+                      if (reuseTechPicked) {
+                        await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
+                          [{ id: existing.id, service_type: existing.service_type || serviceType }],
+                          (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                      }
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
@@ -18756,6 +18768,14 @@ const CallRecordingProcessor = {
                 if (insertData.technician_id) {
                   try {
                     await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+                    // A PICKED technician passed the capability filter on a
+                    // plain read; re-read it under the technician share lock
+                    // so an Off saved since cannot receive this visit.
+                    if (bookingTechnicianPicked) {
+                      await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
+                        [{ id: null, service_type: serviceType }],
+                        (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                    }
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);

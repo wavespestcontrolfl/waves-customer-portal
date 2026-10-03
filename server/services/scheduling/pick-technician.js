@@ -9,7 +9,8 @@
  *      service not switched off. "Needs review" counts the same as qualified.
  *   2. Who is free    — the window is open on that technician's OWN route:
  *      the save probe itself (occupancy.findConflictingVisits scoped by
- *      technicianId), so the pick and the save can never disagree.
+ *      technicianId), so the pick and the save can never disagree; and no
+ *      schedule block (lunch, hard block, crew-wide) covers the window.
  *   3. Who is closest — the smallest extra drive on that technician's day
  *      (find-time's detour for that exact start). The day's route decides,
  *      not a home address or a territory.
@@ -62,6 +63,10 @@ async function stopsByTechnician(conn, date, technicianIds) {
     .where('scheduled_date', date)
     .whereIn('technician_id', technicianIds)
     .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+    // The occupancy and route models' own predicates: a windowless
+    // placeholder row and an expired estimate hold are not stops.
+    .whereNotNull('window_start')
+    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', conn.fn.now()))
     .groupBy('technician_id')
     .select('technician_id')
     .count('* as stops');
@@ -142,14 +147,22 @@ async function pickTechnicianForVisit({
   }
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
 
-  // Free = the save probe, scoped to each technician (their rows + unassigned).
+  // Free = the save probe, scoped to each technician (their rows + unassigned),
+  // and no tech_schedule_blocks row over the window. The probe does not model
+  // blocks; find-time does, but a blocked technician with no route estimate
+  // would otherwise still win the availability-only fallback.
+  const { blockedBySchedule } = require('../tech-out-auto-move');
+  const startMin = toMinutes(windowStart);
+  const endMin = toMinutes(windowEnd) ?? (startMin + durationMinutes);
   const free = [];
   for (const tech of techs) {
     const clash = await findConflictingVisits({
       db: conn, date, windowStart, windowEnd, technicianId: tech.id,
       excludeCustomerId, excludeServiceIds,
     });
-    if (!clash.length) free.push(tech);
+    if (clash.length) continue;
+    if (await blockedBySchedule(tech.id, date, startMin, endMin, conn)) continue;
+    free.push(tech);
   }
   if (!free.length) return { active: true, technician: null, reason: 'none_free' };
 
