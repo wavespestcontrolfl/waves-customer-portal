@@ -602,6 +602,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling

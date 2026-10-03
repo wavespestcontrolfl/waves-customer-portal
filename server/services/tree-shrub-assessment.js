@@ -23,7 +23,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText } = require('./llm/call');
+const { anthropicText, geminiText, dispatchWithFallback } = require('./llm/call');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
   hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
@@ -450,47 +450,70 @@ async function callGeminiVision(base64Image, mimeType) {
   return null;
 }
 
-// GATE_TS_WATCH_LIST: the watch-signal read. A SEPARATE, small Gemini call with
-// its own prompt, so the list can never steer the main read's scores or the
+// GATE_TS_WATCH_LIST: the watch-signal read. A SEPARATE, small call with its own
+// prompt, so the list can never steer the main read's scores or the
 // observations that reach customer copy. It asks for the keys and nothing else
-// (no scores, no prose). Gemini only, no Claude fallback. Any failure is null
-// ("no read", never a clean []): it can never fail the main read, and the sheet
-// must not show an unavailable read as "nothing flagged". Known keys on the
-// month's list only.
-const WATCH_READ_MAX_OUTPUT_TOKENS = 512; // a short key list plus Gemini 3.x thinking spend
+// (no scores, no prose). It rides the shared LLM dispatcher like every other
+// photo lane (MODELS.TEXT_POLICIES.treeShrubWatchSignals: Gemini, OpenAI on a
+// miss; call ledger and cost rows under lane ts_watch_signals), never a raw
+// fetch. Any failure is null ("no read", never a clean []): it can never fail the
+// main read, and the sheet must not show an unavailable read as "nothing
+// flagged". Known keys on the month's list only.
+const WATCH_READ_MAX_OUTPUT_TOKENS = 1024; // a short key list plus Gemini 3.x thinking spend
 // The watch read is optional, so it never holds a finished main read for long:
-// the request aborts at this deadline and the answer is [].
+// the chain's legs share this budget (timeoutMs, enforced per leg by the chain's
+// own hard deadline) and a second deadline here covers an adapter that ignores both.
 const WATCH_READ_MAX_MS = 20 * 1000;
+const WATCH_READ_GRACE_MS = 1000;
+
+// The normalized keys when the answer has a watch_signals array whose every
+// entry is a string key on this month's list; anything else is null.
+function conformingWatchSignals(json, month) {
+  if (!json || !Array.isArray(json.watch_signals)) return null;
+  const signals = normalizeWatchSignals(json.watch_signals, month);
+  const conforming = json.watch_signals.every((entry) => typeof entry === 'string'
+    && signals.includes(entry.trim().toLowerCase()));
+  return conforming ? signals : null;
+}
+
 async function readWatchSignals(base64Image, mimeType, month) {
+  let timer;
   try {
-    if (!GEMINI_KEY) return null;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(WATCH_READ_MAX_MS),
-      body: JSON.stringify({
-        contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: watchListPromptBlock(month) }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: WATCH_READ_MAX_OUTPUT_TOKENS },
-      }),
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), WATCH_READ_MAX_MS + WATCH_READ_GRACE_MS);
+      if (typeof timer.unref === 'function') timer.unref();
     });
-    if (!response.ok) {
-      logger.warn(`Tree-shrub watch-signal read Gemini API ${response.status} (${GEMINI_VISION_MODEL})`);
+    const outcome = await Promise.race([
+      Promise.resolve().then(() => dispatchWithFallback(MODELS.TEXT_POLICIES.treeShrubWatchSignals, {
+        text: watchListPromptBlock(month),
+        images: [{ data: base64Image, mimeType: mimeType || 'image/jpeg' }],
+        jsonMode: true,
+        maxTokens: WATCH_READ_MAX_OUTPUT_TOKENS,
+        thinkingLevel: 'LOW',
+        reasoningEffort: 'low',
+        timeoutMs: WATCH_READ_MAX_MS,
+        laneId: 'ts_watch_signals',
+      }, {
+        // A nonconforming answer is a failed leg (its ledger row is flipped by the
+        // chain), so the OpenAI stand-in gets its turn.
+        validate: (result) => (conformingWatchSignals(result.json, month) ? null : 'schema_invalid:watch_signals'),
+        reserveFallbackBudget: true,
+        hardDeadline: true,
+      })),
+      deadline,
+    ]);
+    if (!outcome || !outcome.ok) {
+      logger.warn(`Tree-shrub watch-signal read unavailable (${(outcome && outcome.reason) || 'timeout'})`);
       return null;
     }
-    const text = geminiText(await response.json());
-    if (!text) return null;
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    // An answer without the array, or with any entry that is not a key on this
-    // month's list, is not a read: null, never a clean [].
-    if (!parsed || !Array.isArray(parsed.watch_signals)) return null;
-    const signals = normalizeWatchSignals(parsed.watch_signals, month);
-    const conforming = parsed.watch_signals.every((entry) => typeof entry === 'string'
-      && signals.includes(entry.trim().toLowerCase()));
-    return conforming ? signals : null;
+    const signals = conformingWatchSignals(outcome.json, month);
+    if (!signals) logger.warn('Tree-shrub watch-signal read answered with no usable watch_signals');
+    return signals;
   } catch (err) {
     logger.warn(`Tree-shrub watch-signal read failed: ${err.message}`);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
