@@ -2239,8 +2239,13 @@ const StripeService = {
         // each waited on the other. Same locks, same rows, only earlier; the later FOR UPDATEs on them
         // are no-ops. (Callers passing both options - completion-balance-sweep, recurring-card-on-file,
         // estimate-public's accept charge - all reach this one transaction, so they share the order.)
-        if (requireAutopayForCustomerId != null) {
-          await trx('customers').where({ id: requireAutopayForCustomerId }).forUpdate().first('id');
+        // Any charge that can apply the customer's account credit (the apply locks that row FOR UPDATE)
+        // takes the customer first too, not only the Auto Pay and self-pay callers.
+        const earlyCustomerId = requireAutopayForCustomerId != null
+          ? requireAutopayForCustomerId
+          : (require('../config/feature-gates').gates.autoApplyAccountCredit ? invoice.customer_id : null);
+        if (earlyCustomerId) {
+          await trx('customers').where({ id: earlyCustomerId }).forUpdate().first('id');
         }
         if (requireSelfPayScheduledServiceId != null) {
           await trx('scheduled_services').where({ id: requireSelfPayScheduledServiceId }).forUpdate().first('id');
@@ -2250,6 +2255,11 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
+        // The invoice moved to another customer (a merge) between the pre-transaction read and this lock:
+        // take the new owner too (the rare, out-of-order case).
+        if (earlyCustomerId && requireAutopayForCustomerId == null && String(lockedInvoice.customer_id) !== String(earlyCustomerId)) {
+          await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+        }
         // The invoice's OWN Bill-To, under its row lock (Codex #4971 r10 P1).
         // A payer stamped on the invoice (at mint — InvoiceService.create
         // persists it — or by a writer racing the unlocked read above) makes

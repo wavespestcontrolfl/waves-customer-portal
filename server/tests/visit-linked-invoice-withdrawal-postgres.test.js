@@ -412,6 +412,22 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(() => assertInvoiceCollectible(after)).toThrow(/third-party payer/);
   });
 
+  test('an annual-prepay invoice with a visit link but no annual_prepay_term_id is excluded through the term\'s own link', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const payerId = await payer();
+    const f = await fixture({ link: 'visit', invoice: { stripe_payment_intent_id: 'pi_annual' } });
+    await mockPg('annual_prepay_terms').insert({
+      id: randomUUID(), customer_id: f.customerId, status: 'payment_pending', prepay_invoice_id: f.invoiceId,
+      term_start: f.date, term_end: etDateString(new Date(Date.now() + 365 * 86400e3)),
+    });
+    // The invoice's own annual_prepay_term_id is NULL (the shape annual-prepay-renewals documents).
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ annual_prepay_term_id: null });
+    const pending = { visitPatch: { visitIds: [f.visitId], payer_id: payerId } };
+    expect(await Linked.ownerTransitions(mockPg, { scheduledServiceId: f.visitId }, { mode: 'pre', pending })).toEqual([]);
+    expect(await assignJobPayer(f.visitId, payerId)).toEqual([]);
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ scheduled_send_error: null, stripe_payment_intent_id: 'pi_annual' });
+  });
+
   test('a self-pay visit is unchanged', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'record' });
     const before = await invoiceRow(invoiceId);

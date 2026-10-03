@@ -37,6 +37,9 @@ function visitLinkedBase(trx, statusesExcluded) {
   return trx('invoices').whereNotIn('status', statusesExcluded)
     .whereNull('payer_id').whereNull('payer_statement_id')
     .whereNull('visit_completion_packet_id').whereNull('annual_prepay_term_id')
+    // An annual-prepay invoice is identified by the TERM's own link too: some carry a visit link and a NULL
+    // annual_prepay_term_id (annual-prepay-renewals.js), and a visit's payer must never withdraw the year.
+    .whereNotIn('id', trx('annual_prepay_terms').whereNotNull('prepay_invoice_id').select('prepay_invoice_id'))
     .where((q) => q.whereNotNull('scheduled_service_id').orWhereNotNull('service_record_id'));
 }
 
