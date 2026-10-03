@@ -169,6 +169,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
       scheduledServiceId: completedVisitId,
       actor: { techRole: 'admin', technicianId: null },
       expectedVisit,
+      expectedServiceRecordId: recordId,
       ...input,
       knex: db,
     });
@@ -211,7 +212,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     const reconcile = (token, abandonMissingPhotos) => fetch(`${base}/api/tech/services/${completedVisitId}/photos/reconcile`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ abandonMissingPhotos, expectedVisit }),
+      body: JSON.stringify({ abandonMissingPhotos, expectedVisit, expectedServiceRecordId: recordId }),
     });
     try {
       expect((await reconcile(technicianToken, false)).status).toBe(409);

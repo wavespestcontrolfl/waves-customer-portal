@@ -1447,7 +1447,7 @@ export function completionAutoCloseDelay(completion, photosOwed, recapEligible) 
 // from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
 // panel's shape, not the completion body's: derive the body fields the same
 // way.
-export function buildPhotoRetryFormBody(photo, index, expectedVisit = null) {
+export function buildPhotoRetryFormBody(photo, index, expectedVisit = null, expectedServiceRecordId = null) {
   const [header, encoded] = photo.data.split(",");
   const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const form = new FormData();
@@ -1461,6 +1461,7 @@ export function buildPhotoRetryFormBody(photo, index, expectedVisit = null) {
   // completion lock. Older persisted drafts predate that receipt; omission
   // deliberately retains the optional deployed API contract for them.
   if (expectedVisit) form.append("expectedVisit", JSON.stringify(expectedVisit));
+  if (expectedServiceRecordId) form.append("expectedServiceRecordId", expectedServiceRecordId);
   return form;
 }
 
@@ -17923,13 +17924,14 @@ export function CompletionPanel({
     let reconciliationNeeded = draft.reconcileOwed === true;
     let retryPermanentlyBlocked = false;
     try {
-      const { servicePhotos: photos = [] } = draft;
+      const { servicePhotos: photos = [], pendingPhotoCompletion = {} } = draft;
       for (const [index, photo] of photos.entries()) {
         try {
           const form = buildPhotoRetryFormBody(
             photo,
             index,
-            draft.pendingPhotoCompletion?.servicePhotoVisit,
+            pendingPhotoCompletion.servicePhotoVisit,
+            pendingPhotoCompletion.serviceRecordId,
           );
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
@@ -17967,7 +17969,8 @@ export function CompletionPanel({
             method: "POST",
             body: JSON.stringify({
               abandonMissingPhotos: draft.abandonMissingPhotos === true,
-              expectedVisit: draft.pendingPhotoCompletion?.servicePhotoVisit,
+              expectedVisit: pendingPhotoCompletion.servicePhotoVisit,
+              expectedServiceRecordId: pendingPhotoCompletion.serviceRecordId,
             }),
           });
         } catch (error) {
@@ -17981,12 +17984,12 @@ export function CompletionPanel({
           return;
         }
         await finishCompletionSuccess({
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: 0 },
         });
       } else {
         const result = {
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: failedPhotos.length },
         };
         // A partially successful retry has already changed the visit's photo

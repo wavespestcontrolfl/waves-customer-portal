@@ -482,6 +482,7 @@ async function uploadServicePhotoForVisit({
   scheduledServiceId,
   actor,
   expectedVisit,
+  expectedServiceRecordId,
   buffer,
   originalName,
   mimeType,
@@ -525,10 +526,17 @@ async function uploadServicePhotoForVisit({
       });
     }
 
-    const serviceRecord = await trx('service_records')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .orderBy('created_at', 'desc')
-      .first('id');
+    const serviceRecordQuery = trx('service_records').where({
+      scheduled_service_id: scheduledServiceId,
+      ...(expectedServiceRecordId ? { id: expectedServiceRecordId } : {}),
+    });
+    if (!expectedServiceRecordId) serviceRecordQuery.orderBy('created_at', 'desc');
+    const serviceRecord = await serviceRecordQuery.first('id');
+    if (expectedServiceRecordId && !serviceRecord) {
+      throw Object.assign(new Error('The completion record changed since photo recovery was saved.'), {
+        statusCode: 409, code: 'visit_identity_changed', isOperational: true,
+      });
+    }
     if (serviceRecord) {
       const photo = await uploadServicePhotoBuffer({
         serviceRecordId: serviceRecord.id,

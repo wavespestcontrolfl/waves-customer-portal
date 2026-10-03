@@ -129,7 +129,9 @@ describe('POST /:id/photos/reconcile', () => {
       structured_notes: { servicePhotoVisit: receipt },
     }];
     await withServer(async (baseUrl) => {
-      const handedOff = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: false, expectedVisit: receipt });
+      const handedOff = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: false, expectedVisit: receipt, expectedServiceRecordId: 'rec-1',
+      });
       expect(handedOff.status).toBe(409);
       expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
       expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
@@ -141,6 +143,7 @@ describe('POST /:id/photos/reconcile', () => {
       const denied = await reconcile(baseUrl, 'tech', {
         abandonMissingPhotos: false,
         expectedVisit: { ...receipt, technicianId: 'tech-other', revision: 'wrong' },
+        expectedServiceRecordId: 'rec-1',
       });
       expect(denied.status).toBe(403);
       expect(mockAlert).toHaveBeenCalledTimes(1);
@@ -168,6 +171,7 @@ describe('POST /:id/photos/reconcile', () => {
       const response = await reconcile(baseUrl, 'tech', {
         abandonMissingPhotos: true,
         expectedVisit: { ...storedReceipt, revision: 'old-completion' },
+        expectedServiceRecordId: 'rec-1',
       });
       expect(response.status).toBe(409);
       expect((await response.json()).code).toBe('photo_reconciliation_handed_off');
@@ -177,6 +181,28 @@ describe('POST /:id/photos/reconcile', () => {
         type: 'service_photo_reconciliation_required', jobId: 'svc-1',
         payload: expect.objectContaining({ source: 'photo_recovery_identity_changed', serviceRecordId: 'rec-1' }),
       }));
+    });
+  });
+
+  test('reconciles the persisted completion record even when a newer record exists', async () => {
+    const receipt = {
+      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
+      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'same-visit',
+    };
+    tables.service_records = [
+      { id: 'rec-newer', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
+      { id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
+    ];
+    await withServer(async (baseUrl) => {
+      const response = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: false, expectedVisit: receipt, expectedServiceRecordId: 'rec-1',
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).serviceRecordId).toBe('rec-1');
+      expect(updates).toContainEqual({
+        table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null },
+      });
     });
   });
 

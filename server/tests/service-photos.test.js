@@ -92,8 +92,9 @@ function makeVisitUploadKnex({
   let insertPayload = null;
   let transactionSettled = false;
   const trx = jest.fn((table) => {
+    let whereClause = {};
     const chain = {
-      where: jest.fn(() => chain),
+      where: jest.fn((clause) => { whereClause = { ...whereClause, ...clause }; return chain; }),
       whereNotNull: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
       orderByRaw: jest.fn(() => chain),
@@ -104,7 +105,11 @@ function makeVisitUploadKnex({
         if (transactionSettled && cleanupQueryError) throw cleanupQueryError;
         if (transactionSettled && table === committedTable) return { id: 'committed-photo-1' };
         if (table === 'scheduled_services') return visit;
-        if (table === 'service_records') return serviceRecordId ? { id: serviceRecordId } : null;
+        if (table === 'service_records') {
+          return serviceRecordId && (!whereClause.id || String(whereClause.id) === String(serviceRecordId))
+            ? { id: serviceRecordId }
+            : null;
+        }
         if (table === 'scheduled_service_photo_staging') return existingStaged;
         return null;
       }),
@@ -242,6 +247,31 @@ describe('service photo uploads', () => {
       mimeType: 'image/jpeg',
       knex,
     })).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('binds a recovery upload to its persisted completion record', async () => {
+    const { servicePhotoVisitSnapshot, uploadServicePhotoForVisit } = require('../services/service-photos');
+    const upload = (knex, expectedServiceRecordId) => uploadServicePhotoForVisit({
+      scheduledServiceId: knex.visit.id,
+      actor: { techRole: 'admin', technicianId: 'tech-1' },
+      expectedVisit: servicePhotoVisitSnapshot(knex.visit),
+      expectedServiceRecordId,
+      buffer: Buffer.from('recovered photo'),
+      originalName: 'recovered.jpg',
+      mimeType: 'image/jpeg',
+      knex,
+    });
+    const matching = makeVisitUploadKnex({ serviceRecordId: 'record-original' });
+    await expect(upload(matching, 'record-original')).resolves.toMatchObject({
+      staged: false, reconcileRequired: true, serviceRecordId: 'record-original',
+    });
+
+    mockS3Send.mockClear();
+    const replaced = makeVisitUploadKnex({ serviceRecordId: 'record-newer' });
+    await expect(upload(replaced, 'record-original')).rejects.toMatchObject({
+      statusCode: 409, code: 'visit_identity_changed',
+    });
     expect(mockS3Send).not.toHaveBeenCalled();
   });
 

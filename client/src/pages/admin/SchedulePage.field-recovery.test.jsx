@@ -236,6 +236,8 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads[1].body.get('caption')).toBe(photos[0].caption);
     expect(JSON.parse(uploads[0].body.get('expectedVisit'))).toEqual(servicePhotoVisit);
     expect(JSON.parse(uploads[1].body.get('expectedVisit'))).toEqual(servicePhotoVisit);
+    expect(uploads[0].body.get('expectedServiceRecordId')).toBe('record-1');
+    expect(uploads[1].body.get('expectedServiceRecordId')).toBe('record-1');
     expect(uploads[1].headers['Content-Type']).toBeUndefined();
     expect(resubmit).not.toHaveBeenCalled();
     expect(completion).toHaveBeenCalledTimes(1);
@@ -339,7 +341,9 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(await screen.findByRole('button', { name: 'Finish report update' })).toBeTruthy();
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
     expect(reconciles).toHaveLength(1);
-    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true, expectedVisit: servicePhotoVisit });
+    expect(JSON.parse(reconciles[0].body)).toEqual({
+      abandonMissingPhotos: true, expectedVisit: servicePhotoVisit, expectedServiceRecordId: 'record-1',
+    });
     expect(completionResumeOwed(service.id)).toBe(false);
     view.unmount();
   });
@@ -433,7 +437,7 @@ describe('completion photos in an unsubmitted draft', () => {
     const reopened = await mount(vi.fn());
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
     expect(reconciles).toHaveLength(1);
-    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true });
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true, expectedServiceRecordId: 'record-1' });
     expect(completionResumeOwed(service.id)).toBe(false);
     reopened.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
@@ -463,7 +467,7 @@ describe('completion photos in an unsubmitted draft', () => {
     const view = await mount(vi.fn());
     await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
     expect(reconciles).toHaveLength(1);
-    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false });
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false, expectedServiceRecordId: 'record-1' });
     expect(completionResumeOwed(service.id)).toBe(false);
     view.unmount();
   });
@@ -514,7 +518,9 @@ describe('completion photos in an unsubmitted draft', () => {
 
     const first = await mount(vi.fn());
     await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
-    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false, expectedVisit: servicePhotoVisit });
+    expect(JSON.parse(reconciles[0].body)).toEqual({
+      abandonMissingPhotos: false, expectedVisit: servicePhotoVisit, expectedServiceRecordId: 'record-1',
+    });
     expect(await screen.findByRole('button', { name: 'Dismiss local recovery' })).toBeTruthy();
     expect(await getCompletionDraft(service.id)).toMatchObject({ reconciliationHandedOff: true });
 
@@ -565,6 +571,7 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads).toHaveLength(1);
     expect(uploads[0].body.get('caption')).toBe(photos[0].caption);
     expect(uploads[0].body.get('sortOrder')).toBe('0');
+    expect(uploads[0].body.get('expectedServiceRecordId')).toBe('record-1');
     // Drafts persisted before the receipt field shipped retain the deployed
     // optional API shape instead of inventing identity from today's row.
     expect(uploads[0].body.get('expectedVisit')).toBeNull();

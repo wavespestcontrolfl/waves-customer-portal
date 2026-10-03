@@ -72,13 +72,20 @@ describe("completionAutoCloseDelay", () => {
 
 describe("buildPhotoRetryFormBody", () => {
   it("derives the attachment fields from the panel-shaped photo", () => {
-    const form = buildPhotoRetryFormBody(photo(1, { caption: "Front door", captionSource: "ai", photoType: "before", sortOrder: 4 }), 0);
+    const form = buildPhotoRetryFormBody(
+      photo(1, { caption: "Front door", captionSource: "ai", photoType: "before", sortOrder: 4 }),
+      0,
+      { revision: "visit-receipt" },
+      "record-1",
+    );
     expect(form.get("photo")).toBeInstanceOf(Blob);
     expect(form.get("photo").type).toBe("image/jpeg");
     expect(form.get("photoType")).toBe("before");
     expect(form.get("sortOrder")).toBe("4");
     expect(form.get("caption")).toBe("Front door");
     expect(JSON.parse(form.get("aiTags"))).toEqual({ captionSource: "ai" });
+    expect(JSON.parse(form.get("expectedVisit"))).toEqual({ revision: "visit-receipt" });
+    expect(form.get("expectedServiceRecordId")).toBe("record-1");
   });
 
   it("falls back to the index, the after type, and no caption or tags", () => {
@@ -88,6 +95,8 @@ describe("buildPhotoRetryFormBody", () => {
     expect(form.get("sortOrder")).toBe("3");
     expect(form.get("caption")).toBeNull();
     expect(form.get("aiTags")).toBeNull();
+    expect(form.get("expectedVisit")).toBeNull();
+    expect(form.get("expectedServiceRecordId")).toBeNull();
   });
 });
 

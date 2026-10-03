@@ -797,6 +797,7 @@ router.post('/:id/photos', (req, res, next) => {
       scheduledServiceId: req.params.id,
       actor: { techRole: req.techRole, technicianId: req.technicianId },
       expectedVisit: req.body.expectedVisit,
+      expectedServiceRecordId: req.body.expectedServiceRecordId,
       buffer: req.file.buffer,
       originalName: req.file.originalname,
       mimeType: req.file.mimetype,
@@ -890,6 +891,52 @@ function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId) {
   return !!expectedVisit
     && String(expectedVisit.technicianId || '') === String(actorId || '')
     && recoveryReceiptMatchesRecord(record, expectedVisit);
+}
+
+async function loadPhotoRecoveryRecord(serviceId, expectedServiceRecordId, columns) {
+  const query = db('service_records').where({
+    scheduled_service_id: serviceId,
+    ...(expectedServiceRecordId ? { id: expectedServiceRecordId } : {}),
+  });
+  if (!expectedServiceRecordId) query.orderBy('created_at', 'desc');
+  return query.first(...columns);
+}
+
+async function photoRecoveryRecordFailure({ record, expectedServiceRecordId, expectedVisit, svc }) {
+  if (!record && !expectedServiceRecordId) {
+    return { status: 409, body: { error: 'Visit has no completion record', code: 'not_completed' } };
+  }
+  let source = null;
+  let message = null;
+  if (!record) {
+    source = 'photo_recovery_record_missing';
+    message = 'The completion record saved for recovered photos is no longer available. The office must reconcile the report.';
+  } else if (!recoveryReceiptMatchesRecord(record, expectedVisit)) {
+    source = 'photo_recovery_identity_changed';
+    message = 'Recovered photos belong to an older completion record. The office must reconcile the correct report.';
+  } else {
+    return null;
+  }
+  const { createAlertOnce } = require('../services/dispatch-alerts');
+  await createAlertOnce({
+    type: PHOTO_RECONCILIATION_HANDOFF,
+    severity: 'warn',
+    techId: svc.technician_id || null,
+    jobId: svc.id,
+    payload: {
+      source,
+      serviceRecordId: record?.id || expectedServiceRecordId,
+      message,
+    },
+    existingPayloadSource: source,
+  });
+  return {
+    status: 409,
+    body: {
+      error: 'The saved completion record changed, so report repair was handed to the office.',
+      code: 'photo_reconciliation_handed_off',
+    },
+  };
 }
 
 async function resolvePhotoReconciliationHandoffs(serviceId, actorId) {
@@ -1060,12 +1107,12 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const expectedServiceRecordId = String(req.body?.expectedServiceRecordId || '').trim() || null;
     let record = null;
     if (!technicianVisitRowInScope(req, svc)) {
-      record = await db('service_records')
-        .where({ scheduled_service_id: svc.id })
-        .orderBy('created_at', 'desc')
-        .first('id', 'technician_id', 'structured_notes');
+      record = await loadPhotoRecoveryRecord(
+        svc.id, expectedServiceRecordId, ['id', 'technician_id', 'structured_notes'],
+      );
       if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId)) {
         const { createAlertOnce } = require('../services/dispatch-alerts');
         await createAlertOnce({
@@ -1087,30 +1134,14 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       }
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    record = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first('id', 'technician_id', 'service_line', 'service_data', 'structured_notes');
-    if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
-    if (!recoveryReceiptMatchesRecord(record, req.body?.expectedVisit)) {
-      const { createAlertOnce } = require('../services/dispatch-alerts');
-      await createAlertOnce({
-        type: PHOTO_RECONCILIATION_HANDOFF,
-        severity: 'warn',
-        techId: svc.technician_id || null,
-        jobId: svc.id,
-        payload: {
-          source: 'photo_recovery_identity_changed',
-          serviceRecordId: record.id,
-          message: 'Recovered photos belong to an older completion record. The office must reconcile the correct report.',
-        },
-        existingPayloadSource: 'photo_recovery_identity_changed',
-      });
-      return res.status(409).json({
-        error: 'The completion record changed, so report repair was handed to the office.',
-        code: 'photo_reconciliation_handed_off',
-      });
-    }
+    record = await loadPhotoRecoveryRecord(
+      svc.id, expectedServiceRecordId,
+      ['id', 'technician_id', 'service_line', 'service_data', 'structured_notes'],
+    );
+    const recordFailure = await photoRecoveryRecordFailure({
+      record, expectedServiceRecordId, expectedVisit: req.body?.expectedVisit, svc,
+    });
+    if (recordFailure) return res.status(recordFailure.status).json(recordFailure.body);
 
     const summary = await reconcilePhotoSummary(record, {
       abandonMissingPhotos: req.body?.abandonMissingPhotos === true,
