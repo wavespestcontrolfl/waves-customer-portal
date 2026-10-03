@@ -19,6 +19,7 @@ import {
   DRAFT_RETENTION_MS,
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
+  listFastCompletionAttempts,
   pruneFastCompletionAttempts,
   putFastCompletionAttempt,
   deleteVisitCompletionDraft,
@@ -119,6 +120,19 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
     expect(await getCompletionResumeBody(fastKey("svc-legacy", "tech-a"))).toBeNull();
     expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toMatchObject(attempt);
+  });
+
+  it("discovers only the current operator's attempts without needing today's route IDs", async () => {
+    await putFastCompletionAttempt("prior-day", "tech-a", { body: committedBody(), summary: "Earlier visit" });
+    await putFastCompletionAttempt("moved-visit", "tech-a", { body: committedBody(), summary: "Moved visit" });
+    await putFastCompletionAttempt("private-visit", "tech-b", { body: committedBody(), summary: "Other operator" });
+    const result = await listFastCompletionAttempts("tech-a");
+    expect(result.available).toBe(true);
+    expect(result.attempts.map((row) => row.serviceId).sort()).toEqual(["moved-visit", "prior-day"]);
+    expect(result.attempts.every((row) => row.operatorId === "tech-a")).toBe(true);
+    expect(await listFastCompletionAttempts("tech-c")).toEqual({ available: true, attempts: [] });
+    globalThis.indexedDB = undefined;
+    expect(await listFastCompletionAttempts("tech-a")).toEqual({ available: false, attempts: [] });
   });
 
   it("uses the idempotency key as a cross-tab compare-and-set fence", async () => {
