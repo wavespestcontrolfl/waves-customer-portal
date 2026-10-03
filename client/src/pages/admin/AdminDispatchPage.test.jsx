@@ -108,7 +108,7 @@ describe("AdminDispatchPage", () => {
     expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
   });
 
-  it("hides the admin-only Automation tab from technician accounts", () => {
+  it("hides the admin-only Automation tab from technician accounts", async () => {
     // Every /api/admin/auto-dispatch endpoint is requireAdmin — techs must
     // not be offered a workspace whose every request 403s.
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "tech" }));
@@ -120,8 +120,10 @@ describe("AdminDispatchPage", () => {
     expect(
       screen.queryByText("Embedded automation workspace"),
     ).not.toBeInTheDocument();
-    // The unrecognized deep-link falls back to the Board tab.
-    expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
+    // The unrecognized deep-link falls back to Schedule for a technician
+    // (Board is owner-only too; codex #5683 r1).
+    expect(await screen.findByText(/Dispatch workspace:/)).toBeInTheDocument();
+    expect(screen.queryByText("Dispatch board workspace")).not.toBeInTheDocument();
   });
 
   it("exposes every Schedule section in the mobile tab strip", () => {
@@ -138,21 +140,23 @@ describe("AdminDispatchPage", () => {
     }
   });
 
-  it("hides the Matching and Booking dispatcher tabs from a technician, who keeps the rest", () => {
+  it("hides the Matching and Booking dispatcher tabs from a technician, who keeps the rest", async () => {
     // POST /dispatch/match/simulate and /dispatch/csr/slots are closed to a
     // technician by the staff allow-list; an admin still gets both tabs (see
     // the full-strip test above).
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderSchedule("/admin/dispatch?tab=csr");
 
-    for (const label of ["Matching", "Booking"]) {
+    // Board and Insights are requireAdmin routes too (codex #5683 r1).
+    for (const label of ["Board", "Matching", "Booking", "Insights"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
-    for (const label of ["Board", "Schedule", "Protocols", "Scores", "Insights"]) {
+    for (const label of ["Schedule", "Protocols", "Scores"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
-    // A deep link to the hidden Booking tab falls back to the Board tab.
-    expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
+    // A deep link to a hidden tab falls back to Schedule for a technician.
+    expect(await screen.findByText(/Dispatch workspace:/)).toBeInTheDocument();
+    expect(screen.queryByText("Dispatch board workspace")).not.toBeInTheDocument();
   });
 
   it("keeps the Scorecard tab off the strip while GATE_ROUTE_SCORECARD is off", async () => {

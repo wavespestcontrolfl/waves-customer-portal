@@ -142,6 +142,8 @@ describe("Settings new UI foundation", () => {
     expect(screen.queryByRole("button", { name: /Financials|Costs/ })).not.toBeInTheDocument();
     expect(screen.queryByText("Operating costs", { exact: true })).not.toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/revenue/settings"))).toBe(false);
+    // The deep link resolves to General, not an empty content area (codex #5683 r1).
+    expect(await screen.findByText("Company info")).toBeInTheDocument();
   });
 
   it("preserves the operating-cost save endpoint and numeric payload", async () => {

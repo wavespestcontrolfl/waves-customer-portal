@@ -71,7 +71,10 @@ export default function CallBridgeLink({
   // that can only 403.
   const canCall = useCanAccessCalls();
   if (!phone) return null;
-  if (!canCall) return <span className={className}>{children ?? phone}</span>;
+  // Plain, unstyled number: callers pass button classes and labels like
+  // "Call", which would leave a dead control-looking pill (codex #5683 r1).
+  // A caller's own formatted number is kept; any other label becomes the number.
+  if (!canCall) return <span>{typeof children === "string" && /\d{3}/.test(children) ? children : phone}</span>;
   return (
     <button
       type="button"

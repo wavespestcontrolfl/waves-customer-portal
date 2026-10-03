@@ -63,13 +63,15 @@ const TABS = {
   SCORECARD: "scorecard",
 };
 const TAB_LIST = [
-  { key: TABS.BOARD, label: "Board", Icon: Map },
+  // Board (GET /admin/dispatch/board) and Insights (GET /dispatch/insights)
+  // are requireAdmin routes: owner-only tabs too (codex #5683 r1).
+  { key: TABS.BOARD, label: "Board", Icon: Map, adminOnly: true },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
   // Matching (POST /dispatch/match/simulate) and Booking (POST
   // /dispatch/csr/slots) are dispatcher tools, owner-only for a technician
-  // login (technician allow-list, 2026-10-02): a technician keeps Board,
-  // Schedule, Protocols, Scores and Insights.
+  // login (technician allow-list, 2026-10-02): a technician keeps
+  // Schedule, Protocols and Scores.
   {
     key: TABS.MATCH,
     label: "Matching",
@@ -91,6 +93,7 @@ const TAB_LIST = [
     key: TABS.INSIGHTS,
     label: "Insights",
     Icon: Lightbulb,
+    adminOnly: true,
   },
 ];
 // GATE_ROUTE_SCORECARD (admin-only, read-only): appended only once the
@@ -134,9 +137,11 @@ export default function AdminDispatchPage() {
   const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-8" : "xl:grid-cols-7"}`;
 
   const validTabKeys = tabList.map((t) => t.key);
+  // Fallback: Board for an admin, Schedule for a technician (Board is
+  // owner-only), for a tabless or not-allowed ?tab=.
   const resolvedTab = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
-    : TABS.BOARD;
+    : (isAdmin ? TABS.BOARD : TABS.SCHEDULE);
   // null while a scorecard deep link is unresolved = nothing rendered yet
   // (no active section, no beacon, a loading placeholder below).
   const tab = scorecardDeepLinkPending ? null : resolvedTab;

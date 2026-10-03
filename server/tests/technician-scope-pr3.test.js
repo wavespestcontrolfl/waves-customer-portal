@@ -66,3 +66,17 @@ describe('technician reach added for the field client (PR 3)', () => {
     expect(technicianMayReach(method, path)).toBe(false);
   });
 });
+
+describe('sender-line lookup is scoped for a technician (codex #5683 r1)', () => {
+  test('a technician needs their own customer and that customer\'s own number before the lookup runs', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/admin-communications.js'), 'utf8');
+    const handler = src.slice(src.indexOf("router.get('/sender'"));
+    const guard = handler.indexOf('if (isTechnicianRequest(req)) {');
+    const lookup = handler.indexOf("require('../services/home-line').staffTextSender(");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(lookup);
+    const block = handler.slice(guard, lookup);
+    expect(block).toMatch(/!customerId \|\| !\(await technicianServicesCustomer\(req, customerId\)\)\) return res\.json\(\{ fromNumber: null \}\)/);
+    expect(block).toMatch(/ownLast10 !== fullPhoneLast10\(phone\)\) return res\.json\(\{ fromNumber: null \}\)/);
+  });
+});
