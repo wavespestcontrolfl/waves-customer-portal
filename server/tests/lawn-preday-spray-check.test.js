@@ -52,17 +52,26 @@ const ctxFor = (lines, over = {}) => ({
 const baseLine = (product, over = {}) => ({ raw: 'Broadleaf step', role: 'base', selected: true, product, ...over });
 
 // A tiny knex stand-in: the visits query, the dedupe read, and a transaction.
-function fakeDb({ visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit' }], alerts = [] } = {}) {
+function fakeDb({ visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }], alerts = [], visitState = {} } = {}) {
   const store = alerts;
+  // Mirrors the SQL of supersedeStaleCards over an in-memory visit table.
+  const closed = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show', 'on_site'];
+  const staleCards = () => store.filter((a) => a.type === 'lawn_spray_hold' && !a.resolved_at).filter((a) => {
+    const v = visitState[a.job_id];
+    return a.payload.for_date < DAY || !v || v.scheduled_date !== a.payload.for_date || closed.includes(v.status)
+      || (v.window_start ?? null) !== (a.payload.window_start ?? null);
+  }).map((a) => ({ id: a.id }));
   const chain = (table) => {
     const state = { where: {}, bindings: [] };
     const c = {
       join: () => c, whereNull: () => c, whereNotIn: () => c, orderBy: () => c,
       where: (arg) => { if (arg && typeof arg === 'object') Object.assign(state.where, arg); return c; },
       whereRaw: (sql, b) => { state.bindings = b; return c; },
-      select: async () => visits,
+      // leftJoin/limit/orderBy are the stale-card read: read-only, no forUpdate on the fake.
+      leftJoin: () => c, limit: () => c,
+      select: async () => (String(table).startsWith('dispatch_alerts') ? staleCards() : visits),
       first: async () => store.find((a) => a.job_id === state.where.job_id && a.type === state.where.type
-        && a.payload.for_date === state.bindings[0]),
+        && a.payload.for_date === state.bindings[0] && (a.payload.window_start ?? null) === state.bindings[1]),
     };
     return c;
   };
@@ -77,7 +86,8 @@ function deps({ ctx, fc, alerts }) {
     loadCatalog: jest.fn(async () => []),
     loadContext: jest.fn(async () => ctx),
     fetchForecast: jest.fn(async () => fc),
-    createAlert: jest.fn(async ({ type, severity, jobId, payload }) => { alerts.push({ type, severity, job_id: jobId, payload }); return {}; }),
+    createAlert: jest.fn(async ({ type, severity, jobId, payload }) => { alerts.push({ id: `alert-${alerts.length + 1}`, type, severity, job_id: jobId, payload, resolved_at: null }); return {}; }),
+    resolveAlert: jest.fn(async ({ id }) => { const a = alerts.find((x) => x.id === id); a.resolved_at = 'NOW'; a.auto = true; return a; }),
   };
 }
 
@@ -144,7 +154,7 @@ describe('lawn pre-day spray check', () => {
   test('forecast unavailable: no card, no throw, the sweep goes on to the next visit', async () => {
     const alerts = [];
     const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: { status: 'unavailable', reason: 'timeout' }, alerts });
-    const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit' }, { id: 'visit-2', service_type: 'Lawn Care Visit' }];
+    const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }, { id: 'visit-2', service_type: 'Lawn Care Visit', window_start: '09:00:00' }];
     const out = await Sweep.runSweep({ dbh: fakeDb({ visits, alerts }), now: NOW, deps: d });
     expect(out).toMatchObject({ considered: 2, unavailable: 2, carded: 0, failed: 0 });
     expect(alerts).toHaveLength(0);
@@ -259,6 +269,65 @@ describe('rain over a label interval that is not a whole number of hours', () =>
     const d = deps({ ctx: ctxFor([baseLine(herbicide)], { windowStart: '09:30:00', arrival: half }), fc: forecast({ wind: (i) => (i === 0 ? 22 : 6) }), alerts });
     await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
     expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 22 mph in the 4 h after the 9:30 AM arrival/);
+  });
+});
+
+describe('a card never outlives the visit it was written for', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  const card = (over = {}) => ({ id: 'old-card', type: 'lawn_spray_hold', job_id: 'visit-1', resolved_at: null,
+    payload: { for_date: DAY, window_start: '09:00:00', ...over } });
+  const sweepWith = async ({ cards, visitState, visits = [], fc = forecast({ wind: 30 }), ctx = ctxFor([baseLine(herbicide)]) }) => {
+    const alerts = [...cards];
+    const d = deps({ ctx, fc, alerts });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visits, visitState }), now: NOW, deps: d });
+    return { out, alerts, d };
+  };
+
+  test('visit moved to another day: card superseded, nothing written for the old date, no forecast read', async () => {
+    const { out, alerts, d } = await sweepWith({ cards: [card()], visitState: { 'visit-1': { scheduled_date: '2026-10-05', status: 'scheduled', window_start: '09:00:00' } } });
+    expect(out.superseded).toBe(1);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ id: 'old-card', resolved_at: 'NOW', auto: true });
+    expect(d.resolveAlert).toHaveBeenCalledWith({ id: 'old-card', auto: true });
+    expect(d.fetchForecast).not.toHaveBeenCalled();
+  });
+
+  test('time moved on the same day: old card superseded, the new arrival gets its own check and card', async () => {
+    const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '13:00:00' }];
+    const ctx = ctxFor([baseLine(herbicide)], { windowStart: '13:00:00', arrival: new Date('2026-10-03T17:00:00Z') });
+    const { out, alerts } = await sweepWith({ cards: [card()], visits, ctx,
+      visitState: { 'visit-1': { scheduled_date: DAY, status: 'scheduled', window_start: '13:00:00' } } });
+    expect(out).toMatchObject({ superseded: 1, carded: 1 });
+    expect(alerts.filter((a) => !a.resolved_at).map((a) => a.payload.window_start)).toEqual(['13:00:00']);
+    expect(alerts.find((a) => a.id === 'old-card').resolved_at).toBe('NOW');
+  });
+
+  test('an unchanged visit keeps its open card (no churn)', async () => {
+    const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }];
+    const { out, alerts } = await sweepWith({ cards: [card()], visits,
+      visitState: { 'visit-1': { scheduled_date: DAY, status: 'scheduled', window_start: '09:00:00' } } });
+    expect(out).toMatchObject({ superseded: 0, carded: 0, duplicate: 1 });
+    expect(alerts[0].resolved_at).toBeNull();
+  });
+
+  test('past-day, cancelled and deleted-visit cards are all superseded', async () => {
+    const cards = [card({ for_date: '2026-10-02' }), { ...card(), id: 'c2', job_id: 'visit-2' }, { ...card(), id: 'c3', job_id: 'visit-3' }];
+    const { out, alerts } = await sweepWith({ cards, visitState: {
+      'visit-1': { scheduled_date: '2026-10-02', status: 'scheduled', window_start: '09:00:00' },
+      'visit-2': { scheduled_date: DAY, status: 'cancelled', window_start: '09:00:00' },
+    } });
+    expect(out.superseded).toBe(3);
+    expect(alerts.every((a) => a.resolved_at === 'NOW')).toBe(true);
+  });
+
+  test('a cleanup failure never stops the sweep', async () => {
+    const alerts = [card({ window_start: '08:00:00' })];
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    d.resolveAlert = jest.fn(async () => { throw new Error('boom'); });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visitState: {} }), now: NOW, deps: d });
+    expect(out).toMatchObject({ superseded: 0, carded: 1 });
   });
 });
 

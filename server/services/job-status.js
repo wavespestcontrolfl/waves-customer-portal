@@ -127,7 +127,7 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
-const { autoResolveOverdueAlertsForJob } = require('./dispatch-alerts');
+const { autoResolveOverdueAlertsForJob, supersedeSprayHoldsOnReschedule } = require('./dispatch-alerts');
 
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -553,6 +553,9 @@ async function transitionJobStatus({
     // rollback (PR #311). No-op for non-terminal toStatus, so safe
     // to call unconditionally.
     await autoResolveOverdueAlertsForJob({
+      jobId, resolvedBy: transitionedBy, trx: t, toStatus,
+    });
+    await supersedeSprayHoldsOnReschedule({
       jobId, resolvedBy: transitionedBy, trx: t, toStatus,
     });
 

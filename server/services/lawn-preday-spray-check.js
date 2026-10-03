@@ -26,7 +26,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { fetchPropertyForecast } = require('./service-report/application-conditions');
 const JobCard = require('./job-card');
-const { createAlert } = require('./dispatch-alerts');
+const { createAlert, resolveAlert } = require('./dispatch-alerts');
 
 const TYPE = 'lawn_spray_hold';
 const SOURCE = 'lawn_preday_spray_check';
@@ -180,15 +180,46 @@ function cardLines(holds) {
   });
 }
 
-// One card per visit per ET day. The read-side check also honors a card a
-// dispatcher already resolved (a re-run must not bring it back); the advisory
-// lock (a lock key, never a visit row) closes the race between two writers.
-async function alreadyCarded(dbh, jobId, day) {
+// One card per visit per ET day per arrival time. The read-side check also
+// honors a card a dispatcher already resolved (a re-run must not bring it
+// back); a card superseded because the visit's time moved is for the OLD
+// window, so the new window gets its own check. The advisory lock (a lock key,
+// never a visit row) closes the race between two writers.
+async function alreadyCarded(dbh, jobId, day, windowStart) {
   const row = await dbh('dispatch_alerts')
     .where({ type: TYPE, job_id: jobId })
-    .whereRaw("payload->>'for_date' = ?", [day])
+    .whereRaw("payload->>'for_date' = ? AND payload->>'window_start' IS NOT DISTINCT FROM ?", [day, windowStart ?? null])
     .first('id');
   return Boolean(row);
+}
+
+// Open cards that no longer describe their visit are superseded (system
+// resolve, same stamp as the status hooks): the visit left the card's day,
+// its arrival window changed (the numbers were for the old arrival), it is in
+// a closed status or gone, or the card is from a previous day. Date and time
+// edits have no single write chokepoint, so this read is the catch-all.
+// Read-only on visits (a join, no row locks), bounded.
+const STALE_CARD_LIMIT = 200;
+async function supersedeStaleCards({ dbh, day, resolve }) {
+  const stale = await dbh('dispatch_alerts as a')
+    .leftJoin('scheduled_services as s', 's.id', 'a.job_id')
+    .where('a.type', TYPE)
+    .whereNull('a.resolved_at')
+    .where(function staleCard() {
+      this.whereRaw("a.payload->>'for_date' < ?", [day])
+        .orWhereNull('s.id')
+        .orWhereRaw("to_char(s.scheduled_date, 'YYYY-MM-DD') <> a.payload->>'for_date'")
+        .orWhereIn('s.status', [...TERMINAL_STATUSES, 'on_site'])
+        .orWhereRaw("s.window_start::text IS DISTINCT FROM a.payload->>'window_start'");
+    })
+    .orderBy('a.created_at', 'asc')
+    .limit(STALE_CARD_LIMIT)
+    .select('a.id');
+  let count = 0;
+  for (const { id } of stale) {
+    if (await (resolve || resolveAlert)({ id, auto: true })) count += 1;
+  }
+  return count;
 }
 
 async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
@@ -206,7 +237,7 @@ async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
   };
   return dbh.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn-preday-spray-check:${jobId}:${day}`]);
-    if (await alreadyCarded(trx, jobId, day)) return false;
+    if (await alreadyCarded(trx, jobId, day, ctx.windowStart)) return false;
     await (deps.createAlert || createAlert)({ type: TYPE, severity: 'warn', jobId, payload, trx });
     return true;
   });
@@ -216,7 +247,7 @@ async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
 // (duplicate / unavailable / carded, or null), whether a forecast was judged,
 // and whether a hold was found. Throws are the caller's to count.
 async function checkVisit({ dbh, visit, day, now, catalog, deps }) {
-  if (await alreadyCarded(dbh, visit.id, day)) return { counter: 'duplicate' };
+  if (await alreadyCarded(dbh, visit.id, day, visit.window_start)) return { counter: 'duplicate' };
   const ctx = await (deps.loadContext || JobCard.loadVisitSprayContext)(visit.id, { dbh, now, catalog, deps: deps.jobCard || {} });
   if (!ctx || !ctx.isLawn || ctx.scheduledDate !== day) return {};
   if (!ctx.coords) return { counter: 'unavailable' };
@@ -239,7 +270,12 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
   if (!enabled()) return { skipped: true, reason: 'gate_off' };
   const day = etDateString(now);
   const deadline = Date.now() + SWEEP_BUDGET_MS;
-  const result = { considered: 0, checked: 0, held: 0, carded: 0, duplicate: 0, unavailable: 0, failed: 0, deadline: false };
+  const result = { considered: 0, checked: 0, held: 0, carded: 0, duplicate: 0, unavailable: 0, failed: 0, superseded: 0, deadline: false };
+  try {
+    result.superseded = await supersedeStaleCards({ dbh, day, resolve: deps.resolveAlert });
+  } catch (err) {
+    logger.warn(`[lawn-preday-spray-check] stale card cleanup failed: ${err.message}`);
+  }
   const visits = await dbh('scheduled_services as s')
     .join('customers as c', 's.customer_id', 'c.id')
     .whereNull('c.deleted_at')
@@ -247,7 +283,7 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
     .whereNotIn('s.status', TERMINAL_STATUSES)
     .orderBy('s.window_start', 'asc')
     .orderBy('s.id', 'asc')
-    .select('s.id', 's.service_type');
+    .select('s.id', 's.service_type', 's.window_start');
   const lawnVisits = visits.filter((v) => detectServiceLine(v.service_type) === 'lawn');
   result.considered = lawnVisits.length;
   if (!lawnVisits.length) return result;
@@ -275,4 +311,4 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
   return result;
 }
 
-module.exports = { enabled, runSweep, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };
+module.exports = { enabled, runSweep, supersedeStaleCards, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };

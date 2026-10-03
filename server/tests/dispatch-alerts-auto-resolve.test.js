@@ -127,3 +127,27 @@ describe('autoResolveOverdueAlertsForJob stamps every resolve as automatic', () 
     expect(trx).not.toHaveBeenCalled();
   });
 });
+
+describe('supersedeSprayHoldsOnReschedule', () => {
+  test('a rescheduled visit supersedes only its open spray hold (auto stamp), in the transition trx', async () => {
+    const row = { id: 'alert-9', type: 'lawn_spray_hold', payload: {}, resolved_at: 'NOW()' };
+    const { trx, update, selectForOpenAlerts } = fakeTrx({ openAlertIds: ['alert-9'], updateReturns: [[row]] });
+    const real = trx.getMockImplementation();
+    const where = jest.fn((arg) => (arg.type ? { whereNull: () => ({ select: selectForOpenAlerts }) } : real('dispatch_alerts').where(arg)));
+    trx.mockImplementation((table) => (table === 'dispatch_alerts' ? { ...real(table), where } : real(table)));
+
+    const result = await dispatchAlerts.supersedeSprayHoldsOnReschedule({ jobId: 'visit-1', trx, toStatus: 'rescheduled' });
+
+    expect(where).toHaveBeenCalledWith({ type: 'lawn_spray_hold', job_id: 'visit-1' });
+    expect(result).toEqual({ resolved: 1 });
+    expect(update.mock.calls[0][0].payload).toEqual(expect.objectContaining({ __raw: expect.stringContaining("jsonb_build_object('superseded_at'") }));
+  });
+
+  test('any other status touches nothing, and the overdue family still ignores rescheduled', async () => {
+    const { trx } = fakeTrx();
+    expect(await dispatchAlerts.supersedeSprayHoldsOnReschedule({ jobId: 'visit-1', trx, toStatus: 'completed' })).toEqual({ resolved: 0 });
+    expect(await dispatchAlerts.autoResolveOverdueAlertsForJob({ jobId: 'visit-1', trx, toStatus: 'rescheduled' })).toEqual({ resolved: 0 });
+    expect(trx).not.toHaveBeenCalled();
+  });
+});
+

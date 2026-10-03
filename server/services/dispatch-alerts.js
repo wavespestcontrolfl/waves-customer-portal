@@ -469,8 +469,29 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
   return { resolved };
 }
 
+/**
+ * Supersede (system-resolve, auto: true) the open pre-day spray hold for a job
+ * whose status moved to 'rescheduled' (cancel-and-rebook leaves the old row
+ * there). Its own function so the overdue family keeps the no-op it has on
+ * 'rescheduled'. Date and time edits that do not change status are caught by
+ * the 5:19 sweep itself (lawn-preday-spray-check.js, supersedeStaleCards).
+ */
+async function supersedeSprayHoldsOnReschedule({ jobId, resolvedBy, trx, toStatus } = {}) {
+  if (!jobId || toStatus !== 'rescheduled') return { resolved: 0 };
+  const open = await (trx || db)('dispatch_alerts')
+    .where({ type: 'lawn_spray_hold', job_id: jobId })
+    .whereNull('resolved_at')
+    .select('id');
+  let resolved = 0;
+  for (const { id } of open) {
+    if (await resolveAlert({ id, resolvedBy, trx, auto: true })) resolved += 1;
+  }
+  return { resolved };
+}
+
 module.exports = {
   emitAlert,
+  supersedeSprayHoldsOnReschedule,
   createAlert,
   createAlertOnce,
   resolveAlert,
