@@ -214,15 +214,15 @@ describe('the completion re-checks the trace the report was judged against (Code
     expect(block).toContain("return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);");
   });
 
-  test('a lane or typed Fast Complete is refused on a visit with a linked project, under the visit lock, before any record write', () => {
+  test('a hidden-trace verdict is judged again under the visit lock, and a trace the report would now show refuses the send', () => {
     const lock = block.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
-    const check = block.indexOf('if (traceSeen !== undefined && lockedSvcRow && (structuredObservations || structuredFindings)) {');
+    const check = block.indexOf('if (traceShown === false && lockedSvcRow) {');
     expect(check).toBeGreaterThan(lock);
     expect(check).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
-    const body = block.slice(check, check + 400);
-    expect(body).toContain("trx('projects').where({ scheduled_service_id: svc.id }).first('id')");
-    expect(body).toContain("code: 'linked_project'");
-    expect(block).toMatch(/err\.code === 'linked_project'[\s\S]{0,260}status: 409/);
+    const body = block.slice(check, check + 520);
+    expect(body).toContain('.traceOnReportForVisit(lockedSvcRow, completionProfile, sp)');
+    expect(body).toContain('} catch { shownNow = true; }');
+    expect(body).toContain("code: 'trace_changed'");
   });
 
   test('a trace the sheet judged as hidden is frozen as no trace, while its stamp still feeds the changed check (Codex P2 on #5633)', () => {

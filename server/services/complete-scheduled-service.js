@@ -5763,16 +5763,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
-          // A lane or typed Fast Complete (the report flow, with its own
-          // record) files a completion record of its own, so it never runs on
-          // a visit that completes through a project. The sheet checks this
-          // when it opens; a project the office linked while it was open, or
-          // a schedule cached before the link, is caught here under the visit
-          // lock (Codex P1 on #5629 and #5633). Any other caller is untouched.
-          if (traceSeen !== undefined && lockedSvcRow && (structuredObservations || structuredFindings)) {
-            const linkedProject = await trx('projects').where({ scheduled_service_id: svc.id }).first('id');
-            if (linkedProject) {
-              throw Object.assign(new Error('visit completes through its linked project'), { code: 'linked_project' });
+          // The sheet said the saved trace is one this report never shows
+          // (traceShown false). That verdict was read when the sheet opened
+          // and depends on the visit's add-ons, which can change before Send,
+          // so it is judged again here under the visit lock, with the live
+          // context's own rule. If the report would now show the trace, the
+          // record was written without checking it: refuse, as for a trace
+          // that changed (Codex P1 on #5745). A failed read refuses too.
+          if (traceShown === false && lockedSvcRow) {
+            let shownNow = true;
+            try {
+              shownNow = await trx.transaction((sp) => require('./pest-recap')
+                .traceOnReportForVisit(lockedSvcRow, completionProfile, sp));
+            } catch { shownNow = true; }
+            if (shownNow) {
+              throw Object.assign(new Error('trace visibility changed during completion'), { code: 'trace_changed' });
             }
           }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
@@ -7953,13 +7958,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
             code: 'trace_changed',
-          } });
-        }
-        if (err && err.code === 'linked_project') {
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
-          return ({ status: 409, body: {
-            error: 'This visit has a project report. Close this sheet and finish the visit from its project.',
-            code: 'linked_project',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
