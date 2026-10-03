@@ -23,7 +23,7 @@ const logger = require('../logger');
 const LOCATION = ['address_line1', 'city', 'zip'];
 const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
 const CARRIED = ['first_name', 'last_name', 'email', ...LOCATION, 'requested_service', 'pain_points'];
-// Stored in place of a location part the caller replaced: the call's store
+// Stored in place of a location part or an email the caller replaced: the call's store
 // only adds, and a reconnect rebuilds it by merging every leg's fields, so a
 // replaced part is OVERWRITTEN with this marker (read back as empty) and the
 // marker wins that merge like any later value.
@@ -137,16 +137,28 @@ function rememberedFields(ctx) {
 }
 
 /**
- * A location part that REPLACES one the caller gave earlier means a different
- * property: the earlier location goes, whole, and what this capture did not
- * restate is asked for — never an old street under a new city. A retry that
- * only ADDS a missing part, or restates the same one, still accumulates.
+ * Which remembered fields this capture REPLACES (as opposed to adds to).
+ *
+ * A location part that differs from one the caller gave earlier means a
+ * different property: the earlier location goes, whole, and what this capture
+ * did not restate is asked for — never an old street under a new city. A
+ * retry that only ADDS a missing part, or restates the same one, accumulates.
+ *
+ * An email given now that could not be read replaces the earlier one too (the
+ * caller named another address), so the earlier one is not kept deliverable.
+ * A readable one simply wins when the fields are built.
  */
-function dropReplacedLocation(prior, extracted, ctx) {
-  const replaced = LOCATION.some((k) => nz(extracted[k]) && nz(prior[k]) && !sameText(extracted[k], prior[k]));
-  if (!replaced) return;
-  for (const k of LOCATION) delete prior[k];
-  note(ctx, Object.fromEntries(LOCATION.map((k) => [k, ESTIMATE_FIELD_REPLACED])));
+function replacedByThisCapture(prior, extracted, input, emailNow) {
+  const movedProperty = LOCATION.some((k) => nz(extracted[k]) && nz(prior[k]) && !sameText(extracted[k], prior[k]));
+  const unreadableNewEmail = !emailNow && nz(input.email) && nz(prior.email);
+  return [...(movedProperty ? LOCATION : []), ...(unreadableNewEmail ? ['email'] : [])];
+}
+
+/** Drops replaced fields from this capture's view and marks them in the call's store. */
+function dropReplaced(prior, ctx, keys) {
+  if (!keys.length) return;
+  for (const k of keys) delete prior[k];
+  note(ctx, Object.fromEntries(keys.map((k) => [k, ESTIMATE_FIELD_REPLACED])));
 }
 
 /**
@@ -161,7 +173,7 @@ function dropReplacedLocation(prior, extracted, ctx) {
 async function resolveEstimateDetails({ input, extracted, emailNow, estimateRequested, callerPhone, callerPhoneValid, isValidEmail, ctx }) {
   const prior = rememberedFields(ctx);
   const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || prior.email_unreadable === 'true');
-  dropReplacedLocation(prior, extracted, ctx);
+  dropReplaced(prior, ctx, replacedByThisCapture(prior, extracted, input, emailNow));
   // Fields accumulate across captures on this call (hook P1): a retry that
   // supplies only the missing piece keeps what earlier captures gave.
   const estimateFields = Object.fromEntries(CARRIED.map((k) => [k, (k === 'email' ? emailNow : nz(extracted[k])) || nz(prior[k])]));

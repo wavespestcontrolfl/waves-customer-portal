@@ -438,6 +438,23 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(filedCards().at(-1)[1]).toMatchObject({ address_line1: '4 Other Ave', city: 'sarasota', zip: null });
   });
 
+  test('an unreadable email given after a readable one replaces it: the earlier address is not kept deliverable, on later captures or after a reconnect', async () => {
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    const full = { first_name: 'Dana', last_name: 'Sample', address_line1: '9 Rental Rd', city: 'Venice' };
+    expect(await ask({ ...full, email: 'old@example.com' }, ctx)).toMatch(/IS on the office queue/);
+    expect(await ask({ email: 'dana at work dot' }, ctx)).toMatch(/still missing: email/);
+    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ email: null }); // the card is revised
+    expect(await ask({}, ctx)).toMatch(/still missing: email/);
+    const resumed = callStore();
+    resumed.noteEstimateFields({ ...full, email: 'old@example.com' }); // the earlier leg
+    resumed.noteEstimateFields(store.bag()); // this leg
+    expect(await ask({}, estimateCtx(resumed))).toMatch(/still missing: email/);
+    // A readable one completes it.
+    expect(await ask({ email: 'new@example.com' }, ctx)).toMatch(/IS on the office queue/);
+    expect(filedCards().at(-1)[1]).toMatchObject({ email: 'new@example.com' });
+  });
+
   test('a yes given while the account could not be read is not lost: the next capture uses it', async () => {
     const ctx = estimateCtx(callStore());
     const ok = db.getMockImplementation();
