@@ -15,7 +15,7 @@ const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { scrubCustomerText, safeConditionLabel, safeCustomerSummary, lowerConfidence } = require('../services/lawn-diagnostic-report');
+const { scrubCustomerText, safeConditionLabel, safeCustomerSummary, lowerConfidence, expectationWithoutStaleTiming } = require('../services/lawn-diagnostic-report');
 const {
   safePublicFirstName,
   safePublicCity,
@@ -193,9 +193,9 @@ function buildPublicLawnReport(diagnostic = {}, { photoCount = null } = {}) {
       restriction_summary: scrubCustomerText(ongoing.restriction_summary_customer) || null,
     },
     expectations: {
-      weeds: hasWeedCause ? (scrubCustomerText(expectations.weeds) || null) : null,
+      weeds: hasWeedCause ? (scrubCustomerText(expectationWithoutStaleTiming('weeds', expectations.weeds)) || null) : null,
       fungus: hasFungusCause ? (scrubCustomerText(expectations.fungus) || null) : null,
-      insects: hasInsectCause ? (scrubCustomerText(expectations.insects) || null) : null,
+      insects: hasInsectCause ? (scrubCustomerText(expectationWithoutStaleTiming('insects', expectations.insects)) || null) : null,
       turf_recovery: scrubCustomerText(expectations.turf_recovery) || null,
     },
     // Server-generated from scrubbed finding names — NOT contract.watch_items,

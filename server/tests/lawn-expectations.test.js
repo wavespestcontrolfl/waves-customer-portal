@@ -979,7 +979,7 @@ describe('buildLawnExpectations', () => {
       expect(tiered).toEqual(plain);
     });
 
-    it('ships dark: no runtime file other than its own tests, the audit script, the dark progress engine and the dark v6 copy writer reads the engine or config', () => {
+    it('reads are allowlisted: only its own tests, the audit script, the progress engine, the v6 copy writer and the P16 routed copy sites read the engine or config', () => {
       const root = path.join(__dirname, '..');
       const hits = [];
       const walk = (dir) => {
@@ -995,11 +995,16 @@ describe('buildLawnExpectations', () => {
       walk(root);
       expect(hits.sort()).toEqual([
         'scripts/audit-lawn-expectation-products.js',
+        // P16: the prospect diagnostic prompt generates RESULT TIMING from the sourced rows; the prospect report's weed expectation reads the weed row.
+        'services/lawn-diagnostic-prompt.js',
+        'services/lawn-diagnostic-report.js',
         // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
         'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
+        // P16: the seasonal-dip diagnosis card prints the approved seasonal-dip row sentence.
+        'services/service-report/lawn-report-v2.js',
       ]);
     });
   });

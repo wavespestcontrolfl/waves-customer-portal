@@ -222,7 +222,9 @@ describe('freeze contract in the render path', () => {
     expect(LAWN_RENDER_STRATEGY).not.toBe('p5');
     // p8: the placeholder photo caption left the payload (renders differ).
     expect(LAWN_RENDER_STRATEGY).not.toBe('p7-watering-instruction-20260929');
-    expect(LAWN_RENDER_STRATEGY).toMatch(/^p8-/);
+    expect(LAWN_RENDER_STRATEGY).not.toMatch(/^p8-/);
+    // p9: P16 routed the seasonal-dip card sentence through the approved row.
+    expect(LAWN_RENDER_STRATEGY).toMatch(/^p9-/);
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -242,7 +244,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap8-lawn-dead-fields-20261001')).toBe(true);
+    expect(signature.startsWith('-lap9-lawn-seasonal-timing-20261003')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

@@ -133,7 +133,9 @@ describe('reservice-report (gate on)', () => {
     expect(block.serviceLine).toBe('lawn');
     expect(block.result).toMatch(/Lawn re-service completed/);
     expect(block.result).not.toMatch(/activity/i);
-    expect(block.expectation).toMatch(/weeds and disease/);
+    expect(block.expectation).toMatch(/take time to show/);
+    // P16 (owner 2026-10-03): no hand-written result timeline.
+    expect(block.expectation).not.toMatch(/\d|days?|weeks?/i);
     expect(block.expectation).not.toMatch(/knock activity down/);
   });
 

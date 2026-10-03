@@ -14,8 +14,8 @@ const {
 } = require('../services/lawn-diagnostic-prompt');
 
 describe('lawn-diagnostic prompt v0.5 naming gate', () => {
-  test('prompt version is bumped to v0.5', () => {
-    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.6');
+  test('prompt version is bumped to v0.7 (RESULT TIMING now generated from the expectation rows)', () => {
+    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.7');
   });
 
   test('perception prompt observes only — it forbids naming/concluding a cause', () => {
@@ -155,5 +155,72 @@ describe('normalizeDiagnosisJson checks every field the report reads', () => {
   test('a single-string evidence value, null fields, and a numeric id are still read correctly', () => {
     const out = normalizeDiagnosisJson({ findings: [{ ...FULL, finding_id: 1, observed_evidence: 'yellowing', confirmation_step: null, spread_risk: 'Medium' }] });
     expect(out.droppedFindings).toBe(0);
+  });
+});
+
+describe('RESULT TIMING is generated from the expectation rows (P16 single-source)', () => {
+  const prompt = require('../services/lawn-diagnostic-prompt');
+  const { ISSUE_ROWS, PRODUCT_ROWS } = require('../config/lawn-expectations');
+
+  // "2-3 weeks", "2 to 3 weeks", "~10-14 days", "60-90 days" -> "2-3 weeks"
+  const COUNT_RE = /\d+(?:\s*(?:-|–|to)\s*\d+)?\s*(?:days?|weeks?|months?)\b/gi;
+  const norm = (m) => m.toLowerCase().replace(/\s*(?:–|to)\s*/g, '-').replace(/\s+/g, ' ');
+  const counts = (text) => (String(text).match(COUNT_RE) || []).map(norm);
+
+  const everyRow = [...Object.values(PRODUCT_ROWS), ...Object.values(ISSUE_ROWS)];
+  const rowCounts = new Set(everyRow.flatMap((row) => [
+    row.visibleChange, row.catalogQuote, ...(row.limits || []),
+    ...Object.values(row.windows || {}).flatMap((w) => [w && w.labelQuote, w && w.catalogQuote]),
+  ]).flatMap(counts));
+
+  const ALL_PROMPTS = {
+    CURATED_REFERENCE: prompt.CURATED_REFERENCE,
+    FALSE_PRECISION_RULE: prompt.FALSE_PRECISION_RULE,
+    DIAGNOSIS_SYSTEM_PROMPT: prompt.DIAGNOSIS_SYSTEM_PROMPT,
+    NARRATIVE_SYSTEM_PROMPT: prompt.NARRATIVE_SYSTEM_PROMPT,
+    CHALLENGE_SYSTEM_PROMPT: prompt.CHALLENGE_SYSTEM_PROMPT,
+    PERCEPTION_PROMPT: prompt.PERCEPTION_PROMPT,
+  };
+
+  test('the block is in the curated reference, exactly as generated', () => {
+    expect(prompt.RESULT_TIMING_BLOCK).toBe(prompt.buildResultTimingBlock());
+    expect(prompt.CURATED_REFERENCE).toContain(prompt.RESULT_TIMING_BLOCK);
+    expect(prompt.DIAGNOSIS_SYSTEM_PROMPT).toContain(prompt.RESULT_TIMING_BLOCK);
+  });
+
+  test('only rows with a label- or catalog-sourced window appear, in their approved words', () => {
+    const lines = prompt.RESULT_TIMING_BLOCK.split('\n').filter((l) => l.startsWith('- ') && !l.startsWith('- Anything'));
+    const sourced = Object.values(ISSUE_ROWS).filter((row) => row.approved
+      && Object.values(row.windows).some((w) => w && (w.source === 'catalog' || w.source === 'label')));
+    expect(lines.length).toBe(sourced.length);
+    expect(sourced.length).toBeGreaterThan(0);
+    for (const row of sourced) expect(prompt.RESULT_TIMING_BLOCK).toContain(row.visibleChange);
+    // A proposed-only row (chinch, seasonal dip) never reaches the prompt.
+    expect(prompt.RESULT_TIMING_BLOCK).not.toContain(ISSUE_ROWS.chinch.visibleChange);
+    expect(prompt.RESULT_TIMING_BLOCK).not.toContain(ISSUE_ROWS.seasonal_dip.visibleChange);
+  });
+
+  test.each(Object.keys(ALL_PROMPTS))('%s carries no day/week/month count that no row carries', (name) => {
+    const stray = counts(ALL_PROMPTS[name]).filter((c) => !rowCounts.has(c));
+    expect(stray).toEqual([]);
+  });
+
+  test('the old hand-written weed, color and disease timing lines are gone', () => {
+    expect(prompt.CURATED_REFERENCE).not.toMatch(/10-14 days/);
+    expect(prompt.CURATED_REFERENCE).not.toMatch(/Weeds: visible response/);
+  });
+
+  test('the check bites: a prompt with an unsourced count is caught', () => {
+    const tampered = `${prompt.CURATED_REFERENCE}\n- Weeds: visible response ~10-14 days.`;
+    expect(counts(tampered).filter((c) => !rowCounts.has(c))).toEqual(['10-14 days']);
+  });
+
+  test('a row with only a proposed window is left out of a generated block', () => {
+    const block = prompt.buildResultTimingBlock({
+      a: { approved: true, appliesTo: 'a thing', visibleChange: 'Shows in 5 days.', windows: { first: { source: 'proposed' } } },
+      b: { approved: true, appliesTo: 'other thing', visibleChange: 'Shows in 3 weeks.', windows: { full: { source: 'catalog' } } },
+    });
+    expect(block).toContain('3 weeks');
+    expect(block).not.toContain('5 days');
   });
 });

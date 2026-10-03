@@ -74,7 +74,7 @@ function crossSeasonNote(dateA, dateB) {
   const b = seasonOfDate(dateB);
   if (!a || !b || a === b) return null;
   if (isCoolSeason(a) || isCoolSeason(b)) {
-    return 'Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months, then greens back up as it warms.';
+    return 'Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months, and color often returns as nights warm.';
   }
   return 'These visits fall in different parts of the growing season, so some change is expected.';
 }
@@ -83,7 +83,7 @@ function crossSeasonNote(dateA, dateB) {
 function crossSeasonNoteFromSeasons(seasonA, seasonB) {
   if (!seasonA || !seasonB || seasonA === seasonB) return null;
   if (isCoolSeason(seasonA) || isCoolSeason(seasonB)) {
-    return 'Most of the change across these visits is seasonal — color naturally dips in the cooler months and recovers as it warms.';
+    return 'Most of the change across these visits is seasonal — color naturally dips in the cooler months and often returns as nights warm.';
   }
   return null;
 }

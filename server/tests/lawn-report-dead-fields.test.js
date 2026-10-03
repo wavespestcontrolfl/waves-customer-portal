@@ -96,3 +96,20 @@ describe('lawn narrative — dead model outputs removed', () => {
     expect(merged.snapshot.statusHeadline).toBe('A steady lawn with one spot to watch');
   });
 });
+
+describe('lawn report seasonal-dip card — P16 routes the approved row sentence', () => {
+  const { ISSUE_ROWS } = require('../config/lawn-expectations');
+  test('a seasonally muted color card prints the seasonal-dip row, with no hand-written regrowth promise', () => {
+    const v2 = buildLawnReportV2({
+      lawnAssessment: assessment({
+        assessmentDate: '2026-01-15',
+        scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 60, stressDamage: 80, fungusControl: 95, overallScore: 70, season: 'dormant' },
+      }),
+    });
+    const color = v2.diagnosis.find((c) => c.key === 'color_vigor');
+    expect(color.seasonal).toBe(true);
+    expect(color.customerExplanation).toBe(ISSUE_ROWS.seasonal_dip.visibleChange);
+    expect(color.explanation).toBe(ISSUE_ROWS.seasonal_dip.visibleChange);
+    expect(color.customerExplanation).not.toMatch(/should green back up/i);
+  });
+});

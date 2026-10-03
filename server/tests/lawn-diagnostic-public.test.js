@@ -262,6 +262,32 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(report.confidence).toBe('low');
   });
 
+  test('a stored weed or insect line with a day or week count is swapped for the current line at egress (P16)', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Weed pressure',
+          confidence: 'moderate',
+          findings: [
+            { name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' },
+            { name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' },
+          ],
+        },
+        expectations: {
+          weeds: 'Visible weed response often takes 10-14 days and may need follow-up depending on weed type.',
+          insects: 'The key sign is whether the damaged edge stops expanding over the next week.',
+          fungus: 'Disease treatments are aimed at stopping spread first.',
+        },
+        watering: {},
+        customer_summary: 'An area worth keeping an eye on.',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(report.expectations.weeds).toBeTruthy();
+    expect(report.expectations.insects).toBeTruthy();
+    expect(`${report.expectations.weeds} ${report.expectations.insects}`).not.toMatch(/\d|days?|weeks?/i);
+  });
+
   test('cause-specific expectations are suppressed below moderate confidence at egress', () => {
     const diag = sentDiagnostic({
       report_contract: JSON.stringify({

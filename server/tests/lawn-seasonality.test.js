@@ -66,6 +66,10 @@ describe('lawn-seasonality', () => {
     test('summer → winter flags a seasonal note', () => {
       expect(crossSeasonNote('2026-07-01', '2026-01-10')).toMatch(/seasonal/i);
     });
+    test('promises no regrowth or recovery (P16: no row supports a cross-season result)', () => {
+      expect(crossSeasonNote('2026-07-01', '2026-01-10')).not.toMatch(/greens back up|recover|as it warms/i);
+      expect(crossSeasonNoteFromSeasons('peak', 'dormant')).not.toMatch(/greens back up|recover|as it warms/i);
+    });
     test('same season → no note', () => {
       expect(crossSeasonNote('2026-06-01', '2026-07-01')).toBeNull();
     });

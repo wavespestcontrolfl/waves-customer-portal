@@ -84,7 +84,7 @@ const COPY = {
       heading: 'we came back and took care of it!',
       result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.',
       completedFallback: 'Reported problem areas were re-treated today.',
-      expectation: 'Lawn treatments take time to show — weeds and disease can take two to three weeks to respond after an application. Contact us if the problem areas are not improving after three weeks.',
+      expectation: 'Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving.',
     },
     inspection_only: {
       heading: 'we came back to check on it!',

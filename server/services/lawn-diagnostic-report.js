@@ -1,3 +1,5 @@
+const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+
 const FLAG_TYPES = new Set([
   'untreated_condition',
   'unsupported_application',
@@ -485,6 +487,20 @@ function runQaSafetyCheck({ products = [], findings = [], compliance = {}, water
   return flags;
 }
 
+const WEED_ROW = PRODUCT_ROWS.herbicide_broadleaf;
+const WEEDS_EXPECTATION = `${WEED_ROW.visibleChange} ${WEED_ROW.secondApp.line}`;
+const INSECTS_EXPECTATION = 'The key sign is whether the damaged edge stops expanding.';
+
+// Reports stored before the owner's 2026-10-03 timing ruling still carry the
+// hand-written "10-14 days" / "over the next week" lines. At egress a stored
+// weed or insect line that names a day, week or month count is swapped for the
+// current line; every other stored line passes through untouched.
+const STORED_TIMING_RE = /\d\s*(?:-|–|to)?\s*\d*\s*(?:days?|weeks?|months?)\b|\bnext week\b/i;
+function expectationWithoutStaleTiming(key, text) {
+  const fixed = { weeds: WEEDS_EXPECTATION, insects: INSECTS_EXPECTATION }[key];
+  return fixed && STORED_TIMING_RE.test(String(text || '')) ? fixed : text;
+}
+
 function buildExpectations(findings = []) {
   // Cause-specific expectations (disease/insect/weed) may only be published for findings
   // that clear the v0.4 naming gate (moderate+). Low/unknown findings stay symptom-only,
@@ -495,9 +511,12 @@ function buildExpectations(findings = []) {
     .map((finding) => normalizeKey(finding.name))
     .join(' ');
   return {
-    weeds: names.includes('weed') ? 'Visible weed response often takes 10-14 days and may need follow-up depending on weed type.' : null,
+    // Weed response timing: the owner-approved selective-weed-control row's
+    // sentences (no day count; no label or turf source gives one, owner
+    // 2026-10-03), never a hand-written number.
+    weeds: names.includes('weed') ? WEEDS_EXPECTATION : null,
     fungus: names.includes('fung') || names.includes('large_patch') ? 'Disease treatments are aimed at stopping spread first; browned turf must regrow over time.' : null,
-    insects: names.includes('chinch') || names.includes('insect') ? 'The key sign is whether the damaged edge stops expanding over the next week.' : null,
+    insects: names.includes('chinch') || names.includes('insect') ? INSECTS_EXPECTATION : null,
     turf_recovery: 'Thin or brown turf recovers through new growth, not instant green-up.',
   };
 }
@@ -1163,6 +1182,7 @@ function buildDiagnosticReportContract(input = {}) {
 
 module.exports = {
   assessInputSufficiency,
+  expectationWithoutStaleTiming,
   buildDiagnosticReportContract,
   buildDiagnosis,
   buildReconciliationFlags,

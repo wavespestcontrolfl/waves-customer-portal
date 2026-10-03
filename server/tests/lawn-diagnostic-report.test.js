@@ -915,6 +915,20 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(modFungus.expectations.fungus).toMatch(/disease treatments/i);
   });
 
+  test('weed and insect expectations state no day or week count (P16, owner 2026-10-03)', () => {
+    const weeds = buildDiagnosticReportContract({
+      findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }],
+    });
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    expect(weeds.expectations.weeds).toContain(PRODUCT_ROWS.herbicide_broadleaf.visibleChange);
+    expect(weeds.expectations.weeds).not.toMatch(/\d|days?|weeks?/i);
+    const insects = buildDiagnosticReportContract({
+      findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }],
+    });
+    expect(insects.expectations.insects).toBeTruthy();
+    expect(insects.expectations.insects).not.toMatch(/\d|days?|weeks?|next week/i);
+  });
+
   test('lowerConfidence returns the more conservative value', () => {
     expect(lowerConfidence('high', 'low')).toBe('low');
     expect(lowerConfidence('low', 'high')).toBe('low');
