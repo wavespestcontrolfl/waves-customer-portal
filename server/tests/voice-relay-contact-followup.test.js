@@ -13,6 +13,9 @@ const { alertOfficeContactFollowUp } = require('../services/voice-agent/relay-al
 function primeCustomer(row) {
   db.mockImplementation(() => ({ where: () => ({ first: async () => row }) }));
 }
+// The bell is written inside one transaction with the ownership check.
+const TRX = jest.fn();
+db.transaction = jest.fn(async (fn) => fn(TRX));
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -57,6 +60,22 @@ test('a long name still fits the headline, and a missing name or summary still r
   await expect(call({ summary: '' })).resolves.toBe(true);
   expect(notifyAdmin.mock.calls[1][1]).toBe('Comms — follow up with a contact on a customer account');
   expect(notifyAdmin.mock.calls[1][2]).toMatch(/“asked for a follow-up”$/);
+});
+
+test('the write re-proves session ownership under the call row lock, in the bell\'s own transaction', async () => {
+  const relayContext = require('../services/voice-agent/relay-context');
+  const fence = jest.spyOn(relayContext, 'claimOwnedElsewhere');
+  fence.mockResolvedValueOnce(false);
+  await expect(call({ sessionKey: 'nonce-1' })).resolves.toBe(true);
+  expect(fence).toHaveBeenCalledWith(TRX, 'CA-contact-1', 'nonce-1');
+  expect(notifyAdmin.mock.calls[0][3].trx).toBe(TRX);
+
+  // Another socket owns the call now: nothing is written, and the caller is told so.
+  notifyAdmin.mockClear();
+  fence.mockResolvedValueOnce(true);
+  await expect(call({ sessionKey: 'nonce-old' })).resolves.toBe('superseded');
+  expect(notifyAdmin).not.toHaveBeenCalled();
+  fence.mockRestore();
 });
 
 test('not raised (so the caller falls back to the lead path) when the write fails, is suppressed, or ids are missing', async () => {

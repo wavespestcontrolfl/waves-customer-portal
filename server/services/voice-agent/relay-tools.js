@@ -1309,6 +1309,9 @@ async function executeTool(name, input = {}, ctx = {}) {
           callbackPhone: followUp.callbackPhone,
           summary: extracted.call_summary || extracted.requested_service || '',
           callSid: ctx.callSid || null,
+          // The claim-owner nonce: the bell write re-proves ownership under the
+          // call row's lock, like the lead capture below.
+          sessionKey: ctx.sessionKey || null,
           // ⭐ EVERYTHING THE LEAD ROW WOULD HAVE HELD rides the bell, since
           // the bell is this call's only artifact: who they said they are and
           // how to reach them, what they want and when, and HOW they asked to
@@ -1330,6 +1333,10 @@ async function executeTool(name, input = {}, ctx = {}) {
               : null,
           ].filter(Boolean),
         });
+        if (belled === 'superseded') {
+          return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+            + 'tools and do not answer account questions; say goodbye briefly.';
+        }
         if (belled) {
           if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
           if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);

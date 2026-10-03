@@ -640,16 +640,29 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
  * 2026-10-03: ring ONE office bell tied to that customer — never a new lead
  * under the caller's number, and nothing on the customer's record changes
  * (the caller is recognised, not verified). Returns true only when a bell row
- * exists; never throws.
+ * exists, 'superseded' when another socket owns the call now (nothing was
+ * written), false otherwise; never throws.
+ *
+ * ⭐ FENCED LIKE EVERY OTHER RELAY WRITE. The bell is rewritten in place by a
+ * later capture, so a stalled capture from a superseded socket must not land
+ * over the replacement's corrected number or restriction: ownership is
+ * re-proven under the call row's lock in the SAME transaction as the write
+ * (claimOwnedElsewhere — the lead, booking and re-service writers' fence).
  */
-async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [] }) {
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null }) {
   if (!customerId || !callSid) return false;
   try {
     const db = require('../../models/db');
     const { raiseAdminAlert, firstSentence } = require('../admin-alert-compose');
     const { lookupCustomerName, fitAction, redactedWords, whyWithQuote } = require('../admin-alert-names');
     const name = await lookupCustomerName(db, customerId);
-    const result = await raiseAdminAlert('alert', {
+    let superseded = false;
+    const result = await db.transaction(async (trx) => {
+      if (sessionKey && await require('./relay-context').claimOwnedElsewhere(trx, callSid, sessionKey)) {
+        superseded = true;
+        return null;
+      }
+      return raiseAdminAlert('alert', {
       area: 'Comms',
       action: name
         ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
@@ -668,13 +681,19 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       // place without ringing again.
       refreshOnDedupe: true,
       ringOnRefresh: () => false,
+      trx,
       // The number to reach them on, the whole summary, and anything they
       // asked about HOW to be contacted (a channel, a do-not-contact request)
       // — read from "Show full text".
       detail: [`Their number: ${callbackPhone || 'the number this call came from'}.`, String(summary || '').trim(), ...notes]
         .filter(Boolean).join(' '),
       metadata: { customerId, callSid, callbackPhone: callbackPhone || null, source: 'voice_relay_contact_followup' },
+      });
     });
+    if (superseded) {
+      logger.warn(`[voice-relay] contact follow-up bell refused — session superseded callSid=${callSid}`);
+      return 'superseded';
+    }
     return Boolean(result?.id) && !result.suppressed;
   } catch (err) {
     logger.error(`[voice-relay] contact follow-up bell failed callSid=${callSid}: ${err.message}`);

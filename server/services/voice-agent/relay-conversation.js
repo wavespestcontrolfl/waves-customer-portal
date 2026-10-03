@@ -4423,7 +4423,15 @@ class RelayConversation {
       // opens with boilerplate a person would read first).
       summary: callerTurns.length ? scrubForStorage(callerTurns.join(' | ')).slice(0, 600) : 'Hung up before saying what they needed',
       callSid: this.callSid,
+      // Fence key only for a CLAIMED session (see toolCtx.sessionKey).
+      sessionKey: this.sessionKey,
     }).then((belled) => {
+      // A superseded socket's floor latches nothing and writes nothing — the
+      // replacement owns this call's artifact (never a fallback lead here).
+      if (belled === 'superseded') {
+        logger.error(`[voice-relay] capture-floor superseded callSid=${this.callSid} — nothing latched`);
+        return true;
+      }
       if (!belled) return false;
       this.leadCaptured = true;
       this._noLeadCreated = true;

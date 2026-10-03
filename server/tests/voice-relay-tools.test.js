@@ -311,6 +311,16 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(createLeadFromExtraction).toHaveBeenCalled();
   });
 
+  test('a superseded session saves nothing: no bell latched, no fallback lead, and the model is told', async () => {
+    bell.mockResolvedValue('superseded');
+    const ctx = recognised({ sessionKey: 'nonce-old' });
+    const out = await executeTool('capture_lead', { call_summary: 'Late write from an old socket.' }, ctx);
+    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ sessionKey: 'nonce-old' }));
+    expect(out).toMatch(/superseded by a reconnect — NOTHING was saved/);
+    expect(ctx.markCaptured).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
   test('a sandbox call still writes nothing — no bell', async () => {
     await executeTool('capture_lead', { call_summary: 'test' }, recognised({ sandbox: true }));
     expect(bell).not.toHaveBeenCalled();

@@ -324,6 +324,16 @@ describe('RelayConversation — explicit end after capture', () => {
       await fallback._runCaptureFloor('hangup');
       expect(bell).toHaveBeenCalledTimes(1);
       expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
+
+      // A superseded socket's floor writes nothing and latches nothing.
+      createLeadFromExtraction.mockClear();
+      bell.mockResolvedValue('superseded');
+      const stale = new RelayConversation({ callSid: 'CA-floor-stale', from: '+19415550133', send: jest.fn() });
+      stale._callerVerified = true;
+      stale._callerContext = { customer: { id: 'c-1111', first_name: 'Pat' }, tier: 'redacted' };
+      await stale._runCaptureFloor('hangup');
+      expect(createLeadFromExtraction).not.toHaveBeenCalled();
+      expect(stale.leadCaptured).toBe(false);
       bell.mockRestore();
     });
 
