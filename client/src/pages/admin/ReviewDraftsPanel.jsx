@@ -78,7 +78,7 @@ function DraftCard({ d }) {
       )}
       {d.reason === LONG_LINK && (
         <p className="text-ui-body text-zinc-700">
-          The review link could not be shortened and the draft would not fit with the full link, so this step sent the fixed text.
+          The review link could not be shortened and the draft would not fit with the full link, so this step uses the fixed text.
         </p>
       )}
       {d.outcome === "fallback" && d.reason !== LONG_LINK && (
@@ -119,7 +119,7 @@ function DraftCard({ d }) {
         {d.outcome === "held"
           ? " · not sent"
           : d.replacedByFixedText
-            ? " · not sent, the fixed text went instead"
+            ? " · not sent, replaced by the fixed text"
             : d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet"}
       </p>
     </Card>

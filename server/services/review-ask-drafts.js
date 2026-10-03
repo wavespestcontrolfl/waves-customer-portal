@@ -184,8 +184,9 @@ async function listRecent({ days = 14, database = db } = {}) {
   const drafts = [];
   for (const r of rows) {
     const evidence = parseJson(r.evidence) || {};
-    // A draft whose request went out as the fixed text instead (the long-link
-    // row says so): it will never send, so the page must not say "not yet".
+    // A draft whose request was switched to the fixed text (the long-link row
+    // names it): the draft will never send, so the page must not say "not
+    // yet". Whether the fixed text went out is the long-link row's own sentAt.
     const replaced = r.outcome === 'drafted' && requestsInWindow(r, requests, rows).some((q) => namedIds.includes(q.id));
     drafts.push({
       id: r.id,

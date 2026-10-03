@@ -68,15 +68,18 @@ describe("Tech-voice review texts panel", () => {
     vi.stubGlobal("fetch", vi.fn(async () => response({
       days: 14,
       drafts: [
-        { id: 6, customerName: "Lena K", step: 0, channel: "sms", outcome: "fallback", reason: "long_link", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T15:02:00Z", sentAt: "2026-10-02T15:03:00Z" },
+        // the switch to the fixed text is recorded before the send: this one has not gone out
+        { id: 6, customerName: "Lena K", step: 0, channel: "sms", outcome: "fallback", reason: "long_link", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T15:02:00Z", sentAt: null },
         { id: 5, customerName: "Lena K", step: 0, channel: "sms", outcome: "drafted", reason: null, body: "A long draft {review_url}", sentences: [], repeat: null, createdAt: "2026-10-02T15:00:00Z", sentAt: null, replacedByFixedText: true },
       ],
       paymentHolds: [],
     })));
     render(<ReviewDraftsPanel />);
-    expect(await screen.findByText(/would not fit with the full link, so this step sent the fixed text/)).toBeInTheDocument();
-    expect(screen.getByText(/not sent, the fixed text went instead/)).toBeInTheDocument();
-    expect(screen.queryByText(/not sent yet/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/would not fit with the full link, so this step uses the fixed text/)).toBeInTheDocument();
+    // the draft is never claimed delivered, and the fixed text only once its own request sent
+    expect(screen.getByText(/not sent, replaced by the fixed text/)).toBeInTheDocument();
+    expect(screen.getAllByText(/not sent yet/)).toHaveLength(1);
+    expect(screen.queryByText(/· sent /)).not.toBeInTheDocument();
     expect(screen.queryByText(/No draft passed/)).not.toBeInTheDocument();
   });
 
