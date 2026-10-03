@@ -126,7 +126,7 @@ export default function useFastCompleteSubmit({
 
   const clearStored = useCallback(async (scope, body) => {
     if (scope.serviceId && scope.operatorId && body) {
-      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, body);
+      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, persistedBodyRef.current || body);
     }
     return true;
   }, []);
@@ -155,7 +155,9 @@ export default function useFastCompleteSubmit({
       persistedBodyRef.current = body;
       return 'send';
     }
-    if (observed.available && (observedBody || persistedBodyRef.current)) {
+    const unchanged = observedBody && persistedBodyRef.current
+      && JSON.stringify(observedBody) === JSON.stringify(persistedBodyRef.current);
+    if (observed.available && !unchanged && (observedBody || persistedBodyRef.current)) {
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       storageWarningSeenRef.current = false;
@@ -178,7 +180,7 @@ export default function useFastCompleteSubmit({
     const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body) : true;
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
-      rejectedBodyRef.current = body;
+      rejectedBodyRef.current = persistedBodyRef.current;
     }
     pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
     pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
@@ -282,7 +284,7 @@ export default function useFastCompleteSubmit({
       if (!removed && persistedBodyRef.current) {
         const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
         if (!sameScope(scopeRef.current, scope)) return;
-        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(body)) {
+        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(persistedBodyRef.current || body)) {
           setError('Could not discard the saved completion on this device. Keep it open and try Discard again.');
           return;
         }
