@@ -29,6 +29,7 @@
  * loop) is a different surface and stays in the agent files.
  */
 
+const crypto = require('crypto');
 const logger = require('../logger');
 const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
@@ -47,6 +48,13 @@ const TYPESAFE_SYSTEMONE_API = 'https://api.typesafe.ai/v1/systemone';
 const TYPESAFE_PINNED_MODEL_RE = /^jev-\d+\.\d+\.\d+$/;
 // Cloudflare Workers AI REST: POST <base>/<account id>/ai/run/@cf/cloudflare/<model>.
 const WORKERS_AI_ACCOUNTS_API = 'https://api.cloudflare.com/client/v4/accounts';
+// Clef takes up to four embedded images beside `state` and `questions`; a
+// request over ~150 KB is refused by the provider (HTTP 413, measured
+// 2026-10-02). The budget counts the data-URL strings, i.e. what the JSON body
+// carries. typed-decisions/image-budget.js fits photos under the same numbers.
+const CLEF_MAX_IMAGES = 4;
+const CLEF_IMAGES_BUDGET_BYTES = 150 * 1024;
+const CLEF_DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})$/i;
 // A Workers AI decision model is one the catalog registers as Cloudflare's
 // with the 'decision' cap (config/models.js is the one place ids live).
 function workersAiDecisionModel(model) {
@@ -488,6 +496,30 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
   }
 }
 
+// What callWorkersAIDecision does with `images`: `present` (any to send),
+// `code` (refusal reason, null when sendable) and `note` (the ledger stand-in:
+// a count and the sha256 of each image, never the bytes).
+function clefImagesPlan(images) {
+  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, code: null, note: null };
+  const list = Array.isArray(images) ? images : [];
+  const hashes = [];
+  let total = 0;
+  let valid = Array.isArray(images);
+  for (const image of list) {
+    const match = typeof image === 'string' ? CLEF_DATA_URL_RE.exec(image) : null;
+    if (!match) { valid = false; break; }
+    total += image.length;
+    hashes.push(crypto.createHash('sha256').update(Buffer.from(match[1], 'base64')).digest('hex'));
+  }
+  const tooMany = list.length > CLEF_MAX_IMAGES || total > CLEF_IMAGES_BUDGET_BYTES;
+  const code = valid ? (tooMany ? 'cloudflare_images_too_large' : null) : 'cloudflare_bad_images';
+  return { present: true, code, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };
+}
+// The ledger text for the call (state, then the image stand-in) and the wire
+// body (`images` only when there are some, so an image-free body is unchanged).
+const clefLedgerText = (stateText, plan) => (plan.note ? `${stateText ?? ''}\n${plan.note}` : stateText);
+const clefBody = (plan, images, state, questions) => (plan.present ? { images, state, questions } : { state, questions });
+
 // ── Cloudflare Clef (typed decisions on Workers AI) ───────────────────
 /**
  * Clef / Clef-flash: decision-only models served by Workers AI, taking the
@@ -500,25 +532,33 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
  * `cloudflare_unknown_model`, `cloudflare_<status>`, `cloudflare_unsuccessful`,
  * `cloudflare_timeout`, `error`, `empty_json`); on success `json` is the
  * `answers` map and `servedModel` is what the provider reports. Never retries.
+ * `images` (optional, <= 4 data-URL strings) ride the body as
+ * `{ images, state, questions }`; with none the body is `{ state, questions }`
+ * exactly. More than 4, a non-data-URL entry (`cloudflare_bad_images`) or a
+ * total over 150 KB (`cloudflare_images_too_large`) fails the leg BEFORE any
+ * network call. The ledger text never holds image bytes: it carries
+ * `[images: n, sha256 <hex>,...]` (sha256 of each decoded image) after the state.
  * Credentials: CF_WORKERS_AI_TOKEN (a least-privilege "Workers AI - Read"
  * token) or, when unset, the existing CF_API_TOKEN; plus CF_ACCOUNT_ID.
  */
-async function callWorkersAIDecision({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
+async function callWorkersAIDecision({ model, state, questions, images, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
   let stateText;
   try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
-  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  const plan = clefImagesPlan(images);
+  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: clefLedgerText(stateText, plan) };
   const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN;
   const account = process.env.CF_ACCOUNT_ID;
   // Like callTypeSafe, a missing credential or an unknown model files a failed
   // ledger row: this lane is dark, so the ledger is where a dead key shows.
   if (!token || !account) return failedLeg(base, { latencyMs: 0 }, 'no_key');
   if (!workersAiDecisionModel(model)) return failedLeg(base, { latencyMs: 0 }, 'cloudflare_unknown_model');
+  if (plan.code) return failedLeg(base, { latencyMs: 0 }, plan.code);
   const t0 = nowMs();
   try {
     const resp = await fetch(`${WORKERS_AI_ACCOUNTS_API}/${encodeURIComponent(account)}/ai/run/@cf/cloudflare/${model}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ state, questions }),
+      body: JSON.stringify(clefBody(plan, images, state, questions)),
       ...abortAfter(timeoutMs),
     });
     if (!resp.ok) {
@@ -775,6 +815,8 @@ async function dispatch(route, payload = {}) {
     // no TEXT_POLICIES entry may carry this provider.
     case PROVIDER.TYPESAFE:
       if (!args.questions || typeof args.questions !== 'object') return { ok: false, reason: 'typesafe_requires_questions' };
+      // Images are a Clef-only input: Jev never receives them.
+      if (Array.isArray(args.images) && args.images.length) return { ok: false, reason: 'typesafe_no_images' };
       return callTypeSafe(args);
     // Same rule for the Cloudflare decision models: questions or nothing, and
     // never a TEXT_POLICIES leg.
@@ -967,6 +1009,8 @@ module.exports = {
   TYPESAFE_SYSTEMONE_API,
   TYPESAFE_PINNED_MODEL_RE,
   WORKERS_AI_ACCOUNTS_API,
+  CLEF_MAX_IMAGES,
+  CLEF_IMAGES_BUDGET_BYTES,
   workersAiDecisionModel,
   geminiUrl,
 };

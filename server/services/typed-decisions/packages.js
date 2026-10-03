@@ -11,6 +11,9 @@
  * tests/typed-decisions-packages.test.js pins each id to a hash in
  * fixtures/typed-decisions/package-hashes.json, so an in-place edit fails CI.
  *
+ * An optional `imageSlots` (a positive integer) lets a package take that many
+ * photos on the Clef provider only (askPackage `{ images }`); none declares it yet.
+ *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
  * question answers a 0..1 probability that the statement is true.
  */
@@ -140,9 +143,14 @@ function canonical(value) {
 }
 
 // sha256 over the parts that define the decision: questions + stateShape +
-// thresholds. The description is prose and may be edited without a new version.
+// thresholds (+ imageSlots, only for a package that declares it: how many
+// photos it is shown is part of the decision, and a package without it hashes
+// exactly as it always did). The description is prose and may be edited
+// without a new version.
 function packageHash(pkg) {
-  const body = canonical({ questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds });
+  const parts = { questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds };
+  if (pkg.imageSlots !== undefined) parts.imageSlots = pkg.imageSlots;
+  const body = canonical(parts);
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
