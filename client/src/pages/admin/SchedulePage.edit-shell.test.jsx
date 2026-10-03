@@ -219,8 +219,9 @@ it('moving a combo saves the other changes on the current slot first, then moves
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(2));
   expect(writeUrls()).toEqual([PUT, MOVE]);
-  // The edit moves nothing, texts nobody and acks nothing.
-  expect(body(0)).toMatchObject({ scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00' });
+  // The edit carries no date, window or technician at all: it moves
+  // nothing, reassigns nothing, texts nobody and acks nothing.
+  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId']) expect(body(0)).not.toHaveProperty(key);
   expect(body(0).notifyCustomer).toBeUndefined();
   expect(body(0).seriesAck).toBeUndefined();
   expect(body(1)).toMatchObject({
@@ -283,14 +284,15 @@ it('after a refused move, a changed detail is saved again before the move', asyn
   expect(writeUrls()).toEqual([PUT, MOVE, PUT, MOVE]);
 });
 
-it('a partly finished whole-stop move is reported', async () => {
+it('a partly finished whole-stop move is reported as such, never as "not moved"', async () => {
   fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
     ? { ok: true, json: async () => ({ needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop finished moving: fixture repair text.' } }) }
     : okJson(url)));
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('Only part of this stop finished moving: fixture repair text.');
+  expect(await screen.findByRole('alert')).toHaveTextContent('The other changes were saved. Save failed: Only part of this stop finished moving: fixture repair text.');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('the stop was not moved');
 });
 
 it('a recurring combo moved together moves this visit only: no "later visits" line, no series ack, no recurrence change', async () => {
@@ -317,8 +319,9 @@ it('a recurring combo moved together moves this visit only: no "later visits" li
     expect(sent.seriesAck).toBeUndefined();
     expect(sent.seriesAckIds).toBeUndefined();
   }
-  // The edit runs on the date the plan is anchored to, before the move.
-  expect(body(0).scheduledDate).toBe('2035-01-02');
+  // The edit runs before the move and sends no date: the plan stays
+  // anchored to the stored one.
+  expect(body(0)).not.toHaveProperty('scheduledDate');
 });
 
 it('a separation that committed is disclosed when the edit after it fails, and a retry never splits twice', async () => {
@@ -345,6 +348,8 @@ it('the move choice is frozen while a save is in flight', async () => {
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(screen.getByLabelText('Separate: move only this service')).toBeDisabled();
   expect(screen.getByLabelText('Move all of them together')).toBeDisabled();
+  // The whole form is frozen for the save, not only the choice.
+  expect(screen.getByTestId('edit-appointment-body')).toHaveAttribute('inert');
   await act(async () => release());
   await waitFor(() => expect(writes()).toHaveLength(2));
   expect(writeUrls()).toEqual([PUT, MOVE]);
@@ -372,7 +377,7 @@ it('a technician change rides the whole-stop move; the edit keeps the technician
   fireEvent.change(techSelect, { target: { value: 'tech-2' } });
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(body(0).technicianId).toBe('tech-1');
+  expect(body(0)).not.toHaveProperty('technicianId');
   expect(body(0).assignmentScope).toBeUndefined();
   expect(body(1).technicianId).toBe('tech-2');
 });
@@ -421,4 +426,85 @@ it('a stop with one live service left (the other cancelled) is an ordinary visit
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(writeUrls()).toEqual([PUT]);
+});
+
+// ---- GitHub Codex round 4 on #5759 ----
+it('the form is not frozen when no save is in flight', () => {
+  openCombo();
+  expect(screen.getByTestId('edit-appointment-body')).not.toHaveAttribute('inert');
+});
+
+it('an edit that still lands while the stop is moving is disclosed, never dropped silently', async () => {
+  let release;
+  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
+    ? new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({}) }); })
+    : okJson(url)));
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  fireEvent.change(dialog.querySelector('textarea'), { target: { value: 'Typed during the move' } });
+  await act(async () => release());
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
+  expect(saveNotice.shown[0]).toContain('The form was changed while the stop was moving. Those last changes were not saved');
+});
+
+it('a split whose response was lost is not repeated into a dead end: the stop is re-read and the edit is saved', async () => {
+  let summaryReads = 0;
+  fetch.mockImplementation(async (url) => {
+    if (String(url).includes('/visit-summary')) {
+      summaryReads += 1;
+      // On open the stop is shared; after the lost split it no longer is.
+      return { ok: true, json: async () => ({ visit: summaryReads === 1 ? combo.visit : null }) };
+    }
+    if (String(url).includes('/split')) return { ok: false, status: 404, json: async () => ({ error: 'row is not a member of this visit' }) };
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  fireEvent.click(await screen.findByLabelText('Separate: move only this service'));
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(writeUrls()).toEqual(['POST /admin/visits/fixture-stop/split', PUT]);
+  expect(body(1).scheduledDate).toBe('2035-01-03');
+});
+
+it('a split refused while the service is still on the stop saves nothing', async () => {
+  fetch.mockImplementation(async (url) => {
+    if (String(url).includes('/visit-summary')) return { ok: true, json: async () => ({ visit: combo.visit }) };
+    if (String(url).includes('/split')) return { ok: false, status: 409, json: async () => ({ error: 'This visit is frozen' }) };
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  fireEvent.click(await screen.findByLabelText('Separate: move only this service'));
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: This visit is frozen');
+  expect(writeUrls()).toEqual(['POST /admin/visits/fixture-stop/split']);
+});
+
+it('a shared stop the form did not know about: the server refusal re-reads the stop and shows the choice', async () => {
+  let summaryReads = 0;
+  let refuse = true;
+  fetch.mockImplementation(async (url, options) => {
+    if (String(url).includes('/visit-summary')) {
+      summaryReads += 1;
+      // The read on open fails; the read after the refusal answers.
+      return summaryReads === 1 ? { ok: false, status: 500, json: async () => ({ error: 'down' }) } : { ok: true, json: async () => ({ visit: combo.visit }) };
+    }
+    if (isPut(url, options) && refuse) {
+      return { ok: false, status: 409, json: async () => ({ error: 'This service is grouped with another at the same stop.', code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' }) };
+    }
+    return okJson(url);
+  });
+  const dialog = openModal(service);
+  setDate(dialog, '2035-01-03');
+  expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.');
+  expect(screen.getByTestId('combo-move-choice')).toBeInTheDocument();
+  refuse = false;
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(3));
+  expect(writeUrls()).toEqual([PUT, PUT, MOVE]);
 });
