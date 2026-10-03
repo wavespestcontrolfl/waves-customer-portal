@@ -50,16 +50,16 @@ async function loadPendingSmsConversations({
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
-  // When the call ended: the stamp /call-status writes on the first terminal
-  // callback, else a callback card's recorded customer leg. Rows from before
-  // that stamp fall back to insert time plus duration, which is early by the
-  // ring time and so only ever leaves a text pending. The pattern has no "?"
-  // and no ":word": db.raw reads either as a binding.
-  const isoStamp = (path) => `CASE WHEN ${path} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
-      THEN CAST(${path} AS timestamptz) END`;
+  // When the call ended: the stamp /call-status writes from Twilio's own
+  // event time. Nothing else is trusted as an end: a callback card's
+  // customer_leg.ended_at is our receipt time, and a late callback would
+  // move it past texts sent after the hangup. Rows without the stamp fall
+  // back to insert time plus duration, which is early by the ring time and
+  // so only ever leaves a text pending. The pattern has no "?" and no
+  // ":word": db.raw reads either as a binding.
   const callEndedAt = `COALESCE(
-    ${isoStamp("spoken.metadata->>'ended_at'")},
-    ${isoStamp("spoken.metadata->'customer_leg'->>'ended_at'")},
+    CASE WHEN spoken.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+      THEN CAST(spoken.metadata->>'ended_at' AS timestamptz) END,
     spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)))`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');

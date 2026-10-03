@@ -241,8 +241,8 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
   test.each([
     ['inbound, stamped by /call-status', { }, (at) => ({ ended_at: at })],
     ['an office click, stamped by /call-status', { direction: 'outbound' }, (at) => ({ ended_at: at })],
-    ['a callback card, its recorded customer leg', { direction: 'outbound', source: 'admin-callback' },
-      (at) => ({ customer_leg: { status: 'completed', duration_seconds: 95, ended_at: at } })],
+    ['a callback card, stamped by /call-status', { direction: 'outbound', source: 'admin-callback' },
+      (at) => ({ ended_at: at, customer_leg: { status: 'completed', duration_seconds: 95, ended_at: '2099-01-01T00:00:00.000Z' } })],
   ])('a call ends at its recorded end, not at insert time plus one leg\'s duration: %s', async (_label, call, metadata) => {
     const callStart = tick;
     // The phone rang for 30 s, then 100 s of talk: the call ended at +130 s.
@@ -250,6 +250,8 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     tick = new Date(callStart.getTime() + 115 * 1000);
     await seed({ body: 'Here is the gate code' });
     tick = callStart;
+    // An unreadable stamp falls back to the early estimate; a callback card's
+    // customer_leg.ended_at (receipt time) is never read as the end.
     await seedCall({ ...call, duration: 100, metadata: metadata('not a time') });
     await expect(pendingCount()).resolves.toEqual(one);
     tick = callStart;
