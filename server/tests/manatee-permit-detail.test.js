@@ -597,6 +597,19 @@ describe('syncPermitDetails', () => {
     expect(b.update.mock.calls[0][0].conditioned_sqft).not.toBeNull();
   });
 
+  test('a base record with ONLY the conditioned sq ft still wins over a fuller revision, which fills its gaps', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const pn = 'BLD9801-1105';
+    const b = stubDb([cand(pn)]);
+    fakeAca({ [pn]: { pages: [
+      recordPage(pn, row('Number of Stories:', '2') + row('Number of Bedrooms:', '4')),
+      recordPage(pn, row('Square Footage (Conditioned)', '2,400')),
+    ] } }, { clock });
+    await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(b.update.mock.calls[0][0]).toMatchObject({ conditioned_sqft: 2400, stories: 2, bedrooms: 4 });
+  });
+
   test('only partial pages anywhere: the best partial is stored', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
     const clock = fakeClock();

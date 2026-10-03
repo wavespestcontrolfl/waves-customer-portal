@@ -274,10 +274,18 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
   // a few) is kept as the best so far while the remaining links are tried.
   let best = null;
   const factCount = (facts) => Object.values(facts).filter((v) => v !== null).length;
+  // `over` wins field by field; its nulls are filled from `under`.
+  const fill = (over, under) => Object.fromEntries(Object.keys(over).map((k) => [k, over[k] ?? under?.[k] ?? null]));
   const settle = (facts) => {
     if (!facts) return false;
-    if (!best || factCount(facts) > factCount(best)) best = facts;
-    return facts.conditioned_sqft !== null;
+    if (facts.conditioned_sqft !== null) {
+      // The record with the conditioned sq ft always wins, whatever a
+      // partial page before it carried; that page only fills its gaps.
+      best = fill(facts, best);
+      return true;
+    }
+    best = !best || factCount(facts) > factCount(best) ? fill(facts, best) : fill(best, facts);
+    return false;
   };
 
   // A single hit redirects straight to the record page (no results list).
