@@ -31,6 +31,7 @@ import {
   seriesMoveSummary,
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
+import { openHoursForDay, formatOpenHour } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -599,7 +600,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, openHours = [] }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -679,6 +680,19 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             style={{ top: selTop, height: selHeight }}
           />
         )}
+        {/* Open hours are drawn, not hit targets: a click or drag lands on
+            the slot rows underneath, which already open New appointment. */}
+        {openHours.map((h) => (
+          <div
+            key={`open-${h}`}
+            aria-hidden
+            className="absolute flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary pointer-events-none"
+            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 12 }}
+          >
+            <span className="u-nums">Open · {formatOpenHour(h)}</span>
+            <span className="font-medium">+ Book</span>
+          </div>
+        ))}
         {showNowLine && <NowLine />}
         {(() => {
           const lanes = computeLanes(services);
@@ -1636,6 +1650,7 @@ export default function TimeGridDay({
                     onToggleSelect={toggleSelection}
                     accent={techAccent(idx)}
                     showNowLine={date === todayIso}
+                    openHours={onCreateSlot ? openHoursForDay(date, byTech[tech.id] || []) : []}
                   />
                 ))}
               </div>

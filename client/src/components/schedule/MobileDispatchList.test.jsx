@@ -260,3 +260,43 @@ describe('MobileDispatchList tie-proximity display order', () => {
     expect(names).toEqual(['First Customer', 'Second Customer']);
   });
 });
+
+describe('MobileDispatchList open hours', () => {
+  it('places a bookable block on each empty hour and pre-fills New appointment', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[SERVICE, { ...SERVICE, id: 'svc-2', windowStart: '10:00', windowEnd: '11:00' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onCreateSlot={onCreateSlot}
+      />,
+    );
+    vi.useRealTimers();
+
+    expect(screen.getByText('· 7 open', { exact: false })).toBeInTheDocument();
+    const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
+    expect(rows.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Book open hour 9–10 AM',
+      'Book open hour 11 AM–12 PM',
+      'Book open hour 12–1 PM',
+      'Book open hour 1–2 PM',
+      'Book open hour 2–3 PM',
+      'Book open hour 3–4 PM',
+      'Book open hour 4–5 PM',
+    ]);
+    // The 9 AM block sits between the 8 AM and 10 AM visits.
+    const nineAm = rows[0];
+    const names = screen.getAllByText('Pat Sample');
+    expect(names[0].compareDocumentPosition(nineAm) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(nineAm.compareDocumentPosition(names[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(nineAm);
+    expect(onCreateSlot).toHaveBeenCalledWith({
+      date: '2026-07-15', windowStart: '09:00', windowEnd: '10:00', techId: 'tech-1',
+    });
+  });
+});

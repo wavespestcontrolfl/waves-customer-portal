@@ -1,0 +1,66 @@
+// Open hours on a schedule day: each on-the-hour 60-minute slot between
+// OPEN_HOURS_START and OPEN_HOURS_END that no live visit touches. Shown as
+// tappable "Open" blocks on the mobile day list and the desktop day grid so
+// the office can see the day's room at a glance (owner ask 2026-10-03).
+// Display only — booking still goes through CreateAppointmentModal and the
+// server's own window and capacity checks.
+
+import { etDateString, etParts } from '../../lib/timezone';
+
+export const OPEN_HOURS_START = 8;
+export const OPEN_HOURS_END = 17;
+
+// A cancelled or skipped visit frees its hour.
+const NOT_OCCUPYING = new Set(['cancelled', 'skipped']);
+
+function parseHHMM(s) {
+  if (!s || typeof s !== 'string') return null;
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+// Minutes [start, end) a visit holds: its booked window, or one hour when
+// the window has no usable end.
+function occupiedRange(svc) {
+  const start = parseHHMM(svc?.windowStart);
+  if (start == null) return null;
+  const end = parseHHMM(svc?.windowEnd);
+  return [start, end != null && end > start ? end : start + 60];
+}
+
+/**
+ * Start hours (24h integers) of the day's open slots. A slot is open when no
+ * occupying visit overlaps it. Past days have none; today drops hours that
+ * have already started (ET).
+ */
+export function openHoursForDay(dateStr, services, { now = new Date() } = {}) {
+  const today = etDateString(now);
+  if (!dateStr || dateStr < today) return [];
+  const { hour, minute } = etParts(now);
+  const nowMin = dateStr === today ? hour * 60 + minute : -1;
+  const ranges = (services || [])
+    .filter((s) => !NOT_OCCUPYING.has(s?.status))
+    .map(occupiedRange)
+    .filter(Boolean);
+  const open = [];
+  for (let h = OPEN_HOURS_START; h < OPEN_HOURS_END; h += 1) {
+    const from = h * 60;
+    if (from < nowMin) continue;
+    if (!ranges.some(([s, e]) => s < from + 60 && e > from)) open.push(h);
+  }
+  return open;
+}
+
+export function hourToHHMM(h) {
+  return `${String(h).padStart(2, '0')}:00`;
+}
+
+// "9–10 AM", "11 AM–12 PM", "12–1 PM".
+export function formatOpenHour(h) {
+  const label = (x) => (x % 12 === 0 ? 12 : x % 12);
+  const ap = (x) => (x < 12 ? 'AM' : 'PM');
+  return ap(h) === ap(h + 1)
+    ? `${label(h)}–${label(h + 1)} ${ap(h)}`
+    : `${label(h)} ${ap(h)}–${label(h + 1)} ${ap(h + 1)}`;
+}

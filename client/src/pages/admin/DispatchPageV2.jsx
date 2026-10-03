@@ -1427,6 +1427,10 @@ export default function DispatchPageV2({
           }}
           onEnRoute={handleEnRoute}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, techId });
+            setShowNewAppt(true);
+          }}
         />
       )}
       {viewMode === "week" && !isMobile && (
@@ -1777,6 +1781,10 @@ export default function DispatchPageV2({
             <MobileDispatchList
               mode="day"
               date={date}
+              onCreateSlot={({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              }}
               services={services}
               rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}

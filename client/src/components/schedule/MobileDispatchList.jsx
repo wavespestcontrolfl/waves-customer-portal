@@ -19,6 +19,7 @@ import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
+import { openHoursForDay, hourToHHMM, formatOpenHour } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -396,8 +397,53 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   );
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+// An empty hour in the day list: tapping it opens New appointment with the
+// day and hour filled in.
+function OpenHourRow({ hour, onBook }) {
+  return (
+    <div className="bg-zinc-50 border-b border-hairline border-zinc-200" style={{ padding: '6px 10px' }}>
+      <button
+        type="button"
+        onClick={onBook}
+        className="flex items-center w-full text-left rounded-xs border border-dashed border-zinc-300 bg-zinc-50 hover:border-zinc-900 hover:bg-white active:bg-white u-focus-ring"
+        style={{ height: 44, padding: '0 12px', gap: 12 }}
+        aria-label={`Book open hour ${formatOpenHour(hour)}`}
+      >
+        <span className="u-nums font-medium text-zinc-900" style={{ fontSize: 14, minWidth: 92 }}>
+          {formatOpenHour(hour)}
+        </span>
+        <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
+        <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 13 }}>+ Book</span>
+      </button>
+    </div>
+  );
+}
+
+// Appointments in list order with each open hour placed before the first
+// visit that starts after it.
+function withOpenHours(sorted, openHours) {
+  const rows = [];
+  const pending = [...openHours];
+  sorted.forEach((svc) => {
+    const start = parseHHMM(svc.windowStart);
+    while (pending.length && start != null && pending[0] * 60 < start) {
+      rows.push({ hour: pending.shift() });
+    }
+    rows.push({ svc });
+  });
+  pending.forEach((hour) => rows.push({ hour }));
+  return rows;
+}
+
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
+  const openHours = useMemo(
+    () => (onCreateSlot ? openHoursForDay(dateStr, services || []) : []),
+    [onCreateSlot, dateStr, services],
+  );
+  const rows = useMemo(() => withOpenHours(sorted, openHours), [sorted, openHours]);
+  // One tech on the roster: the open hour is theirs.
+  const soleTechId = (technicians || []).length === 1 ? technicians[0].id : undefined;
   const today = isETToday(dateStr);
   return (
     <section>
@@ -432,9 +478,12 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         </span>
         <span className="u-nums text-ink-tertiary" style={{ fontSize: 11 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
+          {openHours.length > 0 && (
+            <span className="text-zinc-900 font-medium"> · {openHours.length} open</span>
+          )}
         </span>
       </header>
-      {sorted.length === 0 ? (
+      {rows.length === 0 ? (
         <div
           className="text-ink-tertiary italic"
           style={{ padding: '14px', fontSize: 13 }}
@@ -442,7 +491,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           No appointments
         </div>
       ) : (
-        sorted.map((svc) => (
+        rows.map(({ svc, hour }) => (svc ? (
           <AppointmentRow
             key={svc.id}
             service={svc}
@@ -456,13 +505,24 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
           />
-        ))
+        ) : (
+          <OpenHourRow
+            key={`open-${hour}`}
+            hour={hour}
+            onBook={() => onCreateSlot({
+              date: dateStr,
+              windowStart: hourToHHMM(hour),
+              windowEnd: hourToHHMM(hour + 1),
+              techId: soleTechId,
+            })}
+          />
+        )))
       )}
     </section>
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -522,6 +582,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
+          onCreateSlot={onCreateSlot}
         />
       </div>
     );
@@ -558,6 +619,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
+          onCreateSlot={onCreateSlot}
         />
       ))}
     </div>

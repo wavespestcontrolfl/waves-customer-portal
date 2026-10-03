@@ -350,3 +350,19 @@ describe('TimeGridDay visit-group office actions', () => {
     expect(screen.queryByRole('button', { name: 'Separate' })).toBeNull();
   });
 });
+
+describe('TimeGridDay open hours', () => {
+  it('draws an Open block on each empty hour, only when slots are bookable', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const props = { date: '2026-07-15', services: SERVICES, technicians: [{ id: 'tech-1', name: 'Alex Tech' }], onChange: vi.fn() };
+    const { rerender } = render(<TimeGridDay {...props} />);
+    expect(screen.queryByText(/^Open · /)).toBeNull();
+    rerender(<TimeGridDay {...props} onCreateSlot={vi.fn()} />);
+    vi.useRealTimers();
+    // SERVICES book 8–9 and 10–11 AM: 7 of the 9 hours from 8 AM to 5 PM stay open.
+    expect(screen.queryByText('Open · 8–9 AM')).toBeNull();
+    expect(screen.getByText('Open · 9–10 AM')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(7);
+  });
+});
