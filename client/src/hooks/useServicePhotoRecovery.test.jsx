@@ -356,6 +356,12 @@ describe('service photo recovery controller', () => {
     }
     let discardPromise;
     act(() => { discardPromise = result.current.discard(); });
+    await act(async () => {
+      await result.current.retry();
+      expect(await result.current.discard()).toBe(false);
+    });
+    expect(recovery.postPhoto).not.toHaveBeenCalled();
+    expect(recovery.getPhotos).toHaveBeenCalledTimes(unavailable ? 1 : 0);
     props = { ...props, serviceId: 'visit-b', visitSnapshot: { ...visit, revision: 'revision-b' } };
     rerender();
     await waitFor(() => expect(result.current.restoring).toBe(false));

@@ -79,6 +79,7 @@ export default function useServicePhotoRecovery({
   const pendingPhotoRef = useRef(null);
   const deviceSaveStateRef = useRef(deviceSaveState);
   const uploadInFlight = useRef(false);
+  const discardInFlight = useRef(false);
   const deviceScope = deviceIdentity.staffId;
   const activeServiceId = String(serviceId || '');
   const activeServiceIdRef = useRef(activeServiceId);
@@ -137,7 +138,7 @@ export default function useServicePhotoRecovery({
 
   const uploadPhoto = useCallback(async (photo, { verifyFresh = false } = {}) => {
     const photoServiceId = String(photo?.serviceId || '');
-    if (!canUploadPhoto(photo, activeServiceIdRef.current, uploadInFlight.current)) return;
+    if (!canUploadPhoto(photo, activeServiceIdRef.current, uploadInFlight.current || discardInFlight.current)) return;
     const stillActive = () => activeServiceIdRef.current === photoServiceId;
     uploadInFlight.current = true;
     setUploading(true);
@@ -218,11 +219,13 @@ export default function useServicePhotoRecovery({
 
   const discard = useCallback(async () => {
     const photo = pendingPhotoRef.current;
-    if (!photo || photo.serviceId !== activeServiceIdRef.current || uploadInFlight.current || discarding) return false;
+    if (!photo || photo.serviceId !== activeServiceIdRef.current || uploadInFlight.current || discardInFlight.current) return false;
+    discardInFlight.current = true;
     setDiscarding(true);
     const removed = !deviceScope || !photo.draftStored
       || await deleteServicePhotoDraftIfCurrent(photo.serviceId, deviceScope, photo.draftId);
     if (!samePendingPhoto(photo, pendingPhotoRef.current)) {
+      discardInFlight.current = false;
       setDiscarding(false);
       return false;
     }
@@ -230,6 +233,7 @@ export default function useServicePhotoRecovery({
       setErrorMsg(terminalHandoff(photo.stage)
         ? 'Could not dismiss the saved notice from this device. Try Dismiss again.'
         : 'Could not remove the saved photo from this device. Try Discard again.');
+      discardInFlight.current = false;
       setDiscarding(false);
       return false;
     }
@@ -239,10 +243,11 @@ export default function useServicePhotoRecovery({
     setDeviceSaveState('idle');
     setRestoredPending(false);
     setErrorMsg('');
+    discardInFlight.current = false;
     setDiscarding(false);
     if (activeServiceIdRef.current !== photo.serviceId) setRestoreAttempt(attempt => attempt + 1);
     return true;
-  }, [deviceScope, discarding]);
+  }, [deviceScope]);
 
   return {
     pendingPhoto,
