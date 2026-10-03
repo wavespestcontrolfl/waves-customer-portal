@@ -618,10 +618,14 @@ async function autoChargeMethod(job, customerId, conn) {
 // The amount to announce: the acknowledged total, a CEILING (owner R1), so
 // "up to" it when account credit has been or will be applied; null when the
 // year is not still owed (paid, processing, dead) or credit covers it all.
-async function announcedAmount(job, svc, conn) {
+async function announcedAmount(job, svc, conn, method) {
   const invoice = job.invoice_id
-    ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied', 'payer_id')
+    ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied', 'payer_id', 'stripe_payment_intent_id')
     : null;
+  // Another payment session already on the invoice (e.g. it was sent and the
+  // customer left a payment mid-way): the charge refuses it as a different
+  // active payment and falls to the pay link (GitHub Codex #5640 r10).
+  if (invoice?.stripe_payment_intent_id) return null;
   const invStatus = String(invoice?.status || '').toLowerCase();
   if (!invoice || ['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
   // A year that routes to a third-party payer goes to that payer, never the
@@ -644,7 +648,12 @@ async function announcedAmount(job, svc, conn) {
   // to the pay link): no charge-now text for either (GitHub Codex #5640 r3).
   // Below the processor's 50-cent minimum the charge is refused and falls to
   // the pay link (GitHub Codex #5640 r9).
-  if (currentDueCents < 50 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
+  if (currentDueCents <= 0 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
+  // The processor's 50-cent minimum applies to the FINAL charge, surcharge
+  // included, priced the way the charge prices it (GitHub Codex #5640 r9, r10).
+  const fundingRow = method?.id ? await conn('payment_methods').where({ id: method.id }).first('card_funding') : null;
+  const finalCharge = require('./stripe-pricing').computeChargeAmount(currentDueCents / 100, method?.method_type, { funding: fundingRow?.card_funding });
+  if (finalCharge.totalCents < 50) return null;
   // …and the pre-credit bill within the approved total, the cap the charge
   // enforces before any credit (GitHub Codex #5640 r5).
   if (Number.isInteger(job.authorized_invoice_total_cents)
@@ -690,7 +699,7 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     // the charge-only one.
     if ((await require('./collections/collection-hold').messagingHeldByCollectionHold(svc.customer_id, conn))?.held) return null;
     const method = await autoChargeMethod(job, svc.customer_id, conn);
-    const amount = method ? await announcedAmount(job, svc, conn) : null;
+    const amount = method ? await announcedAmount(job, svc, conn, method) : null;
     if (!amount) return null;
     // A reservation whose visit no longer qualifies (reopened, cancelled,
     // re-closed not performed, its stamp cleared) passes to this visit

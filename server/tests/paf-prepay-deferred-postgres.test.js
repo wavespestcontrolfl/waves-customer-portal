@@ -652,6 +652,11 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('scheduled_services').where({ id: tiny.parentId }).update({ paf_held_term_id: tiny.termId });
       await trx('invoices').where({ id: tiny.invoiceId }).update({ total: 0.4, subtotal: 0.4 });
       expect(await facts(tiny.parentId)).toBeNull();
+      // Another payment session already on the invoice (GitHub Codex #5640 r10).
+      const session = await deferredAccept();
+      await trx('scheduled_services').where({ id: session.parentId }).update({ paf_held_term_id: session.termId });
+      await trx('invoices').where({ id: session.invoiceId }).update({ stripe_payment_intent_id: 'pi_synthetic_active' });
+      expect(await facts(session.parentId)).toBeNull();
       const held = await deferredAccept();
       await trx('scheduled_services').where({ id: held.parentId }).update({ paf_held_term_id: held.termId });
       const hold = require('../services/collections/collection-hold');
