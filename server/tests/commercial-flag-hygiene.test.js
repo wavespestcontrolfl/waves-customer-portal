@@ -127,3 +127,61 @@ describe('leadCommercialSignalFromReadiness', () => {
     }
   });
 });
+
+describe('commercialLeadFields (fresh insert + attached call lead)', () => {
+  const { commercialLeadFields } = require('../routes/lead-webhook')._test;
+
+  test('a commercial verdict promotes the row', () => {
+    expect(commercialLeadFields({ review: ['commercial_signal_on_residential_intake'] }))
+      .toEqual({ is_commercial: true, is_residential: false });
+  });
+
+  test('a residential verdict writes nothing, so it cannot clear an attached lead\'s flag', () => {
+    expect(commercialLeadFields({ review: [] })).toEqual({});
+    expect(commercialLeadFields(null)).toEqual({});
+  });
+
+  test('the columns survive the phone-attach merge filter (false is kept)', () => {
+    const merged = {};
+    for (const [k, v] of Object.entries(commercialLeadFields({ review: ['commercial_signal_on_residential_intake'] }))) {
+      if (v === null || v === undefined || v === '') continue;
+      merged[k] = v;
+    }
+    expect(merged).toEqual({ is_commercial: true, is_residential: false });
+  });
+});
+
+describe('syncPrimaryPropertyType', () => {
+  const { syncPrimaryPropertyType } = require('../services/customer-properties');
+
+  function fakeConn() {
+    const qb = {
+      where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    const conn = jest.fn(() => qb);
+    return { conn, qb };
+  }
+
+  test('writes the type to the active primary property only when it differs', async () => {
+    const { conn, qb } = fakeConn();
+    await expect(syncPrimaryPropertyType('cust-1', 'commercial', conn)).resolves.toBe(1);
+    expect(conn).toHaveBeenCalledWith('customer_properties');
+    expect(qb.where).toHaveBeenCalledWith({ customer_id: 'cust-1', is_primary: true, active: true });
+    expect(qb.whereRaw).toHaveBeenCalledWith("COALESCE(property_type, '') <> ?", ['commercial']);
+    expect(qb.update).toHaveBeenCalledWith(expect.objectContaining({ property_type: 'commercial' }));
+  });
+
+  test.each([[null], [undefined], [''], ['   ']])('a blank (%j) is never propagated', async (blank) => {
+    const { conn } = fakeConn();
+    await expect(syncPrimaryPropertyType('cust-1', blank, conn)).resolves.toBe(0);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('no customer id → no write', async () => {
+    const { conn } = fakeConn();
+    await expect(syncPrimaryPropertyType(null, 'commercial', conn)).resolves.toBe(0);
+    expect(conn).not.toHaveBeenCalled();
+  });
+});

@@ -4313,6 +4313,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // An edited property type also lands on the primary property row,
+          // in this transaction, so property-scoped readers agree with the
+          // account. Only an ACTUAL change (the editor posts the whole form).
+          if (updates.property_type !== undefined
+            && String(updates.property_type ?? '') !== String(lockedBefore.property_type ?? '')) {
+            await require('../services/customer-properties')
+              .syncPrimaryPropertyType(req.params.id, updates.property_type, trx);
+          }
           // A Bill-To edit that can make a withdrawn combined-visit invoice
           // self-pay again (payer cleared) requeues it through the shared
           // reconciliation, inside this same transaction.
