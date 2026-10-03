@@ -6477,7 +6477,12 @@ router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.approveRecap(req.params.serviceId, { approvedBy: recapVideoActor(req) });
-    if (!result.ok) return res.status(409).json({ error: result.error });
+    if (!result.ok) {
+      const error = result.error === 'rerendering_greeting'
+        ? 'This recap is being re-rendered with an updated greeting. Approve it again when it is ready.'
+        : result.error;
+      return res.status(409).json({ error, code: result.error });
+    }
     // Approval sends the customer the watch-recap link (best-effort, idempotent).
     // sendRecap is idempotent + retryable, so a failed send leaves the recap
     // approved-but-unsent and the client surfaces a retry (sent:false).

@@ -53,6 +53,29 @@ async function callbackRecapRetired(scheduledServiceId, knex = db) {
   } catch { return true; }
 }
 
+// The greeting rule recaps render under (stamped on service_recaps.greeting_version).
+// 1 = a customer with no first name is greeted "there", never by the surname.
+const RECAP_GREETING_VERSION = 1;
+
+// True when this recap's video was rendered before the current greeting rule AND the
+// visit's customer has no first name — its baked-in intro greets them by the surname,
+// so it must be re-rendered, never approved or sent (codex #5674 r1). A customer with
+// a first name renders identically under both rules, so their recaps are left alone.
+// Lookup failure keeps today's behavior (no re-render).
+async function recapNeedsGreetingRerender(recap, knex = db) {
+  if (!recap || Number(recap.greeting_version || 0) >= RECAP_GREETING_VERSION) return false;
+  try {
+    const row = await knex('service_records')
+      .where({ 'service_records.scheduled_service_id': recap.scheduled_service_id })
+      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .orderBy('service_records.created_at', 'desc')
+      .first('customers.first_name');
+    return !!row && String(row.first_name || '').trim() === '';
+  } catch {
+    return false;
+  }
+}
+
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
 async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {}) {
   if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
@@ -94,6 +117,13 @@ async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db }
   }
   const recap = await getRecap(scheduledServiceId, knex);
   if (!recap) return { ok: false, error: 'not_found' };
+  // A video rendered before the greeting rule would greet a no-first-name customer by
+  // their surname: re-render it; staff approve the fresh one when it is ready.
+  if (['ready', 'approved'].includes(recap.status) && !recap.sent_at
+    && await recapNeedsGreetingRerender(recap, knex)) {
+    await enqueueRecap(scheduledServiceId, { force: true, knex });
+    return { ok: false, error: 'rerendering_greeting' };
+  }
   // Already approved but the SMS never went out → idempotent OK so the caller can
   // retry sendRecap (which re-claims sent_at).
   if (recap.status === 'approved' && !recap.sent_at) return { ok: true, recap };
@@ -159,6 +189,7 @@ async function processRecap(recap, knex = db) {
       status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS,
       media: JSON.stringify((payload.media || []).map((m) => ({ role: m.role, caption: m.caption, type: m.type }))),
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
+      greeting_version: RECAP_GREETING_VERSION,
     });
     return { status: 'ready', key };
   } catch (err) {
@@ -193,7 +224,7 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 }
 
 module.exports = {
-  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES,
-  getRecap, enqueueRecap, approveRecap, callbackRecapRetired,
+  CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES, RECAP_GREETING_VERSION,
+  getRecap, enqueueRecap, approveRecap, callbackRecapRetired, recapNeedsGreetingRerender,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };
