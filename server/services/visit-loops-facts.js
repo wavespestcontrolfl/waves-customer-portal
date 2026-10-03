@@ -460,9 +460,12 @@ function missedWindowStart(originalWindow) {
 //    flow's 'rescheduled', any later parking status — or the row is gone; Codex
 //    #5610 r6): a REPLACEMENT the office booked (owner
 //    10-02 r4) — same customer, same frozen property and catalog service, created
-//    after the miss was logged, on or after the missed day, live or done, NOT a
-//    generated series child (recurring_parent_id) and NOT an unreviewed call/voice
-//    booking. Any other booking never counts (series top-ups look just like one).
+//    after the miss was logged, on or after the missed day, live or done (status AND
+//    tracker: a track_state of 'cancelled' leads a lagging status), NOT a generated
+//    child (a series child — recurring_parent_id — or a visit generated from ANOTHER
+//    visit — parent_service_id / followup_source_service_id pointing anywhere but the
+//    missed row, which is explicit provenance and counts) and NOT an unreviewed
+//    call/voice booking. Any other booking never counts (series top-ups look just like one).
 async function noshowFollowedUp(conn, customerId, noshow) {
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
   const date = calendarDay(noshow.original_date);
@@ -497,13 +500,19 @@ async function noshowFollowedUp(conn, customerId, noshow) {
     .where('scheduled_date', '>=', date)
     .whereIn('status', LIVE_OR_DONE)
     .where('created_at', '>', noshow.logged_at)
-    .whereNull('recurring_parent_id');
+    .whereNull('recurring_parent_id')
+    .where((q) => q.whereNull('track_state').orWhereNot('track_state', 'cancelled'));
   query = noshow.occurrence_property_id
     ? query.where({ property_id: noshow.occurrence_property_id })
     : query.whereNull('property_id');
   if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
-  const replacements = ((await query.select('service_id', 'service_type', 'status', 'source_action', 'customer_confirmed')) || [])
-    .filter((r) => !isUnreviewedDispatchOwned(r));
+  // generated from another visit (Codex #5610 r7); generated from THIS miss is provenance
+  const missedRowId = noshow.scheduled_service_id ? String(noshow.scheduled_service_id) : null;
+  const generatedElsewhere = (r) => [r.parent_service_id, r.followup_source_service_id]
+    .some((id) => id != null && String(id) !== missedRowId);
+  const replacements = ((await query.select('service_id', 'service_type', 'status', 'track_state', 'source_action', 'customer_confirmed',
+    'parent_service_id', 'followup_source_service_id')) || [])
+    .filter((r) => r.track_state !== 'cancelled' && !generatedElsewhere(r) && !isUnreviewedDispatchOwned(r));
   if (!replacements.length) return false;
   const key = await scopeKey(replacements);
   return Boolean(key.missed) && replacements.some((r) => key.of(r) === key.missed);

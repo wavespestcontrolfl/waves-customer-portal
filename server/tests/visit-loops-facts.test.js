@@ -705,6 +705,14 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ status: 'no_show' })], [repl({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
     expect((await run([noshow({ status: 'no_show' })], [repl({ status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: false })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
     expect((await run([noshow({ status: 'no_show' })], [repl({ source_action: 'voice_agent', customer_confirmed: false })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // Codex #5610 r7: a visit generated from ANOTHER visit, or tracker-cancelled, is no replacement;
+    // one generated from the missed row itself is explicit provenance and counts
+    const miss = noshow({ status: 'no_show' });
+    expect((await run([miss], [repl({ followup_source_service_id: 'visit-other' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ parent_service_id: 'visit-other' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ parent_service_id: 'visit-1' })])).out.missedVisit).toBeNull();
+    expect((await run([miss], [repl({ track_state: 'cancelled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ track_state: 'scheduled' })])).out.missedVisit).toBeNull();
   });
 
   test('a move the office has not reviewed (call-booked / voice-agent) is not a rebooking', async () => {
