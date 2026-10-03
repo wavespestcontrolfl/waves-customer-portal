@@ -10,7 +10,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 
 // The mics: a supported browser whose transcript the test delivers by hand. The
 // sheet's voice mic is the first instance, the visit note's mic the second.
-const dictation = vi.hoisted(() => ({ slots: [], state: { listening: false, mode: 'speech', starting: false, uploading: false } }));
+const dictation = vi.hoisted(() => ({ slots: [], perSlot: [], state: { listening: false, mode: 'speech', starting: false, uploading: false } }));
 vi.mock('../../hooks/useSpeechDictation', async () => {
   const { useRef, useState } = await import('react');
   return {
@@ -19,7 +19,7 @@ vi.mock('../../hooks/useSpeechDictation', async () => {
       const index = useRef(null);
       if (index.current === null) { index.current = dictation.slots.length; dictation.slots.push(null); }
       dictation.slots[index.current] = { onTranscript, rerender: () => setTick((tick) => tick + 1) };
-      return { supported: true, toggle: () => {}, cancel: () => {}, ...dictation.state };
+      return { supported: true, toggle: () => {}, cancel: () => {}, ...dictation.state, ...(dictation.perSlot[index.current] || {}) };
     },
   };
 });
@@ -29,6 +29,7 @@ import FastCompleteSheet from './FastCompleteSheet';
 beforeEach(() => {
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   dictation.slots = [];
+  dictation.perSlot = [];
   dictation.state = { listening: false, mode: 'speech', starting: false, uploading: false };
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -399,6 +400,24 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.getByLabelText('Office note (not on the report)')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
     confirmAll();
+    expect(completeButton().disabled).toBe(false);
+  });
+
+  test('two mics: the note\'s mic finishing first does not release the voice mic\'s hold', async () => {
+    await openSheet(makeRequest());
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    // both mics recording (upload path), then only the note's mic stops
+    setDictation({ mode: 'upload', listening: true });
+    expect(completeButton().disabled).toBe(true);
+    // slot 0 is the voice mic, slot 1 the note's mic
+    React.act(() => {
+      dictation.perSlot[1] = { listening: false };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(completeButton().disabled).toBe(true);
+    setDictation({ listening: false });
     expect(completeButton().disabled).toBe(false);
   });
 });

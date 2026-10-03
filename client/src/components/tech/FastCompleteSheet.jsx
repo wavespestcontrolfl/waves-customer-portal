@@ -699,8 +699,10 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     serviceId: service?.id,
     sheet: { ops: voiceOps, ctx, products, form, setForm, chooseMethod, appendNote },
   });
-  // Words being recorded, transcribed or filled in would miss the save.
-  const busy = dictationPending || voice.filling;
+  // Words being recorded, transcribed or filled in would miss the save. The
+  // voice mic keeps its own flag: the note's mic finishing first must not clear it.
+  const [voiceMicPending, setVoiceMicPending] = useState(false);
+  const busy = dictationPending || voiceMicPending || voice.filling;
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -745,7 +747,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} onPendingChange={onDictationPending} />
+          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} onPendingChange={setVoiceMicPending} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           <OfficeNote voice={voice} locked={locked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
