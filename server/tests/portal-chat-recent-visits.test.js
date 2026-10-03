@@ -102,6 +102,13 @@ test('a read failure never throws and still offers the Completed visits page', a
   expect(actions).toEqual([OPEN_COMPLETED]);
 });
 
+test('a cancelled visit read propagates instead of becoming unavailable history', async () => {
+  const cancelled = Object.assign(new Error('cancelled'), { code: '57014' });
+  listPortalServiceHistory.mockRejectedValue(cancelled);
+
+  await expect(executeToolCall('get_recent_visits', {}, 'cust-1', [], [])).rejects.toBe(cancelled);
+});
+
 test('refuses a model-supplied customer id and a channel without buttons', async () => {
   expect(await executeToolCall('get_recent_visits', { customer_id: 'other' }, 'cust-1', [], [])).toEqual({ error: 'Customer scope mismatch' });
   expect((await executeToolCall('get_recent_visits', {}, 'cust-1', [])).visits).toBeNull();

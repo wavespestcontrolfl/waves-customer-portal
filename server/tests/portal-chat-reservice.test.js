@@ -134,12 +134,12 @@ test.each([
   ['booked callback lookup', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); bookedRow = Promise.reject(deadline); bookedRow.catch(() => {}); }],
   ['reschedule visit', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); reschedulePage.loadById.mockRejectedValue(deadline); }],
   ['reschedule eligibility', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); reschedulePage.pageEligibility.mockRejectedValue(deadline); }],
-])('a portal deadline from the %s read propagates without adding an action', async (_label, arrange) => {
-  const deadline = Object.assign(new Error('expired'), { code: 'PORTAL_CHAT_DEADLINE' });
-  arrange(deadline);
+])('a database cancellation from the nested %s read propagates without adding an action', async (_label, arrange) => {
+  const cancelled = Object.assign(new Error('expired'), { name: 'KnexTimeoutError' });
+  arrange(cancelled);
   const actions = [];
 
-  await expect(offer('pest', PRIMARY, actions)).rejects.toBe(deadline);
+  await expect(offer('pest', PRIMARY, actions)).rejects.toBe(cancelled);
   expect(actions).toEqual([]);
 });
 
