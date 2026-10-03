@@ -404,6 +404,9 @@ function RateReviewRow({ row, batchLocked, saving, busy, draft, onDraft, onCommi
       <TD data-label="Customer" className={NOWRAP}>
         <div className="font-medium text-zinc-900">{name}</div>
         <div className="text-ui-caption text-ink-tertiary">{row.city || "—"}</div>
+        {Array.isArray(row.flags) && row.flags.includes("delivery_bounced") && (
+          <Badge tone="warn" title="The letter bounced or was blocked. Fix the contact, then send again from Send letters.">Bounced — re-send</Badge>
+        )}
       </TD>
       <TD data-label="Line" className={NOWRAP}>{lineLabel(row.family_key)}</TD>
       <TD data-label="Cadence" className={NOWRAP}>{cadenceLabel(row.cadence)}</TD>

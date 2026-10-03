@@ -647,6 +647,16 @@ describe("RateReviewPage", () => {
     expect(screen.getByRole("button", { name: "Cost block" })).toHaveTextContent("Set Oct 28 by Owner · Edit");
   });
 
+  it("a row whose letter bounced shows Bounced — re-send (the delivery_bounced flag); other rows do not", async () => {
+    rows = fixtureRows();
+    rows[0] = { ...rows[0], flags: [...rows[0].flags, "delivery_bounced"] };
+    renderPage();
+    await screen.findByText("Fixture Whitfield");
+    const badges = screen.getAllByText("Bounced — re-send");
+    expect(badges).toHaveLength(1);
+    expect(badges[0].closest("tr")).toHaveTextContent("Fixture Whitfield");
+  });
+
   it("settings feedback says a cost block change is live for the current batch, and a knob change waits for the next build", async () => {
     await renderLoaded();
     fireEvent.click(screen.getByRole("button", { name: "Cost block" }));
