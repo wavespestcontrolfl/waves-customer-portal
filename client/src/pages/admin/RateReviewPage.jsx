@@ -686,6 +686,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
   const [settingsDraft, setSettingsDraft] = useState(settingsDraftFrom(null));
   const [savingSettings, setSavingSettings] = useState(false);
   const [sending, setSending] = useState(false); // the send panel has a request in flight
+  const [sendRev, setSendRev] = useState(0); // bumped by a write the send preview depends on (approval, cost block)
   const [settingsFeedback, setSettingsFeedback] = useState(null);
   const costBlockRef = useRef(null);
   const batchSeq = useRef(0);
@@ -867,6 +868,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
       return;
     }
     setApproveOpen(false);
+    setSendRev((n) => n + 1);
     try {
       if (!stillSelected(key)) return;
       const text = `Batch approved: ${noticeCount(data.approved)} marked approved (${signedDollars(data.annual_delta_cents)} per year). Nothing has been sent yet — use Send letters below the table.`;
@@ -944,6 +946,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
       const data = await adminFetch("/admin/rate-review/config", { method: "PUT", body: JSON.stringify(patch) });
       setConfig(data.config);
       setSettingsDraft(settingsDraftFrom(data.config));
+      setSendRev((n) => n + 1);
       setSettingsFeedback({ ok: true, text: "Settings saved. They apply to the next build; this batch keeps the values it was ranked with." });
     } catch (e) {
       const detail = e.details && Array.isArray(e.details.errors) ? e.details.errors.join(" · ") : e.message;
@@ -1016,7 +1019,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
         liveConfig={config}
         rowProps={rowProps}
         exceptionProps={{ disabled: batchLocked || saving, busyRow, onInclude: includeException, onSkip: skipException }}
-        sendProps={{ disabled: busyRow != null || approving || savingSettings, onBusyChange: setSending, onChanged: reloadSelected }}
+        sendProps={{ refreshKey: sendRev, disabled: busyRow != null || approving || savingSettings, onBusyChange: setSending, onChanged: reloadSelected }}
       />
 
       {/* Settings stand on their own: the knobs and the cost block are set before the first batch exists. */}

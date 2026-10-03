@@ -72,4 +72,15 @@ describe('RateReviewSendPanel', () => {
     expect(onBusyChange).toHaveBeenCalledWith(true);
     expect(onBusyChange).toHaveBeenLastCalledWith(false);
   });
+
+  it('refreshKey change reads the send preview again', async () => {
+    mockAdminFetch.mockResolvedValue(preview({ unscheduled: 0 }));
+    const { rerender } = render(<RateReviewSendPanel batchKey="2026-12" refreshKey={0} />);
+    await screen.findByText('Testcust One');
+    expect(screen.queryByRole('button', { name: /Prepare/ })).not.toBeInTheDocument();
+    mockAdminFetch.mockResolvedValue(preview({ unscheduled: 2 }));
+    rerender(<RateReviewSendPanel batchKey="2026-12" refreshKey={1} />);
+    expect(await screen.findByRole('button', { name: 'Prepare 2 notices' })).toBeInTheDocument();
+    expect(mockAdminFetch).toHaveBeenCalledTimes(2);
+  });
 });

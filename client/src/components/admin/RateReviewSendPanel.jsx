@@ -94,8 +94,10 @@ function PanelBody({ state, error, view, onRetry }) {
 // disabled: the page has another write in flight (one save at a time).
 // onBusyChange(true|false): this panel's own request is in flight, so the page
 // disables its row controls. onChanged(): a prepare or send finished, so the
-// page re-reads the batch (rows move approved → sent).
-export default function RateReviewSendPanel({ batchKey, disabled = false, onBusyChange, onChanged }) {
+// page re-reads the batch (rows move approved → sent). refreshKey: changes
+// when the page saved something the preview depends on (an approval, the
+// cost block), so the preview is read again.
+export default function RateReviewSendPanel({ batchKey, disabled = false, refreshKey = 0, onBusyChange, onChanged }) {
   const [preview, setPreview] = useState(null);
   const [state, setState] = useState("loading"); // loading | ready | off | error
   const [error, setError] = useState("");
@@ -114,7 +116,7 @@ export default function RateReviewSendPanel({ batchKey, disabled = false, onBusy
       if (e.status === 404) setState("off");
       else { setError(e.message || "Could not load the send preview."); setState("error"); }
     }
-  }, [batchKey]);
+  }, [batchKey, refreshKey]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {

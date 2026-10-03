@@ -12,7 +12,7 @@ const panelProps = vi.hoisted(() => ({ current: null }));
 vi.mock("../../components/admin/RateReviewSendPanel", () => ({
   default: (props) => {
     panelProps.current = props;
-    return <div data-testid="send-panel" data-batch-key={props.batchKey} data-disabled={String(!!props.disabled)} />;
+    return <div data-testid="send-panel" data-batch-key={props.batchKey} data-disabled={String(!!props.disabled)} data-refresh-key={String(props.refreshKey)} />;
   },
 }));
 
@@ -500,6 +500,15 @@ describe("RateReviewPage", () => {
     expect(panel).toHaveAttribute("data-disabled", "false");
     const table = screen.getByRole("table", { name: "Rate review rows" });
     expect(table.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("approving the batch tells the send panel to read its preview again", async () => {
+    await renderLoaded();
+    expect(screen.getByTestId("send-panel")).toHaveAttribute("data-refresh-key", "0");
+    fireEvent.click(screen.getByRole("button", { name: "Approve batch · send 3 notices" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve 3 notices" }));
+    await screen.findByText(/Batch approved: 2 notices marked approved/);
+    expect(screen.getByTestId("send-panel")).toHaveAttribute("data-refresh-key", "1");
   });
 
   it("the panel's request blocks the page's writes and its changes re-read the batch", async () => {
