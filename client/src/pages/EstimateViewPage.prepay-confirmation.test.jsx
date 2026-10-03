@@ -5,6 +5,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
+import { AFTER_VISIT_CONSENT_VERSION, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 vi.mock('react-router-dom', () => ({
   useParams: () => ({
     token: 'synthetic-prepay-token'
@@ -133,7 +134,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-function prepayPayload(prepayInLane = true) {
+function prepayPayload(prepayInLane = true, { afterVisit = false } = {}) {
   const p = recurringPayload();
   p.pricing.annualPrepayEligible = true;
   p.pricing.setupFee = {
@@ -143,11 +144,12 @@ function prepayPayload(prepayInLane = true) {
   p.recurringCardPolicy = {
     enforced: true,
     required: true,
-    prepayInLane
+    prepayInLane,
+    ...(afterVisit ? { prepayAfterFirstVisit: true } : {})
   };
   return p;
 }
-function prepayFetch(p) {
+function prepayFetch(p, { quoteExtra = {}, acceptResult = { nextStep: 'confirmed' } } = {}) {
   return vi.fn(async (url, opts) => {
     const u = String(url);
     if (u.includes('/recurring-card-intent')) {
@@ -174,15 +176,14 @@ function prepayFetch(p) {
           totalCents: 60000,
           methodKey: 'synthetic',
           capturedMethod: true,
-          methodType: 'card'
+          methodType: 'card',
+          ...quoteExtra
         }
       }, {
         ok: false,
         status: 402
       });
-      return jsonResponse({
-        nextStep: 'confirmed'
-      });
+      return jsonResponse(acceptResult);
     }
     if (u.includes('/data')) return jsonResponse(p);
     return jsonResponse({});
@@ -209,6 +210,138 @@ async function reachPrepayQuote() {
   await screen.findByText('Confirm your annual prepay total');
   return fetchMock;
 }
+const AFTER_VISIT_QUOTE = { chargedAfterFirstVisit: true, consentVariant: 'after_visit_prepay' };
+async function reachAfterVisitPrepayQuote({ quoteExtra = AFTER_VISIT_QUOTE, acceptResult } = {}) {
+  stubLocalStorage();
+  const fetchMock = prepayFetch(prepayPayload(true, { afterVisit: true }), { quoteExtra, acceptResult });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<EstimateViewPage />);
+  fireEvent.click((await screen.findAllByRole('button', { name: /Arrival window/i }))[0]);
+  fireEvent.click(await screen.findByRole('button', { name: /Switch to annual prepay/ }));
+  fireEvent.click(await screen.findByRole('checkbox'));
+  const confirm = await screen.findByRole('button', { name: 'Confirm the 12-month plan' });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+  await screen.findByText('Confirm your annual prepay total');
+  return fetchMock;
+}
+const acceptBodies = (fetchMock) => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/accept')).map(([, o]) => JSON.parse(o.body));
+describe('annual prepay charged after the first visit (GATE_PAF_PREPAY)', () => {
+  it('inline capture shows the after-visit wording and the after_visit_prepay authorization', async () => {
+    stubLocalStorage();
+    vi.stubGlobal('fetch', prepayFetch(prepayPayload(true, { afterVisit: true })));
+    render(<EstimateViewPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Arrival window/i }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /Switch to annual prepay/ }));
+    await screen.findByRole('checkbox');
+    expect(screen.getByText(/charge this card after your first visit\./)).toBeInTheDocument();
+    expect(screen.getByText(/charge my 12-month annual prepay total after my first visit/)).toBeInTheDocument();
+    expect(screen.queryByText(/annual prepay total now/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('View full terms'));
+    expect(screen.getByText(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)).toBeInTheDocument();
+  });
+
+  it('a deferred quote renders the after-visit copy and the resubmit attests prepayChargeConsentVariant', async () => {
+    const fetchMock = await reachAfterVisitPrepayQuote();
+    expect(screen.getByText('$600.00 after your first visit')).toBeInTheDocument();
+    expect(screen.queryByText(/due today/)).not.toBeInTheDocument();
+    expect(screen.getByText(/is charged after your first visit — nothing is charged today/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Confirm & pay \$600/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).toMatchObject({
+      prepayChargeAcknowledgedTotalCents: 60000,
+      prepayChargeConsentAccepted: true,
+      prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: AFTER_VISIT_CONSENT_VERSION
+    });
+    // The first (pre-quote) accept never claims a variant.
+    expect(acceptBodies(fetchMock)[0].prepayChargeConsentVariant).toBeUndefined();
+  });
+
+  it('a surcharged deferred quote says account credit can only lower the amount (GitHub Codex #5595)', async () => {
+    await reachAfterVisitPrepayQuote({ quoteExtra: { ...AFTER_VISIT_QUOTE, surcharge: 18, total: 618, totalCents: 61800 } });
+    expect(screen.getByText(/credit card surcharge\. Your card.*is charged after your first visit — nothing is charged today\. If account credit applies, it can only lower the amount\./)).toBeInTheDocument();
+  });
+
+  it('the quote-step checkbox (auto-satisfy, no capture) is the AFTER_VISIT_PREPAY text', async () => {
+    stubLocalStorage();
+    const p = prepayPayload(true, { afterVisit: true });
+    const base = prepayFetch(p, { quoteExtra: { ...AFTER_VISIT_QUOTE, capturedMethod: false } });
+    vi.stubGlobal('fetch', vi.fn(base));
+    render(<EstimateViewPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Arrival window/i }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /Switch to annual prepay/ }));
+    fireEvent.click(await screen.findByRole('checkbox'));
+    const confirm = await screen.findByRole('button', { name: 'Confirm the 12-month plan' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await screen.findByText('Confirm your annual prepay total');
+    const quoteBox = screen.getAllByText(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT);
+    expect(quoteBox.length).toBeGreaterThan(0);
+    expect(screen.queryByText(PREPAY_CARD_CONSENT_TEXT)).not.toBeInTheDocument();
+  });
+
+  it('a quote without consentVariant keeps today\'s copy and sends no prepayChargeConsentVariant', async () => {
+    const fetchMock = await reachPrepayQuote();
+    expect(screen.getByText('$600.00 due today')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm & pay $600.00' }));
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVariant');
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVersion');
+  });
+
+  it('an after_first_visit success shows nothing-charged-today copy with the acknowledged total', async () => {
+    const fetchMock = await reachAfterVisitPrepayQuote({
+      acceptResult: { nextStep: 'confirmed', billingTerm: 'prepay_annual', invoiceSettled: true, prepayChargeStatus: 'after_first_visit', prepayChargedTotal: 600 }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(await screen.findByText(/Nothing was charged today — your annual prepay of up to \$600\.00 is charged to your saved card \(or debited from your saved bank account\) after your first visit\. Any account credit lowers it\./)).toBeInTheDocument();
+    expect(screen.queryByText(/went through/)).not.toBeInTheDocument();
+  });
+});
+
+const quoteCheckbox = (text) => screen.getAllByText(text)
+  .map((el) => el.closest('label')?.querySelector('input[type="checkbox"]'))
+  .find(Boolean);
+describe('a capture only consents to the charge timing it showed (GitHub Codex #5595 r1)', () => {
+  it('captured under after-visit wording, quoted for an immediate charge: the quote asks again', async () => {
+    const fetchMock = await reachAfterVisitPrepayQuote({ quoteExtra: {} });
+    expect(screen.getByText('$600.00 due today')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm & pay $600.00' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(quoteCheckbox(PREPAY_CARD_CONSENT_TEXT));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVariant');
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVersion');
+  });
+
+  it('captured under charge-now wording, quoted for after the first visit: the quote asks again', async () => {
+    stubLocalStorage();
+    const fetchMock = prepayFetch(prepayPayload(), { quoteExtra: AFTER_VISIT_QUOTE });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Arrival window/i }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /Switch to annual prepay/ }));
+    fireEvent.click(await screen.findByRole('checkbox'));
+    const first = await screen.findByRole('button', { name: 'Confirm & pay the 12-month plan' });
+    await waitFor(() => expect(first).toBeEnabled());
+    fireEvent.click(first);
+    await screen.findByText('Confirm your annual prepay total');
+    expect(screen.getByText('$600.00 after your first visit')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(quoteCheckbox(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).toMatchObject({ prepayChargeConsentVariant: 'after_visit_prepay' });
+  });
+});
+
 describe('annual prepay confirmation', () => {
   it('preserves captured authorization at the exact-total step and honors a later uncheck', async () => {
     const fetchMock = await reachPrepayQuote();

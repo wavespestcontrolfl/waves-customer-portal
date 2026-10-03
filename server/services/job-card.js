@@ -69,6 +69,33 @@ function paragraphLlmEnabled() {
   return process.env.GATE_JOB_CARD_LLM === 'true';
 }
 
+// What the customer told us about THIS visit, on the card (owner "ok go"
+// 2026-10-03): the booked reason today; texts and pre-visit photos join it.
+// Display only — never the paragraph or its grounding. Read at call time,
+// exact 'true'; off = the card's payload is unchanged.
+function customerContextEnabled() {
+  return process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT === 'true';
+}
+
+// How the booked reason was taken down. A call is an AI summary, never the
+// customer's exact words, so the card never quotes it.
+const CUSTOMER_REQUEST_SOURCES = new Set(['picker', 'text', 'call', 'office']);
+function customerRequestNote(svc) {
+  let pests = svc.customer_request_pests;
+  if (typeof pests === 'string') pests = parseJson(pests);
+  const pestWords = (Array.isArray(pests) ? pests : [])
+    .map((p) => clean(String(p || '').replace(/[_-]+/g, ' '), 40))
+    .filter(Boolean)
+    .slice(0, 8);
+  const text = clean(svc.customer_request, 1000);
+  if (!text && !pestWords.length) return null;
+  return {
+    text: text || null,
+    source: CUSTOMER_REQUEST_SOURCES.has(svc.customer_request_source) ? svc.customer_request_source : null,
+    pests: pestWords,
+  };
+}
+
 // ── Facts ───────────────────────────────────────────────────────────────────
 
 const OPEN_REQUEST_TERMINAL = ['resolved', 'closed', 'cancelled'];
@@ -421,6 +448,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       // irrigation.
       dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
+      'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests',
     )
     .first();
   if (!svc) return null;
@@ -473,6 +501,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       visitNotes: clean(svc.notes, 2000) || null,
       chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
       petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
+      // Only with the gate on, so the payload is byte-identical off.
+      ...(customerContextEnabled() ? { customerRequest: customerRequestNote(svc) } : {}),
     }, knownCodes),
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
@@ -1916,6 +1946,7 @@ function fieldGuideLineProduct(name, products) {
 module.exports = {
   jobCardEnabled,
   paragraphLlmEnabled,
+  customerContextEnabled,
   buildJobCard,
   mixForProduct,
   loadJobCardFacts,

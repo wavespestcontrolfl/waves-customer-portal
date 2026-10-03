@@ -11,6 +11,11 @@
  * tests/typed-decisions-packages.test.js pins each id to a hash in
  * fixtures/typed-decisions/package-hashes.json, so an in-place edit fails CI.
  *
+ * An optional `imageSlots` (an integer 1..MAX_IMAGE_SLOTS = 4, Clef's per-request
+ * maximum) lets a package take that many photos on the Clef provider only
+ * (askPackage `{ images }`); none declares it yet. A registered package with any
+ * other value fails at load.
+ *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
  * question answers a 0..1 probability that the statement is true.
  */
@@ -149,6 +154,16 @@ const PACKAGES = deepFreeze({
   [SMS_SOLICITATION.id]: SMS_SOLICITATION,
 });
 
+// Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a
+// package can never advertise more slots than the provider takes.
+const MAX_IMAGE_SLOTS = 4;
+const validImageSlots = (slots) => Number.isInteger(slots) && slots >= 1 && slots <= MAX_IMAGE_SLOTS;
+for (const pkg of Object.values(PACKAGES)) {
+  if (pkg.imageSlots !== undefined && !validImageSlots(pkg.imageSlots)) {
+    throw new Error(`typed-decisions package ${pkg.id}: imageSlots must be an integer 1..${MAX_IMAGE_SLOTS}`);
+  }
+}
+
 function packageFor(id) {
   return Object.prototype.hasOwnProperty.call(PACKAGES, id) ? PACKAGES[id] : null;
 }
@@ -163,9 +178,14 @@ function canonical(value) {
 }
 
 // sha256 over the parts that define the decision: questions + stateShape +
-// thresholds. The description is prose and may be edited without a new version.
+// thresholds (+ imageSlots, only for a package that declares it: how many
+// photos it is shown is part of the decision, and a package without it hashes
+// exactly as it always did). The description is prose and may be edited
+// without a new version.
 function packageHash(pkg) {
-  const body = canonical({ questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds });
+  const parts = { questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds };
+  if (pkg.imageSlots !== undefined) parts.imageSlots = pkg.imageSlots;
+  const body = canonical(parts);
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
@@ -211,4 +231,4 @@ function providerLabel(provider) {
 // admin review route shows the reviewer the same span.
 const CALL_TRANSCRIPT_CHARS = 5000;
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };
+module.exports = { PACKAGES, packageFor, packageHash, MAX_IMAGE_SLOTS, validImageSlots, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };

@@ -59,14 +59,21 @@ postgres('admin neighborhood gate-code routes', () => {
     }).returning('id');
     return row.id;
   };
-  const property = async (neighborhoodId, { active = true } = {}) => {
-    const customerId = randomUUID();
-    await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Owner', phone: '+12025550177', email: `${customerId}@example.invalid` });
+  const property = async (neighborhoodId, { active = true, customerId: existing, source = 'office', deleted = false } = {}) => {
+    const customerId = existing || randomUUID();
+    if (!existing) {
+      await trx('customers').insert({
+        id: customerId, first_name: 'Sample', last_name: 'Owner', phone: '+12025550177', email: `${customerId}@example.invalid`,
+        deleted_at: deleted ? new Date() : null,
+      });
+    }
+    const propertyId = randomUUID();
     await trx('customer_properties').insert({
-      id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true,
+      id: propertyId, customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: !existing,
       address_line1: '100 Synthetic Way', city: 'Lakewood Ranch', zip: '34202', active, address_key: randomUUID(),
-      neighborhood_id: neighborhoodId, neighborhood_source: 'office',
+      neighborhood_id: neighborhoodId, neighborhood_source: neighborhoodId ? source : null,
     });
+    return { customerId, propertyId };
   };
   const list = async (query = '') => {
     const r = await call('GET', `/${query}`);
@@ -114,6 +121,8 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(await call('GET', '/')).toEqual({ status: 404, body: { enabled: false } });
     expect(await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '5555' })).toEqual({ status: 404, body: { enabled: false } });
     expect(await call('PATCH', `/entries/${id}`, { action: 'confirm' })).toEqual({ status: 404, body: { enabled: false } });
+    expect(await call('GET', `/customers/${randomUUID()}/properties`)).toEqual({ status: 404, body: { enabled: false } });
+    expect(await call('PUT', `/properties/${randomUUID()}/neighborhood`, { neighborhoodId: null })).toEqual({ status: 404, body: { enabled: false } });
     // The disabled answer is never cached past a gate flip.
     const res = await fetch(`${baseUrl}/`);
     expect(res.headers.get('cache-control')).toBe('no-store');
@@ -332,5 +341,157 @@ postgres('admin neighborhood gate-code routes', () => {
     const toKeypad = await call('PATCH', `/entries/${a}`, { access_type: 'keypad', code: '8642' });
     expect(toKeypad.status).toBe(200);
     expect(await trx('neighborhood_access').where({ id: a }).first()).toMatchObject({ access_type: 'keypad', code: '8642', instructions: null });
+  });
+
+  test('list: ?neighborhood= returns only that neighborhood, and only when it passes the list rules', async () => {
+    const a = await neighborhood('Palmetto Cove');
+    await entry(a, { code: '1212' });
+    const b = await neighborhood('Quail Run');
+    await entry(b, { code: '3434' });
+    const empty = await neighborhood('Rosemary Empty');
+    const parked = await neighborhood('Sage Parked', { active: false });
+    await entry(parked);
+
+    const one = await list(`?neighborhood=${b}`);
+    expect(one.body.neighborhoods.map((n) => n.name)).toEqual(['Quail Run']);
+    expect(one.body.total).toBe(1);
+    expect((await list(`?neighborhood=${empty}`)).body.neighborhoods).toEqual([]);
+    expect((await list(`?neighborhood=${parked}`)).body.neighborhoods).toEqual([]);
+    expect((await list(`?neighborhood=${randomUUID()}`)).body.neighborhoods).toEqual([]);
+    expect((await list('?neighborhood=not-an-id')).status).toBe(400);
+    expect((await list()).body.neighborhoods.map((n) => n.name)).toEqual(['Palmetto Cove', 'Quail Run']);
+  });
+
+  test('list ?picker=1 finds every active neighborhood, empty ones included (the directory view does not)', async () => {
+    const empty = await neighborhood('Hollow Empty');
+    await neighborhood('Hollow Parked', { active: false });
+    expect((await list('?q=hollow')).body.neighborhoods.map((x) => x.name)).toEqual([]);
+    expect((await list('?q=hollow&picker=1')).body.neighborhoods.map((x) => x.id)).toEqual([empty]);
+  });
+
+  test('customer properties: active only, with the neighborhood and its live entries; 404 for a missing or deleted customer', async () => {
+    const n = await neighborhood('Tupelo Bend');
+    await entry(n, { code: '4545' });
+    await entry(n, { code: '5656', gate_label: 'Back gate', status: 'needs_confirm' });
+    await entry(n, { code: '6767', gate_label: 'Old gate', status: 'retired' });
+    await entry(n, { code: null, access_type: 'guard', instructions: 'Check in at the booth', gate_label: 'Guard house' });
+    const first = await property(n, { source: 'county' });
+    await property(n, { customerId: first.customerId, active: false });
+    const unlinked = await property(null, { customerId: first.customerId });
+
+    const r = await call('GET', `/customers/${first.customerId}/properties`);
+    expect(r.status).toBe(200);
+    expect(r.body.properties).toHaveLength(2);
+    const linked = r.body.properties.find((p) => p.id === first.propertyId);
+    expect(linked).toMatchObject({
+      label: 'Synthetic', addressLine1: '100 Synthetic Way', addressLine2: null, city: 'Lakewood Ranch', zip: '34202',
+      neighborhood: { id: n, name: 'Tupelo Bend', county: 'Manatee' }, neighborhoodSource: 'county',
+    });
+    expect(linked.entries.map((e) => [e.gateLabel, e.code, e.status])).toEqual([
+      ['Back gate', '5656', 'needs_confirm'],
+      ['Guard house', null, 'active'],
+      ['Main gate', '4545', 'active'],
+    ]);
+    expect(linked.entries.find((e) => e.gateLabel === 'Guard house')).toMatchObject({ accessType: 'guard', instructions: 'Check in at the booth' });
+    expect(r.body.properties.find((p) => p.id === unlinked.propertyId)).toMatchObject({ neighborhood: null, neighborhoodSource: null, entries: [] });
+
+    // A switched-off neighborhood is not shown: the property reads as not linked, no codes.
+    const off = await neighborhood('Switched Off Grove', { active: false });
+    await entry(off, { code: '7878' });
+    const parked = await property(off);
+    const offView = await call('GET', `/customers/${parked.customerId}/properties`);
+    expect(offView.body.properties[0]).toMatchObject({ neighborhood: null, neighborhoodSource: null, entries: [] });
+
+    const gone = await property(n, { deleted: true });
+    expect((await call('GET', `/customers/${gone.customerId}/properties`)).status).toBe(404);
+    expect((await call('GET', `/customers/${randomUUID()}/properties`)).status).toBe(404);
+    expect((await call('GET', '/customers/not-an-id/properties')).status).toBe(404);
+  });
+
+  test('link: an existing neighborhood is written as an office pick with checked-at stamped, and returned in the GET shape', async () => {
+    const n = await neighborhood('Umbrella Point');
+    await entry(n, { code: '7878' });
+    const { propertyId } = await property(null);
+
+    const r = await call('PUT', `/properties/${propertyId}/neighborhood`, { neighborhoodId: n });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ id: propertyId, neighborhood: { id: n, name: 'Umbrella Point' }, neighborhoodSource: 'office' });
+    expect(r.body.entries.map((e) => e.code)).toEqual(['7878']);
+    expect(await trx('customer_properties').where({ id: propertyId }).first())
+      .toMatchObject({ neighborhood_id: n, neighborhood_source: 'office', neighborhood_checked_at: expect.any(Date) });
+  });
+
+  test('link: a county-made link is replaced by the office pick', async () => {
+    const county = await neighborhood('Vine County Pick');
+    const office = await neighborhood('Willow Office Pick');
+    const { propertyId } = await property(county, { source: 'county' });
+    const r = await call('PUT', `/properties/${propertyId}/neighborhood`, { neighborhoodId: office });
+    expect(r.status).toBe(200);
+    expect(await trx('customer_properties').where({ id: propertyId }).first()).toMatchObject({ neighborhood_id: office, neighborhood_source: 'office' });
+  });
+
+  test('clear: neighborhood removed but still an office decision, checked-at stamped', async () => {
+    const n = await neighborhood('Xylia Walk');
+    const { propertyId } = await property(n, { source: 'county' });
+    const r = await call('PUT', `/properties/${propertyId}/neighborhood`, { neighborhoodId: null });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ neighborhood: null, neighborhoodSource: null, entries: [] });
+    expect(await trx('customer_properties').where({ id: propertyId }).first())
+      .toMatchObject({ neighborhood_id: null, neighborhood_source: 'office', neighborhood_checked_at: expect.any(Date) });
+  });
+
+  test('create: inserts an office neighborhood and links it; an existing name (any case or spacing) is linked, not duplicated', async () => {
+    const { propertyId } = await property(null);
+    const made = await call('PUT', `/properties/${propertyId}/neighborhood`, { create: { name: '  Yarrow   Estates ', county: 'Sarasota' } });
+    expect(made.status).toBe(200);
+    expect(made.body.neighborhood).toMatchObject({ name: 'Yarrow Estates', county: 'Sarasota' });
+    const row = await trx('neighborhoods').where({ id: made.body.neighborhood.id }).first();
+    expect(row).toMatchObject({ source: 'office', active: true, match_key: 'sarasota|yarrow estates', county: 'Sarasota' });
+    expect(row.subdivision_names).toEqual([]);
+
+    const other = await property(null);
+    const again = await call('PUT', `/properties/${other.propertyId}/neighborhood`, { create: { name: 'YARROW ESTATES', county: 'Sarasota' } });
+    expect(again.status).toBe(200);
+    expect(again.body.neighborhood.id).toBe(made.body.neighborhood.id);
+    expect(Number((await trx('neighborhoods').where({ match_key: 'sarasota|yarrow estates' }).count('* as n').first()).n)).toBe(1);
+    // Same name in another county is a different neighborhood.
+    const manatee = await call('PUT', `/properties/${other.propertyId}/neighborhood`, { create: { name: 'Yarrow Estates', county: 'Manatee' } });
+    expect(manatee.body.neighborhood.id).not.toBe(made.body.neighborhood.id);
+  });
+
+  test('create: a switched-off neighborhood of that name is refused, not revived', async () => {
+    const { propertyId } = await property(null);
+    await trx('neighborhoods').insert({
+      name: 'Zinnia Parked', county: 'Charlotte', match_key: 'charlotte|zinnia parked', source: 'county', active: false,
+    });
+    expect((await call('PUT', `/properties/${propertyId}/neighborhood`, { create: { name: 'Zinnia Parked', county: 'Charlotte' } })).status).toBe(409);
+    expect(await trx('customer_properties').where({ id: propertyId }).first()).toMatchObject({ neighborhood_id: null, neighborhood_checked_at: null });
+  });
+
+  test('link: validation, unknown/inactive neighborhood, other or inactive property, deleted customer', async () => {
+    const n = await neighborhood('Alpine Valid');
+    const parked = await neighborhood('Beech Parked', { active: false });
+    const { propertyId } = await property(null);
+    const put = (id, body) => call('PUT', `/properties/${id}/neighborhood`, body);
+
+    expect((await put(propertyId, {})).status).toBe(400);
+    expect((await put(propertyId, { neighborhoodId: n, create: { name: 'X', county: 'Manatee' } })).status).toBe(400);
+    expect((await put(propertyId, { neighborhoodId: 'nope' })).status).toBe(400);
+    expect((await put(propertyId, { neighborhoodId: 5 })).status).toBe(400);
+    expect((await put(propertyId, { create: { name: '', county: 'Manatee' } })).status).toBe(400);
+    expect((await put(propertyId, { create: { name: 'a'.repeat(121), county: 'Manatee' } })).status).toBe(400);
+    expect((await put(propertyId, { create: { name: 'Ok Name', county: 'Hillsborough' } })).status).toBe(400);
+    expect((await put(propertyId, { create: 'Ok Name' })).status).toBe(400);
+    expect((await put(propertyId, { neighborhoodId: parked })).status).toBe(404);
+    expect((await put(propertyId, { neighborhoodId: randomUUID() })).status).toBe(404);
+    expect((await put(randomUUID(), { neighborhoodId: n })).status).toBe(404);
+    expect((await put('not-an-id', { neighborhoodId: n })).status).toBe(404);
+    const inactive = await property(null, { active: false });
+    expect((await put(inactive.propertyId, { neighborhoodId: n })).status).toBe(404);
+    const gone = await property(null, { deleted: true });
+    expect((await put(gone.propertyId, { neighborhoodId: n })).status).toBe(404);
+    // Nothing was written by any refusal.
+    expect(await trx('customer_properties').where({ id: propertyId }).first()).toMatchObject({ neighborhood_id: null, neighborhood_checked_at: null });
+    expect(JSON.stringify(logger.error.mock.calls)).toBe('[]');
   });
 });
