@@ -5,13 +5,15 @@
  * suite skips without it. It builds its own schema (the two tables the
  * search reads, with the columns it reads) and drops it after.
  *
- *  - Each source's read cap keeps its rows by the ranking the results use
- *    (GitHub Codex P2 on 7568aea485): an older post holding the rare word
- *    "tick" is never dropped for 500+ newer posts holding only "control".
- *  - The registry judges a portal post only by a live check since the post
- *    went live, on the driver's own timestamps (a check half a second before
- *    the post went live is older news); the post-publish check's
- *    'live_visible' counts as live (GitHub Codex P2 on 7568aea485).
+ *  - Every row holding a word is read and ranked (GitHub Codex P2 on
+ *    7568aea485): an older post holding the rare word "tick" is never
+ *    dropped for 600 newer posts holding only "control"; and the rarity is
+ *    counted over the posts a report may link, read with the frontmatter the
+ *    link rule needs (GitHub Codex P2 on 8c57183332: spoke-only rows never
+ *    make "tick" look common).
+ *  - A portal post the registry keeps a row for stands on that row alone; a
+ *    row in conflict never comes back; the post-publish check's
+ *    'live_visible' counts as live (GitHub Codex P1s and P2 on 8c57183332).
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
   get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
@@ -49,7 +51,7 @@ const registryRow = (title, { daysAgo = 0, ...change } = {}) => {
     workflow_status: 'published',
     astro_status: 'present',
     live_status: 'live',
-    live_status_checked_at: null,
+    reconciliation_status: 'matched',
     noindex_detected: false,
     metadata: {},
     published_at: new Date(NOW - daysAgo * DAY),
@@ -85,8 +87,7 @@ postgres('report blog search on Postgres', () => {
       t.uuid('id').primary();
       t.uuid('db_blog_id');
       for (const column of ['title', 'h1', 'meta_description', 'target_keyword', 'live_url', 'canonical_url', 'canonical_url_normalized']) t.text(column);
-      for (const column of ['content_type', 'workflow_status', 'astro_status', 'live_status']) t.string(column);
-      t.timestamp('live_status_checked_at', { useTz: true });
+      for (const column of ['content_type', 'workflow_status', 'astro_status', 'live_status', 'reconciliation_status']) t.string(column);
       t.boolean('noindex_detected');
       t.jsonb('metadata');
       t.timestamp('published_at', { useTz: true });
@@ -113,7 +114,7 @@ postgres('report blog search on Postgres', () => {
     await mockPg('blog_posts').del();
   });
 
-  test('the registry\'s read cap keeps an older post holding the rare word over 600 newer ones holding only the common one', async () => {
+  test('the registry read ranks an older post holding the rare word above 600 newer ones holding only the common one', async () => {
     const common = Array.from({ length: 600 }, (_, i) => registryRow(`Weed Control Tips ${i}`, { daysAgo: i }));
     const rare = registryRow('Tick Season Guide for Florida Yards', { daysAgo: 2000 });
     await mockPg.batchInsert('content_registry', [...common, rare], 200);
@@ -124,7 +125,7 @@ postgres('report blog search on Postgres', () => {
     expect(posts.slice(1).map((post) => post.title)).toEqual(Array.from({ length: 7 }, (_, i) => `Weed Control Tips ${i}`));
   });
 
-  test('the portal\'s read cap does the same', async () => {
+  test('the portal read does the same', async () => {
     const common = Array.from({ length: 600 }, (_, i) => portalRow(`Weed Control Tips ${i}`, { daysAgo: i }));
     const rare = portalRow('Tick Season Guide for Florida Yards', { daysAgo: 2000 });
     await mockPg.batchInsert('blog_posts', [...common, rare], 200);
@@ -140,39 +141,51 @@ postgres('report blog search on Postgres', () => {
     expect((await searchReportBlogPosts(mockPg, 'tick control')).map((post) => post.id)).toEqual([both.id, tick.id, inSummary.id]);
   });
 
-  test('a portal post the registry has not judged since it went live is found; one it found gone since is not', async () => {
-    const wentLive = new Date(Date.UTC(2026, 8, 20, 12, 0, 0, 800));
-    const post = portalRow('Ghost Ants After Rain', { astro_published_at: wentLive });
+  test('spoke-only rows never make the rare word look common: rarity is counted over linkable posts', async () => {
+    const spoke = { live_url: '/blog/tick-checks-lawn/', canonical_url: '/blog/tick-checks-lawn/', metadata: { frontmatter: { domains: ['bradentonfllawncare.com'] } } };
+    const spokeTicks = [1, 2, 3].map((i) => registryRow(`Tick Checks on the Lawn ${i}`, { ...spoke, live_url: `/blog/tick-checks-lawn-${i}/`, daysAgo: i }));
+    const tick = registryRow('Tick Season Guide', { daysAgo: 2000 });
+    const control = [1, 2].map((i) => registryRow(`Weed Control Tips ${i}`, { daysAgo: i }));
+    await mockPg('content_registry').insert([...spokeTicks, tick, ...control]);
+    expect((await searchReportBlogPosts(mockPg, 'tick control')).map((post) => post.id)).toEqual([tick.id, ...control.map((row) => row.id)]);
+  });
+
+  test('a portal post the registry keeps a row for stands on that row alone', async () => {
+    const post = portalRow('Ghost Ants After Rain');
     await mockPg('blog_posts').insert(post);
-    const check = (checkedAt, change = {}) => registryRow(post.title, {
-      db_blog_id: post.id, live_url: post.astro_live_url, canonical_url: post.astro_live_url, live_status: 'not_found', live_status_checked_at: checkedAt, ...change,
-    });
     const search = async () => (await searchReportBlogPosts(mockPg, 'ghost ants')).map((found) => found.url);
     const pick = async () => (await resolveReportBlogPostPick((fn) => fn(mockPg), post.id)).post?.url || null;
-
-    // Checked half a second before it went live: older news.
-    await mockPg('content_registry').insert(check(new Date(wentLive.getTime() - 500)));
+    // No registry row yet: the portal's own rule.
     expect(await search()).toEqual([post.astro_live_url]);
     expect(await pick()).toBe(post.astro_live_url);
-
-    // Found gone half a second after: refused.
-    await mockPg('content_registry').update({ live_status_checked_at: new Date(wentLive.getTime() + 500) });
-    expect(await search()).toEqual([]);
-    expect(await pick()).toBeNull();
-
-    // The post-publish check's verdict on a row synced before the post existed.
+    const row = registryRow(post.title, { db_blog_id: post.id, live_url: post.astro_live_url, canonical_url: post.astro_live_url });
+    for (const refused of [
+      { live_status: 'visibility_review' },
+      { live_status: 'live_visible', astro_status: 'missing' },
+      { live_url: '/blog/ghost-ants-lawn/', canonical_url: '/blog/ghost-ants-lawn/', metadata: { frontmatter: { domains: ['bradentonfllawncare.com'] } } },
+      { reconciliation_status: 'conflict' },
+    ]) {
+      await mockPg('content_registry').del();
+      await mockPg('content_registry').insert({ ...row, ...refused });
+      expect(await search()).toEqual([]);
+      expect(await pick()).toBeNull();
+    }
+    // A row the registry links: the registry's post, by its own text.
     await mockPg('content_registry').del();
-    await mockPg('content_registry').insert(check(null, { live_status: 'live_visible', astro_status: 'missing' }));
+    await mockPg('content_registry').insert({ ...row, live_status: 'live_visible' });
     expect(await search()).toEqual([post.astro_live_url]);
+    expect((await searchReportBlogPosts(mockPg, 'ghost ants'))[0].id).toBe(row.id);
     expect(await pick()).toBe(post.astro_live_url);
   });
 
-  test('a registry post the post-publish check verified live is found and resolves before the sweep looks', async () => {
+  test('a registry post the post-publish check verified live is found and resolves; one in conflict never is', async () => {
     const fresh = registryRow('Ghost Ants After the First Rain', { live_status: 'live_visible' });
     const review = registryRow('Ghost Ant Baits That Work', { live_status: 'visibility_review' });
-    await mockPg('content_registry').insert([fresh, review]);
+    const conflict = registryRow('Ghost Ant Season Notes', { reconciliation_status: 'conflict' });
+    await mockPg('content_registry').insert([fresh, review, conflict]);
     expect((await searchReportBlogPosts(mockPg, 'ghost ants')).map((post) => post.id)).toEqual([fresh.id]);
     expect((await resolveReportBlogPostPick((fn) => fn(mockPg), fresh.id)).post).toEqual({ id: fresh.id, title: fresh.title, url: fresh.live_url });
     expect(await resolveReportBlogPostPick((fn) => fn(mockPg), review.id)).toEqual({ post: null, rejected: true });
+    expect(await resolveReportBlogPostPick((fn) => fn(mockPg), conflict.id)).toEqual({ post: null, rejected: true });
   });
 });
