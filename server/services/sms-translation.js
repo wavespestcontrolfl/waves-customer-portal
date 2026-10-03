@@ -856,15 +856,20 @@ async function translateAndCheck({ englishReply, language, languageCode, context
 // gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
 // no trial. A first text, or one from a customer who mostly writes another
 // language, goes on. A read failure goes on too (the trial sends nothing).
+// One to four words, then a quoted text to the end: the shape of a phone's reaction in any language.
+const LOCALIZED_REACTION_RE = /^[^\s\u00ab\u201c\u201e"\u300c]{1,30}(?:\s+[^\s\u00ab\u201c\u201e"\u300c]{1,30}){0,3}\s*[\u00ab\u201c\u201e"\u300c][\s\S]+[\u00bb\u201d\u201c"\u300d]$/u;
+
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
     const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
       .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body');
     const { isSmsReaction } = require('./sms-intent');
-    const { isEnglishInbound } = require('./sms-label-facts');
-    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b));
-    const english = bodies.filter((b) => isEnglishInbound(b)).length;
+    const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
+    // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
+    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !LOCALIZED_REACTION_RE.test(b.trim()));
+    // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
+    const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b)).length;
     return english > bodies.length - english;
   } catch (err) {
     logger.warn(`[sms-translation] earlier texts not read: ${err.code || err.name || 'error'}`);

@@ -551,6 +551,21 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'ready' });
   });
 
+  test('short foreign replies in the history count as foreign, so the customer stays in the trial', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Perfecto' }, { message_body: 'Vale' }, { message_body: 'Ok' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
+  });
+
+  test('reactions in any phone language are left out of the history vote', async () => {
+    mockEarlier.mockResolvedValueOnce([
+      { message_body: 'Понравилось «Hi Nadia, see you Wed.»' }, { message_body: 'Le gustó “Hi Nadia, see you Wed.”' },
+      { message_body: 'Понравилось «Your visit is done.»' }, { message_body: 'Thanks, see you then' },
+    ]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
   test('a foreign-language iPhone reaction is skipped, as an English one is', async () => {
     const quoted = 'Hi Nadia, we moved your service to Wed, Sep 23, 12:00 PM - 2:00 PM.';
     scriptModels({ inbound: { is_english: false, language: 'Russian', language_code: 'ru', english: `Liked «${quoted}»` } });
