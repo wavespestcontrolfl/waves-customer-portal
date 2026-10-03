@@ -130,6 +130,7 @@ const {
   uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../services/service-report/application-conditions');
 
 // Office coordinates for office-level rain outlooks (matches the NWS point
 // used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
@@ -6502,14 +6503,16 @@ router.get('/', async (req, res, next) => {
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
     try {
-      const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,precipitation_probability&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York`);
-      if (weatherRes.ok) {
-        const wd = await weatherRes.json();
-        const current = wd.current || {};
+      const forecast = await fetchPropertyForecast({
+        latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
+        longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
+      });
+      if (forecast.status === 'ok' && forecast.current) {
+        const current = forecast.current;
         weather = {
-          temp: Math.round(current.temperature_2m || 0),
-          windSpeed: Math.round(current.wind_speed_10m || 0),
-          rainProbability: current.precipitation_probability || 0,
+          temp: Math.round(current.temperature_f || 0),
+          windSpeed: Math.round(current.wind_mph || 0),
+          rainProbability: current.precipitation_probability_pct || 0,
         };
       }
     } catch { /* weather is optional */ }

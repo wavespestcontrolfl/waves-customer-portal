@@ -3287,6 +3287,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
             });
           })
           .first('id');
+        if (alreadyFlagged) {
+          // The nightly check already flagged this occurrence, so no second row is
+          // logged — but a person has now called it a no-show: that confirms the
+          // existing row (reopening one settled earlier) and its card.
+          await require('../services/not-closed-out').confirmMiss({
+            logId: alreadyFlagged.id, confirmedBy: req.technicianId, reopen: true,
+          });
+        }
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
           // the occurrence as it stood under the transition's row lock
@@ -6422,6 +6430,53 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/admin/dispatch/not-closed-out/:logId/confirm-miss — "This was a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/dismiss      — "Not a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/done         — "Done" (a confirmed miss was dealt with).
+//
+// The person decisions on a "Visit not closed out" Action Queue card
+// (services/not-closed-out.js; owner 2026-10-03). :logId is the reschedule_log
+// row the card's payload carries. Rebooking and closing the visit out go through
+// the existing job tools, which settle the row themselves. No customer contact.
+const NOT_CLOSED_OUT_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.post('/not-closed-out/:logId/confirm-miss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').confirmMiss({ logId: req.params.logId, confirmedBy: req.technicianId });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/confirm-miss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/dismiss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const note = typeof req.body?.note === 'string' ? req.body.note : null;
+    const result = await require('../services/not-closed-out').dismiss({ logId: req.params.logId, dismissedBy: req.technicianId, note });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/dismiss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/done', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').markHandled({ logId: req.params.logId, handledBy: req.technicianId });
+    if (!result.ok && result.reason === 'not_confirmed') {
+      return res.status(409).json({ error: 'Say whether this was a miss first.', code: 'NOT_CONFIRMED' });
+    }
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/done] failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/alerts/resolve-all — clear current Action Queue.
 //
 // Bulk version of PATCH /alerts/:id/resolve. It marks every unresolved
@@ -6538,7 +6593,13 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert } = require('../services/dispatch-alerts');
+    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+    // A decision-only card (a visit not closed out) is settled by its own
+    // decision routes; a bare resolve would close it and record nothing.
+    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
+    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
     const row = await resolveAlert({
       id: req.params.id,
       resolvedBy: req.technicianId,
