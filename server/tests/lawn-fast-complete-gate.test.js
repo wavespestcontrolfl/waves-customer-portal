@@ -95,6 +95,39 @@ describe('/complete wiring', () => {
     expect(src).toMatch(/preflightLawnFastCompletion\(\{[^}]*lawnFast,[^}]*\}\)/s);
   });
 
+  describe('the locked-row visit-type check (source order, like the other locked-row compares)', () => {
+    const lockAt = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const identityAt = src.indexOf("require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)");
+    const callAt = src.indexOf("assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast })");
+
+    test('runs right after the main flow\'s locked identity compare, on the locked rows, only for a lawnFast block that is not an incomplete outcome', () => {
+      expect(lockAt).toBeGreaterThan(-1);
+      expect(identityAt).toBeGreaterThan(lockAt);
+      expect(callAt).toBeGreaterThan(identityAt);
+      expect(callAt - identityAt).toBeLessThan(600);
+      expect(src.slice(identityAt, callAt)).toMatch(/if \(lawnFast != null && !isIncompleteVisit\) \{/);
+    });
+
+    test('adds one column to the existing customer FOR SHARE read, only where the column exists, and no second lock or query', () => {
+      const shareAt = src.indexOf("const snapshotCustomerRow = await trx('customers')");
+      const read = src.slice(shareAt, src.indexOf('if (completionPricingPlan) {', shareAt));
+      expect(read).toContain('.forShare()');
+      expect(read).toContain("...(billingModeColumnsExist ? ['billing_mode'] : [])");
+      expect((read.match(/trx\(/g) || []).length).toBe(1);
+    });
+
+    test('both abort codes release the claim; a changed type answers 409 with its reason, an unreadable one 503', () => {
+      const changedAt = src.indexOf("if (err && err.code === 'visit_identity_changed') {");
+      const changed = src.slice(changedAt, src.indexOf("if (err && err.code === 'lawn_fast_visit_type_unavailable') {", changedAt));
+      expect(changed).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+      expect(changed).toContain("...(err.reason ? { reason: err.reason } : {})");
+      const unavailableAt = src.indexOf("if (err && err.code === 'lawn_fast_visit_type_unavailable') {");
+      const unavailable = src.slice(unavailableAt, src.indexOf("if (err && err.code === 'trace_changed') {", unavailableAt));
+      expect(unavailable).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+      expect(unavailable).toContain('status: 503');
+    });
+  });
+
   test('only a body that carries the block is judged', () => {
     expect(src).toMatch(/^\s+lawnFast = null,$/m);
     expect(src).toMatch(/if \(lawnFast !== null && lawnFast !== undefined\)/);

@@ -20,6 +20,7 @@ const {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   preflightLawnFastCompletion,
+  assertLawnFastVisitTypeUnderLock,
 } = require('../services/lawn-fast-complete');
 const reportData = require('../services/service-report/report-data');
 const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
@@ -622,9 +623,81 @@ describe('preflightLawnFastCompletion', () => {
     });
   });
 
-  test('an incomplete visit is not judged', async () => {
-    delete process.env.GATE_LAWN_FAST_COMPLETE;
+  test('an incomplete visit is not judged (with the gate on; the gate is checked first, see below)', async () => {
     expect(await run({}, { isIncompleteVisit: true })).toBeNull();
+  });
+});
+
+describe('an incomplete outcome and the dark gate', () => {
+  const savedGate = process.env.GATE_LAWN_FAST_COMPLETE;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedGate;
+  });
+  const incomplete = (args = {}) => preflightLawnFastCompletion({ knex: fakeKnex({}), svc: { id: VISIT, customer_id: 'cust-1' }, isIncompleteVisit: true, lawnFast: {}, ...args });
+
+  test('gate off: ANY /complete carrying lawnFast is refused, an incomplete outcome included', async () => {
+    delete process.env.GATE_LAWN_FAST_COMPLETE;
+    expect(await incomplete()).toMatchObject({ status: 409, payload: { code: 'lawn_fast_disabled' } });
+  });
+
+  test('gate on: an incomplete outcome is exempt from the rest (identity echo, visit type, eligibility, assessment), and reads nothing', async () => {
+    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+    const knex = fakeKnex({});
+    expect(await incomplete({ knex, expectedVisit: null, lawnFast: {} })).toBeNull();
+    expect(knex).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertLawnFastVisitTypeUnderLock (the authority, inside the completion transaction)', () => {
+  const lockedSvc = { id: VISIT, customer_id: 'cust-1', is_callback: false, service_id: 'cat-1' };
+  const lock = (billingMode, lawnFast = { visitType: 'recurring' }, extra = {}) => assertLawnFastVisitTypeUnderLock({
+    trx: extra.trx || {}, lockedCustomer: 'lockedCustomer' in extra ? extra.lockedCustomer : { billing_mode: billingMode }, lockedSvc, lawnFast,
+  });
+  beforeEach(() => resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE()));
+
+  test('unchanged: passes (recurring, one_time and per_application)', async () => {
+    await expect(lock(null)).resolves.toBeUndefined();
+    await expect(lock('per_application', { visitType: 'per_application' })).resolves.toBeUndefined();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+    await expect(lock(null, { visitType: 'one_time' })).resolves.toBeUndefined();
+  });
+
+  test('billing_mode changed between the preflight and the transaction: visit_identity_changed / visit_type_changed', async () => {
+    await expect(lock('per_application')).rejects.toMatchObject({ code: 'visit_identity_changed', reason: 'visit_type_changed' });
+  });
+
+  test('the profile\'s billing type changed: the same abort', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+    await expect(lock(null)).rejects.toMatchObject({ code: 'visit_identity_changed', reason: 'visit_type_changed' });
+  });
+
+  test('an echoed unknown (or a non-object echo) is never accepted', async () => {
+    await expect(lock(null, { visitType: 'unknown' })).rejects.toMatchObject({ code: 'visit_identity_changed' });
+    await expect(lock(null, { visitType: null })).rejects.toMatchObject({ code: 'visit_identity_changed' });
+    await expect(lock(null, true)).rejects.toMatchObject({ code: 'visit_identity_changed' });
+  });
+
+  test('the profile read fails inside the transaction: aborts retryably (503 class), never passes', async () => {
+    resolveCompletionProfileForScheduledService.mockRejectedValue(Object.assign(new Error('connection lost'), { code: '08006' }));
+    await expect(lock(null)).rejects.toMatchObject({ code: 'lawn_fast_visit_type_unavailable' });
+  });
+
+  test('the strict resolver is used, on the transaction', async () => {
+    const trx = { isTransaction: true };
+    await lock(null, { visitType: 'recurring' }, { trx });
+    expect(resolveCompletionProfileForScheduledService).toHaveBeenCalledWith(lockedSvc, trx, { strict: true });
+  });
+
+  test('a locked customer row without billing_mode (column not selected) cannot be judged: aborts retryably', async () => {
+    await expect(lock(null, { visitType: 'recurring' }, { lockedCustomer: { first_name: 'Test' } })).rejects.toMatchObject({ code: 'lawn_fast_visit_type_unavailable' });
+    await expect(lock(null, { visitType: 'recurring' }, { lockedCustomer: null })).rejects.toMatchObject({ code: 'lawn_fast_visit_type_unavailable' });
+  });
+
+  test('no lawnFast block: nothing runs (no query, no profile read)', async () => {
+    const trx = jest.fn();
+    for (const absent of [null, undefined]) await expect(assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: { billing_mode: 'per_application' }, lockedSvc, lawnFast: absent })).resolves.toBeUndefined();
+    expect(trx).not.toHaveBeenCalled();
+    expect(resolveCompletionProfileForScheduledService).not.toHaveBeenCalled();
   });
 });
 

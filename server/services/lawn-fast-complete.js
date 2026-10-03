@@ -666,8 +666,11 @@ function visitTypeRefusal(verdict, lawnFast) {
 /**
  * Preflight for a /complete body carrying a `lawnFast` block. Returns
  * `{ status, payload }` (the shape preflightLawnAssessmentCompletion returns) to
- * refuse, or null to proceed. Order: gate, visit identity echoed, eligible visit,
- * confirmed assessment. The photo floor is never checked here (advisory; see
+ * refuse, or null to proceed. Order: gate (always, first), then an incomplete outcome
+ * is exempt from the rest; otherwise visit identity echoed, visit type echoed,
+ * eligible visit, visit type recomputed, confirmed assessment. The same visit-type
+ * verdict is enforced again under the completion lock
+ * (assertLawnFastVisitTypeUnderLock); that locked check is the authority. The photo floor is never checked here (advisory; see
  * evaluatePhotoFloor).
  *
  * It runs only on a FRESH completion attempt (the caller's claim.action ===
@@ -705,13 +708,18 @@ function visitTypeRefusal(verdict, lawnFast) {
  * only submits completed), like the lawn assessment preflight.
  */
 async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null } = {}) {
-  if (isIncompleteVisit) return null;
+  // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
+  // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
     return {
       status: 409,
       payload: { error: 'Lawn Fast Complete is not available. Use the full completion form.', code: 'lawn_fast_disabled' },
     };
   }
+  // An incomplete OUTCOME records no products and has no assessment to confirm, so the
+  // identity echo, the visit-type check, eligibility and the assessment checks are exempt
+  // (the main flow's own checks, including its expectedVisit compare when sent, still run).
+  if (isIncompleteVisit) return null;
   if (expectedVisitIncomplete(expectedVisit)) {
     return {
       status: 400,
@@ -802,6 +810,33 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   return null;
 }
 
+// The visit type re-judged INSIDE the completion transaction, beside the main flow's
+// locked-row identity compare: billing_mode is read from the LOCKED customer row
+// (the existing FOR SHARE read selects it), the profile with the strict resolver on the
+// transaction, and the same lawnFastVisitType result is compared with the type the
+// sheet echoed. A change since the unlocked preflight (the office moved the customer
+// to per-application billing, say) aborts with visit_identity_changed / visit_type_changed
+// through the main flow's own error path. A failed read aborts retryably
+// (lawn_fast_visit_type_unavailable, 503), never passes. A profile edit racing the commit
+// is out of scope: the profile is catalog data this transaction does not lock. Nothing
+// runs for a request without a lawnFast block.
+async function assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer, lockedSvc, lawnFast }) {
+  if (lawnFast === null || lawnFast === undefined) return;
+  const unavailable = () => Object.assign(new Error('lawn fast visit type unavailable'), { code: 'lawn_fast_visit_type_unavailable' });
+  if (!lockedCustomer || !('billing_mode' in lockedCustomer) || !lockedSvc) throw unavailable();
+  let profile;
+  try {
+    profile = await require('./service-completion-profiles').resolveCompletionProfileForScheduledService(lockedSvc, trx, { strict: true });
+  } catch (err) {
+    logger.warn(`[lawn-fast] visit type unavailable under the completion lock for ${lockedSvc.id}: ${err?.code || err?.name || 'Error'}`);
+    throw unavailable();
+  }
+  const visitType = lawnFastVisitType(profile, lockedCustomer.billing_mode || null, lockedSvc.is_callback === true);
+  if (!lawnFast || typeof lawnFast !== 'object' || lawnFast.visitType !== visitType) {
+    throw Object.assign(new Error('visit type changed during completion'), { code: 'visit_identity_changed', reason: 'visit_type_changed' });
+  }
+}
+
 module.exports = {
   LEGACY_PHOTO_FLOOR,
   isUuid,
@@ -814,4 +849,5 @@ module.exports = {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   preflightLawnFastCompletion,
+  assertLawnFastVisitTypeUnderLock,
 };
