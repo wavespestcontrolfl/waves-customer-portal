@@ -164,6 +164,7 @@ const HOLD_COPY = Object.freeze({
   term_family_changed: 'The prepaid term now covers a different plan than the notice named, so nothing was changed.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
+  delivery_revoked: 'The notice bounced or was blocked after it went out, so the customer was not told and the rate was not changed.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
   billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
   renewal_in_progress: 'A renewal of this prepaid plan is being recorded right now, so the amount is retried tonight.',
@@ -742,7 +743,11 @@ async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId })
 // with sent_at set and at least one leg delivered. Re-read under the row
 // lock in applyNotice.
 function wasDelivered(notice) {
-  return !!(notice && notice.sent_at && NOTIFIED_STATUSES.includes(String(notice.status)) && (notice.email_sent === true || notice.sms_sent === true));
+  // A notice whose every channel later failed (a hard bounce, a drop, a block,
+  // an undelivered text — rate-review-comms.js recordChannelFailure) is not a
+  // notified customer, whatever stamps remain on the row.
+  return !!(notice && notice.sent_at && NOTIFIED_STATUSES.includes(String(notice.status)) && (notice.email_sent === true || notice.sms_sent === true)
+    && !parseMetadata(notice.metadata).delivery_revoked);
 }
 
 async function loadDueNotices(dbh, asOfDay) {
@@ -1255,7 +1260,10 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       const customer = await trx('customers').where({ id: noticeRow.customer_id }).forUpdate().first();
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
-      if (!notice || notice.applied_at || !wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      if (!notice || notice.applied_at) { outcomeBox.skipped = true; return; }
+      // Told, then the only channel failed: named, never silently skipped.
+      if (parseMetadata(notice.metadata).delivery_revoked) throw hold('delivery_revoked', { event: parseMetadata(notice.metadata).delivery_revoked.event });
+      if (!wasDelivered(notice)) { outcomeBox.skipped = true; return; }
       // A merge undo can repoint the notice after the due scan: the locks
       // above are the scanned owner's, so never write under them — the next
       // run reads the live owner.
