@@ -664,16 +664,22 @@ async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
   for (const [technicianId, ids] of byTech) {
     const n = ids.length;
     try {
-      await PushService.sendToAdminUser(technicianId, {
+      const result = await PushService.sendToAdminUser(technicianId, {
         title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
         body: '',
         url: '/admin/today',
         tag,
         priority: 'high',
       });
+      // Delivered to a device, or the tech has none (a retry could never
+      // land): the batch is done. Every device failed: keep it for a retry
+      // (pre-push audit P1 — the sender reports provider failures, it does
+      // not throw them).
+      const total = Number(result?.total) || 0;
+      if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
       await db('tech_notifications').whereIn('id', ids)
         .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
-      pushed += 1;
+      if (total > 0) pushed += 1;
     } catch (err) {
       logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
       await db('tech_notifications').whereIn('id', ids)

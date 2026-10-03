@@ -5,7 +5,7 @@
 // The feed insert, as (technicianId, row) with the payload parsed back —
 // resolve false to fail the insert.
 const mockWriteCard = jest.fn().mockResolvedValue(undefined);
-const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
+const mockSendToAdminUser = jest.fn().mockResolvedValue({ total: 1, sent: 1 });
 const mockSendOpts = [];
 
 jest.mock('../models/db', () => jest.fn());
@@ -546,13 +546,26 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
   });
 
+  test('a send every device refused (the sender reports, not throws) keeps the batch for a retry; no devices at all closes it', async () => {
+    notices._test.setCurrentAutoDispatchRun('r1');
+    await move('auto_dispatch');
+    mockSendToAdminUser.mockResolvedValueOnce({ total: 2, sent: 0, failed: 2 });
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload).toMatchObject({ push_held_run: 'r1' });
+    expect(cardRows[0].payload).not.toHaveProperty('push_claimed_at');
+
+    mockSendToAdminUser.mockResolvedValueOnce({ total: 0, sent: 0, failed: 0 });
+    expect(await notices.beginAutoDispatchRun('r2')).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
+  });
+
   test('the held mark is removed only after the push is handed off', async () => {
     notices._test.setCurrentAutoDispatchRun('r1');
     await move('auto_dispatch');
     mockSendToAdminUser.mockImplementationOnce(async () => {
       // mid-handoff: still held, claimed
       expect(cardRows[0].payload).toMatchObject({ push_held_run: 'r1', push_claimed_at: expect.anything() });
-      return { sent: 1 };
+      return { total: 1, sent: 1 };
     });
     expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 1 });
     expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
