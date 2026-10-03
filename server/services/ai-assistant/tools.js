@@ -712,18 +712,26 @@ function customerTyped(text, address) {
 }
 // The address this tool told the model to read back in the previous turn,
 // when the assistant's reply that turn shows it. `rows` are newest first.
-function pendingReadBack(rows) {
-  // This turn's own message is the newest row when its save landed.
-  const earlier = rows[0]?.role === 'user' ? rows.slice(1) : rows;
-  const next = earlier.findIndex((r) => r.role === 'user');
-  const lastTurn = next === -1 ? earlier : earlier.slice(0, next);
-  const asked = lastTurn.find((r) => r.role === 'tool_use' && r.content === 'request_email_change');
-  const reply = lastTurn.find((r) => r.role === 'assistant');
-  if (!asked || !reply) return null;
+// The assistant's reply is the last row a turn saves, so the newest assistant
+// row is the last reply: everything above it is this turn (the customer's
+// message, tools already run for it), and the rows below it down to the next
+// customer message are what that reply's turn ran.
+function pendingReadBack(rows, customerMessage) {
+  const replyAt = rows.findIndex((r) => r.role === 'assistant');
+  if (replyAt === -1) return null;
+  // Only this turn's own message may sit above the reply: any other customer
+  // message means the reply is not the one this message answers.
+  const since = rows.slice(0, replyAt).filter((r) => r.role === 'user');
+  if (since.length > 1 || (since.length === 1 && since[0].content !== customerMessage)) return null;
+  const older = rows.slice(replyAt + 1);
+  const turnEnd = older.findIndex((r) => r.role === 'user');
+  const asked = (turnEnd === -1 ? older : older.slice(0, turnEnd))
+    .find((r) => r.role === 'tool_use' && r.content === 'request_email_change');
+  if (!asked) return null;
   let result = asked.tool_results;
   try { if (typeof result === 'string') result = JSON.parse(result); } catch { return null; }
   const address = typeof result?.read_back === 'string' ? result.read_back : '';
-  return address && showsEmail(reply.content, address) ? address : null;
+  return address && showsEmail(rows[replyAt].content, address) ? address : null;
 }
 
 async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}) {
@@ -756,7 +764,7 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   if (input.customer_confirmed !== true) return emailReadBack(asked);
   // Confirmed means this turn's message answers the read-back of this same
   // address; anything else is read back (again) first.
-  const pending = pendingReadBack(rows);
+  const pending = pendingReadBack(rows, customerMessage);
   if (!pending || !sameEmail(pending, asked)) return emailReadBack(asked);
   // Not a tool result the model sees: assistant.js hands off on it. The
   // address is the one the read-back showed.

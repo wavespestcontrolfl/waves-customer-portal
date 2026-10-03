@@ -141,6 +141,17 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(db.__queries.some((sql) => /update "customers"/.test(sql))).toBe(false);
 });
 
+test('another tool already run this turn does not hide the read-back', async () => {
+  const message = afterReadBack('Yes, and when is my next visit?');
+  chat.unshift({ role: 'tool_use', content: 'get_upcoming_services', tool_results: JSON.stringify({ services: [] }) });
+  mockCreate.mockResolvedValueOnce(ask({ new_email: NEW, customer_confirmed: true }));
+
+  const result = await say(message);
+
+  expect(result.escalated).toBe(true);
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/New email, confirmed/);
+});
+
 test('a confirmed change and an escalate call in one reply ring one bell, the one with the address', async () => {
   mockCreate.mockResolvedValueOnce({ content: [
     { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'email change', topic: 'account_change' } },
@@ -179,6 +190,16 @@ test.each([
   ['the last reply showed a longer address', () => afterReadBack('Yes', `I have x${NEW}. Is that right?`)],
   ['the last reply showed it with an underscore in front', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`)],
   ['the read-back was for another address', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`, { logged: readBackRow(`_${NEW}`) })],
+  ['the only read-back is from this same turn', () => {
+    afterReadBack(`Change it to ${NEW}, yes I am sure`, `Sure. Is ${NEW} the new one?`, { logged: null });
+    chat.unshift(readBackRow(NEW));
+    return chat[1].content;
+  }],
+  ['another customer message came after the read-back', () => {
+    afterReadBack('Yes');
+    chat.splice(1, 0, { role: 'user', content: 'Hold on' });
+    return 'Yes';
+  }],
   ['no read-back was asked for last turn', () => afterReadBack('Yes', `I have ${NEW}. Is that right?`, { logged: null })],
   ['the read-back was a turn before the last one', () => {
     afterReadBack('Yes');
