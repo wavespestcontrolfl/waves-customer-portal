@@ -168,6 +168,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     setLoading(true);
     setLoadError('');
     try {
+      ensureCurrentDeviceIdentity(deviceScope);
       const data = await getServicePhotos(serviceId, deviceIdentity.token);
       if (sequence === loadSequence.current) {
         setPhotos(data.photos || []);
@@ -175,10 +176,13 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         setVisitReadReady(true);
       }
     } catch (err) {
-      if (sequence === loadSequence.current) setLoadError(err.message || 'Failed to load photos');
+      if (sequence === loadSequence.current) {
+        setVisitReadReady(false);
+        setLoadError(err.message || 'Failed to load photos');
+      }
     }
     if (sequence === loadSequence.current) setLoading(false);
-  }, [serviceId, deviceIdentity.token]);
+  }, [serviceId, deviceIdentity.token, deviceScope]);
 
   useEffect(() => {
     setVisitReadReady(false);
@@ -216,7 +220,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   };
 
   const uploadPhoto = async (photo, { verifyFresh = false } = {}) => {
-    if (!photo || uploadInFlight.current) return;
+    if (uploadInFlight.current) return;
     uploadInFlight.current = true;
     setUploading(true);
     setErrorMsg('');
@@ -272,8 +276,12 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       const message = uploadFailureMessage(err, {
         saved: savedState === 'saved' || deviceSaveState === 'saved',
       });
-      if (pendingPhotoRef.current?.draftId === photo.draftId) setErrorMsg(message);
-      if (savedState && pendingPhotoRef.current?.draftId === photo.draftId) setDeviceSaveState(savedState);
+      if (pendingPhotoRef.current?.draftId === photo.draftId) {
+        setErrorMsg(message);
+        if (savedState) setDeviceSaveState(savedState);
+      }
+      setVisitReadReady(false);
+      void load();
     }
     uploadInFlight.current = false;
     setUploading(false);

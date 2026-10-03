@@ -279,7 +279,7 @@ it('blocks Retry if the signed-in technician changes before the POST', async () 
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'different-tech', role: 'technician' }));
   fireEvent.click(screen.getByRole('button', { name: 'Retry upload', exact: true }));
 
-  expect(await screen.findByText(/Signed-in technician changed/)).toBeInTheDocument();
+  expect(await screen.findByText(/Signed-in technician changed.*Upload not confirmed/)).toBeInTheDocument();
   expect(fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0);
   expect(await getServicePhotoDraft(VISIT_ID, TECH_ID)).toMatchObject({
     draftId: 'old-tech-draft',
@@ -289,12 +289,13 @@ it('blocks Retry if the signed-in technician changes before the POST', async () 
 
 it('reads the visit again before Retry and keeps the file when its property changed', async () => {
   let liveVisit = VISIT;
-  let uploads = 0;
+  const uploads = [];
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     if (url.endsWith('/photo-marks')) return response({ supported: false });
     if (options?.method === 'POST') {
-      uploads += 1;
-      throw new Error('Signal dropped');
+      uploads.push(options.body);
+      if (uploads.length === 1) throw new Error('Signal dropped');
+      return response({ photo: { id: 'new-property-photo', staged: true } });
     }
     return response({ photos: [], visit: liveVisit });
   }));
@@ -309,11 +310,18 @@ it('reads the visit again before Retry and keeps the file when its property chan
   fireEvent.click(screen.getByRole('button', { name: 'Retry upload', exact: true }));
 
   expect(await screen.findByText(/Discard the saved photo, review the current visit/)).toBeInTheDocument();
-  expect(uploads).toBe(1);
+  expect(uploads).toHaveLength(1);
   expect(await getServicePhotoDraft(VISIT_ID, TECH_ID)).toMatchObject({
     fileName: 'property.jpg',
     expectedVisit: VISIT,
   });
+  fireEvent.click(screen.getByRole('button', { name: 'Discard saved photo', exact: true }));
+  await waitFor(() => expect(screen.getByRole('button', { name: /Add Photo/ })).toBeEnabled());
+  fireEvent.change(screen.getByLabelText('Choose service photo'), {
+    target: { files: [new File(['new-property-photo'], 'new-property.jpg', { type: 'image/jpeg' })] },
+  });
+  await screen.findByText(/Photo saved — it will attach/);
+  expect(JSON.parse(uploads[1].get('expectedVisit'))).toEqual(liveVisit);
 });
 
 it('recovers a completed upload receipt and retries reconciliation after a later visit edit', async () => {
