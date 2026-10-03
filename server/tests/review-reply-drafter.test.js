@@ -591,6 +591,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     const notKind = grounding({ text: 'The technician was not kind, but the ants are gone.', rating: 4, mentionedTechNames: [], topics: [], account: null });
     expect(verify(good("Hi Dana, we're glad our technician was kind and the ants are gone."), notKind)).toBe('negated_review_claim');
     expect(verify(good('Hi Dana, that is kind of you. We are glad the ants are gone.'), notKind)).toBeNull();
+    expect(verify(good('Hi Dana, our technician was kind enough to help and the ants are gone.'), notKind)).toBe('negated_review_claim');
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
