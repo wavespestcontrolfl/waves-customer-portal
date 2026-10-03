@@ -242,7 +242,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     db.__rows = (q) => {
       if (q.sql.includes('from "agent_sessions"')) return [conversationFor('portal_chat', 'cust-1')];
       if (q.sql.includes('"reservice_token" from "customers"')) return [{ reservice_token: 'tok_rs' }];
-      if (q.sql.includes('select "content" from "agent_messages"')) return mockRecentWords(q);
+      if (q.sql.includes('from "agent_messages"')) return mockRecentWords(q);
       return [];
     };
   });
@@ -293,9 +293,9 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content).toMatch(/separately priced/);
   });
 
-  test('the customer\'s newest messages are read newest-first, so a long chat still classifies its latest words', async () => {
+  test('portal history is read newest-first, so a long chat reaches its latest words (model and classifier alike)', async () => {
     let sql;
-    mockRecentWords = (q) => { sql = q.sql; return [{ content: 'yes please' }, { content: 'The ants are back in the kitchen' }]; };
+    mockRecentWords = (q) => { sql = q.sql; return [{ role: 'user', content: 'yes please' }, { role: 'assistant', content: 'Sorry to hear that. Want me to check your plan?' }, { role: 'user', content: 'The ants are back in the kitchen' }]; };
     mockCreate
       .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
       .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Tap below to book it.' }] });
@@ -303,18 +303,32 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     const result = await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
 
     expect(sql).toMatch(/order by "created_at" desc, "id" desc limit \$\d/);
+    // Put back in order: the model's last message is the customer's newest.
+    const sent = mockCreate.mock.calls[0][0].messages;
+    const textOf = (m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => b.text).join(''));
+    expect(sent.map(textOf)).toEqual(['The ants are back in the kitchen', 'Sorry to hear that. Want me to check your plan?', 'yes please']);
     expect(result.actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' }]);
   });
 
-  test('the words read is skipped when the re-service gate is off', async () => {
-    delete process.env.GATE_PORTAL_CHAT_RESERVICE;
-    let read = false;
-    mockRecentWords = () => { read = true; return []; };
+  test('SMS keeps the original oldest-first history read', async () => {
+    let sql;
+    mockRecentWords = (q) => { sql = q.sql; return []; };
     mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
 
-    await assistant.processMessage({ message: 'The ants are back', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+    await assistant.processMessage({ message: 'Hi', channel: 'sms', channelIdentifier: '+15550100', customerPhone: '+15550100' });
 
-    expect(read).toBe(false);
+    expect(sql).toMatch(/order by "created_at" asc limit \$\d/);
+  });
+
+  test('with visit facts on too, a problem since the visit goes to the re-service rule, not a blanket hand-off', async () => {
+    process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+    mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+    await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+    const text = mockCreate.mock.calls[0][0].system[0].text;
+    expect(text).not.toMatch(/reports a problem since the visit or says something was missed, escalate/);
+    expect(text).toMatch(/Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS/);
   });
 
   test('the gates compose: every portal section in one prompt', async () => {

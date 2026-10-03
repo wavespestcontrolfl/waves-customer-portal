@@ -115,6 +115,7 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
     tools: portalToolsFor({ payments, visits, reservice }),
     actions: [],
     cards: payments || visits ? [] : null,
+    portal: true,
     // Whether the payment card and re-service tools are in this lane.
     payments,
     reservice,
@@ -122,23 +123,11 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   };
 }
 
-// The customer's last three messages, newest last, ending with this one: a
-// newest-first read of its own (the model's history read is oldest-first and
-// capped, so in a long chat it never reaches the latest words). A failed read,
-// or a save that failed, still leaves this message.
+// The customer's last three messages, newest last, ending with this one (a
+// failed save leaves it out of the history, so it is added back).
 const CUSTOMER_WORDS_KEPT = 3;
-async function recentCustomerWords(conversationId, message) {
-  let words = [];
-  try {
-    const rows = await db('agent_messages')
-      .where({ conversation_id: conversationId, role: 'user' })
-      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-      .limit(CUSTOMER_WORDS_KEPT)
-      .select('content');
-    words = rows.map((r) => r.content).filter((c) => typeof c === 'string').reverse();
-  } catch (err) {
-    logger.warn(`[ai-assistant] recent customer words read failed: ${err.message}`);
-  }
+function recentCustomerWords(history, message) {
+  const words = history.filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content);
   if (words[words.length - 1] !== message) words.push(message);
   return words.slice(-CUSTOMER_WORDS_KEPT);
 }
@@ -271,6 +260,9 @@ Call open_portal_section for the matching page and say in one sentence what the 
 
 `);
 
+// The visit-facts escalation sentence, which the re-service prompt narrows.
+const VISIT_PROBLEM_ESCALATION = 'If the customer reports a problem since the visit or says something was missed, escalate.';
+
 // GATE_PORTAL_CHAT_VISIT_FACTS on top of either portal prompt: the past-visit
 // tool, and the owner-approved company facts (services/sms-company-facts.js,
 // the texting AI's own block, unedited).
@@ -279,7 +271,7 @@ function withVisitFacts(prompt) {
     .replace('- Hand the conversation to the Waves team (escalate)', '- Look up the customer\'s recent completed visits (get_recent_visits)\n- Hand the conversation to the Waves team (escalate)')
     .replace('plan details, past visits, or documents', 'plan details, or documents')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PAST VISITS:
-For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits. Answer from what it returns (the date, the service, the technician's first name, the kinds of product applied) and point the customer to the card it shows for the reviewed summary and the report link. You are not given the summary text. Do not add a finding, product or date it did not return, and never name a product brand. If the customer reports a problem since the visit or says something was missed, escalate.
+For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits. Answer from what it returns (the date, the service, the technician's first name, the kinds of product applied) and point the customer to the card it shows for the reviewed summary and the report link. You are not given the summary text. Do not add a finding, product or date it did not return, and never name a product brand. ${VISIT_PROBLEM_ESCALATION}
 
 ${renderCompanyFactsSection()}
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
@@ -289,6 +281,7 @@ WHAT YOU MUST ESCALATE (use the escalate tool):`);
 // visits go to offer_reservice, which alone decides whether a visit is free.
 function withReservice(prompt) {
   return prompt
+    .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS below.')
     .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:
 When the customer reports pests, or a lawn problem, back or still there between scheduled visits, call offer_reservice with the service line (pest or lawn) and follow its instruction. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead.
@@ -388,10 +381,12 @@ class WavesAssistant {
     }
 
     // 5. Build conversation history for Claude
-    const history = await this.buildHistory(conversation.id);
+    // Portal chat reads the newest messages; other channels keep the original
+    // oldest-first read.
+    const history = await this.buildHistory(conversation.id, { newest: lane.portal === true });
     // The customer's own latest words, which the re-service tool classifies
     // (the model's reading of them never decides what is covered).
-    if (lane.reservice) lane.context.customerWords = await recentCustomerWords(conversation.id, message);
+    if (lane.reservice) lane.context.customerWords = recentCustomerWords(history, message);
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
@@ -631,14 +626,19 @@ class WavesAssistant {
   /**
    * Build Claude message history from conversation.
    */
-  async buildHistory(conversationId) {
+  // The last 20 messages. `newest`: read newest-first and put back in order,
+  // so a long chat still reaches its latest turn (portal chat). Without it,
+  // the original read: the first 20, which never reaches the latest turn once
+  // a chat passes 20 (SMS keeps it unchanged).
+  async buildHistory(conversationId, { newest = false } = {}) {
     const msgs = await db('agent_messages')
       .where('conversation_id', conversationId)
       .whereIn('role', ['user', 'assistant'])
-      .orderBy('created_at', 'asc')
+      .orderBy([{ column: 'created_at', order: newest ? 'desc' : 'asc' }, ...(newest ? [{ column: 'id', order: 'desc' }] : [])])
       .limit(20);
+    const ordered = newest ? msgs.reverse() : msgs;
 
-    return msgs.map(m => ({ role: m.role, content: m.content }));
+    return ordered.map(m => ({ role: m.role, content: m.content }));
   }
 
   /**

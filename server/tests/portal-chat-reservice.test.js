@@ -22,20 +22,27 @@ jest.mock('../services/reservice-scheduler', () => {
 });
 
 const db = require('../models/db');
+const { _internals: reschedulePage } = require('../routes/reschedule-public');
 const { portalToolsFor, executeToolCall } = require('../services/ai-assistant/tools');
 
 const ANTS = ['The ants are back in the kitchen'];
 const WEEDS = ['Weeds are coming back all over the lawn'];
 const PRIMARY = { secondaryProperty: false, customerWords: ANTS };
 let tokenRow;
+let bookedRow;
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockGates.reserviceStreamline = true;
   mockScheduler.reserviceSelfServeEnabled.mockReturnValue(true);
   tokenRow = { reservice_token: 'tok_rs_1' };
-  const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => tokenRow) };
-  db.mockImplementation(() => chain);
+  bookedRow = { id: 'svc-callback-1' };
+  db.mockImplementation((table) => {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => (table === 'customers' ? tokenRow : bookedRow)) };
+    return chain;
+  });
+  reschedulePage.loadById.mockResolvedValue({ id: 'svc-callback-1' });
+  reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
 });
 
 const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerWords: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
@@ -81,10 +88,31 @@ test('a line with a re-service already booked: its date and window, a button to 
   const { result, actions } = await offer('pest');
 
   expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control Re-Service, Oct 9', href: '/reschedule/tok_move' }]);
+  // The reschedule page's own verdict on that very visit decides the button.
+  expect(reschedulePage.loadById).toHaveBeenCalledWith('svc-callback-1');
+  expect(result.instruction).toMatch(/a button to move it is shown/);
   expect(result.offered).toBe(false);
   expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
   expect(result.instruction).toMatch(/Do not offer another one/);
   expect(JSON.stringify(result)).not.toMatch(/tok_move/);
+});
+
+test.each([
+  ['the reschedule page refuses the visit (notice window, grouped, inactive account)', () => { reschedulePage.pageEligibility.mockResolvedValue({ ok: false, reason: 'notice_window' }); }],
+  ['the eligibility read fails', () => { reschedulePage.pageEligibility.mockRejectedValue(new Error('db down')); }],
+  ['the token names no visit of this customer', () => { bookedRow = undefined; }],
+])('a booked re-service the page would not move: its date, but no button: %s', async (_label, arrange) => {
+  arrange();
+  mockScheduler.loadReserviceLaneAvailability.mockResolvedValue({
+    eligible: ['pest'], bookable: [], verified: true, hasRecurringPlan: true,
+    open: { pest: { date: '2026-10-09', windowStart: '10:00', serviceType: 'Pest Control Re-Service', rescheduleUrl: '/reschedule/tok_move' } },
+  });
+
+  const { result, actions } = await offer('pest');
+
+  expect(actions).toEqual([]);
+  expect(result.already_booked.date).toBe('Oct 9, 2026');
+  expect(result.instruction).not.toMatch(/button/);
 });
 
 test('an inactive customer with a booked re-service still hears about that visit (unverified read)', async () => {

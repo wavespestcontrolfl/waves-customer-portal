@@ -268,6 +268,18 @@ function shortDateLabel(dateKey) {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// The visit as the reschedule page loads it, when that page's own GET verdict
+// would let the customer move it; null otherwise. Any failure fails closed.
+async function movableVisit(id) {
+  const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
+  const svc = await loadById(id).catch(() => null);
+  const verdict = svc && await pageEligibility(svc).catch((err) => {
+    logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
+    return null;
+  });
+  return verdict?.ok ? svc : null;
+}
+
 async function offerRescheduleLink(customerId, actions) {
   const NO_LINK = {
     available: false,
@@ -278,7 +290,6 @@ async function offerRescheduleLink(customerId, actions) {
   // loader and GET verdict (account state, status, dispatch review, grouped or
   // frozen visit, the self-serve move notice window), never a mirror of it.
   // Any failure fails closed — no button.
-  const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const movable = [];
   // Upcoming visits are read a page at a time until three are movable or
   // none are left: the button cap applies to movable visits, so no run of
@@ -298,12 +309,8 @@ async function offerRescheduleLink(customerId, actions) {
       .offset(offset);
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-      const svc = await loadById(row.id).catch(() => null);
-      const verdict = svc && await pageEligibility(svc).catch((err) => {
-        logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
-        return null;
-      });
-      if (verdict?.ok) movable.push({ row, property: String(svc.address_line1 || '').trim() });
+      const svc = await movableVisit(row.id);
+      if (svc) movable.push({ row, property: String(svc.address_line1 || '').trim() });
     }
     if (rows.length < RESCHEDULE_PAGE) break;
   }
@@ -482,9 +489,11 @@ function reserviceSurfaceOpen({ secondaryProperty }) {
 }
 
 // A re-service already open in the line: its date and window for the model,
-// and a button to move it.
-function bookedReserviceResult(line, booked, actions) {
-  const movable = typeof booked.rescheduleUrl === 'string' && /^\/reschedule\/[A-Za-z0-9_-]+$/.test(booked.rescheduleUrl);
+// and a button to move it only when the reschedule page would accept it.
+async function bookedReserviceResult(customerId, line, booked, actions) {
+  const token = /^\/reschedule\/([A-Za-z0-9_-]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
+  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
+  const movable = Boolean(row && await movableVisit(row.id));
   if (movable) {
     addAction(actions, {
       type: 'link',
@@ -519,7 +528,7 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   // The page's own availability read: plan coverage minus lanes that already
   // hold an open re-service. Any failure resolves to nothing bookable.
   const state = await require('../reservice-scheduler').loadReserviceLaneAvailability(customerId);
-  if (state.open?.[line]) return bookedReserviceResult(line, state.open[line], actions);
+  if (state.open?.[line]) return bookedReserviceResult(customerId, line, state.open[line], actions);
   if (state.verified && state.hasRecurringPlan === false) {
     return {
       offered: false,
