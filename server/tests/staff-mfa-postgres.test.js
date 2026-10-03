@@ -231,4 +231,22 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
     expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();
   });
+  test('gate on: staff pushes skip an enrolled account\'s devices registered without the code', async () => {
+    const PushService = require('../services/push-notifications');
+    await enroll(); // credential version 2, earlier devices deactivated
+    await mockDatabase('push_subscriptions').insert([
+      { admin_user_id: techId, subscription_data: '{"endpoint":"https://push.example.test/a"}', active: true, staff_token_version: 2, staff_mfa: false },
+      { admin_user_id: techId, subscription_data: '{"endpoint":"https://push.example.test/b"}', active: true, staff_token_version: 2, staff_mfa: true },
+    ]);
+    // beforeDispatch returning false stops before any provider call and
+    // reports how many devices the lookup chose.
+    const lookup = () => PushService.sendToAdminUsers([techId], () => ({ title: 't', body: 'b' }), { beforeDispatch: async () => false });
+    expect((await lookup()).subscriptions).toBe(1);
+    process.env.GATE_ADMIN_MFA = 'false';
+    try {
+      expect((await lookup()).subscriptions).toBe(2);
+    } finally {
+      process.env.GATE_ADMIN_MFA = 'true';
+    }
+  });
 });

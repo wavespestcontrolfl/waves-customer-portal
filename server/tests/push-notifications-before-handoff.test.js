@@ -9,7 +9,7 @@ const mockApnsSend = jest.fn();
 const mockFcmSend = jest.fn();
 jest.mock('../services/apns', () => ({ send: (...a) => mockApnsSend(...a), status: () => ({ configured: true }) }));
 jest.mock('../services/fcm', () => ({ send: (...a) => mockFcmSend(...a), status: () => ({ configured: true }) }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), adminMfaLive: () => false }));
 
 const db = require('../models/db');
 const Push = require('../services/push-notifications');

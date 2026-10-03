@@ -113,6 +113,8 @@ async function subscribe(req, res, next) {
           device_info: safeDeviceInfo || keep.device_info,
           role: technician.role,
           staff_token_version: staffTokenVersion,
+          // Two-step proof of the registering session (GATE_ADMIN_MFA).
+          staff_mfa: req.staffToken?.mfa === true,
         });
         if (dupes.length) {
           await trx('push_subscriptions')
@@ -129,6 +131,7 @@ async function subscribe(req, res, next) {
         device_info: safeDeviceInfo,
         active: true,
         staff_token_version: staffTokenVersion,
+        staff_mfa: req.staffToken?.mfa === true,
       }).returning('*');
       return { id: row.id, reactivated: false };
     });
