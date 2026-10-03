@@ -101,6 +101,14 @@ describe('POST /dismiss-batch', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true, dismissed: 37 });
   });
 
+  test('today/tomorrow is judged as of the read, not the tap: an ET midnight in between never clears a card shown on its own', async () => {
+    const chains = stubDb([0]);
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    // 11:59 PM ET Oct 3 read; the tap lands after midnight.
+    await handler('/dismiss-batch', 'post')({ technicianId: 't-1', body: { as_of: '2026-10-04T03:59:00.000Z' } }, res, (e) => { throw e; });
+    expect(chains[0].whereRaw[0][1]).toEqual(['2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04', '2026-10-03', '2026-10-04']);
+  });
+
   test.each([
     ['no as_of', {}],
     ['an unparseable as_of', { as_of: 'yesterday-ish' }],
