@@ -75,6 +75,7 @@ describe('assignDispatchJob → tech notice', () => {
       visitId: 'job-1', fromTechId: 't-old', toTechId: 't-new', actorId: 'adam', trx: null,
       // The committed schedule rides along so the card never re-reads a later move.
       snapshot: { date: '2026-09-10', windowStart: undefined, windowEnd: undefined },
+      previous: null,
     });
   });
 
@@ -104,6 +105,16 @@ describe('assignDispatchJob → tech notice', () => {
     expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({
       snapshot: { date: '2026-09-14', windowStart: '13:00', windowEnd: undefined },
     }));
+    // The row's slot before the edit is the cards' previous day, so a move off
+    // today/tomorrow stays a today/tomorrow change (Codex #5783 P2).
+    const { previous, snapshot } = mockNotifyAssignmentChange.mock.calls.at(-1)[0];
+    expect(previous).not.toBeNull();
+    expect(previous).not.toEqual(snapshot);
+  });
+
+  test('a plain reassignment (no schedule change) carries no previous slot', async () => {
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx: assignmentTrx() });
+    expect(mockNotifyAssignmentChange.mock.calls.at(-1)[0].previous).toBeNull();
   });
 
   test('with noticeSnapshot.date, BOTH eligibility reads (the pre-check and the locked re-check) query technician_absences with the SNAPSHOT date, not the row\'s stored date (tech-out P1: a caller that is about to move the visit — the edit modal, tech + date in one save — must check the destination day)', async () => {

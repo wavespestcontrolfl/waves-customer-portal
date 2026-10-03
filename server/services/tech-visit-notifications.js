@@ -639,12 +639,14 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
  */
 async function pushAutoDispatchSummary({ runId } = {}) {
   try {
-    if (!enabled() || !gateEnvValue(SUMMARY_GATE)) return { pushed: 0 };
     for (let i = 0; i < 5 && visitQueues.size; i += 1) {
       await Promise.allSettled([...visitQueues.values()]);
     }
+    // Taken before the gate check: a gate turned off mid-run discards this
+    // run's held cards instead of leaving them for the next run's count.
     const held = [...heldAutoDispatchCards.entries()];
     heldAutoDispatchCards.clear();
+    if (!enabled() || !gateEnvValue(SUMMARY_GATE)) return { pushed: 0 };
     const PushService = require('./push-notifications');
     let pushed = 0;
     for (const [technicianId, cards] of held) {
@@ -667,6 +669,14 @@ async function pushAutoDispatchSummary({ runId } = {}) {
     logger.warn(`[tech-visit-notifications] auto-dispatch summary failed (${errorTag(err)})`);
     return { pushed: 0 };
   }
+}
+
+// A run starts from an empty batch: cards held by an earlier run that died
+// before its summary (completeRun threw) are never counted as this run's
+// (Codex #5783 P2). Runs are serialized (runExclusive), so nothing in flight
+// belongs to another run.
+function discardHeldAutoDispatchCards() {
+  heldAutoDispatchCards.clear();
 }
 
 // Follow-through shares the staff notification and push paths. Its live
@@ -745,6 +755,7 @@ module.exports = {
   notifyVisitRescheduled,
   notifyVisitCancelled,
   pushAutoDispatchSummary,
+  discardHeldAutoDispatchCards,
   SUMMARY_GATE,
   _test: { heldAutoDispatchCards, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

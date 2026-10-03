@@ -830,6 +830,8 @@ async function runAutoDispatch(opts = {}) {
   const totals = { evaluated: 0, skipped: 0, recommended: 0, changed: 0, failed: 0 };
 
   const runId = await audit.startRun(config, triggeredBy);
+  // This run's summary push counts only cards this run holds.
+  require('../tech-visit-notifications').discardHeldAutoDispatchCards();
   logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} lock>${lockBoundary} lookahead<=${lookaheadEnd}`);
 
   let runStatus = 'completed';

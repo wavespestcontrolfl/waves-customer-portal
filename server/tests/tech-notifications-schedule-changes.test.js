@@ -64,6 +64,10 @@ describe('GET /schedule-changes', () => {
 
     const [list, count] = chains;
     expect(list.where[0]).toEqual(['n.technician_id', 't-1']);
+    // Both reads stop at as_of, the bound a following clear-all uses.
+    const asOf = new Date(res.json.mock.calls[0][0].as_of);
+    expect(list.where[1]).toEqual(['n.created_at', '<=', asOf]);
+    expect(count.where[1]).toEqual(['n.created_at', '<=', asOf]);
     expect(list.whereIn[0]).toEqual(['n.type', ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']]);
     // Joined on the uuid primary key, the payload id pattern-checked first.
     expect(list.on[0]).toBe('s.id');

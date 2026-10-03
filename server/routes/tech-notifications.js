@@ -137,19 +137,22 @@ function soonSql() {
 }
 
 // GET /schedule-changes — soon cards first (never cut off by the cap), then
-// newest; `later_total` counts every open non-soon card; `as_of` bounds a
-// following clear-all to what this read could have shown.
+// newest; `later_total` counts every open non-soon card. Both reads stop at
+// `as_of`, the same bound a following clear-all uses, so a card written
+// mid-read is neither shown nor cleared — the next read shows it.
 router.get('/schedule-changes', async (req, res, next) => {
   try {
     const soon = soonSql();
     const asOf = new Date();
     const [rows, totals] = await Promise.all([
       openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
         .orderByRaw(`${soon.sql} DESC`, soon.bindings)
         .orderBy('n.created_at', 'desc')
         .limit(SCHEDULE_CHANGE_LIMIT)
         .select('n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', db.raw(`${soon.sql} as soon`, soon.bindings)),
       openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
         .whereRaw(`NOT ${soon.sql}`, soon.bindings)
         .count('* as n'),
     ]);
