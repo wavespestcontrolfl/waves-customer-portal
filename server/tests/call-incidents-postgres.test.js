@@ -83,7 +83,7 @@ describe('the two-model rule for a call finding', () => {
       id, call_log_id: callId, audit_source: 'self_audit', category: 'field_drift', field: 'appointment_agreed',
       old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'),
       // The self-audit stores the model that actually answered.
-      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }), ...over,
+      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true }, extraction_prompt_version: 'v2-extract-abc' }), ...over,
     });
     return id;
   };
@@ -134,6 +134,18 @@ describe('the two-model rule for a call finding', () => {
     expect(row.summary).not.toMatch(/kitchen|Thursday/);
 
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ adjudicated: 0, candidates: 0 });
+  });
+
+  test('the incident keeps the extraction version of the audit, even after the call is reprocessed', async () => {
+    const callId = await call();
+    const id = await finding(callId);
+    await database('call_log').where({ id: callId }).update({ ai_extraction_prompt_version: 'v2-extract-newer' });
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect((await database('ai_incidents').where({ evidence_id: id }).first()).prompt_version).toBe('v2-extract-abc');
+    // A finding written before the snapshot existed is unversioned.
+    const old = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }) });
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect((await database('ai_incidents').where({ evidence_id: old }).first()).prompt_version).toBeNull();
   });
 
   test('a disagreeing second reader leaves a lead; an unreachable one stores nothing and is retried', async () => {

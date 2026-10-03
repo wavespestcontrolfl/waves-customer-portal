@@ -167,6 +167,79 @@ const safeJson = (t) => {
 };
 
 /**
+ * One finding → one ai_incidents row. Returns the stored disposition, or
+ * null when nothing was stored (no disagreement, or the second reader could
+ * not be reached: retried next run).
+ */
+async function adjudicateOne({ dbi, row, reader }) {
+  const prodValue = row.old_value === 'true';
+  const auditorValue = row.new_value === 'true';
+  // A row whose two values agree is not a disagreement (defensive).
+  if (prodValue === auditorValue) return null;
+  const detail = typeof row.detail === 'string' ? safeJson(row.detail) : (row.detail || {});
+  const auditorProvider = providerForModel(detail.auditor_model);
+  const skipRule = leadWithoutReading({ row, detail, auditorProvider, auditorValue });
+  let reading = { ok: true, provider: null, model: null, answer: null };
+  if (!skipRule) {
+    reading = await reader(row, auditorProvider);
+    if (!reading.ok) {
+      logger.warn(`[call-incidents] second reader unavailable for finding ${String(row.finding_id).slice(0, 8)} (${reading.reason}); retried next run`);
+      return null;
+    }
+  }
+  const decision = skipRule
+    ? { disposition: 'lead', rule: skipRule, auditorExcerptVerified: excerptInTranscript(row.transcript_excerpt, row.transcription), secondValue: null, secondExcerptVerified: false }
+    : decideCallFinding({
+      field: row.field, auditorValue, auditorExcerpt: row.transcript_excerpt, second: reading.answer, transcript: row.transcription,
+    });
+  // Belt: the two readers must be on different providers to confirm.
+  if (decision.disposition === 'confirmed_mistake' && reading.provider === auditorProvider) {
+    decision.disposition = 'lead';
+    decision.rule = 'same_provider';
+  }
+  const signals = await typedSignals(dbi, row.call_id, row.field);
+  const base = {
+    area: AREA,
+    evidence_type: EVIDENCE_TYPE,
+    evidence_id: String(row.finding_id),
+    incident_key: String(row.call_id),
+    surface: SURFACE,
+    failure_mode: failureModeFor(row.field, prodValue),
+    intent: null,
+    // The version production's answers came from at audit time (missing on
+    // findings written before the snapshot existed: unversioned).
+    prompt_version: detail.extraction_prompt_version ? String(detail.extraction_prompt_version).slice(0, 40) : null,
+    produced_at: row.call_at || null,
+    summary: `${row.field}: production said ${prodValue}, the auditor said ${auditorValue}${row.category === 'spam_false_positive' ? ' (spam false positive)' : ''}.`,
+    model: reading.model || null,
+    schema_version: SCHEMA_VERSION,
+  };
+  const adjudication = (extra = {}) => JSON.stringify({
+    rule: decision.rule,
+    field: row.field,
+    production: prodValue,
+    auditor: { value: auditorValue, model: detail.auditor_model || null, provider: auditorProvider, excerpt_verified: decision.auditorExcerptVerified },
+    second: { provider: reading.provider, model: reading.model, value: decision.secondValue, excerpt_verified: decision.secondExcerptVerified },
+    typed_signals: signals,
+    ...extra,
+  });
+  let disposition = decision.disposition;
+  try {
+    await dbi('ai_incidents').insert({ ...base, disposition, adjudication: adjudication() });
+  } catch (err) {
+    // One confirmed row per (call, cell): a second finding about the same
+    // call and field is kept as a duplicate, never counted twice.
+    if (!(isUniqueViolation(err) && disposition === 'confirmed_mistake')) throw err;
+    disposition = 'duplicate';
+    await dbi('ai_incidents')
+      .insert({ ...base, disposition, adjudication: adjudication({ duplicate_of_confirmed: true }) })
+      .onConflict(['area', 'evidence_type', 'evidence_id'])
+      .ignore();
+  }
+  return disposition;
+}
+
+/**
  * Nightly: every self-audit finding from the last LOOKBACK_DAYS not yet
  * adjudicated becomes ONE ai_incidents row (idempotent: anti-join + the
  * evidence key). Attribution is by when the CALL happened and the extraction
@@ -191,75 +264,15 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .limit(batchLimit)
     .select(
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',
-      'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at', 'c.ai_extraction_prompt_version'
+      'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at'
     );
 
   const byDisposition = {};
   let adjudicated = 0;
   for (const row of rows) {
     try {
-      const prodValue = row.old_value === 'true';
-      const auditorValue = row.new_value === 'true';
-      // A row whose two values agree is not a disagreement (defensive).
-      if (prodValue === auditorValue) continue;
-      const detail = typeof row.detail === 'string' ? safeJson(row.detail) : (row.detail || {});
-      const auditorProvider = providerForModel(detail.auditor_model);
-      const skipRule = leadWithoutReading({ row, detail, auditorProvider, auditorValue });
-      let reading = { ok: true, provider: null, model: null, answer: null };
-      if (!skipRule) {
-        reading = await reader(row, auditorProvider);
-        if (!reading.ok) {
-          logger.warn(`[call-incidents] second reader unavailable for finding ${String(row.finding_id).slice(0, 8)} (${reading.reason}); retried next run`);
-          continue;
-        }
-      }
-      const decision = skipRule
-        ? { disposition: 'lead', rule: skipRule, auditorExcerptVerified: excerptInTranscript(row.transcript_excerpt, row.transcription), secondValue: null, secondExcerptVerified: false }
-        : decideCallFinding({
-          field: row.field, auditorValue, auditorExcerpt: row.transcript_excerpt, second: reading.answer, transcript: row.transcription,
-        });
-      // Belt: the two readers must be on different providers to confirm.
-      if (decision.disposition === 'confirmed_mistake' && reading.provider === auditorProvider) {
-        decision.disposition = 'lead';
-        decision.rule = 'same_provider';
-      }
-      const signals = await typedSignals(dbi, row.call_id, row.field);
-      const base = {
-        area: AREA,
-        evidence_type: EVIDENCE_TYPE,
-        evidence_id: String(row.finding_id),
-        incident_key: String(row.call_id),
-        surface: SURFACE,
-        failure_mode: failureModeFor(row.field, prodValue),
-        intent: null,
-        prompt_version: row.ai_extraction_prompt_version ? String(row.ai_extraction_prompt_version).slice(0, 40) : null,
-        produced_at: row.call_at || null,
-        summary: `${row.field}: production said ${prodValue}, the auditor said ${auditorValue}${row.category === 'spam_false_positive' ? ' (spam false positive)' : ''}.`,
-        model: reading.model || null,
-        schema_version: SCHEMA_VERSION,
-      };
-      const adjudication = (extra = {}) => JSON.stringify({
-        rule: decision.rule,
-        field: row.field,
-        production: prodValue,
-        auditor: { value: auditorValue, model: detail.auditor_model || null, provider: auditorProvider, excerpt_verified: decision.auditorExcerptVerified },
-        second: { provider: reading.provider, model: reading.model, value: decision.secondValue, excerpt_verified: decision.secondExcerptVerified },
-        typed_signals: signals,
-        ...extra,
-      });
-      let disposition = decision.disposition;
-      try {
-        await dbi('ai_incidents').insert({ ...base, disposition, adjudication: adjudication() });
-      } catch (err) {
-        // One confirmed row per (call, cell): a second finding about the same
-        // call and field is kept as a duplicate, never counted twice.
-        if (!(isUniqueViolation(err) && disposition === 'confirmed_mistake')) throw err;
-        disposition = 'duplicate';
-        await dbi('ai_incidents')
-          .insert({ ...base, disposition, adjudication: adjudication({ duplicate_of_confirmed: true }) })
-          .onConflict(['area', 'evidence_type', 'evidence_id'])
-          .ignore();
-      }
+      const disposition = await adjudicateOne({ dbi, row, reader });
+      if (!disposition) continue;
       adjudicated += 1;
       byDisposition[disposition] = (byDisposition[disposition] || 0) + 1;
     } catch (err) {
