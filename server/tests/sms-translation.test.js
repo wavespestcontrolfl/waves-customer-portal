@@ -91,6 +91,11 @@ describe('tokenParity', () => {
     expect(loose('I would like to reschedule to Saturday at 9 AM, is that possible?', 'Tôi muốn đổi lịch hẹn sang thứ Bảy lúc 9 giờ sáng được không?').ok).toBe(true);
     expect(loose('Can you come at 2 PM?', 'Bạn đến lúc 2 giờ chiều được không?').ok).toBe(true);
     expect(loose('Come at 2 PM', 'Приходите в 2 часа дня').ok).toBe(true);
+    // "дня" is also "days": only after the hour word is it the afternoon
+    expect(loose('Can you come in 2 days?', 'Вы можете приехать через 2 дня?').ok).toBe(true);
+    // the usual hour word may sit between the number and the half (Portuguese, French)
+    expect(loose('Come at 9 AM.', 'Venha às 9 horas da manhã.').ok).toBe(true);
+    expect(loose('Come at 8 PM.', 'Venez à 8 heures du soir.').ok).toBe(true);
     expect(loose('Come at 9 AM', 'Приходите в 9 утра').ok).toBe(true);
     expect(loose('Come at 9 AM', 'Vini a 9è nan maten').ok).toBe(true);
     expect(loose('Come at 3 PM', 'Vini a 3 è nan aprèmidi').ok).toBe(true);
@@ -106,6 +111,9 @@ describe('tokenParity', () => {
     expect(tokenParity('I see one payment.', 'Veo 2 pagos.')).toMatchObject({ ok: false, added: ['2'] });
     expect(tokenParity('I see two payments.', 'Veo dos pagos.')).toMatchObject({ ok: false, missing: ['2'] });
     expect(tokenParity('You have 1 visit left.', 'Le queda una visita.')).toMatchObject({ ok: false, missing: ['1'] });
+    // a literal 1 beside a worded one: counts cannot say which was dropped, so the allowance is off
+    expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda una visita y 1 pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
+    expect(tokenParity('You have 1 visit left and one payment due.', 'Le queda 1 visita y un pago pendiente.')).toMatchObject({ ok: false, missing: ['1'] });
   });
 
   test('a translation that keeps every figure passes, 12-hour times may read as 24-hour', () => {
@@ -540,6 +548,20 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su próxima visita es el jueves 14 de noviembre a las 14:00.', back: 'Thanks! Your next visit is Thursday, Nov 14 at 2 PM.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
+  });
+
+  test('a named date keeps its day with its month: a read-back that drops the day holds, even when a worded "one" became a digit', async () => {
+    // counts alone cannot tell "one payment" from the day in "Oct 1": the figure check lets one worded 1 go,
+    // and this date check is what keeps the day
+    const reply = 'I see one payment on Oct 1.';
+    expect(tokenParity(reply, 'Veo 1 pago en octubre.').ok).toBe(true);
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo 1 pago en octubre.', back: 'I see 1 payment in October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
+    // the faithful one passes the date check, day before or after the month
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
   });
 
   test('the same named date written out in full in the read-back passes; "may" as a verb is not a month', async () => {

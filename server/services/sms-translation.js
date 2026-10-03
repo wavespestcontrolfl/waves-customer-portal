@@ -324,17 +324,20 @@ const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // (an hour word may sit between the number and the half: "2 h du soir", "9 giờ sáng", "9 è nan maten", "2 часа дня")
 // Words that name NIGHT without saying which side of midnight ("đêm", "ночи", "nachts") are left out: such a
 // time keeps no half on its side and holds the trial.
-const HOUR_GAP = '(?:(?:h|uhr|ore|gi\\u1EDD|\\u00E8|\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?)\\s+)?';
+const RU_HOUR = '\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?';
+const HOUR_GAP = `(?:(?:h|horas?|heures?|uhr|ore|gi\\u1EDD|\\u00E8|${RU_HOUR})\\s+)?`;
 const END = '(?![\\p{L}\\p{N}])';
-const LOCAL_PM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
+// Russian "дня" (afternoon) is also "days" ("через 2 дня" = in 2 days): it names the half only after the hour
+// word ("2 часа дня").
+const LOCAL_PM_RE = new RegExp(`^\\s*(?:${RU_HOUR}\\s+\\u0434\\u043D\\u044F|${HOUR_GAP}(?:${[
   'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
   'in\\s+the\\s+(?:afternoon|evening)', 'at\\s+night',
   // Vietnamese, Haitian Creole, Russian, Italian, German, Tagalog
   'chi\\u1EC1u', 't\\u1ED1i', 'tr\\u01B0a',
   'nan\\s+apr[e\\u00E8]midi', 'apr[e\\u00E8]midi', 'nan\\s+asw[e\\u00E8]', 'di\\s?swa',
-  '\\u0434\\u043D\\u044F', '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
+  '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
   'del\\s+pomeriggio', 'di\\s+sera', 'nachmittags', 'abends', 'ng\\s+hapon', 'ng\\s+gabi',
-].join('|')})${END}`, 'iu');
+].join('|')}))${END}`, 'iu');
 const LOCAL_AM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
   'de\\s+la\\s+(?:ma[n\\u00F1]ana|madrugada)', 'da\\s+(?:manh[a\\u00E3]|madrugada)', 'du\\s+matin', 'in\\s+the\\s+morning',
   's\\u00E1ng', 'nan\\s+maten', 'di\\s?maten', '\\u0443\\u0442\\u0440\\u0430',
@@ -557,8 +560,14 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   // the English wrote as the WORD may be left as the translation's article. Only that word and only that
   // direction; a changed count ("un" -> "dos") is the read-back meaning check's to catch, and a digit the
   // translation adds still holds.
-  const wordedOnes = strictTimes ? diffCounts(en.digits, protectedTokens(englishReply, { strictTimes }).digits).filter((d) => d === '1').length : 0;
-  let spareOnes = wordedOnes;
+  // A 1 the English wrote as a DIGIT is never the one let go. Counts alone cannot tell the two apart, so the
+  // allowance is off whenever the English has a literal bare 1 - except the day of a named date ("Oct 1"),
+  // which the read-back's own date check keeps (calendarTokens compares month and day together).
+  const raw = strictTimes ? protectedTokens(englishReply, { strictTimes }).digits : [];
+  const wordedOnes = diffCounts(en.digits, raw).filter((d) => d === '1').length;
+  const literalOnes = raw.filter((d) => d === '1').length;
+  const datedOnes = calendarTokens(String(englishReply || '')).filter((t) => /^md:\d+\/1$/.test(t)).length;
+  let spareOnes = literalOnes > datedOnes ? 0 : wordedOnes;
   const missingDigits = diffCounts(en.digits, tr.digits).filter((d) => !(d === '1' && spareOnes-- > 0));
   const addedDigits = diffCounts(tr.digits, en.digits);
   const digits = strictTimes ? { missing: missingDigits, added: addedDigits } : pairTwentyFourHour(missingDigits, addedDigits, en, tr);
@@ -710,7 +719,8 @@ function durationFaults(englishReply, backTranslation) {
 }
 
 // A named date keeps its weekday and month: "Tuesday, Oct 14" is not "Thursday, Nov 14". Read off the English
-// read-back like durations. Capitalized names only ("march" and "sun" are words); "May" only beside a number.
+// read-back like durations, the day of the month with its month ("Oct 1" is not "October", nor "Oct 7").
+// Capitalized names only ("march" and "sun" are words); "May" only beside a number.
 const WEEKDAYS = ['Monday|Mon', 'Tuesday|Tues|Tue', 'Wednesday|Wed', 'Thursday|Thurs|Thur|Thu', 'Friday|Fri', 'Saturday|Sat', 'Sunday|Sun'];
 const MONTHS = ['January|Jan', 'February|Feb', 'March|Mar', 'April|Apr', 'May', 'June|Jun', 'July|Jul', 'August|Aug', 'September|Sept|Sep', 'October|Oct', 'November|Nov', 'December|Dec'];
 function calendarTokens(text) {
@@ -719,7 +729,14 @@ function calendarTokens(text) {
   WEEKDAYS.forEach((names, i) => { for (const _ of str.matchAll(new RegExp(`\\b(?:${names})\\b\\.?`, 'g'))) out.push(`day:${i}`); });
   MONTHS.forEach((names, i) => {
     const re = names === 'May' ? /\bMay\b(?=\.?\s*\d)|(?<=\d(?:st|nd|rd|th)?\s+(?:of\s+)?)May\b/g : new RegExp(`\\b(?:${names})\\b`, 'g');
-    for (const _ of str.matchAll(re)) out.push(`month:${i + 1}`);
+    for (const m of str.matchAll(re)) {
+      out.push(`month:${i + 1}`);
+      // ...and its day with it ("Oct 1", "October 1st", "1 Oct", "1st of October"): "Oct 1" is not "October"
+      const after = /^\.?\s*(\d{1,2})(?:st|nd|rd|th)?(?![\d:])/.exec(str.slice(m.index + m[0].length));
+      const before = /(?<![\d:])(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?$/.exec(str.slice(0, m.index));
+      const day = after?.[1] || before?.[1];
+      if (day) out.push(`md:${i + 1}/${Number(day)}`);
+    }
   });
   return out;
 }
