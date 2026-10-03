@@ -163,6 +163,21 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect(mockState.raw.some((k) => k.startsWith('customer-comms:'))).toBe(false);
   });
 
+  test('a hard bounce of a rate review letter does not run the generic bounce recovery (its alert would never be closed); another template\'s bounce still does', async () => {
+    const recovery = require('../services/email-bounce-recovery');
+    const attempt = jest.spyOn(recovery, 'attemptRecovery').mockResolvedValue({ resent: false });
+    try {
+      expect((await post([event()])).status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mockHandle).toHaveBeenCalledTimes(1);
+      expect(attempt).not.toHaveBeenCalled();
+      mockState.message = { ...MESSAGE, template_key: 'invoice.sent' };
+      expect((await post([event()])).status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(attempt).toHaveBeenCalledTimes(1);
+    } finally { attempt.mockRestore(); }
+  });
+
   test('a redelivered event (already in the event ledger) does not reconcile or alert again', async () => {
     const ev = event({ sg_event_id: 'evt-dup' });
     mockHandle.mockResolvedValue([{ noticeId: 'n1', customerId: 'c1' }]);

@@ -469,7 +469,18 @@ function hasContact(customer, prefs) {
   // ...and one whose billing channel is email-only, with an address to send to, is
   // refused the text by the canonical consent gate (CHANNEL_EMAIL_ONLY).
   const emailOnly = prefs?.billing_channel === 'email' && !!String(prefs?.billing_email || customer?.email || '').trim();
-  return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() && prefs?.sms_enabled !== false && !emailOnly };
+  // The customer's explicit billing channel choices (notification_prefs.billing_channels, the
+  // shared billing-delivery-channels resolver) decide both legs when set: a text-only choice
+  // gets no email, an email-only or app-only choice gets no text. No explicit choice (null)
+  // keeps the legacy rule above. A choice with neither email nor text leaves no channel, and
+  // the letter is held (no_contact).
+  const { billingChannelAllowed } = require('./billing-delivery-channels');
+  const emailChosen = billingChannelAllowed(prefs || {}, 'billing', 'email');
+  const smsChosen = billingChannelAllowed(prefs || {}, 'billing', 'sms');
+  return {
+    email: email.includes('@') && emailChosen !== false,
+    sms: !!String(customer?.phone || '').trim() && prefs?.sms_enabled !== false && (smsChosen === null ? !emailOnly : smsChosen),
+  };
 }
 
 // The notices' stored first visits (rate checks read their stamped price).
@@ -1119,7 +1130,10 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   };
   // From here a provider may have the message: an exception is no longer a clean non-send.
   progress.crossed = true;
-  const email = await PriceChangeNotices.sendNoticeEmail({
+  // The legs the customer's channel choices allow (hasContact): a leg they did not choose
+  // is never attempted.
+  const legs = hasContact(customer, prefs);
+  const email = !legs.email ? { sent: false, attempted: false } : await PriceChangeNotices.sendNoticeEmail({
     customer,
     // The recipient frozen with the letter, passed through unchanged (no second prefs read).
     recipient: resolvedRecipient || null,
@@ -1147,6 +1161,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         if (!live || live.active === false) { emailHold = 'recipient_unavailable'; return { ok: false, reason: 'recipient_unavailable' }; }
         if (!to) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
         await lockCustomerEmail(trx, to);
+        // The channel choice again, on the rows read under the fence.
+        if (!hasContact(live, prefs || {}).email) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
         const [recipient] = getInvoiceEmailRecipients(live, prefs || {});
         // BOTH the address and the greeting must still be the frozen ones.
         if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()
@@ -1159,7 +1175,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   });
   if (email.messageId) progress.dispatchMeta.email_message_id = String(email.messageId);
   const smsPhone = String(customer.phone || '').trim();
-  const sms = await PriceChangeNotices.sendNoticeSms({
+  const sms = !legs.sms ? { sent: false, attempted: false } : await PriceChangeNotices.sendNoticeSms({
     customer,
     // Delivery evidence is provider acceptance only: a sender that answers
     // sent with deliveryOutcome not_sent (SMS gate off, owner silence) or
