@@ -10364,6 +10364,15 @@ function LawnAssessmentCompletionBlock({
               ))}
             </div>
           )}
+          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
+              "since your last visit" score line needs 2+ usable photos on both
+              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
+              can never show it. Analyze stays enabled at one photo. */}
+          {photos.length < 2 && (
+            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
+            </div>
+          )}
           <button
             type="button"
             onClick={analyze}

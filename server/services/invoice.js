@@ -8963,19 +8963,23 @@ const InvoiceService = {
     from,
     to,
     sort = "newest",
+    // Optional connection (a read-only snapshot transaction a reader holds); defaults to the pool.
+    database = db,
+    // Optional: end the ordering with invoices.id so tied rows page deterministically (default off).
+    stableOrder = false,
   } = {}) {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
     const dateColumn =
       "COALESCE(invoices.service_date, invoices.created_at::date)";
-    const invoiceDate = db.raw(dateColumn);
+    const invoiceDate = database.raw(dateColumn);
     const validDate = (value) =>
       typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
     const normalizedStatus = String(status || "")
       .trim()
       .toLowerCase();
-    const hasAnnualPrepayTerms = await annualPrepayInvoiceTableExists();
+    const hasAnnualPrepayTerms = await annualPrepayInvoiceTableExists(database);
     const directStatuses = new Set([
       "draft",
       "scheduled",
@@ -9023,8 +9027,8 @@ const InvoiceService = {
           // govern.
           .andWhere(function () {
             this.whereNotNull("invoices.payer_id").orWhereNotExists(
-              db("notification_prefs")
-                .select(db.raw("1"))
+              database("notification_prefs")
+                .select(database.raw("1"))
                 .whereRaw(
                   "notification_prefs.customer_id = invoices.customer_id",
                 )
@@ -9058,7 +9062,7 @@ const InvoiceService = {
       return q;
     };
 
-    const listBase = db("invoices").leftJoin(
+    const listBase = database("invoices").leftJoin(
       "customers",
       "invoices.customer_id",
       "customers.id",
@@ -9082,13 +9086,13 @@ const InvoiceService = {
       // (not the rate stored on the invoice) so its tax preview matches the
       // server retotal when a customer's type changed after invoice creation.
       "customers.property_type",
-      db.raw(`(
+      database.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
           WHERE customer_id = invoices.customer_id AND is_default = true
           LIMIT 1
         ) AS card_on_file`),
-      db.raw(`(
+      database.raw(`(
           SELECT json_build_object(
             'id', pp.id,
             'payment_amount', pp.payment_amount,
@@ -9134,9 +9138,10 @@ const InvoiceService = {
         .orderBy("invoices.created_at", "desc");
     }
 
+    if (stableOrder) query.orderBy("invoices.id", "asc");
     const invoices = await query.limit(safeLimit).offset(safeOffset);
     const [{ count }] = await applyFilters(
-      db("invoices").leftJoin(
+      database("invoices").leftJoin(
         "customers",
         "invoices.customer_id",
         "customers.id",
@@ -12638,6 +12643,8 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
+module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim
 // back, exercised directly by the ported Postgres adoption-restore cases
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
