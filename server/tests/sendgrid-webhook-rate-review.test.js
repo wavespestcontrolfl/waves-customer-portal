@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 process.env.SENDGRID_WEBHOOK_PUBLIC_KEY = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
-const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set() };
+const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set(), raw: [] };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -45,7 +45,7 @@ jest.mock('../models/db', () => {
       return b;
     };
     db.isTransaction = inTx;
-    db.raw = jest.fn(async () => ({ rows: [] }));
+    db.raw = jest.fn(async (sql, bindings) => { if (inTx) mockState.raw.push(String(bindings && bindings[0])); return { rows: [] }; });
     db.fn = { now: () => new Date() };
     db.transaction = async (fn) => { mockState.txOpen += 1; const r = await fn(make(true)); mockState.txDone += 1; return r; };
     return db;
@@ -56,6 +56,7 @@ jest.mock('../models/db', () => {
 const mockHandle = jest.fn(async () => []);
 const mockRaise = jest.fn(async () => {});
 jest.mock('../services/rate-review-comms', () => ({
+  isRateReviewMessage: (m) => !!m && m.template_key === 'billing.rate_review_notice',
   handleEmailDeliveryEvent: (...a) => mockHandle(...a),
   raiseDeliveryAlerts: (...a) => mockRaise(...a),
 }));
@@ -90,7 +91,7 @@ async function post(events, { signed = true, key = privateKey } = {}) {
 const MESSAGE = { id: 'em-1', provider_message_id: 'smsg1', template_key: 'billing.rate_review_notice', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'cust1@example.com', send_attempt_token: null, status: 'sent' };
 const event = (over = {}) => ({ event: 'bounce', type: 'bounce', email: 'cust1@example.com', sg_message_id: 'smsg1.filter', sg_event_id: `evt-${Math.random()}`, timestamp: 1790000000, reason: '550 mailbox not found', ...over });
 
-beforeEach(() => { mockState.message = { ...MESSAGE }; mockState.ledger = new Set(); mockHandle.mockReset().mockResolvedValue([]); mockRaise.mockReset(); });
+beforeEach(() => { mockState.message = { ...MESSAGE }; mockState.ledger = new Set(); mockState.raw = []; mockHandle.mockReset().mockResolvedValue([]); mockRaise.mockReset(); });
 
 describe('SendGrid event webhook → rate review letter reconciliation', () => {
   test('a signed bounce for a rate review letter reaches the reconciliation inside the event transaction, then raises its alerts', async () => {
@@ -104,6 +105,18 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect(message).toMatchObject({ id: 'em-1', template_key: 'billing.rate_review_notice' });
     expect(passed).toMatchObject({ event: 'bounce', sg_message_id: 'smsg1.filter' });
     expect(mockRaise).toHaveBeenCalledWith(alerts);
+  });
+
+  test('lock order: a rate review event takes customer-comms BEFORE the address key (the sender\'s order); another message takes no customer-comms lock', async () => {
+    await post([event()]);
+    const comms = mockState.raw.findIndex((k) => k === 'customer-comms:c1');
+    const address = mockState.raw.findIndex((k) => k.startsWith('customer-email:'));
+    expect(comms).toBeGreaterThanOrEqual(0);
+    expect(address).toBeGreaterThan(comms);
+    mockState.raw = [];
+    mockState.message = { ...MESSAGE, template_key: 'billing.invoice' };
+    await post([event()]);
+    expect(mockState.raw.some((k) => k.startsWith('customer-comms:'))).toBe(false);
   });
 
   test('a redelivered event (already in the event ledger) does not reconcile or alert again', async () => {

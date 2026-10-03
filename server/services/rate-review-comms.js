@@ -638,8 +638,19 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
   return { ok: true, subject: rendered.subject, html: rendered.html, costBlockReady: !!costBlock, suppressed: entry ? entry.reason : null };
 }
 
-function claimKeyFor(noticeIds) {
-  return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',')).digest('hex').slice(0, 16);
+// The send attempt's identity (the email idempotency key carries it): the claimed
+// notice ids, plus the number of earlier undelivered attempts on them — an
+// authorized re-send after a bounce must be a NEW attempt, or the email library
+// would dedupe it against the bounced message and never dispatch.
+function claimKeyFor(noticeIds, attempt = 0) {
+  return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',') + (attempt > 0 ? `:a${attempt}` : '')).digest('hex').slice(0, 16);
+}
+
+function priorAttempts(lines) {
+  return Math.max(0, ...lines.map((l) => {
+    const m = parseJson(l.notice.metadata, {});
+    return (Array.isArray(m.delivery_revocations) ? m.delivery_revocations.length : 0) + (m.delivery_revoked ? 1 : 0);
+  }));
 }
 
 async function claimLines(dbh, entry) {
@@ -795,7 +806,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     return { outcome: 'in_flight', holdReason: fresh.reason };
   }
   entry = fresh.entry;
-  const claimKey = claimKeyFor(claimed);
+  const claimKey = claimKeyFor(claimed, priorAttempts(entry.lines));
   // The billing recipient is resolved BEFORE the payload is built, digested
   // and frozen, so the greeting in the frozen letter and the public page is the
   // one the email carries.
@@ -928,25 +939,47 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // fence: a merge or merge undo (which repoints notices under it) either
   // commits before the stamp, which then sees it, or waits for the stamp.
   const orphaned = [];
+  const undeliveredEarly = [];
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
     for (const l of entry.lines) {
+      // Read under the fence: a bounce or failed text that arrived while the legs
+      // were still running was recorded on this 'sending' row (early_failures);
+      // it counts here, so a failed channel is never stamped delivered.
+      const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).forUpdate().first();
+      if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
-      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: _cf, email_message_id: _e, sms_sid: _s, ...meta } = parseJson(l.notice.metadata, {});
-      const stamped = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
-        status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-        metadata: JSON.stringify({ ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
-      });
-      if (stamped) {
-        const snap = await trx('rate_review_snapshots').where({ notice_id: l.noticeId }).first();
-        await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({
-          status: 'sent', updated_at: sentAt,
-          ...(snap ? { flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)) } : {}),
+      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: early = {}, ...meta } = parseJson(live.metadata, {});
+      const emailOk = !!email.sent && !early.email;
+      const smsOk = !!sms.sent && !early.sms;
+      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta };
+      if (!emailOk && !smsOk) {
+        // Every channel that went out failed before the stamp: undelivered, a
+        // sendable draft again, the ranking row flagged for a re-send.
+        const failure = early.email || early.sms;
+        await trx('price_change_notices').where({ id: live.id }).update({
+          status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: sentAt,
+          metadata: JSON.stringify({ ...base, channel_failures: early, delivery_revoked: failure }),
         });
-      } else {
-        orphaned.push(l);
+        const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
+        if (snap) {
+          const flags = flagList(snap.flags);
+          if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
+          await trx('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), status: 'approved', updated_at: sentAt });
+        }
+        undeliveredEarly.push({ noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten: false, channel: early.email ? 'email' : 'sms', event: failure.event });
+        continue;
       }
+      await trx('price_change_notices').where({ id: live.id }).update({
+        status: 'sent', sent_at: sentAt, email_sent: emailOk, sms_sent: smsOk, updated_at: sentAt,
+        metadata: JSON.stringify({ ...base, ...(Object.keys(early).length ? { channel_failures: early } : {}), ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }),
+      });
+      const snap = await trx('rate_review_snapshots').where({ notice_id: l.noticeId }).first();
+      await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({
+        status: 'sent', updated_at: sentAt,
+        ...(snap ? { flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)) } : {}),
+      });
     }
     // Delivered, but the notice moved to another customer after the provider
     // took it (a merge undo): never reported sent and never left 'sending' —
@@ -962,6 +995,10 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   if (orphaned.length) {
     logger.error(`[rate-review-comms] letter to customer ${entry.customerId} was delivered but ${orphaned.length} notice(s) moved to another customer before the stamp — held as ${UNCERTAIN}`);
     return { outcome: 'uncertain', holdReason: 'delivered_repointed', delivered: entry.lines.length - orphaned.length };
+  }
+  if (undeliveredEarly.length) {
+    await raiseDeliveryAlerts(undeliveredEarly);
+    return { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' };
   }
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
 }
@@ -1203,13 +1240,22 @@ const flagList = (raw) => (Array.isArray(raw) ? raw : (() => { const v = parseJs
 // 'deferred' is still retrying; 'delivered' never un-revokes a failure; a spam
 // report is a delivered message.)
 const EMAIL_UNDELIVERED_EVENTS = new Set(['bounce', 'dropped', 'blocked']);
+const isRateReviewMessage = (m) => !!m && m.template_key === TEMPLATE_KEY;
 const isEmailUndelivered = (ev) => EMAIL_UNDELIVERED_EVENTS.has(String(ev?.event || '').trim().toLowerCase());
 
 // Notices of this customer whose metadata names the provider id (set at dispatch).
-async function noticesForDispatch(dbh, customerId, key, value) {
+async function noticesForDispatch(dbh, customerId, key, value, { claimKey = null, anySending = false } = {}) {
   if (!customerId || !value) return [];
   const rows = await dbh('price_change_notices').where({ customer_id: customerId }).whereNotNull('rate_review_row_id');
-  return rows.filter((n) => String(parseJson(n.metadata, {})[key] || '') === String(value));
+  return rows.filter((n) => {
+    const meta = parseJson(n.metadata, {});
+    if (String(meta[key] || '') === String(value)) return true;
+    // Still 'sending' (the ids are written at the stamp): the email by the claim
+    // key in its idempotency key; a text by the customer's in-flight letter.
+    if (String(n.status) !== 'sending') return false;
+    if (claimKey && meta.pending_letter && String(meta.pending_letter.key) === String(claimKey)) return true;
+    return anySending;
+  });
 }
 
 // One channel of one delivered notice failed (run inside a transaction, which
@@ -1229,9 +1275,18 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   const meta = parseJson(live.metadata, {});
   const flag = channel === 'email' ? 'email_sent' : 'sms_sent';
   const otherFlag = channel === 'email' ? 'sms_sent' : 'email_sent';
-  if (meta.delivery_revoked || live[flag] !== true) return null;
   const at = (detail.at instanceof Date ? detail.at : new Date()).toISOString();
   const failure = { event: String(detail.event || ''), channel, at, reason: String(detail.reason || '').slice(0, 300) };
+  // The failure beat the delivery stamp (the send is still running its other
+  // leg): remembered on the claimed row; the stamp, under this same fence,
+  // counts it. The first failure per channel wins.
+  if (String(live.status) === 'sending') {
+    const early = meta.early_failures || {};
+    if (early[channel]) return null;
+    await trx('price_change_notices').where({ id: live.id }).update({ metadata: JSON.stringify({ ...meta, early_failures: { ...early, [channel]: failure } }), updated_at: new Date() });
+    return null;
+  }
+  if (meta.delivery_revoked || live[flag] !== true) return null;
   const next = { ...meta, channel_failures: { ...(meta.channel_failures || {}), [channel]: failure } };
   const patch = { [flag]: false, updated_at: new Date() };
   if (live[otherFlag] === true) {
@@ -1310,7 +1365,9 @@ async function raiseDeliveryAlerts(alerts) {
 // letter that did not reach the mailbox. Returns alerts to raise after commit.
 async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
   if (!emailMessage || emailMessage.template_key !== TEMPLATE_KEY || !isEmailUndelivered(ev)) return [];
-  const notices = await noticesForDispatch(trx, emailMessage.recipient_id, 'email_message_id', emailMessage.id);
+  // rate_review:<batch>:<customer>:<claimKey>:<recipient hash>
+  const claimKey = String(emailMessage.idempotency_key || '').split(':')[3] || null;
+  const notices = await noticesForDispatch(trx, emailMessage.recipient_id, 'email_message_id', emailMessage.id, { claimKey });
   const alerts = [];
   const at = ev.timestamp ? new Date(Number(ev.timestamp) * 1000) : new Date();
   for (const notice of notices) {
@@ -1329,7 +1386,8 @@ async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db }
     if (!log || !log.customer_id) return [];
     const alerts = [];
     await dbh.transaction(async (trx) => {
-      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {
+      const pointer = String(log.message_type || '') === 'price_change_notice';
+      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid, { anySending: pointer })) {
         const alert = await recordChannelFailure(trx, notice, 'sms', { event: String(status || 'failed'), at: new Date(), reason: errorCode ? `error ${errorCode}` : '' });
         if (alert) alerts.push(alert);
       }
@@ -1346,6 +1404,7 @@ module.exports = {
   TEMPLATE_KEY,
   handleEmailDeliveryEvent,
   handleSmsDeliveryFailure,
+  isRateReviewMessage,
   raiseDeliveryAlerts,
   sendPreview,
   letterPreview,

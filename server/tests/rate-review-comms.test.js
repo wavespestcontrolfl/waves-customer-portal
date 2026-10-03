@@ -979,6 +979,54 @@ describe('customer surfaces', () => {
       expect(notices()[0].status).toBe('sent');
     });
 
+    test('a bounce that arrives while the send is still running (before the stamp) is remembered and counted at the stamp — never stamped delivered', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+      smsLeg.mockImplementation(async () => {
+        // the email already left; its bounce lands while the text leg runs
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        expect(notices()[0].status).toBe('sending');
+        const early = await comms.handleEmailDeliveryEvent(mockDb, message({ idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+        expect(early).toEqual([]); // nothing to revoke yet: remembered on the claimed row
+        return { sent: false, attempted: false };
+      });
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(res).toMatchObject({ sent: 0, failed: 1 });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ event: 'bounce', channel: 'email' });
+      expect(snapshots()[0].status).toBe('approved');
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+    });
+
+    test('an early failure of one channel leaves the other\'s delivery standing', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+      smsLeg.mockImplementation(async () => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await comms.handleEmailDeliveryEvent(mockDb, message({ idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: false, sms_sent: true });
+      expect(meta().channel_failures.email).toMatchObject({ event: 'bounce' });
+    });
+
+    test('an authorized re-send after a bounce is a NEW attempt: the email idempotency key changes, so the library does not dedupe it against the bounced message', async () => {
+      await sendEmailOnly();
+      const first = emailLeg.mock.calls[0][0].idempotencyKeyBase;
+      await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      const second = emailLeg.mock.calls[1][0].idempotencyKeyBase;
+      expect(second).not.toBe(first);
+      // ...while a plain retry with no bounce in between keeps its identity
+      mockDb.reset(book());
+      emailLeg.mockClear();
+      emailLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(emailLeg.mock.calls[1][0].idempotencyKeyBase).toBe(emailLeg.mock.calls[0][0].idempotencyKeyBase);
+    });
+
     test('a prepaid amount already staged is un-staged and the notice returns to unapplied', async () => {
       const prepay = draft(1, {
         billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',

@@ -373,6 +373,12 @@ async function handleEvent(ev) {
     const rateReviewComms = require('../services/rate-review-comms');
     let deliveryAlerts = [];
     const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      // The sender takes customer-comms BEFORE the address key; a rate review
+      // event takes them in that order too (handleEmailMessageEvent locks the
+      // address first), so a failure callback can never deadlock a send.
+      if (rateReviewComms.isRateReviewMessage(emailMessage) && emailMessage.recipient_id) {
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, emailMessage.recipient_id);
+      }
       attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
       if (attemptMatched) deliveryAlerts = await rateReviewComms.handleEmailDeliveryEvent(trx, emailMessage, ev);
     });
