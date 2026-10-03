@@ -40,27 +40,10 @@ import {
 // Below this, the home already reads square — don't churn the frame. Radians.
 const ALIGN_MIN_ANGLE = (4 * Math.PI) / 180;
 
-// Two appearances, one component. `dark` is the tech-portal chrome (that
-// surface stays Montserrat + dark palette by rule — see TechHomePage.jsx).
-// `light` mirrors the admin CompletionPanel "M" theme (near-white surfaces,
-// #111 ink, hairline borders, black pill CTAs, Roboto — the closeout host
-// this modal opens from via "Trace where we sprayed").
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  accent: '#0ea5e9',
-  red: '#ef4444',
-  ok: '#22c55e',
-  noticeBg: '#22c55e18',
-  noticeBorder: '#22c55e',
-  noticeText: '#22c55e',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  mapBackdrop: '#0a0f14',
-  scrim: 'rgba(0,0,0,0.7)',
-};
-
+// One appearance: the admin CompletionPanel "M" theme (near-white surfaces,
+// #111 ink, hairline borders, black pill CTAs, Roboto). The navy tech-portal
+// chrome is gone (owner 2026-10-03, DECISIONS "The field workspace takes the
+// Waves Admin look").
 // Owner rule (2026-07-23): the admin appearance is strictly black and white —
 // success/info chrome renders in ink, never green. `red` stays only for
 // genuine failures (the admin spec's red-is-for-alerts-only line). The spray
@@ -84,7 +67,7 @@ const LIGHT = {
 };
 
 // Spray visuals stay in customer brand colors (mist + sprayer head), separate
-// from the DARK chrome above — the snapshot lands on the customer report.
+// from the admin chrome above — the snapshot lands on the customer report.
 // Mist is the bright waves blue (owner 2026-07-29; was teal #2FA89D, then
 // glass navy #04395E which read like a shadow — "friendly, inviting" won).
 // Keep in sync with TracedTreatmentZoneMap.jsx, which replays over the same
@@ -105,7 +88,6 @@ export default function TechTreatmentZoneModal({
   // The Fast Complete report flow judges its trace with the report, so its
   // save is also refused once the visit is completed.
   openVisitOnly = false,
-  appearance = 'dark',
   // Lawn visits outline the treated AREA (clean pulsing outline on the report)
   // instead of the perimeter spray-mist metaphor (owner 2026-07-28).
   lawnMode = false,
@@ -117,45 +99,30 @@ export default function TechTreatmentZoneModal({
   // covers), and saves captureMode 'yard'.
   yardMode = false,
 }) {
-  const light = appearance === 'light';
-  const T = light ? LIGHT : DARK;
-  // Light buttons are the M-theme pills (44px, rounded-full, UPPERCASE 500);
-  // dark keeps the original tech-portal buttons untouched.
-  const btnStyle = (kind, disabled) => (light
-    ? {
-        height: 44,
-        padding: '0 16px',
-        borderRadius: 999,
-        fontFamily: LIGHT.font,
-        fontSize: 14,
-        fontWeight: 500,
-        textTransform: 'uppercase',
-        letterSpacing: '0.3px',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        border: kind === 'primary' ? 'none' : `1px solid ${LIGHT.text}`,
-        background: kind === 'primary' ? LIGHT.accent : 'transparent',
-        color: kind === 'primary' ? '#FFFFFF' : LIGHT.text,
-      }
-    : {
-        padding: '10px 14px',
-        borderRadius: 8,
-        fontSize: 14,
-        fontWeight: 700,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        border: kind === 'primary' ? 'none' : `1px solid ${DARK.border}`,
-        background: kind === 'primary' ? DARK.accent : 'transparent',
-        color: kind === 'primary' ? '#fff' : DARK.text,
-      });
-  // Admin weight cap is 400/500; the dark variant keeps its original weights.
-  const strong = light ? 500 : 700;
-  // The admin surface enforces a 14px floor for readable text (AGENTS.md);
-  // dark keeps the tech portal's original 13px small text.
-  const smallText = light ? 14 : 13;
+  const T = LIGHT;
+  // The M-theme pills (44px, rounded-full, UPPERCASE 500).
+  const btnStyle = (kind, disabled) => ({
+    height: 44,
+    padding: '0 16px',
+    borderRadius: 999,
+    fontFamily: LIGHT.font,
+    fontSize: 14,
+    fontWeight: 500,
+    textTransform: 'uppercase',
+    letterSpacing: '0.3px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    border: kind === 'primary' ? 'none' : `1px solid ${LIGHT.text}`,
+    background: kind === 'primary' ? LIGHT.accent : 'transparent',
+    color: kind === 'primary' ? '#FFFFFF' : LIGHT.text,
+  });
+  // Admin weight cap is 400/500, and the surface keeps a 14px floor for
+  // readable text (AGENTS.md).
+  const strong = 500;
+  const smallText = 14;
   const [mapState, setMapState] = useState({ status: 'loading' });
   const [existing, setExisting] = useState(null);
   const [step, setStep] = useState('trace');
@@ -634,7 +601,7 @@ export default function TechTreatmentZoneModal({
         position: 'relative',
         width: '100%',
         aspectRatio: '4 / 3',
-        borderRadius: light ? 12 : 10,
+        borderRadius: 12,
         overflow: 'hidden',
         background: T.mapBackdrop,
         border: `1px solid ${T.border}`,
@@ -678,7 +645,7 @@ export default function TechTreatmentZoneModal({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h2 style={{
             margin: 0, fontSize: 18, fontWeight: strong, color: T.text,
-            fontFamily: light ? LIGHT.font : "'Montserrat', sans-serif",
+            fontFamily: LIGHT.font,
           }}>
             Treatment Zone
           </h2>
@@ -734,7 +701,7 @@ export default function TechTreatmentZoneModal({
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
             {suggestNote ? (
-              <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: light ? 500 : 600, color: T.accent }}>{suggestNote}</p>
+              <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: 500, color: T.accent }}>{suggestNote}</p>
             ) : null}
             {mapFrame(
               <>
@@ -868,7 +835,7 @@ export default function TechTreatmentZoneModal({
                   type="checkbox"
                   checked={interior}
                   onChange={(e) => setInterior(e.target.checked)}
-                  style={{ width: 18, height: 18, accentColor: light ? LIGHT.accent : DARK.accent }}
+                  style={{ width: 18, height: 18, accentColor: LIGHT.accent }}
                 />
                 Interior spray too — shade the whole home as treated
               </label>

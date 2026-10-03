@@ -24,7 +24,9 @@ const TIP_PREVIEW_COUNT = 4;
 // Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
 // longer line, never trims it.
 const CUSTOM_TIP_MAX_CHARS = 240;
-const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
+// The mic on the light sheet: ink outline at rest, filled ink while it listens
+// (`red` is DictationButton's listening colour; the admin look keeps red for errors).
+const MIC_PALETTE = { accent: '#1c1917', muted: '#d6d3d1', red: '#1c1917', card: '#ffffff' };
 
 export const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
 export const methodLabel = (value) => {
