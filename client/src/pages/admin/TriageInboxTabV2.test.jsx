@@ -317,6 +317,70 @@ describe('missing first-name card', () => {
   });
 });
 
+describe('household hold card (GATE_CALL_HOUSEHOLD_HOLD)', () => {
+  const SUGGESTED = '11111111-1111-4111-8111-111111111111';
+  const SURVIVOR = '22222222-2222-4222-8222-222222222222';
+  const payload = { flag: 'household_address_match', suggested_customer_id: SUGGESTED,
+    heard_name_v1: { first_name: 'Sample', last_name: 'Caller' }, caller_phone: '+19415550123',
+    address: '100 Example Loop, Sarasota, 34240', preferred_date_time: 'Tuesday at 10 AM', service: 'Pest Control' };
+  const card = { ...ordinary, id: 'hh', first_name: null, last_name: null, from_phone: '+19415550123', feedback_verdict: null,
+    reason_code: 'household_address_match', severity: 'blocking', call_summary: 'Wants pest control Tuesday.',
+    payload: JSON.stringify(payload) };
+  const load = (item = card) => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [item], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+  const cardEl = async () => (await screen.findAllByText('+19415550123', { exact: false }))[0].closest('.py-4');
+
+  it('shows the heard name, caller number, address and request, ONE Open customer link, and no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = await cardEl();
+    expect(within(el).getByText('Heard name:').parentElement).toHaveTextContent('Sample Caller');
+    expect(within(el).getByText('Caller dialed from:').parentElement).toHaveTextContent('+19415550123');
+    expect(within(el).getByText('Stated address:').parentElement).toHaveTextContent('100 Example Loop, Sarasota, 34240');
+    expect(within(el).getByText('Requested:').parentElement).toHaveTextContent('Pest Control · Tuesday at 10 AM');
+    const links = within(el).getAllByRole('link', { name: 'Open customer' });
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute('href', `/admin/customers?customerId=${SUGGESTED}`);
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+  });
+
+  it('opens the merge survivor the server resolved, not the merged-away id', async () => {
+    load({ ...card, suggested_customer_open_id: SURVIVOR });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = await cardEl();
+    expect(within(el).getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${SURVIVOR}`);
+  });
+
+  it('a non-admin gets neither Resolve nor Dismiss (the server 403s both)', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = await cardEl();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /dismiss/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /accept|deny/i })).toBeNull();
+    expect(within(el).getByText(/needs an admin/i)).toBeInTheDocument();
+  });
+
+  it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = await cardEl();
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/hh/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+
+  it('a malformed suggested id never becomes a link', () => {
+    render(<ConfirmEvidence reasonCode="household_address_match" payload={{ ...payload, suggested_customer_id: 'not-a-uuid' }} suggestedOpenId="also-bad" />);
+    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
+  });
+});
+
 describe('verdict 409 with its own instruction', () => {
   it('shows the server message for a relinked call instead of reloading and looping', async () => {
     const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };
