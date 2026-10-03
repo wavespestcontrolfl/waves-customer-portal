@@ -1184,8 +1184,11 @@ async function sweepUnenrichedProperties({ limit, stalePendingCools = false } = 
 // per address): every address attempted in the window counts, the killed
 // run's and any earlier retry's alike. The retry never re-buys an address
 // (stalePendingCools), so addresses attempted = lookups bought. Call-time
-// lookups stamp the same ledger, so this can only under-count what is left —
-// a retry never buys past the nightly cap.
+// lookups stamp the same ledger, which only lowers what is left.
+// Known limit: the ledger stamp is best effort (markLookupAttempt logs and
+// continues on a write failure). A lookup whose stamp failed is not counted,
+// so a night with BOTH ledger write failures and a deploy kill can buy up to
+// that many lookups past the cap. An exact cap needs a durable spend counter.
 const RETRY_BUDGET_WINDOW_HOURS = 12;
 async function backfillBudgetLeft() {
   // PROPERTY_LOOKUP_CACHE_DISABLED turns the ledger's writes off, so nothing
