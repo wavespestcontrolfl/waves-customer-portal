@@ -78,20 +78,21 @@ describe('buildSelectionQuery', () => {
     expect(values).toEqual(['90 days', 7]);
   });
 
-  test('failure modes drop rows whose payload predates the failed attempt; sample-clean is unaffected', () => {
+  test('failure modes keep a payload only when it is provably the stamped attempt\'s; sample-clean is unaffected', () => {
     // A failed refresh stamps last_attempt_* but keeps the earlier success's
-    // parcel, coordinates and snapshot. The payload is current only when
-    // data_saved_at (lookup start) is within the attempt's own lookup_ms (plus
-    // slack) of last_attempt_at, or when there is no payload at all.
+    // parcel, coordinates and snapshot. Exact match on attempt ids; the timing
+    // window survives only for legacy rows with no ids at all.
     for (const flags of [[], ['--status=all-failed']]) {
       const { text } = replay.buildSelectionQuery(replay.parseArgs(flags));
-      expect(text).toMatch(/\(last_attempt_at - data_saved_at\) BETWEEN \(COALESCE\(lookup_ms, 0\)::float8 \/ 1000 - 5\)/);
+      expect(text).toMatch(/payload_attempt_id IS NOT NULL AND payload_attempt_id = last_attempt_id/);
+      // legacy window is gated on BOTH ids being NULL
+      expect(text).toMatch(/payload_attempt_id IS NULL AND last_attempt_id IS NULL\s+AND \(last_attempt_at - data_saved_at\) BETWEEN \(COALESCE\(lookup_ms, 0\)::float8 \/ 1000 - 5\)/);
       expect(text).toMatch(/data_saved_at IS NULL AND property_record IS NULL/);
       // a cache hit is not a refresh: it keeps the payload it served
       expect(text).toMatch(/last_attempt_status = 'cache_hit'/);
     }
     const clean = replay.buildSelectionQuery(replay.parseArgs(['--status=sample-clean=5']));
-    expect(clean.text).not.toMatch(/data_saved_at/);
+    expect(clean.text).not.toMatch(/data_saved_at|attempt_id/);
   });
 
   test('selects the stored provider list (no contact columns) for the FDOR provenance check', () => {

@@ -94,12 +94,14 @@ const DEFAULT_LIMIT = 500;
 const MAX_CONCURRENCY = 3;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 250;
-// A payload written by the attempt that stamped the row sits that attempt's
+// LEGACY rows only (written before attempt provenance, both attempt ids NULL):
+// a payload written by the attempt that stamped the row sits that attempt's
 // own duration before the stamp (data_saved_at = lookup start,
 // last_attempt_at = its finish, lookup_ms = the duration). Both sides of the
 // window are pinned: a later failed refresh keeps the OLD start and duration,
 // so its stamp lands outside "duration ± slack" unless the refresh itself took
-// under the slack. The slack only covers the stamp's own write latency.
+// under the slack. This is a heuristic that cannot see a sub-slack refresh;
+// rows that carry attempt ids never use it (exact match, below).
 const PAYLOAD_SLACK_SECONDS = 5;
 
 // Gates the replayed parcel guards read at call time (feature-gates.js
@@ -196,10 +198,15 @@ function buildSelectionQuery(args) {
   // data_saved_at, never ran for it). Only a payload saved by the stamped
   // attempt itself, or no payload at all (a stub), may stand for a failure; a
   // cache hit is not a refresh, so it keeps the payload it served.
+  //   - attempt ids present: exact, payload_attempt_id = last_attempt_id. A
+  //     last_attempt_id with a different or NULL payload id is stale.
+  //   - both ids NULL (legacy row, pre-provenance): the timing window.
   const currentPayload = `(last_attempt_at IS NULL OR last_attempt_status = 'cache_hit'
     OR (data_saved_at IS NULL AND property_record IS NULL)
-    OR (last_attempt_at - data_saved_at) BETWEEN (COALESCE(lookup_ms, 0)::float8 / 1000 - ${PAYLOAD_SLACK_SECONDS}) * interval '1 second'
-      AND (COALESCE(lookup_ms, 0)::float8 / 1000 + ${PAYLOAD_SLACK_SECONDS}) * interval '1 second')`;
+    OR (payload_attempt_id IS NOT NULL AND payload_attempt_id = last_attempt_id)
+    OR (payload_attempt_id IS NULL AND last_attempt_id IS NULL
+      AND (last_attempt_at - data_saved_at) BETWEEN (COALESCE(lookup_ms, 0)::float8 / 1000 - ${PAYLOAD_SLACK_SECONDS}) * interval '1 second'
+        AND (COALESCE(lookup_ms, 0)::float8 / 1000 + ${PAYLOAD_SLACK_SECONDS}) * interval '1 second'))`;
 
   if (args.status === 'no_parcel') {
     where.push(`last_attempt_status = ${bind('no_parcel')}`, currentPayload);
