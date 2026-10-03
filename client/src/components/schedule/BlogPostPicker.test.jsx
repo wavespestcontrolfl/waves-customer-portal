@@ -126,6 +126,19 @@ describe('BlogPostPicker', () => {
       expect(await screen.findByRole('button', { name: 'Suggested: “standing water”' })).toBeTruthy();
     });
 
+    test('a phrase the server refuses says what to leave out and is not offered again (pre-push P1 on 1aaeaa36ab)', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn().mockRejectedValue(Object.assign(new Error('not_a_topic'), { status: 422 }));
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('ants at John Smith home');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “ants at John Smith home”' }));
+      expect(await screen.findByRole('button', { name: 'Can’t suggest this one' })).toBeDisabled();
+      expect(screen.getByText('Name the topic only, with no names, addresses or phone numbers.')).toBeTruthy();
+      expect(suggest).toHaveBeenCalledTimes(1);
+      await searchFor('ghost ants');
+      expect(await screen.findByRole('button', { name: 'Suggest a post about “ghost ants”' })).not.toBeDisabled();
+    });
+
     test('a new search starts a new suggestion', async () => {
       const search = vi.fn(async () => ({ posts: [], suggest: true }));
       render(<Harness search={search} suggest={vi.fn(async () => ({ status: 'queued' }))} />);

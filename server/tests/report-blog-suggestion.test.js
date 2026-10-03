@@ -21,6 +21,8 @@ let mockDbCurrent = null;
 jest.mock('../models/db', () => {
   const proxy = (...args) => (mockDbCurrent ? mockDbCurrent(...args) : {});
   proxy.raw = (...args) => (mockDbCurrent?.raw ? mockDbCurrent.raw(...args) : { toString: () => args[0] });
+  // A transaction runs inline on the same fake.
+  proxy.transaction = (fn) => (mockDbCurrent?.transaction ? mockDbCurrent.transaction(fn) : fn(proxy));
   proxy.fn = { now: () => new Date() };
   proxy.schema = { hasTable: async () => true, hasColumn: async () => true };
   return proxy;
@@ -67,6 +69,8 @@ function queueKnex({ registry = [], sentToday = 0, held = null, inserted = true 
     return { rows: inserted ? [{ id: 'row-1' }] : [] };
   });
   knex.calls = calls;
+  // The count and the write share one transaction (the fake runs it inline).
+  knex.transaction = jest.fn(async (fn) => fn(knex));
   return knex;
 }
 // The queue's own writes: the search's select builds a raw metadata
@@ -135,10 +139,44 @@ describe('suggestionRow', () => {
   });
 });
 
+describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
+  test('is read in the words as typed: lowercasing hides a capitalized name from the redactor', () => {
+    expect(phraseProblem(normalizePhrase('ants at John Smith home'))).toBeNull();
+    expect(phraseProblem(normalizePhrase('ants at John Smith home'), 'ants at John Smith home')).toBe('not_a_topic');
+  });
+
+  test('a phrase the redactor is unsure of is refused', () => {
+    expect(phraseProblem(normalizePhrase('ants 12345678'), 'ants 12345678')).toBe('not_a_topic');
+  });
+
+  test('a capitalized topic can read as a name and is refused with it; written as a sentence it is not', () => {
+    expect(phraseProblem(normalizePhrase('Standing Water'), 'Standing Water')).toBe('not_a_topic');
+    expect(phraseProblem(normalizePhrase('Standing water'), 'Standing water')).toBeNull();
+  });
+
+  test('a suggestion is checked as typed, before anything is read', async () => {
+    const knex = queueKnex();
+    expect(await suggestReportBlogPost(knex, { phrase: 'ants at John Smith home', actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
+    expect(knex.calls).toEqual([]);
+  });
+});
+
 describe('suggestReportBlogPost', () => {
+  test('the count, the held check and the write run in one transaction under the person\'s lock (pre-push P1 on 1aaeaa36ab)', async () => {
+    const knex = queueKnex();
+    expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'queued' });
+    expect(knex.transaction).toHaveBeenCalledTimes(1);
+    const lock = knex.calls.findIndex(([name, sql]) => name === 'raw' && /pg_advisory_xact_lock/.test(String(sql)));
+    const count = knex.calls.findIndex(([name, sql]) => name === 'opportunity_queue whereRaw' && /suggested_by/.test(String(sql)));
+    const write = knex.calls.findIndex(([name, sql]) => name === 'raw' && /^INSERT INTO opportunity_queue/.test(String(sql)));
+    expect(knex.calls[lock]).toEqual(['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['report-blog-suggestion:tech-1']]);
+    expect(lock).toBeLessThan(count);
+    expect(count).toBeLessThan(write);
+  });
+
   test('writes one row for a phrase no post covers; an expired suggestion of it is revived, nothing else overwritten', async () => {
     const knex = queueKnex();
-    expect(await suggestReportBlogPost(knex, { phrase: 'Standing Water', actorId: 'tech-1', scheduledServiceId: 'svc-1' })).toEqual({ status: 'queued' });
+    expect(await suggestReportBlogPost(knex, { phrase: '  Standing   water ', actorId: 'tech-1', scheduledServiceId: 'svc-1' })).toEqual({ status: 'queued' });
     expect(queueWrites(knex)).toHaveLength(1);
     const [[, sql, values]] = queueWrites(knex);
     expect(sql).toMatch(/^INSERT INTO opportunity_queue \(/);

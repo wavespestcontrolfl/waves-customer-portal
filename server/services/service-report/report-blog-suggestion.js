@@ -53,16 +53,27 @@ function dedupeKeyFor(phrase) {
   return `techsuggest:v1:${slug}`;
 }
 
-// Why a phrase cannot be a topic, or null.
-function phraseProblem(phrase) {
+// Why a phrase cannot be a topic, or null. `typed` is the phrase as the
+// person typed it, for the personal-data check.
+function phraseProblem(phrase, typed = phrase) {
   const { searchTerms } = require('./report-blog-post');
   if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !searchTerms(phrase).length) return 'not_a_topic';
   const { isTransactionalQuery } = require('../content/scoring-config');
   if (isTransactionalQuery(phrase)) return 'not_a_topic';
   const { geoBlockReason } = require('../content/topic-targeting-gate');
   if (geoBlockReason(phrase, { allowStatewide: true })) return 'not_a_topic';
+  // Personal data, read in the words as typed as well as normalized:
+  // lowercasing hides a capitalized name from the redactor ("ants at John
+  // Smith home"), and a phrase it is unsure of (confidence below high) is
+  // refused too. A capitalized topic ("Standing Water") can read as a name
+  // and is refused with it: the redactor's own rule is that a false name costs
+  // far less than a real one reaching a published post (pre-push P1 on
+  // 1aaeaa36ab).
   const { redact } = require('../content/pii-redactor');
-  if ((redact(phrase).findings || []).length) return 'not_a_topic';
+  for (const text of new Set([String(typed || ''), phrase])) {
+    const { findings = [], confidence } = redact(text);
+    if (findings.length || confidence !== 'high') return 'not_a_topic';
+  }
   return null;
 }
 
@@ -101,12 +112,20 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now 
  */
 async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null }) {
   const phrase = normalizePhrase(raw);
-  const problem = phraseProblem(phrase);
+  const problem = phraseProblem(phrase, raw);
   if (problem) return { error: problem };
   const { searchReportBlogPosts } = require('./report-blog-post');
   if ((await searchReportBlogPosts(knex, phrase)).some((post) => post.exact)) return { status: 'covered' };
+  // One suggestion at a time per person, so the day's cap holds when taps
+  // race: the count, the held check and the write share one transaction
+  // under the person's advisory lock (pre-push P1 on 1aaeaa36ab).
+  return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId }));
+}
+
+async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
   if (actorId) {
-    const sent = await knex('opportunity_queue')
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
+    const sent = await trx('opportunity_queue')
       .whereRaw("signal_metadata->>'source' = ?", [SOURCE])
       .whereRaw("signal_metadata->>'suggested_by' = ?", [String(actorId)])
       .whereRaw("mined_at > now() - interval '1 day'")
@@ -114,7 +133,7 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
       .first();
     if (Number(sent?.n) >= MAX_PER_DAY) return { error: 'too_many_suggestions' };
   }
-  const held = await knex('opportunity_queue')
+  const held = await trx('opportunity_queue')
     .where({ action_type: 'new_supporting_blog' })
     .whereRaw('lower(query) = ?', [phrase])
     .whereIn('status', HELD_STATUSES)
@@ -125,7 +144,7 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   const values = columns.map((column) => (column === 'score_breakdown' || column === 'signal_metadata' ? JSON.stringify(row[column]) : row[column]));
   // A new key writes the row; an expired suggestion of the same phrase is
   // revived; any other held or skipped one stays as it is.
-  const result = await knex.raw(
+  const result = await trx.raw(
     `INSERT INTO opportunity_queue (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})
      ON CONFLICT (dedupe_key) DO UPDATE SET status = 'pending', attempt_count = 0, skip_reason = NULL,
        mined_at = now(), expires_at = EXCLUDED.expires_at, signal_metadata = EXCLUDED.signal_metadata, updated_at = now()

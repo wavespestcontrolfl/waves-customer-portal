@@ -68,7 +68,8 @@ export function useBlogPostSearch(search) {
 
 // One tap suggests the search as a new post. The answer stands while the
 // search text stays the same: idle, sending, queued, already (someone
-// suggested it before) or failed.
+// suggested it before), refused (the server will not take the phrase) or
+// failed.
 export function useBlogSuggestion(suggest, query) {
   const phrase = String(query || "").trim();
   const [state, setState] = useState({ phrase: null, status: "idle" });
@@ -79,7 +80,7 @@ export function useBlogSuggestion(suggest, query) {
     Promise.resolve()
       .then(() => suggest(phrase))
       .then((data) => settle(data?.status === "queued" ? "queued" : data?.status === "already_queued" ? "already" : "failed"))
-      .catch(() => settle("failed"));
+      .catch((err) => settle(err?.status === 422 ? "refused" : "failed"));
   }, [suggest, phrase]);
   return { status: state.phrase === phrase ? state.status : "idle", send };
 }
@@ -91,6 +92,7 @@ export const SUGGESTION_COPY = {
   queued: { button: (phrase) => `Suggested: “${phrase}”`, note: "In the blog queue. It will be written and published automatically." },
   already: { button: () => "Already in the blog queue", note: "Someone suggested it already. It will be written and published automatically." },
   failed: { button: (phrase) => `Suggest a post about “${phrase}”`, note: "That didn’t go through. Try again." },
+  refused: { button: () => "Can’t suggest this one", note: "Name the topic only, with no names, addresses or phone numbers." },
 };
 
 // The search's status lines: searching, failed, nothing found, or (no post
@@ -114,15 +116,17 @@ function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
 // "Suggest a post about …" and, after the tap, what became of it.
 function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
   const done = suggestion.status === "queued" || suggestion.status === "already";
+  // A refused phrase is refused again: only a new search starts over.
+  const settled = done || suggestion.status === "refused";
   const copy = SUGGESTION_COPY[suggestion.status];
   return (
     <>
       <button
         type="button"
         onClick={suggestion.send}
-        disabled={disabled || done || suggestion.status === "sending"}
+        disabled={disabled || settled || suggestion.status === "sending"}
         aria-live="polite"
-        style={{ ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || done ? "default" : "pointer" }}
+        style={{ ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || settled ? "default" : "pointer" }}
       >
         {copy.button(phrase)}
       </button>
