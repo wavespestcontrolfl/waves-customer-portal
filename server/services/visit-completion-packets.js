@@ -1092,6 +1092,29 @@ function retryMarkerOf(error) {
     .some((marker) => text.startsWith(marker)) ? text : null;
 }
 
+// A stamp is `payer_billed:<payer>[:flags][:at=<iso>][:m=<marker>]`; the marker is the verbatim send-state
+// error the withdrawal replaced and may itself contain ':', so it is always the LAST segment. The first
+// `:m=` starts it (nothing before it can contain one).
+function stampMarkerTail(stamp) {
+  const text = String(stamp || '');
+  const at = text.indexOf(':m=');
+  return at >= 0 ? text.slice(at + 3) : null;
+}
+
+// A later flag (`hold`) goes in the flags, before the marker tail, never inside the marker.
+function stampWithFlag(stamp, flag) {
+  const at = String(stamp).indexOf(':m=');
+  return at >= 0 ? `${stamp.slice(0, at)}:${flag}${stamp.slice(at)}` : `${stamp}:${flag}`;
+}
+
+// Whether a stamp carries a flag (`park`, `hold`, `queued`), read from the flags only, never the marker tail.
+function stampHasFlag(stamp, flag) {
+  const text = String(stamp || '');
+  if (!/^payer_billed:/.test(text)) return false;
+  const at = text.indexOf(':m=');
+  return (at >= 0 ? text.slice(0, at) : text).split(':').slice(2).includes(flag);
+}
+
 // The invoice-level half of a Bill-To withdrawal, shared by the combined-visit (packet)
 // path below and the visit-linked path (visit-linked-invoice-withdrawal.js): credit
 // returned, the invoice off the send queue and stamped `payer_billed:<payer>`, armed
@@ -1129,14 +1152,19 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
       throw stuck;
     }
   }
-  // The packet path parks only the stale-send recovery's row (scheduled, no send time, that text or a `:park`
-  // stamp). The visit-linked path (markQueued) parks EVERY scheduled row with no send time, whatever its
-  // marker (a summary-planned or delivery-review error included): the automatic sender excludes such rows
-  // until an operator reviews them, so a release must put them back exactly as they were.
+  // BOTH paths park EVERY scheduled row with no send time, whatever its marker (the stale-send text, a
+  // summary-planned or delivery-review error, or none): the automatic sender excludes such rows until an
+  // operator reviews them, so a release must put them back exactly as they were, never into the queue.
   const nullTimeScheduled = prior?.status === 'scheduled' && !prior.scheduled_send_at;
-  const parked = nullTimeScheduled
-    && (markQueued
-      || String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
+  const parked = nullTimeScheduled;
+  // A replayed withdrawal reads a row that already carries a stamp: its own `:m=` tail (or, for a legacy
+  // packet `:park` stamp with no tail, the stale-send text) is the marker, never the stamp itself.
+  const priorError = String(prior?.scheduled_send_error || '');
+  const priorStamped = /^payer_billed:/.test(priorError);
+  const priorStampTail = priorStamped ? stampMarkerTail(priorError) : null;
+  const priorOriginal = priorStamped
+    ? (priorStampTail !== null ? priorStampTail : (!markQueued && stampHasFlag(priorError, 'park') ? STALE_SEND_PARK_ERROR : ''))
+    : priorError;
   // `queued` (non-packet callers only): the invoice was waiting in the send queue, so a
   // release puts it back there instead of leaving it a draft.
   const queued = markQueued && !parked && prior?.status === 'scheduled';
@@ -1146,13 +1174,16 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
   // without it the requeue would text the pay link a second time. (The packet release rebuilds its
   // marker from sms_sent_at and the summary record instead, so it never needed the tail.)
   // A parked row's marker is its WHOLE original error, restored verbatim.
-  const priorMarker = markQueued
-    ? (parked ? (String(prior?.scheduled_send_error || '') || null) : retryMarkerOf(prior?.scheduled_send_error))
-    : null;
+  const priorMarker = parked
+    ? (priorOriginal || null)
+    : (markQueued ? retryMarkerOf(prior?.scheduled_send_error) : null);
   // The operator-chosen send time rides the stamp too (`:at=<iso>`), so a release puts the invoice
   // back at that time, not at "now".
   const priorSendAt = queued && prior?.scheduled_send_at ? new Date(prior.scheduled_send_at).toISOString() : null;
-  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}${priorSendAt ? `:at=${priorSendAt}` : ''}${priorMarker ? `:m=${priorMarker}` : ''}`;
+  // A parked PACKET row always writes its tail, even empty (`:m=`): a legacy packet `:park` stamp has no
+  // tail and means the stale-send text, so "no marker" must be told apart from it.
+  const markerTail = parked && !markQueued ? `:m=${priorMarker || ''}` : (priorMarker ? `:m=${priorMarker}` : '');
+  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}${priorSendAt ? `:at=${priorSendAt}` : ''}${markerTail}`;
   const withdrawn = parked
     ? await trx('invoices').where({ id: invoiceId, status: 'scheduled' }).whereNull('payer_id').whereNull('scheduled_send_at')
       .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() })
@@ -1180,7 +1211,9 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
   // release re-arms nothing: the reconciliation restores self-pay and the
   // ordinary lifecycle arms the sequence again.
   await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).whereIn('status', ['active', 'autopay_hold'])
-    .update({ status: 'paused', next_touch_at: null, paused_reason: 'payer_billed', updated_at: trx.fn.now() });
+    // The next touch's original time rides `paused_until` (an existing column, no migration; nothing auto-resumes on
+    // it) and comes back on release. In one UPDATE the right-hand side reads the row as it was, so this captures it.
+    .update({ status: 'paused', paused_until: trx.raw('next_touch_at'), next_touch_at: null, paused_reason: 'payer_billed', updated_at: trx.fn.now() });
   return { stamp, prior };
 }
 
@@ -1202,8 +1235,8 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   const held = Number(await trx('service_visits').where({ id: visit.id })
     .where((q) => q.whereNull('billing_hold').orWhere('billing_hold', false))
     .update({ billing_hold: true, updated_at: trx.fn.now() }));
-  if (held || /:hold$/.test(String(prior?.scheduled_send_error || ''))) {
-    await trx('invoices').where({ id: invoiceId, scheduled_send_error: stamp }).update({ scheduled_send_error: `${stamp}:hold` });
+  if (held || stampHasFlag(prior?.scheduled_send_error, 'hold')) {
+    await trx('invoices').where({ id: invoiceId, scheduled_send_error: stamp }).update({ scheduled_send_error: stampWithFlag(stamp, 'hold') });
   }
   // A packet that closed for DELIVERY review keeps that verdict (Codex #4311
   // r42 P2): replacing the whole error with a payer-only state would raise a
@@ -1333,6 +1366,7 @@ async function resumeDunningPausedByWithdrawal(trx, invoiceId) {
   // pause or an autopay hold carries its own reason and is left alone.
   const pausedByWithdrawal = await trx('invoice_followup_sequences')
     .where({ invoice_id: invoiceId, status: 'paused', paused_reason: 'payer_billed' }).first('id', 'customer_id');
+  // `paused_until` is the original next touch the pause set aside (see the pause above).
   if (pausedByWithdrawal) {
     // An AUTOPAY customer goes back to the hold, never to active dunning
     // (local audit): the withdrawal paused both states under one reason, so
@@ -1353,15 +1387,21 @@ async function resumeDunningPausedByWithdrawal(trx, invoiceId) {
     } catch { onAutopay = true; }
     await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
       .update(onAutopay
-        ? { status: 'autopay_hold', paused_reason: null, next_touch_at: null, updated_at: trx.fn.now() }
-        : { status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
+        ? { status: 'autopay_hold', paused_reason: null, paused_until: null, next_touch_at: null, updated_at: trx.fn.now() }
+        // Back at the original touch time; "now" only when that time has already passed (or was never recorded).
+        : { status: 'active', paused_reason: null, paused_until: null,
+          next_touch_at: trx.raw('GREATEST(COALESCE(paused_until, now()), now())'), updated_at: trx.fn.now() });
   }
 }
 
 async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // `payer_billed:<payerId>[:park][:hold]` — the flags are order-independent
   // so a later one can be appended without re-parsing the rest.
-  const [, stampedPayer, ...flags] = invoice.scheduled_send_error.split(':');
+  const stamp = invoice.scheduled_send_error;
+  const markerTail = stampMarkerTail(stamp);
+  const stampHead = markerTail === null ? stamp : stamp.slice(0, stamp.indexOf(':m='));
+  const markerPart = markerTail === null ? '' : stamp.slice(stamp.indexOf(':m='));
+  const [, stampedPayer, ...flags] = stampHead.split(':');
   const holdFlag = flags.includes('hold') ? 'hold' : null;
   const parked = flags.includes('park');
   const flagSuffix = flags.length ? `:${flags.join(':')}` : '';
@@ -1372,7 +1412,7 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   if (live) {
     if (String(live) !== stampedPayer) {
       await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error })
-        .update({ scheduled_send_error: `payer_billed:${live}${flagSuffix}`, updated_at: trx.fn.now() });
+        .update({ scheduled_send_error: `payer_billed:${live}${flagSuffix}${markerPart}`, updated_at: trx.fn.now() });
       // The office-review state records WHICH AP account owes this invoice,
       // so a payer-to-payer handoff has to move it with the stamp (fallback
       // audit P1): the packet error and the open alert were written with the
@@ -1396,7 +1436,9 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
         scheduled_send_error: carriedMarker, updated_at: trx.fn.now() }
       // A parked ambiguous send returns to the park it came from — its
       // evidence restored, its send time still empty — never to the queue.
-      : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });
+      // (A parked row's own marker rides the stamp tail and is restored verbatim; a legacy `:park` stamp with no
+      // tail is the stale-send recovery's row.)
+      : { scheduled_send_error: parked ? (markerTail !== null ? (markerTail || null) : STALE_SEND_PARK_ERROR) : null, updated_at: trx.fn.now() });
   if (!moved || !packet || packet.status === 'failed') return false;
   // Only a hold the withdrawal created is lifted: a visit held before it
   // for another office-owned reason keeps that hold.

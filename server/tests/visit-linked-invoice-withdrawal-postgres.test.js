@@ -440,6 +440,46 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a visit-linked release puts dunning back at its original next touch, and at now only when that time has passed', async () => {
+    const payerId = await payer();
+    const future = new Date(Date.now() + 5 * 86400e3);
+    const past = new Date(Date.now() - 2 * 86400e3);
+    const ahead = await fixture({ link: 'record' });
+    const behind = await fixture({ link: 'visit' });
+    for (const [f, touch] of [[ahead, future], [behind, past]]) {
+      await mockPg('invoice_followup_sequences').insert({ invoice_id: f.invoiceId, customer_id: f.customerId, status: 'active', step_index: 1, next_touch_at: touch });
+      await assignJobPayer(f.visitId, payerId);
+      const paused = await mockPg('invoice_followup_sequences').where({ invoice_id: f.invoiceId }).first();
+      expect(paused).toMatchObject({ status: 'paused', paused_reason: 'payer_billed', next_touch_at: null });
+      expect(new Date(paused.paused_until).getTime()).toBe(touch.getTime());
+    }
+    const releasedAt = Date.now();
+    await clearJobPayer(ahead.visitId);
+    await clearJobPayer(behind.visitId);
+    const later = await mockPg('invoice_followup_sequences').where({ invoice_id: ahead.invoiceId }).first();
+    expect(later).toMatchObject({ status: 'active', paused_reason: null, paused_until: null, step_index: 1 });
+    expect(new Date(later.next_touch_at).getTime()).toBe(future.getTime());
+    const overdue = await mockPg('invoice_followup_sequences').where({ invoice_id: behind.invoiceId }).first();
+    expect(overdue).toMatchObject({ status: 'active', paused_reason: null, paused_until: null });
+    expect(new Date(overdue.next_touch_at).getTime()).toBeGreaterThanOrEqual(releasedAt - 5000);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an autopay customer\'s hold goes back to autopay_hold on release, with no stored touch time left behind', async () => {
+    const autopay = require('../services/autopay-eligibility');
+    jest.spyOn(autopay, 'customerOnAutopay').mockResolvedValue(true);
+    const payerId = await payer();
+    const f = await fixture({ link: 'record' });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: f.invoiceId, customer_id: f.customerId, status: 'autopay_hold', is_autopay_held: true, next_touch_at: null });
+    await assignJobPayer(f.visitId, payerId);
+    expect(await mockPg('invoice_followup_sequences').where({ invoice_id: f.invoiceId }).first())
+      .toMatchObject({ status: 'paused', paused_reason: 'payer_billed', paused_until: null });
+    await clearJobPayer(f.visitId);
+    expect(await mockPg('invoice_followup_sequences').where({ invoice_id: f.invoiceId }).first())
+      .toMatchObject({ status: 'autopay_hold', paused_reason: null, paused_until: null, next_touch_at: null });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('the payer-activation prelock set covers every non-terminal linked invoice, processing and stamped included', async () => {
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const processing = await fixture({ link: 'record', status: 'processing' });
