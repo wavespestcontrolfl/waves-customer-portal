@@ -91,6 +91,9 @@ describe('tokenParity', () => {
     expect(loose('I would like to reschedule to Saturday at 9 AM, is that possible?', 'Tôi muốn đổi lịch hẹn sang thứ Bảy lúc 9 giờ sáng được không?').ok).toBe(true);
     expect(loose('Can you come at 2 PM?', 'Bạn đến lúc 2 giờ chiều được không?').ok).toBe(true);
     expect(loose('Come at 2 PM', 'Приходите в 2 часа дня').ok).toBe(true);
+    // the Russian hour word with its day part is a clock time with no preposition
+    expect(loose('2 PM', '2 часа дня').ok).toBe(true);
+    expect(loose('9 AM', '9 часов утра').ok).toBe(true);
     // "дня" is also "days": only after the hour word is it the afternoon
     expect(loose('Can you come in 2 days?', 'Вы можете приехать через 2 дня?').ok).toBe(true);
     // the usual hour word may sit between the number and the half (Portuguese, French)
@@ -579,6 +582,13 @@ describe('runTranslationTrial', () => {
       mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
       expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: id })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
     }
+    // "October first at 2 PM" is a date; an ordinal that counts a visit is not a day of the month
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre a las 14:00.', back: 'I see a payment on October first at 2 PM.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'I see one payment on Oct 1 at 2 PM.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's6' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Nuestra primera visita de octubre está programada.', back: 'Our first visit in October is scheduled.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'Our first October visit is scheduled.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's7' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
     // the faithful one passes the date check, day before or after the month
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });

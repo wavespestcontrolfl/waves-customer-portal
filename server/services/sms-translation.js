@@ -348,9 +348,14 @@ const LOCAL_PM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${PM_WORDS})${END}`, 'iu');
 const LOCAL_AM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${AM_WORDS})${END}`, 'iu');
 const HOURS_PM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${PM_WORDS}|\\u0434\\u043D\\u044F)${END}`, 'iu');
 const HOURS_AM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${AM_WORDS})${END}`, 'iu');
+// Russian "2 часа дня", "9 часов утра", "7 часов вечера": the hour word followed by its day part is a clock
+// time on its own (a duration takes another form, "2 часа днём"), so it needs no preposition.
+const RU_HOUR_WORD = '\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?\\s+';
+const RU_PM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}(?:\\u0434\\u043D\\u044F|\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430)${END}`, 'iu');
+const RU_AM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}\\u0443\\u0442\\u0440\\u0430${END}`, 'iu');
 function localHalf(before, after) {
-  if (LOCAL_PM_RE.test(after)) return 'pm';
-  if (LOCAL_AM_RE.test(after)) return 'am';
+  if (LOCAL_PM_RE.test(after) || RU_PM_RE.test(after)) return 'pm';
+  if (LOCAL_AM_RE.test(after) || RU_AM_RE.test(after)) return 'am';
   if (!CLOCK_PREP_RE.test(before)) return null;
   return HOURS_PM_RE.test(after) ? 'pm' : (HOURS_AM_RE.test(after) ? 'am' : null);
 }
@@ -745,12 +750,22 @@ function durationFaults(englishReply, backTranslation) {
 const WEEKDAYS = ['Monday|Mon', 'Tuesday|Tues|Tue', 'Wednesday|Wed', 'Thursday|Thurs|Thur|Thu', 'Friday|Fri', 'Saturday|Sat', 'Sunday|Sun'];
 const MONTHS = ['January|Jan', 'February|Feb', 'March|Mar', 'April|Apr', 'May', 'June|Jun', 'July|Jul', 'August|Aug', 'September|Sept|Sep', 'October|Oct', 'November|Nov', 'December|Dec'];
 const ORDINAL_WORDS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'];
-// a read-back may word the day ("October first", "the twenty-first of October"): read as its number
+const ORDINAL = `(?:(?:twenty|thirty)[-\\s](?:${ORDINAL_WORDS.slice(0, 9).join('|')})|thirtieth|${ORDINAL_WORDS.join('|')})`;
+const MONTH_NAME = `(?:${MONTHS.join('|')})`;
+function ordinalValue(word) {
+  const w = word.toLowerCase();
+  if (w === 'thirtieth') return 30;
+  const compound = /^(twenty|thirty)[-\s](.+)$/.exec(w);
+  return compound ? (compound[1] === 'twenty' ? 20 : 30) + ORDINAL_WORDS.indexOf(compound[2]) + 1 : ORDINAL_WORDS.indexOf(w) + 1;
+}
+// A read-back may word the day: "October first", "October the first", "the first of October". Only those two
+// date forms are read as a number; an ordinal that counts something else ("our first October visit") is not.
+const MONTH_THEN_ORDINAL_RE = new RegExp(`\\b(${MONTH_NAME}\\.?\\s+(?:the\\s+)?)(${ORDINAL})\\b(?!\\s+(?:\\p{Ll}+\\s+)?(?:visit|service|treatment|appointment|payment|application|invoice|charge)s?\\b)`, 'gu');
+const ORDINAL_OF_MONTH_RE = new RegExp(`\\b(${ORDINAL})(\\s+of\\s+${MONTH_NAME})\\b`, 'gi');
 function ordinalDigits(text) {
   return text
-    .replace(/\b(twenty|thirty)[-\s](first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)\b/gi, (m, tens, unit) => String((tens.toLowerCase() === 'twenty' ? 20 : 30) + ORDINAL_WORDS.indexOf(unit.toLowerCase()) + 1))
-    .replace(/\bthirtieth\b/gi, '30')
-    .replace(new RegExp(`\\b(?:${ORDINAL_WORDS.join('|')})\\b`, 'gi'), (w) => String(ORDINAL_WORDS.indexOf(w.toLowerCase()) + 1));
+    .replace(ORDINAL_OF_MONTH_RE, (m, word, rest) => `${ordinalValue(word)}${rest}`)
+    .replace(MONTH_THEN_ORDINAL_RE, (m, lead, word) => `${lead}${ordinalValue(word)}`);
 }
 function calendarTokens(text) {
   const str = ordinalDigits(asciiDigits(text));
