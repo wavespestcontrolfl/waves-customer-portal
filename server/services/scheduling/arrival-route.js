@@ -79,11 +79,12 @@ function comboRouteCheckLive() {
  *  offset, and one target window cannot stand for staggered promises) — and
  *  the caller keeps today's answer (`grouped` → route_unverified). */
 function foldVisitUnit(target, stored, siblings) {
-  const clean = hasCoords(target) && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
+  const underWay = row => ['en_route', 'on_site'].includes(row.status);
+  const clean = hasCoords(target) && !underWay(stored) && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
     && dateOnly(row.scheduled_date) === dateOnly(stored.scheduled_date)
     && hasCoords(row) && Number(row.lat) === Number(target.lat) && Number(row.lng) === Number(target.lng)
     && String(row.window_start || '').slice(0, 5) === String(stored.window_start || '').slice(0, 5)
-    && !['en_route', 'on_site'].includes(row.status));
+    && !underWay(row));
   if (!clean) return null;
   // The tapped member keeps its own row untouched: its work is resolved per
   // candidate window by buildPlacementTarget, exactly as for a visit alone
