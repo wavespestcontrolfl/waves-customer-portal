@@ -25,6 +25,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { safeEqual } = require('../middleware/hermes-auth');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
 const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
@@ -36,18 +37,28 @@ const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow
 // force, never over a person's label) and is recorded as labeled_by
 // 'claude-labeler'. Unset (or shorter than 32 characters) = off. A request
 // without the header goes through admin sign-in exactly as before. Contract:
-// docs/public-route-contracts.md "Typed-decision labeler token": a wrong or
-// unset token, any other path or method, and the dark gate all answer the same
-// generic 404 (checked against the env value, no DB read); a valid token rides
-// a per-IP limiter only while the gate is live; privacy headers on every
-// token response.
+// docs/public-route-contracts.md "Typed-decision labeler token".
+// `labelerPreGuard` is mounted in server/index.js AHEAD of the global /api/
+// limiter and the /api/admin body parsers (Codex #5677 r1), so a request with
+// the header gets its privacy headers and, when anything is wrong (token,
+// method, path, dark gate), the generic 404 before any of them can answer; a
+// valid one rides its own /64-keyed limiter and the global limiter skips it.
+// The router runs the same guard again (idempotent) so it holds on its own.
 const MACHINE_LABELER = 'claude-labeler';
-const LABEL_PATH = /^\/reviews\/[0-9a-f-]{36}\/label$/i;
+const LABEL_PATH = /^\/reviews\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/label$/i;
 const MIN_LABELER_TOKEN_CHARS = 32;
-const labelerLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
-function machineLabeler(req, res, next) {
+const labelerLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Token callers carry no JWT: key by the /64-collapsed client IP.
+  keyGenerator: unauthenticatedAuthLimitKey,
+});
+function labelerPreGuard(req, res, next) {
   const supplied = req.get('x-labeler-token');
-  if (supplied === undefined) return next();
+  if (supplied === undefined || req.labelerChecked) return next();
+  req.labelerChecked = true;
   res.set({ 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer' });
   const expected = process.env.TYPED_DECISIONS_LABELER_TOKEN || '';
   const ok = expected.length >= MIN_LABELER_TOKEN_CHARS && safeEqual(supplied, expected);
@@ -55,7 +66,7 @@ function machineLabeler(req, res, next) {
   req.machineLabeler = true;
   return labelerLimiter(req, res, next);
 }
-router.use(machineLabeler);
+router.use(labelerPreGuard);
 router.use((req, res, next) => (req.machineLabeler ? next() : adminAuthenticate(req, res, next)));
 router.use((req, res, next) => (req.machineLabeler ? next() : requireAdmin(req, res, next)));
 // GATE_TYPED_DECISIONS off: 404 before any read or write, so the kill switch
@@ -347,3 +358,4 @@ router.post('/reviews/:id/label', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.labelerPreGuard = labelerPreGuard;

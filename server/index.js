@@ -321,7 +321,9 @@ const limiter = rateLimit({
   // window must not turn email links into 429 JSON). The route enforces
   // its own soft ATTRIBUTION budget and always redirects.
   skip: (req) => process.env.NODE_ENV !== 'production'
-    || (req.method === 'GET' && String(req.originalUrl || '').startsWith('/api/public/newsletter/e/')),
+    || (req.method === 'GET' && String(req.originalUrl || '').startsWith('/api/public/newsletter/e/'))
+    // A verified labeler-token request already rode labelerPreGuard's own limiter.
+    || req.machineLabeler === true,
 });
 // The disabled payer-statement-pay surface must ALWAYS look like Not Found —
 // even ahead of the global /api/ limiter — so an IP that already exhausted the
@@ -487,6 +489,11 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
+// Typed-decision labeler token (X-Labeler-Token): privacy headers and the
+// generic 404 for a wrong token / path / dark gate must land BEFORE the global
+// limiter and the /api/admin parsers; a valid token rides its own limiter.
+// See docs/public-route-contracts.md "Typed-decision labeler token".
+app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions').labelerPreGuard);
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

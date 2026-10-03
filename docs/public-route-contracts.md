@@ -5983,11 +5983,19 @@ caller and every other path of this router keeps `adminAuthenticate` +
 `TYPED_DECISIONS_LABELER_TOKEN`; unset or shorter than 32 characters = off.
 **Token format gate / generic 404:** the check is against the env value with no
 DB read; a wrong, short or unset token, any method other than POST, any path
-other than `/reviews/<uuid>/label`, and `GATE_TYPED_DECISIONS` off all answer the
+other than `/reviews/<uuid>/label` (a structured UUID, not any 36 hex/hyphen characters), and `GATE_TYPED_DECISIONS` off all answer the
 same `404 { error: 'Not found' }`. **Gate:** `GATE_TYPED_DECISIONS` (dark gate:
 the limiter is skipped while it is off, so a probe never sees a revealing 429).
-**Rate limit:** 120 requests a minute per IP (`labelerLimiter`), applied only
-after the token and gate pass. **Privacy headers:** `Cache-Control: no-store`,
+**Order:** `labelerPreGuard` is mounted in `server/index.js` AHEAD of the
+global `/api/` limiter and the `/api/admin` body parsers (and runs again inside
+the router, idempotently), so a request carrying the header gets its privacy
+headers and, when anything is wrong, the generic 404 before any global
+middleware can answer; past a valid token the global limiter skips it
+(`req.machineLabeler`), and the later body parsers may still answer a valid
+caller 400 (malformed JSON) or the large-body guard's refusal, with the privacy
+headers already set. **Rate limit:** 120 requests a minute per /64-collapsed IP
+(`labelerLimiter`, `unauthenticatedAuthLimitKey`), applied only after the token,
+path (a structured UUID) and gate pass. **Privacy headers:** `Cache-Control: no-store`,
 `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer` on every response to a
 request carrying the header. **Writes:** exactly the label write a person makes
 (the same verdict / `seen_answer` / `seen_subject` binding and 409s), narrowed:
