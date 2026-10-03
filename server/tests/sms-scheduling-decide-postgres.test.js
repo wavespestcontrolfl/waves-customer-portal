@@ -142,6 +142,24 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
   }));
 
+  test('the sweep recovers a reply that arrived on a tracking line (stored as domain_lead or van_lead), and still skips a consumed one', async () => {
+    for (const type of ['domain_lead', 'van_lead']) {
+      await inTrx(async (trx) => {
+        const { offerId, inboundId } = await seed(trx);
+        await trx('sms_offers').where({ id: offerId }).update({ created_at: new Date('2040-03-01T13:00:01Z') });
+        await trx('sms_log').where({ id: inboundId }).update({ message_type: type });
+        const run = jest.fn(async () => ({ recorded: true }));
+        await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+        expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
+        // Lead intake took it: the row was retyped, so it is not the sweep's.
+        await trx('sms_log').where({ id: inboundId }).update({ message_type: 'lead_intake' });
+        run.mockClear();
+        await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+        expect(run).not.toHaveBeenCalled();
+      });
+    }
+  });
+
   test('one decision per text, even across two offers', () => inTrx(async (trx) => {
     const { customerId, offerId, inboundId } = await seed(trx);
     const [d2] = await trx('agent_decisions').insert({ workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer 2' }).returning('id');
