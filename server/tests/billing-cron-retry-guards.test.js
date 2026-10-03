@@ -24,6 +24,8 @@ let mockCollectedRow = null;
 let mockOrphanRow = null;
 let mockPaymentUpdates = [];
 let mockHoldSkipLogged = null;
+let mockParkUpdate = () => Promise.resolve(1); // result of a payments update (rows affected)
+let mockHealthInserts = [];
 
 jest.mock('../models/db', () => {
   function builder(table) {
@@ -33,10 +35,13 @@ jest.mock('../models/db', () => {
       'whereNotNull', 'whereRaw', 'distinct', 'select', 'orderBy', 'join',
       'leftJoin', 'pluck', 'count', 'returning',
     ]) b[m] = () => b;
-    b.insert = () => Promise.resolve([]);
+    b.insert = (row) => {
+      if (table === 'customer_health_alerts') mockHealthInserts.push(row);
+      return Promise.resolve([]);
+    };
     b.update = (payload) => {
       if (table === 'payments') mockPaymentUpdates.push(payload);
-      return Promise.resolve(1);
+      return table === 'payments' ? mockParkUpdate(payload) : Promise.resolve(1);
     };
     b.first = () => {
       if (table === 'customers') return Promise.resolve(mockCustomer);
@@ -58,7 +63,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/prepaid-pi-guard', () => ({ neutralizeOpenPaymentIntent: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -83,6 +90,9 @@ jest.mock('../services/stripe', () => ({
 }));
 
 const StripeService = require('../services/stripe');
+const logger = require('../services/logger');
+const { notifyAdmin } = require('../services/notification-service');
+const { neutralizeOpenPaymentIntent } = require('../services/prepaid-pi-guard');
 const { logAutopay } = require('../services/autopay-log');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const BillingCron = require('../services/billing-cron');
@@ -128,6 +138,8 @@ beforeEach(() => {
   mockOrphanRow = null;
   mockPaymentUpdates = [];
   mockHoldSkipLogged = null;
+  mockParkUpdate = () => Promise.resolve(1);
+  mockHealthInserts = [];
   jest.clearAllMocks();
   StripeService.charge.mockReset();
   StripeService.chargeOneTime.mockReset();
@@ -639,5 +651,155 @@ describe('retry settlement reporting', () => {
     expect(logAutopay).toHaveBeenCalledWith('cust-1', status === 'paid' ? 'retry_success' : 'retry_processing', expect.objectContaining({ amountCents: 3396, paymentId: 'pay-state' }));
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+  });
+});
+
+
+describe('B16: retry rung answered with a 3DS demand', () => {
+  const scaError = () => Object.assign(new Error('Customer authentication required'), {
+    code: 'STRIPE_REQUIRES_ACTION',
+    stripePaymentIntentId: 'pi_retry_sca',
+    paymentRecord: { id: 'pay-sca-row', amount: '33.00', stripe_payment_intent_id: 'pi_retry_sca' },
+  });
+  const rejectAll = () => {
+    StripeService.charge.mockRejectedValue(scaError());
+    StripeService.chargeOneTime.mockRejectedValue(scaError());
+    StripeService.chargeMonthly.mockRejectedValue(scaError());
+  };
+  const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+  const TwilioService = require('../services/twilio');
+
+  beforeEach(() => {
+    notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+    neutralizeOpenPaymentIntent.mockResolvedValue({ ok: true, piId: 'pi_retry_sca' });
+  });
+
+  test('parked, PI cancelled, ONE bell with the key and bell:true, collect-by-hand wording, no customer message, no retry armed', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAll();
+
+    await BillingCron.processPaymentRetries();
+
+    // the park write: ladder disarmed, prefix the webhook matches on kept exactly
+    expect(mockPaymentUpdates).toHaveLength(1);
+    expect(mockPaymentUpdates[0]).toMatchObject({ next_retry_at: null, retry_count: 2, superseded_by_payment_id: 'pay-sca-row' });
+    expect(mockPaymentUpdates[0].failure_reason).toMatch(/^Customer authentication required \(3DS\)/);
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'sca_required', expect.objectContaining({ paymentId: 'pay-failed-1' }));
+    expect(neutralizeOpenPaymentIntent).toHaveBeenCalledWith('pi_retry_sca');
+
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(headline).toBe("Billing — collect Test Retry's autopay by hand");
+    expect(why).toBe('The bank must approve this $33.00 card charge; it was not collected and will not retry.');
+    expect(opts).toMatchObject({
+      bell: true,
+      dedupeKey: 'autopay-sca-parked:cust-1:pi_retry_sca',
+      link: '/admin/customers?customerId=cust-1',
+      metadata: expect.objectContaining({ area: 'Billing', severity: 'needs-you', who: 'person', subject: { type: 'customer', id: 'cust-1' } }),
+    });
+    // honest lifecycle: a person marks it done, nothing closes it
+    expect(opts.metadata.doneWhen).toBe('collected_and_marked_done');
+    expect(opts.detail).toMatch(/will not retry on its own/);
+    expect(opts.detail).toMatch(/No message was sent to the customer/);
+    expect(opts.detail).toMatch(/collect it by hand/);
+    expect(opts.detail).toMatch(/mark it done/);
+
+    expect(mockHealthInserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/webhook handles/));
+  });
+
+  test('replay of the same PaymentIntent raises the same dedupe key', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAll();
+    await BillingCron.processPaymentRetries();
+    await BillingCron.processPaymentRetries();
+    expect(notifyAdmin).toHaveBeenCalledTimes(2);
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe(notifyAdmin.mock.calls[1][3].dedupeKey);
+  });
+
+  test('PI still in flight: wording says pending at Stripe and does not tell the office to collect; the sweep goes on to the next row', async () => {
+    mockFailedPayments = [monthlyFailedPayment(), monthlyFailedPayment({ id: 'pay-failed-2', description: 'Flea add-on — FAILED', metadata: '{}' })];
+    neutralizeOpenPaymentIntent.mockResolvedValueOnce({ ok: false, reason: 'payment_in_flight', piId: 'pi_retry_sca', piStatus: 'processing' });
+    StripeService.charge.mockRejectedValueOnce(scaError());
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaError());
+    StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+
+    const result = await BillingCron.processPaymentRetries();
+
+    const [, headline, why, opts] = notifyAdmin.mock.calls[0];
+    expect(headline).toBe("Billing — check Test Retry's pending autopay charge");
+    expect(why).toBe('The $33.00 card charge is still pending at Stripe; check it before doing anything.');
+    expect(opts.detail).toMatch(/still pending at Stripe/);
+    expect(opts.detail).not.toMatch(/collect it by hand/);
+    expect(result.retried).toBe(2);
+  });
+
+  test.each([
+    ['unverifiable', () => neutralizeOpenPaymentIntent.mockResolvedValueOnce({ ok: false, reason: 'payment_session_unverifiable', piId: 'pi_retry_sca', detail: 'cancel failed: boom' })],
+    ['a Stripe error thrown', () => neutralizeOpenPaymentIntent.mockRejectedValueOnce(new Error('stripe down'))],
+  ])('PI cancel %s: wording says it could NOT be cancelled and to cancel it in Stripe first; never aborts the sweep', async (_label, arrange) => {
+    mockFailedPayments = [monthlyFailedPayment(), monthlyFailedPayment({ id: 'pay-failed-2', description: 'Flea add-on — FAILED', metadata: '{}' })];
+    arrange();
+    StripeService.charge.mockRejectedValueOnce(scaError());
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaError());
+    StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+
+    const result = await BillingCron.processPaymentRetries();
+
+    const [, headline, why, opts] = notifyAdmin.mock.calls[0];
+    expect(headline).toBe("Billing — cancel Test Retry's autopay charge in Stripe");
+    expect(why).toBe('The $33.00 card charge could not be cancelled; cancel it in Stripe before collecting any other way.');
+    expect(opts.detail).toMatch(/could NOT be cancelled/);
+    expect(opts.detail).toMatch(/Cancel it in Stripe before collecting any other way/);
+    expect(opts.detail).not.toMatch(/collect it by hand/);
+    expect(result.retried).toBe(2);
+  });
+
+  test.each([
+    ['null (insert failed)', null],
+    ['the suppressed sentinel', { id: null, suppressed: true }],
+  ])('bell result %s: error logged, health-alert fallback written, never "office alerted"', async (_label, result) => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAll();
+    notifyAdmin.mockResolvedValue(result);
+
+    await BillingCron.processPaymentRetries();
+
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/office alert NOT filed/));
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/office alerted/));
+    expect(mockHealthInserts).toHaveLength(1);
+    expect(mockHealthInserts[0]).toMatchObject({ customer_id: 'cust-1', alert_type: 'payment_failure', severity: 'high' });
+    expect(JSON.parse(mockHealthInserts[0].trigger_data)).toMatchObject({ stripe_payment_intent_id: 'pi_retry_sca', source: 'autopay_sca_parked_autopay_retry' });
+  });
+
+  test('a filed bell logs "office alerted"', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAll();
+    await BillingCron.processPaymentRetries();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/office alerted/));
+  });
+
+  test.each([
+    ['rejects', () => Promise.reject(new Error('db unavailable'))],
+    ['matches no row', () => Promise.resolve(0)],
+  ])('park update %s: no sca_required event, PI not cancelled, no alert, row left armed, sweep continues', async (_label, update) => {
+    mockFailedPayments = [monthlyFailedPayment(), monthlyFailedPayment({ id: 'pay-failed-2', description: 'Flea add-on — FAILED', metadata: '{}' })];
+    // only the 3DS park write misbehaves; the next row's own bookkeeping still works
+    mockParkUpdate = (payload) => (/3DS/.test(payload.failure_reason || '') ? update() : Promise.resolve(1));
+    StripeService.charge.mockRejectedValueOnce(scaError());
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaError());
+    StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+
+    const result = await BillingCron.processPaymentRetries();
+
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/SCA park update for payment pay-failed-1 did not apply/));
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'sca_required', expect.anything());
+    expect(neutralizeOpenPaymentIntent).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(mockHealthInserts).toHaveLength(0);
+    expect(result.retried).toBe(2);
   });
 });

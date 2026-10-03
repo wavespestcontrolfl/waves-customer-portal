@@ -287,10 +287,15 @@ async function destinationTechClash(t, { technicianId, date, windowStart, window
 // beside a terminal one would be moved under a parent — and artifacts —
 // describing the old stop. Returns { frozen, reason } — an unreadable
 // state reads as frozen (fail closed).
-async function frozenVisitVerdict(t, visitId) {
+function isVisitReadCancellation(err) {
+  return ['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+    || ['AbortError', 'KnexTimeoutError'].includes(err?.name);
+}
+
+async function frozenVisitVerdict(t, visitId, { propagateCancellation = false } = {}) {
   if (!visitId) return { frozen: false, reason: null };
   try {
-    const activity = await visitActivity(visitId, t);
+    const activity = await visitActivity(visitId, t, { propagateCancellation });
     if (!activity) return { frozen: false, reason: null }; // no such visit: the row is effectively ungrouped
     // Not open and not dissolved (closing, …) = being finalized: frozen for
     // every direct writer, exactly as the unit mover refuses it (P0 r36).
@@ -305,6 +310,7 @@ async function frozenVisitVerdict(t, visitId) {
     if (claim) return { frozen: true, reason: 'completion_in_flight' };
     return { frozen: false, reason: null };
   } catch (err) {
+    if (propagateCancellation && isVisitReadCancellation(err)) throw err;
     require('./logger').warn(`[visit-groups] frozenVisitVerdict(${visitId}) unreadable — treated as frozen: ${err.message}`);
     return { frozen: true, reason: 'unreadable' };
   }
@@ -369,7 +375,7 @@ function windowedMembersConnected(members) {
   return true;
 }
 
-async function visitActivity(visitId, trx = db) {
+async function visitActivity(visitId, trx = db, { propagateCancellation = false } = {}) {
   const visit = await trx('service_visits').where({ id: visitId }).first();
   if (!visit) return null;
   const [effects, reminderClaim, packets, children] = await Promise.all([
@@ -392,9 +398,15 @@ async function visitActivity(visitId, trx = db) {
   const [record, invoice] = childIds.length
     ? await Promise.all([
       trx('service_records').whereIn('scheduled_service_id', childIds).first('id')
-        .catch(() => null),
+        .catch((err) => {
+          if (propagateCancellation && isVisitReadCancellation(err)) throw err;
+          return null;
+        }),
       trx('invoices').whereIn('scheduled_service_id', childIds).first('id')
-        .catch(() => null),
+        .catch((err) => {
+          if (propagateCancellation && isVisitReadCancellation(err)) throw err;
+          return null;
+        }),
     ])
     : [null, null];
   return {

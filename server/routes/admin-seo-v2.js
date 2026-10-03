@@ -417,6 +417,7 @@ const CitationAuditor = require('../services/seo/citation-auditor');
 const ConversionFunnel = require('../services/seo/conversion-funnel');
 const SiteRollup = require('../services/seo/site-rollup');
 const GeoGrid = require('../services/seo/geo-grid-tracker');
+const GeoGridNamedSearches = require('../services/seo/geo-grid-named-searches');
 const { geoGridToCSV } = require('../services/csv-generators');
 const { isEnabled } = require('../config/feature-gates');
 const { isEntityQuestion } = require('../services/seo/aeo-entity-facts');
@@ -448,6 +449,14 @@ router.get('/geo-grid/heatmap', async (req, res, next) => {
     const { office, keyword } = req.query;
     if (!office || !keyword) return res.status(400).json({ error: 'office and keyword are required' });
     res.json(await GeoGrid.getHeatmap(office, keyword));
+  } catch (err) { next(err); }
+});
+
+// The eight-search scoreboard: four priority cities × pest and lawn, read from
+// stored scans (no DataForSEO call).
+router.get('/geo-grid/named-searches', async (req, res, next) => {
+  try {
+    res.json(await GeoGridNamedSearches.getNamedSearches());
   } catch (err) { next(err); }
 });
 

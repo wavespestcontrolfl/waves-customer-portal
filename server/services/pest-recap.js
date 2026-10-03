@@ -364,6 +364,13 @@ async function visitTraceOnReport(svc, profile, lane, knex) {
   }
 }
 
+// The same verdict for a visit row the caller already holds (the completion
+// re-judges it under the visit lock).
+async function traceOnReportForVisit(svc, profile, knex = db) {
+  const { lane } = await sheetRecordFor(profile, svc, knex);
+  return visitTraceOnReport(svc, profile, lane, knex);
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -446,6 +453,10 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     // flea, cockroach and the knockdowns), as the office's Schedule
     // follow-up does.
     followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
+    // Whether the sheet's report flow is live now. A plain pest visit reads
+    // no lane and no typed form, so `eligible` alone cannot tell a phone's
+    // cached report-flow row that GATE_FAST_COMPLETE_REPORT went off.
+    reportFlow: require('../config/feature-gates').fastCompleteReportLive(),
     lane,
     existingRecordLoadFailed,
     catalogLoadFailed,
@@ -1708,6 +1719,7 @@ module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
   buildRecapContext,
+  traceOnReportForVisit,
   draftRecapMessage,
   submitRecap,
   // Shared with completeScheduledService's expectedVisit guard.

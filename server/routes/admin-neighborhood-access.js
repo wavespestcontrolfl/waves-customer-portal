@@ -15,10 +15,17 @@
  *                                     other live codes there then need confirming)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
  *                                     or { action: 'confirm' | 'retire' }
+ * POST   /visits/:visitId/entries   — from a visit: add a keypad code to that
+ *                                     visit's neighborhood ({ code, gateLabel? })
+ * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
+ *                                     neighborhood code wrong ({ code }: the code shown)
  *
  * A neighborhood's gate code is shared by every stop in it and is staff-only:
- * the whole router requires full admin (the tech portal is deprecated) and
- * every response is no-store. QR / app passes are stored as instructions only,
+ * every route but the two /visits ones requires full admin, and every
+ * response is no-store. The /visits routes (owner ruling 2026-10-03, dark
+ * behind GATE_NEIGHBORHOOD_TECH_ACTIONS) also admit a technician, only
+ * through a visit assigned to them: an added code is live at once, a code
+ * marked wrong drops to needs_confirm and the office decides. No bell. QR / app passes are stored as instructions only,
  * never as a code. Dark behind GATE_NEIGHBORHOOD_ACCESS (read at call time):
  * off answers 404 { enabled: false } on every route.
  *
@@ -28,12 +35,14 @@
 const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { neighborhoodAccessLive } = require('../config/feature-gates');
-const { isKeypadCode, matchKey } = require('../services/neighborhood-access');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
+const { isKeypadCode, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
+const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
 const router = express.Router();
-router.use(adminAuthenticate, requireAdmin);
+router.use(adminAuthenticate);
 router.use((req, res, next) => {
   // no-store first, so the disabled answer is never cached past a gate flip.
   res.set('Cache-Control', 'no-store');
@@ -52,6 +61,7 @@ const MAX_NAME = 120;
 const COUNTIES = ['Manatee', 'Sarasota', 'Charlotte'];
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
+const KEYPAD_CODE_ERROR = 'A keypad code is 3 to 8 digits, with an optional leading or trailing # or *';
 
 function logFailure(what, err) {
   logger.error(`[admin-neighborhood-access] ${what} failed (${(err && (err.code || err.name)) || 'error'})`);
@@ -63,7 +73,7 @@ function staleCutoff() {
   return d;
 }
 
-function serializeEntry(row, { cutoff, conflicted }) {
+function serializeEntry(row, { cutoff, conflicted, staffNames }) {
   const confirmedAt = row.last_confirmed_at || null;
   const basis = confirmedAt || row.created_at;
   return {
@@ -77,6 +87,11 @@ function serializeEntry(row, { cutoff, conflicted }) {
     lastConfirmedAt: confirmedAt ? new Date(confirmedAt).toISOString() : null,
     stale: row.status === 'active' && !!basis && new Date(basis) < cutoff,
     conflict: conflicted && !!row.code && row.status !== 'retired',
+    // Field provenance: who added it from a visit, and a standing "this code
+    // is wrong" report (cleared when the office confirms or edits the value).
+    addedBy: row.source_technician_id ? (staffNames.get(row.source_technician_id) || 'Staff') : null,
+    markedWrongAt: row.flagged_wrong_at ? new Date(row.flagged_wrong_at).toISOString() : null,
+    markedWrongBy: row.flagged_wrong_at ? (staffNames.get(row.flagged_wrong_by) || 'Staff') : null,
   };
 }
 
@@ -125,7 +140,7 @@ function validateEntry(body, current) {
   let code = null;
   if (merged.access_type === 'keypad') {
     if (!rawCode) return { error: 'A keypad entry needs a code' };
-    if (!isKeypadCode(rawCode)) return { error: 'A keypad code is 3 to 8 digits, with an optional leading or trailing # or *' };
+    if (!isKeypadCode(rawCode)) return { error: KEYPAD_CODE_ERROR };
     code = rawCode.replace(/\s+/g, '');
   } else {
     // Passes and app QR codes are stored as instructions only, never as a code.
@@ -145,6 +160,19 @@ function validateEntry(body, current) {
   };
 }
 
+// The office (or a fresh on-site code) answering a "this code is wrong" report.
+const WRONG_REPORT_CLEARED = { flagged_wrong_at: null, flagged_wrong_by: null };
+
+// Every other confirmed code in the neighborhood now needs confirming: a new
+// code means one of them is stale or the community has two gates.
+async function demoteOtherActiveCodes(trx, neighborhoodId, exceptId) {
+  await trx('neighborhood_access')
+    .where({ neighborhood_id: neighborhoodId, status: 'active' })
+    .whereNotNull('code')
+    .whereNot('id', exceptId)
+    .update({ status: 'needs_confirm', updated_at: trx.fn.now() });
+}
+
 async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   const q = trx('neighborhood_access')
     .where({ neighborhood_id: neighborhoodId })
@@ -154,14 +182,212 @@ async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   return !!(await q.first('id'));
 }
 
-// Clearing a bell the change resolved is best-effort: it never fails the save.
-async function closeBellsBestEffort(entryId) {
-  try {
-    await require('../services/neighborhood-access').closeResolvedConflictBells();
-  } catch (err) {
-    logger.warn(`[admin-neighborhood-access] conflict bell close failed for entry ${entryId} (${(err && (err.code || err.name)) || 'error'})`);
-  }
+// ---- from a visit (technician or admin) --------------------------------------
+
+// Declared BEFORE the router's requireAdmin below: these two are the only
+// routes a technician reaches here.
+function techActionsLive(req, res, next) {
+  if (!neighborhoodTechActionsLive()) return res.status(404).json({ enabled: false });
+  return next();
 }
+
+// Every open route screen refetches on dispatch:job_update: a shared code
+// changed for every stop in the neighborhood, not only on the phone that
+// sent it. Best effort, after the commit; the date set skips the
+// route-quality refresh (no visit moved).
+async function announceGateChange(req, result) {
+  if (result.status >= 300) return;
+  try {
+    await emitDispatchJobUpdate({ jobId: req.params.visitId, actorId: req.technicianId, qualityDates: new Set() });
+  } catch { /* the write stands; other screens catch up on their next load */ }
+}
+
+// A gate write always gives way. Other writers take the same rows in orders
+// that cannot all be matched (the property writers lock the customer before
+// its visits; the annual-prepay switch locks the visit before its customer),
+// so instead of an order this transaction waits at most GATE_LOCK_WAIT_MS for
+// any lock, well under Postgres's deadlock check, then rolls back and tries
+// again. It can never be the transaction that makes a billing or property
+// write fail; after the last try it answers "busy" and the technician retries.
+const GATE_LOCK_WAIT_MS = 300;
+const GATE_WRITE_TRIES = 3;
+const BUSY = { status: 503, body: { error: 'That stop is busy right now. Try again in a moment.', code: 'busy' } };
+const LOCK_NOT_AVAILABLE = '55P03';
+const DEADLOCK_DETECTED = '40P01';
+
+async function gateWrite(work) {
+  for (let attempt = 1; attempt <= GATE_WRITE_TRIES; attempt += 1) {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw(`SET LOCAL lock_timeout = '${GATE_LOCK_WAIT_MS}ms'`);
+        return work(trx);
+      });
+    } catch (err) {
+      if (!err || ![LOCK_NOT_AVAILABLE, DEADLOCK_DETECTED].includes(err.code)) throw err;
+      if (attempt < GATE_WRITE_TRIES) await new Promise((resolve) => { setTimeout(resolve, 50 * attempt); });
+    }
+  }
+  return BUSY;
+}
+
+const NO_NEIGHBORHOOD = {
+  status: 409,
+  body: { error: 'This stop has no neighborhood yet. Ask the office to set one.', code: 'no_neighborhood' },
+};
+
+// The neighborhood of a visit this login may act on, read under the locks
+// that make it stable, each waited for only briefly (see gateWrite):
+//   1. the visit's CUSTOMER row, FOR SHARE. Every writer that adds a property,
+//      changes the primary or relinks a neighborhood takes that row FOR
+//      UPDATE first, so none of them can run until this commits and the
+//      stop's neighborhood cannot move underneath the write;
+//   2. the visit row (lockOwnedLiveVisit): a technician reaches only a visit
+//      on their own route (assigned to them, not dead, inside the access
+//      window, completed allowed), re-checked under the lock so a
+//      reassignment or cancellation landing meanwhile cannot let a former
+//      assignee's write through;
+//   3. the neighborhood row (the lock every writer of its entries takes first).
+// Returns { neighborhoodId } or { status, body }.
+const VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_zip',
+];
+
+async function lockVisitNeighborhood(trx, req, visitId) {
+  const notFound = { status: 404, body: { error: 'Visit not found' } };
+  if (!UUID_RE.test(visitId)) return notFound;
+  // The customer is read off the visit before any lock, then confirmed under
+  // the visit's lock: a visit moved to another customer meanwhile is refused.
+  const peek = await trx('scheduled_services').where({ id: visitId }).first('customer_id');
+  if (!peek || !peek.customer_id) return notFound;
+  await trx('customers').where({ id: peek.customer_id }).forShare().first('id');
+  let visit;
+  try {
+    visit = await lockOwnedLiveVisit(trx, req, visitId, VISIT_COLUMNS, { allowCompleted: true });
+  } catch (err) {
+    // Not theirs and not there read the same: a technician learns nothing
+    // about another route's visits.
+    if (err && (err.status === 403 || err.status === 404)) return notFound;
+    throw err;
+  }
+  if (visit.customer_id !== peek.customer_id) return notFound;
+  const neighborhoodId = (await visitNeighborhoodIds(trx, [visit])).get(visit.id);
+  if (!neighborhoodId) return NO_NEIGHBORHOOD;
+  const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
+  if (!hood || !hood.active) return NO_NEIGHBORHOOD;
+  return { neighborhoodId };
+}
+
+// Returns { error } or { value: { code, gate_label } }. Keypad codes only: an
+// instruction may be meant for one house, so those stay with the office.
+function validateVisitCode(body) {
+  const input = body && typeof body === 'object' ? body : {};
+  if (typeof input.code !== 'string' || !input.code.trim()) return { error: 'Enter the gate code' };
+  const raw = input.code.trim();
+  if (raw.length > MAX_CODE || !isKeypadCode(raw)) return { error: KEYPAD_CODE_ERROR };
+  let label = 'Main gate';
+  if (input.gateLabel !== undefined && input.gateLabel !== null) {
+    if (typeof input.gateLabel !== 'string') return { error: 'gateLabel must be text' };
+    label = input.gateLabel.trim() || label;
+    if (label.length > MAX_LABEL) return { error: `gateLabel is limited to ${MAX_LABEL} characters` };
+  }
+  return { value: { code: raw.replace(/\s+/g, ''), gate_label: label } };
+}
+
+router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, async (req, res) => {
+  const checked = validateVisitCode(req.body);
+  if (checked.error) return res.status(400).json({ error: checked.error });
+  const { code, gate_label: gateLabel } = checked.value;
+  try {
+    const result = await gateWrite(async (trx) => {
+      const where = await lockVisitNeighborhood(trx, req, req.params.visitId);
+      if (where.status) return where;
+      const { neighborhoodId } = where;
+      // The code that worked at the gate is the confirmed one (owner ruling
+      // 2026-10-03): live at once, and every other confirmed code there now
+      // needs confirming, the office-add rule.
+      const existing = await trx('neighborhood_access')
+        .where({ neighborhood_id: neighborhoodId })
+        .whereNot('status', 'retired')
+        .whereRaw('lower(code) = lower(?)', [code])
+        .forUpdate()
+        .first('id');
+      if (existing) {
+        // Already on file (perhaps unconfirmed or reported wrong): this is
+        // fresh evidence for it. Who first filed it stays as recorded.
+        await trx('neighborhood_access').where({ id: existing.id }).update({
+          status: 'active', last_confirmed_at: trx.fn.now(), updated_at: trx.fn.now(), ...WRONG_REPORT_CLEARED,
+        });
+        await demoteOtherActiveCodes(trx, neighborhoodId, existing.id);
+        return { status: 200, body: { id: existing.id, status: 'active' } };
+      }
+      const [ins] = await trx('neighborhood_access').insert({
+        neighborhood_id: neighborhoodId,
+        gate_label: gateLabel,
+        access_type: 'keypad',
+        code,
+        status: 'active',
+        source: isTechnicianRequest(req) ? 'tech' : 'office',
+        source_technician_id: req.technicianId,
+        last_confirmed_at: trx.fn.now(),
+      }).returning('id');
+      const newId = ins.id ?? ins;
+      await demoteOtherActiveCodes(trx, neighborhoodId, newId);
+      return { status: 201, body: { id: newId, status: 'active' } };
+    });
+    await announceGateChange(req, result);
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
+    logFailure('visit add code', err);
+    return res.status(500).json({ error: 'Could not save the gate code' });
+  }
+});
+
+router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techActionsLive, async (req, res) => {
+  const { entryId } = req.params;
+  if (!UUID_RE.test(entryId)) return res.status(404).json({ error: 'Gate code not found' });
+  // The code the technician was shown: an entry the office edited since is a
+  // different code, never tested at the gate, and is not flagged.
+  const shown = req.body && typeof req.body.code === 'string' ? req.body.code.trim() : '';
+  if (!shown) return res.status(400).json({ error: 'code is required' });
+  try {
+    const result = await gateWrite(async (trx) => {
+      const where = await lockVisitNeighborhood(trx, req, req.params.visitId);
+      if (where.status) return where;
+      // Only a code of THIS visit's neighborhood, and only a code: an
+      // unconfirmed instruction is hidden from the schedule, so flagging one
+      // would remove it for every stop.
+      const row = await trx('neighborhood_access')
+        .where({ id: entryId, neighborhood_id: where.neighborhoodId })
+        .whereNot('status', 'retired')
+        .whereNotNull('code')
+        .forUpdate()
+        .first('id', 'code');
+      if (!row) return { status: 404, body: { error: 'Gate code not found' } };
+      if (row.code.toLowerCase() !== shown.toLowerCase()) {
+        return { status: 409, body: { error: 'That code was changed. Check your route for the new one.', code: 'entry_changed' } };
+      }
+      // Flagged, never retired (owner ruling 2026-10-03): the schedule tags
+      // it "confirm on site" and the office decides.
+      await trx('neighborhood_access').where({ id: entryId }).update({
+        status: 'needs_confirm',
+        flagged_wrong_at: trx.fn.now(),
+        flagged_wrong_by: req.technicianId,
+        updated_at: trx.fn.now(),
+      });
+      return { status: 200, body: { id: entryId, status: 'needs_confirm' } };
+    });
+    await announceGateChange(req, result);
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    logFailure('visit mark wrong', err);
+    return res.status(500).json({ error: 'Could not report the gate code' });
+  }
+});
+
+// ---- the directory (admin only) -----------------------------------------------
+router.use(requireAdmin);
 
 router.get('/', async (req, res) => {
   try {
@@ -220,6 +446,10 @@ router.get('/', async (req, res) => {
       : [];
     const byNeighborhood = new Map(ids.map((id) => [id, []]));
     for (const row of entryRows) byNeighborhood.get(row.neighborhood_id).push(row);
+    const staffIds = [...new Set(entryRows.flatMap((r) => [r.source_technician_id, r.flagged_wrong_by]).filter(Boolean))];
+    const staffNames = new Map(staffIds.length
+      ? (await db('technicians').whereIn('id', staffIds).select('id', 'name')).map((t) => [t.id, t.name])
+      : []);
 
     const neighborhoods = page.map((n) => {
       const rows = byNeighborhood.get(n.id);
@@ -236,7 +466,7 @@ router.get('/', async (req, res) => {
         hasConflict: conflicted,
         entries: rows
           .filter((r) => includeRetired || r.status !== 'retired')
-          .map((r) => serializeEntry(r, { cutoff, conflicted })),
+          .map((r) => serializeEntry(r, { cutoff, conflicted, staffNames })),
       };
     });
     res.json({ neighborhoods, total, limit, offset });
@@ -407,13 +637,7 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
       // The office's new code is the confirmed one: any other live code in
       // the neighborhood now needs confirming, as when the filer sees a new
       // code (the day feed then flags it "confirm on site").
-      if (entry.code) {
-        await trx('neighborhood_access')
-          .where({ neighborhood_id: neighborhoodId, status: 'active' })
-          .whereNotNull('code')
-          .whereNot('id', newId)
-          .update({ status: 'needs_confirm', updated_at: trx.fn.now() });
-      }
+      if (entry.code) await demoteOtherActiveCodes(trx, neighborhoodId, newId);
       return { status: 201, body: { id: newId } };
     });
     return res.status(result.status).json(result.body);
@@ -445,14 +669,14 @@ router.patch('/entries/:id', async (req, res) => {
 
       if (action === 'retire') {
         if (row.status !== 'retired') {
-          await trx('neighborhood_access').where({ id }).update({ status: 'retired', updated_at: trx.fn.now() });
+          await trx('neighborhood_access').where({ id }).update({ status: 'retired', updated_at: trx.fn.now(), ...WRONG_REPORT_CLEARED });
         }
         return { status: 200, body: { id, status: 'retired' } };
       }
       if (row.status === 'retired') return { status: 409, body: { error: 'This entry is retired; add a new one instead' } };
       if (action === 'confirm') {
         await trx('neighborhood_access').where({ id }).update({
-          status: 'active', last_confirmed_at: trx.fn.now(), updated_at: trx.fn.now(),
+          status: 'active', last_confirmed_at: trx.fn.now(), updated_at: trx.fn.now(), ...WRONG_REPORT_CLEARED,
         });
         return { status: 200, body: { id, status: 'active' } };
       }
@@ -471,14 +695,16 @@ router.patch('/entries/:id', async (req, res) => {
         || (next.code || null) !== (row.code || null)
         || (next.instructions || null) !== (row.instructions || null);
       // The value is now the office's: it no longer comes from the customer
-      // who filed it (a later conflict bell must never open that customer).
+      // who filed it.
       const confirmation = valueChanged
-        ? { status: 'active', last_confirmed_at: trx.fn.now(), source: 'office', source_customer_id: null }
+        ? {
+          status: 'active', last_confirmed_at: trx.fn.now(), source: 'office', source_customer_id: null,
+          source_technician_id: null, ...WRONG_REPORT_CLEARED,
+        }
         : {};
       await trx('neighborhood_access').where({ id }).update({ ...next, ...confirmation, updated_at: trx.fn.now() });
       return { status: 200, body: { id, status: valueChanged ? 'active' : row.status } };
     });
-    if (result.status === 200) await closeBellsBestEffort(id);
     return res.status(result.status).json(result.body);
   } catch (err) {
     if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });

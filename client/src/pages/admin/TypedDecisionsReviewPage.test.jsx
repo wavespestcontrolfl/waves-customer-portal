@@ -292,3 +292,22 @@ it('names the provider whose answer a row holds: a Clef row reads Clef, with Cle
   expect(screen.getByRole('button', { name: 'Clef wrong' })).toBeInTheDocument();
   expect(screen.queryByText(/Jev/)).toBeNull();
 });
+
+it('shows a social post photo question as the hosted photo with its caption', async () => {
+  mockList([yesNoRow({
+    provider: 'cloudflare', providerLabel: 'Clef', capability: 'photo_privacy', question: 'Does the photo show a recognizable human face?', subjectType: 'social_post',
+    subject: { type: 'social_post', text: 'Fixture caption', imageUrl: 'https://cdn.example.test/tech-field-fixture.jpg', at: '2026-10-03T12:00:00Z' },
+  })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  const photo = await screen.findByAltText('The photo this post published');
+  expect(photo).toHaveAttribute('src', 'https://cdn.example.test/tech-field-fixture.jpg');
+  expect(photo.closest('a')).toHaveAttribute('href', 'https://cdn.example.test/tech-field-fixture.jpg');
+  expect(screen.getByText('Fixture caption')).toBeInTheDocument();
+});
+
+it('never renders a social post image from a non-https address', async () => {
+  mockList([yesNoRow({ subjectType: 'social_post', subject: { type: 'social_post', text: 'Fixture caption', imageUrl: 'javascript:alert(1)', at: '2026-10-03T12:00:00Z' } })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Fixture caption')).toBeInTheDocument();
+  expect(screen.queryByAltText('The photo this post published')).toBeNull();
+});

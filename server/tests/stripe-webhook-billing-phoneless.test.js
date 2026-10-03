@@ -239,6 +239,16 @@ describe('stripe-webhook call sites no longer gate on customer.phone', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: null, customerId: 'cust-1' }));
   });
 
+  // B16: the bank-verification notice is for the ACH micro-deposit step only. A card's 3DS step
+  // (off-session autopay parked on it, or an on-session payer who authenticates in their own
+  // browser) and any unknown step send nothing: the copy is wrong for a card.
+  test.each(['use_stripe_sdk', 'redirect_to_url', 'some_future_action', undefined])(
+    'requires_action with next_action %s sends no customer notice', async (type) => {
+      mockState.customer = { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' };
+      await handlePaymentIntentRequiresAction({ id: 'pi_card_1', next_action: type ? { type } : undefined }, 'evt_card');
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
   test('setup_intent.setup_failed (bank_verification_failed) reaches sendBillingSms for a phone-less customer', async () => {
     mockState.customer = { id: 'cust-1', first_name: 'Pat', phone: null };
     const setupIntent = { id: 'seti_1', payment_method: 'pm_1', metadata: { waves_customer_id: 'cust-1' },

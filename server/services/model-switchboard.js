@@ -78,6 +78,7 @@ const SELECTORS = [
   // default (Fable 5.1) is itself a requires:'deep' catalog model. cap:
   // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
   // photos every other photo-model selector below sends, not text alone.
+  { key: 'SMS_SCHEDULING_DECIDE', env: 'MODEL_SMS_SCHEDULING_DECIDE', description: 'SMS scheduling decide step (owner ruling 2026-10-02: one model, Sonnet 5.5; shadow behind GATE_SMS_SCHEDULING_DECIDE)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
@@ -130,6 +131,7 @@ const ROUTE_SELECTOR = {
   smsDraftSaveSale: 'SMS_SONNET',
   smsToneRewrite: 'SMS_SONNET',
   plantIdReferee: 'PLANT_ID_REFEREE',
+  smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
   typedDecision: 'TYPESAFE_JEV',
   typedDecisionClef: 'CLOUDFLARE_CLEF',
@@ -152,7 +154,6 @@ const POLICY_SELECTOR = {
   photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
-  jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
   imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
@@ -353,6 +354,7 @@ const LANES = [
   L('visit_typed_facts', 'Typed voice fill (a typed visit\'s findings)', 'visit-typed-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_TYPED_VOICE_FILL, dark' }),
   L('review_ask_fact_check', 'Tech-voice review text fact check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('review_ask_repeat_check', 'Tech-voice review text repeat check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('lawn_draft_timing_check', 'Lawn report draft result-timing check', 'service-report/lawn-draft-timing-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'GATE_LAWN_REPORT_COPY_V6; kill LAWN_DRAFT_TIMING_CHECK=off' }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
@@ -407,6 +409,7 @@ const LANES = [
   // 09-28): identify mode only, and only for an identity lane where Gemini
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
   // invalid, or out of budget leaves the escalation result unchanged.
+  L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE, shadow only: records what it would book, books nothing (owner ruling 2026-10-02: one model, Sonnet 5.5)' }),
   L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
@@ -480,7 +483,6 @@ const LANES = [
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
-  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD_LLM, dark' }),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -580,6 +582,7 @@ const LANES = [
   L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D(['OPENAI_TRANSCRIPT_LABEL_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
+  L('voice_fill_transcription', 'Fast Complete voice fill · speech to text', 'fast-complete-voice-fill.js', 'locked', D('OPENAI_VOICE_FILL_TRANSCRIBE_MODEL', 'gpt-transcribe', { live: true }), null, { inbound: true, lock: LOCK.benchmark('32 recorded visits 2026-10-03: 19-20 forms filled perfectly vs 16 on gpt-4o-transcribe, both primed with the sheet\'s product names'), note: 'GATE_FAST_COMPLETE_VOICE_FILL; the clip is transcribed with the sheet\'s product names, then fast_complete_voice_fill maps it' }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
   // Blog image generation (content/image-generator.js, env BLOG_IMAGE_PROVIDER).
   // Literals are the REAL no-env defaults — computed through the same
@@ -657,6 +660,7 @@ const LANE_AREA = {
   contact_dictation: 'calls',
   address_recovery: 'calls',
   tech_dictation: 'calls',
+  voice_fill_transcription: 'office',
   parse_when: 'calls',
   voice_relay: 'voice',
   voice_relay_collections: 'voice',
@@ -700,7 +704,6 @@ const LANE_AREA = {
   completion_recap: 'reports',
   lawn_visit_narratives: 'reports',
   previsit_brief: 'reports',
-  job_card_paragraph: 'reports',
   visit_voice_facts: 'reports',
   visit_lane_facts: 'reports',
   visit_typed_facts: 'reports',
@@ -722,6 +725,7 @@ const LANE_AREA = {
   review_topic: 'content',
   review_ask_fact_check: 'content',
   review_ask_repeat_check: 'content',
+  lawn_draft_timing_check: 'reports',
   hero_alt: 'content',
   image_screen: 'content',
   editorial_review: 'content',
@@ -817,6 +821,7 @@ const LANE_DESCRIBE = {
   contact_dictation: 'Decodes dictated contact details',
   address_recovery: 'Recovers a street address that did not validate',
   tech_dictation: 'Transcribes field notes from the tech',
+  voice_fill_transcription: 'Hears what the tech said for Fast Complete voice fill',
   parse_when: 'Reads "next Tuesday morning" into a date',
   voice_relay: 'Speaks with callers on the phone line (Sandy)',
   voice_relay_collections: 'Speaks with customers on collections calls',
@@ -862,7 +867,6 @@ const LANE_DESCRIBE = {
   completion_recap: 'Writes the short recap the customer gets',
   lawn_visit_narratives: 'Writes lawn and visit summaries',
   previsit_brief: 'Briefs the tech before a visit',
-  job_card_paragraph: 'Writes the job card\'s customer paragraph',
   visit_voice_facts: 'Reads where the technician treated and the pests they named from their visit note',
   visit_lane_facts: 'Reads a specialty visit\'s places and findings from the technician\'s visit note',
   visit_typed_facts: 'Reads a typed visit\'s findings from the technician\'s visit note',
@@ -884,6 +888,7 @@ const LANE_DESCRIBE = {
   review_topic: 'Finds the topic a customer raised before the Day-0 review ask',
   review_ask_fact_check: 'Checks every sentence of a tech-voice review text against the customer record (GATE_REVIEW_ASK_TECH_VOICE)',
   review_ask_repeat_check: 'Holds a later tech-voice review text that repeats an earlier one (GATE_REVIEW_ASK_TECH_VOICE)',
+  lawn_draft_timing_check: 'Rejects a lawn technician report draft whose sentence says when a result will show (GATE_LAWN_REPORT_COPY_V6)',
   hero_alt: 'Writes alt text for hero images',
   image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',

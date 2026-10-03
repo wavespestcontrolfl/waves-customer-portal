@@ -44,6 +44,10 @@ const linkage = require('../estimate-property-linkage');
  *   own scope.
  * @param {Map} [caches.propertyById]
  * @param {Map} [caches.estimateById]
+ * @param {Function} [caches.onLookupFailure] - called when a property or
+ *   estimate read FAILS (not when the row is simply gone), so a caller that
+ *   must not persist a result built on a transient failure can tell the two
+ *   apart. The return value is the same either way.
  * @returns {Promise<{key: string|null, hasEvidence: boolean}>}
  *   - hasEvidence: false, key: null — the row carries no stamp,
  *     property_id, or source_estimate_id at all. The caller decides its
@@ -60,7 +64,8 @@ const linkage = require('../estimate-property-linkage');
  *     legitimately carry only ONE locality segment).
  */
 async function resolveVisitPropertyScope(row = {}, database, caches = {}) {
-  const { propertyById, estimateById } = caches;
+  const { propertyById, estimateById, onLookupFailure } = caches;
+  const failed = () => { if (typeof onLookupFailure === 'function') onLookupFailure(); return null; };
 
   if (row.service_address_line1) {
     // address_line2 (the unit) rides this key too — a condo/apartment
@@ -84,7 +89,7 @@ async function resolveVisitPropertyScope(row = {}, database, caches = {}) {
       prop = await database('customer_properties')
         .where({ id: row.property_id })
         .first('address_line1', 'address_line2', 'city', 'zip')
-        .catch(() => null);
+        .catch(failed);
       if (propertyById) propertyById.set(row.property_id, prop);
     }
     if (!prop) return { key: null, hasEvidence: true };
@@ -102,7 +107,7 @@ async function resolveVisitPropertyScope(row = {}, database, caches = {}) {
       src = await database('estimates')
         .where({ id: row.source_estimate_id })
         .first('address')
-        .catch(() => null);
+        .catch(failed);
       if (estimateById) estimateById.set(row.source_estimate_id, src);
     }
     if (!src?.address) return { key: null, hasEvidence: true };

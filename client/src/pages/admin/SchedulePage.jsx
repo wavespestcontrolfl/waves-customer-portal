@@ -7110,7 +7110,9 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
 // (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
 const fmtAmount = formatMeasuredAmount;
 
-export function JobCardOrderButton({ productId, name, order, D, compact = false }) {
+// serviceId: the visit this job card is for. The server accepts a technician's
+// restock request only from one of their own current visits.
+export function JobCardOrderButton({ productId, name, order, serviceId, D, compact = false }) {
   const [state, setState] = useState("idle");
   const [msg, setMsg] = useState("");
   const submit = async () => {
@@ -7119,7 +7121,7 @@ export function JobCardOrderButton({ productId, name, order, D, compact = false 
       try {
         const data = await adminFetch(`/admin/inventory/waveguard-forecast/${productId}/restock-request`, {
           method: "POST",
-          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
+          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}`, scheduledServiceId: serviceId || undefined }),
         });
         setState("done");
         setMsg(data?.existing ? "Already on the order list" : "Added to the order list");
@@ -7164,7 +7166,7 @@ export function JobCardOrderButton({ productId, name, order, D, compact = false 
   );
 }
 
-function JobCardProduct({ p, D }) {
+function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
   const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
@@ -7204,7 +7206,7 @@ function JobCardProduct({ p, D }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} D={D} compact />
+        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
       </div>
     </JobCardCollapsible>
   );
@@ -7382,7 +7384,7 @@ function JobCardTank({ tank, serviceId, D }) {
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
-            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
+            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} serviceId={serviceId} D={D} compact />
           </div>
         )}
       </div>
@@ -7524,7 +7526,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
+      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}

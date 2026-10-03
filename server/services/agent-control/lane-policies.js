@@ -146,6 +146,8 @@ const LANE_RUNTIME = {
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  // Speech to text for Fast Complete voice fill: one provider, no stored output (the words live only inside the request).
+  voice_fill_transcription: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   parse_when: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
 
   // ── Voice AI agent ──
@@ -187,6 +189,10 @@ const LANE_RUNTIME = {
   plant_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   pest_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // SMS scheduling decide step (GATE_SMS_SCHEDULING_DECIDE, dark): shadow only — reads a customer's reply to a
+  // recorded offer and records what it would book in sms_offer_decisions. Never a send, move or booking; a miss
+  // records an error row and the text stays with staff. No queue, no fallback provider.
+  sms_scheduling_decide: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
   typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
@@ -243,6 +249,9 @@ const LANE_RUNTIME = {
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
   report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
+  // Its verdict rejects a lawn report draft the technician has not read yet
+  // (it never sends anything; an unavailable check accepts the draft).
+  lawn_draft_timing_check: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M2' },
   // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
@@ -256,9 +265,6 @@ const LANE_RUNTIME = {
   // route (or a day with no eligible visits) makes no model call.
   // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
   previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
-  // interactive: runs while the tech opens the drawer — bounded cross-provider
-  // fallback, then the deterministic template (Codex r8 on #3885).
-  job_card_paragraph: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M1' },
   // GATE_FAST_COMPLETE_REPORT: reads where the technician treated and the
   // pests they named from their own note, each fact quoted word for word;
   // the sheet shows what was heard and the technician sends it with the
