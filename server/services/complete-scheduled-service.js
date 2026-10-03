@@ -11152,7 +11152,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             billingMode: svc.cust_billing_mode,
             primaryLinePrice: svc.primary_line_price,
           })
-          && Math.round(Number(mintInvoiceAmount) * 100) === Math.round(Number(svc.cust_monthly_rate) * 100)
+          // The amount must equal today's rate, EXCEPT on a required resume whose amount
+          // was FROZEN earlier: provenance must not depend on the frozen figure still
+          // matching a rate that has since moved. Such a mint is still the month's dues
+          // (the visit's dues shape above says so), so it always asks for the stamp and
+          // the stamp helper's locked validation decides: a stale frozen amount is refused
+          // retryably (dues_amount_stale, which refreshes the frozen amount to the current
+          // rate) instead of minting an UNSTAMPED invoice the next plan visit would bill
+          // beside.
+          && ((backfillReviewMintRequired && backfillFrozenMintAmount != null)
+            || Math.round(Number(mintInvoiceAmount) * 100) === Math.round(Number(svc.cust_monthly_rate) * 100))
           ? serviceDateOnly(svc.scheduled_date).slice(0, 7)
           : null;
         const mintOptions = {

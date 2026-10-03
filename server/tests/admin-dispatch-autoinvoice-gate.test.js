@@ -389,6 +389,12 @@ describe('completion route wires dues-collected coverage', () => {
     expect(source).toMatch(/openInvoiceCovers: false/);
     expect(source).toMatch(/const duesCoverageClaimsPaid = \(autopayCoversVisit \|\| membershipDuesCoveredAtMint\)\s*\n\s*&& \(customerAutopayActive \|\| await duesCoverageIsSettled\(\)\);/);
     expect(source).toMatch(/\|\| duesCoverageClaimsPaid\s*\n\s*\|\| \['paid', 'prepaid'\]\.includes/);
+    // Dues provenance never hinges on a FROZEN amount still equalling today's rate: a required
+    // resume with a frozen amount always asks for the stamp (the stamp helper's locked validation
+    // refuses a stale figure retryably); every other mint keeps the live amount-equals-rate check.
+    expect(source).toMatch(/&& \(\(backfillReviewMintRequired && backfillFrozenMintAmount != null\)\s*\n\s*\|\| Math\.round\(Number\(mintInvoiceAmount\) \* 100\) === Math\.round\(Number\(svc\.cust_monthly_rate\) \* 100\)\)\s*\n\s*\? serviceDateOnly\(svc\.scheduled_date\)\.slice\(0, 7\)/);
+    // ...and the stale refusal refreshes the frozen amount so the resume bills the current rate.
+    expect(source).toMatch(/invErr\?\.reason === 'dues_amount_stale'[\s\S]{0,900}backfillMintAmountCents: invErr\.currentMonthlyRateCents/);
     // The covered visit reads like one covered before the mint at every later reader.
     expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
   });

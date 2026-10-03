@@ -261,9 +261,35 @@ describe('afterCommit — outermost transaction', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it('a callback whose OWN savepoint rolled back does NOT fire even when the outer transaction catches that failure and commits', async () => {
+    const { savepoint, settleTop, settleSavepoint } = handles();
+    const fn = jest.fn();
+    afterCommit(savepoint, fn);
+    settleSavepoint.reject(new Error('savepoint rolled back'));
+    await flush();
+    settleTop.resolve(); // the outer caught the failure and committed anyway
+    await flush();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('a rollback anywhere in the chain suppresses it (a middle savepoint rolled back, the rest committed)', async () => {
+    const { top, savepoint, settleTop, settleSavepoint } = handles();
+    let settleDeep;
+    const deeper = { parentTransaction: savepoint, executionPromise: new Promise((resolve) => { settleDeep = resolve; }) };
+    const fn = jest.fn();
+    afterCommit(deeper, fn);
+    settleDeep(); // innermost released
+    settleSavepoint.reject(new Error('middle rolled back'));
+    settleTop.resolve();
+    await flush();
+    expect(fn).not.toHaveBeenCalled();
+    expect(top).toBeTruthy();
+  });
+
   it('walks a chain of savepoints, and a top-level handle behaves as before', async () => {
-    const { top, savepoint, settleTop } = handles();
+    const { top, savepoint, settleTop, settleSavepoint } = handles();
     const deeper = { parentTransaction: savepoint, executionPromise: Promise.resolve() };
+    settleSavepoint.resolve(); // every nested handle settles (released) before the outer commits
     const viaDeeper = jest.fn();
     const direct = jest.fn();
     afterCommit(deeper, viaDeeper);
