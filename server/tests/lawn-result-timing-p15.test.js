@@ -145,6 +145,9 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'The weeds should fade by your next visit.',
     'The lawn should look greener every week.',
     'Visible improvement should arrive by 10/10.',
+    'The treated weeds will fade a little more each day.',
+    'The treatment will improve the lawn every week.',
+    'We apply this once a week in summer.',
   ])('any forward duration or calendar deadline fails: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(true);
   });
@@ -155,9 +158,7 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'You noticed weeds two weeks ago.',
     'Over the last two weeks the lawn browned.',
     'We will recheck at your next visit.',
-    'We apply this once a week in summer.',
-    'The lawn may need a feeding every few weeks.',
-  ])('past windows, frequency and "next visit" pass: %s', (text) => {
+  ])('past windows and "next visit" pass: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(false);
   });
 });
