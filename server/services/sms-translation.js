@@ -969,16 +969,17 @@ const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
  * ONCE: a single guarded UPDATE stamps checks.send_claimed_at, and the stamp is never lifted. A send whose
  * outcome is uncertain (the provider accepted, the request timed out) therefore can never be repeated from the
  * card; after a definite failure staff write the reply themselves.
+ * dbi: the caller's thread-lock transaction, so the locked section uses one connection.
  * Returns 'ok' | 'stale' | 'claimed'. Fails closed: any doubt reads as stale.
  */
-async function claimTranslationReplyForSend({ trialId, customerId, to, now = new Date() }) {
+async function claimTranslationReplyForSend({ trialId, customerId, to, now = new Date(), dbi = db }) {
   try {
     if (!trialId || !customerId) return 'stale';
-    const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null);
+    const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null, dbi);
     if (!assist || assist.pending || String(assist.trialId) !== String(trialId)) return 'stale';
     if (assist.replyUsed) return 'claimed';
     if (!assist.replyTranslated) return 'stale';
-    const claimed = await db(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
+    const claimed = await dbi(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
       .whereRaw("checks->>'send_claimed_at' IS NULL")
       .update({ checks: db.raw("jsonb_set(COALESCE(checks, '{}'::jsonb), '{send_claimed_at}', to_jsonb(?::text))", [now.toISOString()]) });
     return claimed === 1 ? 'ok' : 'claimed';
@@ -1003,7 +1004,7 @@ function quotesLiveEta(replyEnglish, factsBlock) {
  * A reply quoting minutes-away is never offered. With phoneLast10, only when the text came from that number.
  * Read-only: staff send through the ordinary composer.
  */
-async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) {
+async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null, dbi = db) {
   try {
     if (!customerId || !inboxAssistEnabled()) return null;
     const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -1011,7 +1012,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     const policy = require('./sms-response-policy');
     const last10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
     // their latest text (an applicant's hiring reply on a shared phone is another thread)
-    const last = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'inbound' }))
+    const last = await excludeUnresolvedSendReservations(dbi('sms_log').where({ customer_id: customerId, direction: 'inbound' }))
       .modify((qb) => require('../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb, 'message_type'))
       .orderBy('created_at', 'desc').limit(1).first('id', 'created_at', 'from_phone');
     if (!last) return null;
@@ -1022,13 +1023,13 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     // reply to that number after the text. A reminder, receipt, review ask or failed send is not an answer.
     // (An approved-draft send after the text counts without resolving which text it answered: that hides the
     // card, never shows it.)
-    const later = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
+    const later = await excludeUnresolvedSendReservations(dbi('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
       .where('created_at', '>', last.created_at).whereIn('message_type', policy.HUMAN_REPLY_TYPES)
       .select('message_type', 'status', 'to_phone');
     const answered = (later || []).some((o) => last10(o.to_phone) === last10(last.from_phone)
       && policy.outboundIsAnswer({ direction: 'outbound', messageType: o.message_type, status: o.status, replyToMessageId: last.id }));
     if (answered) return null;
-    const row = await db(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
+    const row = await dbi(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
     // The trial runs after the webhook answers and takes several model calls: for a text that just arrived, no
     // row yet means "not finished", and the composer asks again. (An English text never gets a row, so this
     // stops by itself after the window.)

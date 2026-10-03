@@ -429,7 +429,8 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(words);
       expect(suggestMode.lockSuggestThread).toHaveBeenCalled();
-      expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567' }));
+      // on the thread-lock transaction's own connection (a second pooled connection could deadlock a pool of 2)
+      expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567', dbi: expect.anything() }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });

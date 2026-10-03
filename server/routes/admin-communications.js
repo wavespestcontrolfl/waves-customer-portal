@@ -727,7 +727,7 @@ router.post('/sms', async (req, res, next) => {
             // Same final gate for a translation card's reply: under the thread lock, the customer's latest
             // text must still be the one it answers, unanswered and unexpired, and one guarded UPDATE lets
             // only one sender through. Nothing is parked or reserved for a refused send.
-            translationClaim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to });
+            translationClaim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to, dbi: trx });
             if (translationClaim !== 'ok') return [];
           }
           if (claimedDecisionId) {
