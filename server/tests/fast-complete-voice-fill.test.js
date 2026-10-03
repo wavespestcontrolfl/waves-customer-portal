@@ -1932,3 +1932,20 @@ test('"Taurus four ounces, no, five ounces of Taurus": the four is corrected awa
   const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces' }] }), ctx, t);
   expect(out.products[0].amount).toBeNull();
 });
+
+describe('Codex #5698 round 10: "then" ends a shared lead-in', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('a way before the first product does not reach a product after "then"', () => {
+    const t = 'Spot treated with Taurus, then used Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 'then used Talstar', { method: 'spot_treatment' })] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('same-as-last before the first product does not reach a product after "then"', () => {
+    const t = 'Same mix as last time for Taurus, then today used Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 'today used Talstar', { sameAsLast: true })] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});

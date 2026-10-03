@@ -1173,12 +1173,15 @@ function mentionSentenceWords(mention, world, { contrast = false } = {}) {
   return world.tokens.slice(from, to).join(' ');
 }
 
+// What ends a shared lead-in between the first name and a later one: a contrast,
+// or "then" (the next step: "Spot treated with Taurus, then used Talstar").
+const endsLeadIn = (token) => CONTRAST_WORDS.has(token) || token === 'then';
 // The sentence's words before its first product name, when no contrast word sits
 // between them and this mention; '' otherwise.
 function leadInWords(mention, world) {
   const { from, to } = sentenceSpan(mention, world);
   const firstName = Math.min(...world.mentions.filter((m) => m.start >= from && m.end <= to).map((m) => m.start));
-  const crossed = world.tokens.slice(firstName, mention.start).some((token) => CONTRAST_WORDS.has(token));
+  const crossed = world.tokens.slice(firstName, mention.start).some(endsLeadIn);
   return crossed ? '' : world.tokens.slice(from, firstName).filter((_, i) => !world.negated.has(from + i)).join(' ');
 }
 
@@ -1195,7 +1198,7 @@ function governingWords(mention, world) {
   const own = world.tokens.slice(mention.start, next);
   const cut = own.findIndex((token) => CONTRAST_WORDS.has(token));
   // the lead-in covers only the names on its own side of a contrast
-  const crossed = world.tokens.slice(firstName, mention.start).some((token) => CONTRAST_WORDS.has(token));
+  const crossed = world.tokens.slice(firstName, mention.start).some(endsLeadIn);
   const leadIn = crossed ? [] : world.tokens.slice(from, firstName);
   return [...leadIn, '.', ...(cut === -1 ? own : own.slice(0, cut))].join(' ');
 }
