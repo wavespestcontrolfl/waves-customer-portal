@@ -182,7 +182,7 @@ describeOrSkip('20261003130000_termite_annual_v3_charge_after_installation_claus
       await seedThroughR3(db);
       await revision.up(db);
       await publish(db);
-      expect(await reader(db, { master: true, termite: true })(db)).toBe(true);
+      expect(await reader(db, { master: true, termite: true })({ conn: db })).toBe(true);
     });
 
     test('false while GATE_PAF_TERMITE is off', async () => {
@@ -190,21 +190,64 @@ describeOrSkip('20261003130000_termite_annual_v3_charge_after_installation_claus
       await seedThroughR3(db);
       await revision.up(db);
       await publish(db);
-      expect(await reader(db, { master: true, termite: false })(db)).toBe(false);
+      expect(await reader(db, { master: true, termite: false })({ conn: db })).toBe(false);
     });
 
     test('false while the template is still a draft', async () => {
       const { db } = fixture;
       await seedThroughR3(db);
       await revision.up(db);
-      expect(await reader(db, { master: true, termite: true })(db)).toBe(false);
+      expect(await reader(db, { master: true, termite: true })({ conn: db })).toBe(false);
+    });
+
+    describe('an agreement already issued for the estimate decides', () => {
+      const estimateId = randomUUID();
+      async function issue(db, text, status = 'sent') {
+        await db.raw(`CREATE TABLE IF NOT EXISTS customer_contracts (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          document_template_key text,
+          status text,
+          contract_text_snapshot text,
+          document_variables_snapshot jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )`);
+        await db('customer_contracts').insert({
+          document_template_key: seed.TEMPLATE_KEY, status, contract_text_snapshot: text,
+          document_variables_snapshot: JSON.stringify({ estimate: { id: estimateId } }),
+        });
+      }
+
+      test('issued on the after-installation wording: true even after the gate goes off', async () => {
+        const { db } = fixture;
+        await seedThroughR3(db);
+        await issue(db, revision.TEMPLATE_V3_ANNUAL_R4_BODY);
+        expect(await reader(db, { master: true, termite: false })({ estimateId, conn: db })).toBe(true);
+      });
+
+      test('issued on the at-signing wording: false even though the active template and gate now say after installation', async () => {
+        const { db } = fixture;
+        await seedThroughR3(db);
+        await issue(db, r3.TEMPLATE_V3_ANNUAL_R3_BODY);
+        await revision.up(db);
+        await publish(db);
+        expect(await reader(db, { master: true, termite: true })({ estimateId, conn: db })).toBe(false);
+      });
+
+      test('a cancelled agreement does not decide: falls back to what would be issued now', async () => {
+        const { db } = fixture;
+        await seedThroughR3(db);
+        await issue(db, r3.TEMPLATE_V3_ANNUAL_R3_BODY, 'cancelled');
+        await revision.up(db);
+        await publish(db);
+        expect(await reader(db, { master: true, termite: true })({ estimateId, conn: db })).toBe(true);
+      });
     });
 
     test('false for the at-signing wording', async () => {
       const { db } = fixture;
       await seedThroughR3(db);
       await publish(db);
-      expect(await reader(db, { master: true, termite: true })(db)).toBe(false);
+      expect(await reader(db, { master: true, termite: true })({ conn: db })).toBe(false);
     });
   });
 });

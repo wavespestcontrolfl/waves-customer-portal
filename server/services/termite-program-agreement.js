@@ -115,12 +115,24 @@ function agreementAuthorizesAfterInstallCharge(contractText) {
   return normalizeAgreementWhitespace(contractText).includes(ANNUAL_AFTER_INSTALL_CHARGE_AUTHORIZATION);
 }
 
-// For the estimate page's "sign your agreement" step: will the agreement
-// this customer is about to be sent charge after installation? True only
-// when the gate is on AND the ACTIVE annual version carries that wording.
-// Any failure reads false (the page then says nothing about charge timing).
-async function annualAgreementChargesAfterInstallation(conn = db) {
+// For the estimate page's "sign your agreement" step: does THIS customer's
+// agreement charge after installation? The agreement already issued for the
+// estimate decides, by its own snapshotted text — a later template edit or
+// gate change must never make the page contradict the document the customer
+// holds. With none issued yet, the answer is what would be issued now: the
+// gate on AND the ACTIVE annual version carrying that wording. Any failure
+// reads false (the page then says nothing about charge timing).
+async function annualAgreementChargesAfterInstallation({ estimateId = null, conn = db } = {}) {
   try {
+    if (estimateId) {
+      const issued = await conn('customer_contracts')
+        .where({ document_template_key: ANNUAL_TEMPLATE_KEY })
+        .whereNotIn('status', ['cancelled', 'expired', 'voided'])
+        .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+        .orderBy('created_at', 'desc')
+        .first('contract_text_snapshot');
+      if (issued) return agreementAuthorizesAfterInstallCharge(issued.contract_text_snapshot);
+    }
     if (!require('../config/feature-gates').pafTermiteLive()) return false;
     const active = await conn('document_templates as dt')
       .join('document_template_versions as dtv', 'dtv.id', 'dt.active_version_id')

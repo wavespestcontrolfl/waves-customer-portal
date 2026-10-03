@@ -188,7 +188,12 @@ describe('the approved BILLING clause', () => {
 describeOrSkip('termite annual charge after installation — real Postgres', () => {
   let fixture;
   let ids;
-  const SIGNED_ON = '2026-10-05';
+  // Relative to the run date: the never-installed alert measures real
+  // elapsed time from the signature, so a fixed calendar date would age
+  // into the alert window.
+  const dayOffset = (days) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+  const SIGNED_ON = dayOffset(-2);
+  const SIGNED_AT = `${SIGNED_ON}T15:59:00.000Z`;
 
   beforeEach(async () => {
     fixture = await createScratchDb();
@@ -212,7 +217,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       customer_id: customerId,
       document_template_key: ANNUAL_TEMPLATE_KEY,
       status: 'signed',
-      signed_at: new Date(`${SIGNED_ON}T15:59:00Z`),
+      signed_at: new Date(SIGNED_AT),
       contract_text_snapshot: r4.TEMPLATE_V3_ANNUAL_R4_BODY,
       annual_plan_version: 'v3',
       signer_ip: '203.0.113.9',
@@ -225,7 +230,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       prepay_invoice_id: invoice.id,
       plan_label: 'Termite Annual Protection',
       term_start: SIGNED_ON,
-      term_end: '2027-10-05',
+      term_end: dayOffset(363),
       status: 'payment_pending',
       created_at: new Date(`${SIGNED_ON}T16:00:00Z`),
     }).returning('*');
@@ -315,7 +320,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
   // `closeout` says otherwise (null = no record at all).
   const addInstall = async (db, fields = {}, closeout = {}) => {
     const [visit] = await db('scheduled_services').insert({
-      customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: '2026-10-14', ...fields,
+      customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: dayOffset(0), ...fields,
     }).returning('*');
     if (closeout && visit.status === 'completed') {
       await db('service_records').insert({
@@ -337,7 +342,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect(await atSigning()).toEqual({ status: 'awaiting_installation', reason: null, deliverPayLink: false });
     const state = await chargeState(db);
     expect(state).toMatchObject({
-      status: 'awaiting_installation', invoice_id: ids.invoiceId, contract_id: ids.contractId, signed_at: '2026-10-05T15:59:00.000Z',
+      status: 'awaiting_installation', invoice_id: ids.invoiceId, contract_id: ids.contractId, signed_at: SIGNED_AT,
     });
     expect(await atSigning({ trigger: 'sweep' })).toEqual({ status: 'awaiting_installation', reason: null, deliverPayLink: false });
     expect(await chargeState(db)).toEqual(state);
