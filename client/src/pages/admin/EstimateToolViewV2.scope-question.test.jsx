@@ -301,6 +301,18 @@ describe("scope question", { timeout: 20000 }, () => {
     expect(screen.getByRole("button", { name: "Just their space" })).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("a size typed for one scope does not survive a change of answer: the new scope's size replaces it", async () => {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1200));
+    fireEvent.change(screen.getByLabelText("Home Sq Ft"), { target: { value: "1350" } });
+    expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1350);
+    fireEvent.click(screen.getByRole("button", { name: "The whole building" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(3));
+    await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(9000));
+  });
+
   it("changing a decided scope blocks pricing until the lookup for the new answer succeeds: in flight, and after it fails", async () => {
     let failAnswered = true;
     // A scope staff already answered "suite" (the server carries the answer).

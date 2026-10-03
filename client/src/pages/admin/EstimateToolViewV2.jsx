@@ -3204,6 +3204,16 @@ export default function EstimateToolViewV2({
   function answerScope(answer) {
     occupancyRef.current = { address: form.address.trim(), answer };
     setScopePending({ address: form.address.trim(), answer });
+    // A size typed for the old scope is not a measurement of the new one (a
+    // suite's 1,200 sq ft is not the building's): the re-run lookup's values
+    // replace the boxes, and staff re-enter a measurement for the new scope.
+    setForm((f) => ({
+      ...f,
+      _homeSqFtEdited: false,
+      _lotSqFtEdited: false,
+      _storiesEdited: false,
+      _manualFields: (f._manualFields || []).filter((key) => !["homeSqFt", "lotSqFt", "stories"].includes(key)),
+    }));
     void doLookup({ occupancy: answer });
   }
 
