@@ -98,10 +98,13 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
  * category is pest_control. The category is services-table backed (the
  * authoritative signal) — not the broad detectServiceCategory fallback.
  */
-async function resolveEligibility(serviceId, knex = db) {
+async function resolveEligibility(serviceId, knex = db, { strict = false } = {}) {
   const svc = await loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
-  const profile = await resolveCompletionProfileForScheduledService(svc, knex).catch((err) => {
+  // strict (lawn Fast Complete): the resolver rethrows a failed availability probe
+  // or lookup instead of synthesizing a profile that has lost its project-backed
+  // and companion flags. A failure is still a null profile here, but a null one.
+  const profile = await resolveCompletionProfileForScheduledService(svc, knex, { strict }).catch((err) => {
     logger.warn(`[pest-recap] profile lookup failed for ${serviceId}: ${err.message}`);
     return null;
   });

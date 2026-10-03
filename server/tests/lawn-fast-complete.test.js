@@ -7,11 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => true) }));
 jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
 const {
@@ -163,7 +161,6 @@ describe('buildLawnFastContext', () => {
   beforeEach(() => {
     resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE());
     buildPlanForService.mockReset();
-    isUserFeatureEnabled.mockClear();
     delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
     delete process.env.GATE_LAWN_PROPERTY_HISTORY;
   });
@@ -212,12 +209,14 @@ describe('buildLawnFastContext', () => {
     expect(ctx.turfHeightCapture).toBe(false);
   });
 
-  test('turfHeightCapture follows the per-tech flag on an untyped lawn visit', async () => {
-    isUserFeatureEnabled.mockResolvedValueOnce(true);
-    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(true);
-    expect(isUserFeatureEnabled).toHaveBeenCalledWith('tech-1', 'turf-height-capture', false, expect.anything());
-    isUserFeatureEnabled.mockResolvedValueOnce(false);
-    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(false);
+  test('turfHeightCapture follows the per-tech flag row on an untyped lawn visit', async () => {
+    const TECH = uuid(5);
+    const read = (flag) => buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ user_feature_flags: flag })), technicianId: TECH });
+    expect((await read({ enabled: true })).turfHeightCapture).toBe(true);
+    expect((await read({ enabled: false })).turfHeightCapture).toBe(false);
+    expect((await read(undefined)).turfHeightCapture).toBe(false);
+    // No technician (or a malformed id): nothing to look up, hidden.
+    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ user_feature_flags: { enabled: true } })), technicianId: 'tech-1' })).turfHeightCapture).toBe(false);
   });
 
   test('a recurring program visit carries the planned products with each watering rule', async () => {
@@ -317,7 +316,7 @@ describe('buildLawnFastContext', () => {
         lawn_assessment_photos: [{ zone: 'front' }, { zone: 'trouble' }],
       })),
     });
-    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: true, readFailed: false });
+    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: true, unusableReason: null, readFailed: false });
     expect(ctx.photoStatus).toMatchObject({ soft: true, count: 2, meetsFloor: false });
     expect(ctx.photoStatus.warning).toMatch(/can still finish/);
   });
@@ -326,7 +325,7 @@ describe('buildLawnFastContext', () => {
     const ctx = await buildLawnFastContext(VISIT, {
       knex: fakeKnex(tables({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: false }, lawn_assessment_photos: [] })),
     });
-    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: false, readFailed: false });
+    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: false, unusableReason: null, readFailed: false });
   });
 });
 

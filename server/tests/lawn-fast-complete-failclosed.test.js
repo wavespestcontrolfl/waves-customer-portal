@@ -4,20 +4,15 @@
 // uuid column (Postgres 22P02 would be a 500). Table-driven: for each read, make
 // it throw and assert the fail-closed output. Synthetic data only.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/service-completion-profiles', () => ({
-  resolveCompletionProfileForScheduledService: jest.fn(),
-}));
-jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => true) }));
+// Failures are injected at the QUERY level (the fake db throws), not by making a
+// helper throw, so a helper that swallows its own query failure cannot hide: the
+// profile resolver, the feature-flag read and the week-plan loader all run for real.
+// The global db is the week-plan loader's (it reads the module-level connection).
+jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
-jest.mock('../services/irrigation-week-plan', () => ({
-  ...jest.requireActual('../services/irrigation-week-plan'),
-  loadCurrentWeekPlan: jest.fn(async () => null),
-}));
 
-const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { isUserFeatureEnabled } = require('../services/feature-flags');
+const globalDb = require('../models/db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
-const { loadCurrentWeekPlan } = require('../services/irrigation-week-plan');
 const { gates } = require('../config/feature-gates');
 const {
   isUuid,
@@ -29,15 +24,19 @@ const {
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const VISIT = uuid(1);
 const ASSESSMENT = uuid(2);
+const CATALOG = uuid(3);
+const TECH = uuid(5);
 const P_HERB = uuid(11);
 const P_UNKNOWN = uuid(14);
 
-const PROFILE = (extra = {}) => ({
-  category: 'lawn_care', serviceKey: 'lawn_care_monthly', billingType: 'recurring', findingsType: null,
-  projectBacked: false, requiresProject: false, companions: [], ...extra,
+// The catalog service and its completion-profile row, as the real resolver reads them.
+const SERVICE_ROW = { service_key: 'lawn_care_monthly', name: 'Lawn Care', category: 'lawn_care', billing_type: 'recurring' };
+const PROFILE_ROW = (extra = {}) => ({
+  service_key: 'lawn_care_monthly', service_name_snapshot: 'Lawn Care', category: 'lawn_care', billing_type: 'recurring',
+  completion_mode: 'service_report', project_type: null, companion_types: null, active: true, ...extra,
 });
 const visit = (extra = {}) => ({
-  id: VISIT, customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care', service_id: 'cat-1',
+  id: VISIT, customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care', service_id: CATALOG,
   scheduled_date: '2026-10-05', status: 'confirmed', visit_id: null, technician_id: 'tech-1',
   cust_address_line1: '100 Example Court', cust_city: 'Bradenton', cust_state: 'FL', cust_zip: '34201', ...extra,
 });
@@ -56,7 +55,7 @@ const readError = () => Object.assign(new Error('connection lost'), { code: '080
 // A table-keyed fake knex. A table whose data is an Error rejects every read; a
 // table in `failFirst` rejects its first N reads and then serves its rows.
 // `calls` lists each table touched, in order.
-function fakeKnex(tables, { failFirst = {}, calls = [] } = {}) {
+function fakeKnex(tables, { failFirst = {}, calls = [], hasTableFails = false } = {}) {
   const attempts = {};
   const knex = jest.fn((table) => {
     calls.push(table);
@@ -74,6 +73,13 @@ function fakeKnex(tables, { failFirst = {}, calls = [] } = {}) {
     chain.catch = (reject) => settle().catch(reject);
     return chain;
   });
+  knex.raw = (sql) => ({ sql });
+  knex.schema = {
+    hasTable: async () => {
+      if (hasTableFails) throw readError();
+      return true;
+    },
+  };
   return knex;
 }
 
@@ -84,7 +90,7 @@ function uuidStrictKnex(tables, calls = []) {
   const base = fakeKnex(tables, { calls });
   const bad = (value) => (Array.isArray(value) ? value.some(bad) : !isUuid(String(value)));
   const invalid = () => Object.assign(new Error('invalid input syntax for type uuid'), { code: '22P02' });
-  return jest.fn((table) => {
+  const strict = jest.fn((table) => {
     const chain = base(table);
     for (const method of ['where', 'whereIn']) {
       const original = chain[method];
@@ -99,12 +105,26 @@ function uuidStrictKnex(tables, calls = []) {
     }
     return chain;
   });
+  strict.schema = base.schema;
+  return strict;
 }
 
 const baseTables = (extra = {}) => ({
   scheduled_services: visit(),
+  services: SERVICE_ROW,
+  service_completion_profiles: PROFILE_ROW(),
+  user_feature_flags: { enabled: true },
   customers: { billing_mode: null },
   lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true, service_date: '2026-10-05' },
+  // What the property-history resolver reads (the visit's installed assessment, joined; the
+  // customer's properties; any recorded move and baseline reset).
+  'lawn_assessments as la': [{
+    id: ASSESSMENT, customer_id: 'cust-1', service_id: VISIT, confirmed_by_tech: true, property_id: 'prop-1',
+    history_visit_id: VISIT, history_visit_customer_id: 'cust-1', history_visit_property_id: 'prop-1',
+    history_visit_date: '2026-10-05', service_date: '2026-10-05', created_at: '2026-10-05T12:00:00Z',
+  }],
+  customer_properties: [{ id: 'prop-1', customer_id: 'cust-1', active: true, is_primary: true, address_line1: '100 Example Court' }],
+  lawn_baseline_resets: [],
   lawn_assessment_photos: [{ zone: 'front' }, { zone: 'close_up' }, { zone: 'trouble' }],
   products_catalog: [herbicide],
   property_preferences: PREFS,
@@ -125,12 +145,10 @@ beforeEach(() => {
   process.env.GATE_LAWN_WATERING_RULE = 'true';
   process.env.GATE_LAWN_FAST_COMPLETE = 'true';
   gates.irrigationWeekPlan = false;
-  resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE());
   buildPlanForService.mockReset().mockResolvedValue({
     completionDefaults: { items: [{ product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } }] },
   });
-  isUserFeatureEnabled.mockReset().mockResolvedValue(true);
-  loadCurrentWeekPlan.mockReset().mockResolvedValue(null);
+  globalDb.mockReset().mockImplementation(() => { throw new Error('the global db is only for the week-plan loader'); });
 });
 afterAll(() => {
   const restore = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
@@ -142,7 +160,7 @@ afterAll(() => {
 });
 
 describe('buildLawnFastContext: every read, made to throw', () => {
-  const ctx = (tables, options) => buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(tables), options), technicianId: 'tech-1' });
+  const ctx = (tables, options) => buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(tables), options), technicianId: TECH });
 
   test('the control: a recurring program visit with every read healthy gets the planned items', async () => {
     const result = await ctx({});
@@ -170,14 +188,13 @@ describe('buildLawnFastContext: every read, made to throw', () => {
   });
 
   test('billing mode read fails on an ineligible visit: still the same refusal', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
-    const result = await ctx({ customers: readError() });
+    const result = await ctx({ customers: readError(), services: { ...SERVICE_ROW, service_key: 'lawn_re_service' }, service_completion_profiles: PROFILE_ROW({ service_key: 'lawn_re_service' }) });
     expect(result).toMatchObject({ eligible: false, reason: 'lawn_re_service' });
   });
 
   test('assessment read fails: reads as no confirmed assessment, flagged, never confirmed', async () => {
     const result = await ctx({ lawn_assessments: readError() });
-    expect(result.assessment).toEqual({ exists: false, id: null, confirmed: false, readFailed: true });
+    expect(result.assessment).toEqual({ exists: false, id: null, confirmed: false, unusableReason: null, readFailed: true });
     expect(result.photoStatus).toBeNull();
     expect(result.readFailures).toContain('assessment');
   });
@@ -204,8 +221,7 @@ describe('buildLawnFastContext: every read, made to throw', () => {
   });
 
   test('height flag read fails: capture hidden, recorded', async () => {
-    isUserFeatureEnabled.mockRejectedValue(readError());
-    const result = await ctx({});
+    const result = await ctx({ user_feature_flags: readError() });
     expect(result.turfHeightCapture).toBe(false);
     expect(result.readFailures).toContain('turf_height_flag');
   });
@@ -214,9 +230,48 @@ describe('buildLawnFastContext: every read, made to throw', () => {
     await expect(ctx({ scheduled_services: visit({ visit_id: uuid(7) }), service_visits: readError() })).rejects.toThrow('connection lost');
   });
 
-  test('profile lookup fails: profile_unavailable, a refusal', async () => {
-    resolveCompletionProfileForScheduledService.mockRejectedValue(readError());
-    expect(await ctx({})).toMatchObject({ eligible: false, reason: 'profile_unavailable' });
+  // The profile read, failed at the QUERY level. The non-strict resolver turned a failed
+  // availability probe into a synthesized lawn profile that had lost projectBacked /
+  // requiresProject / companions, approving a project-backed visit.
+  describe('profile reads', () => {
+    const PROJECT_BACKED = { service_completion_profiles: PROFILE_ROW({ completion_mode: 'project_required', project_type: 'special' }) };
+    const COMPANION = { service_completion_profiles: PROFILE_ROW({ companion_types: [{ type: 'tree_shrub', delivery: 'internal_only' }] }) };
+
+    test('the controls: a project-backed profile and a companion profile are refused when the read succeeds', async () => {
+      expect(await ctx(PROJECT_BACKED)).toMatchObject({ eligible: false, reason: 'project_backed' });
+      expect(await ctx(COMPANION)).toMatchObject({ eligible: false, reason: 'has_companions' });
+    });
+
+    test('the availability probe (schema.hasTable) fails: profile_unavailable, not an eligible synthesized lawn profile', async () => {
+      for (const tables of [{}, PROJECT_BACKED, COMPANION]) {
+        const result = await buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(tables), { hasTableFails: true }) });
+        expect(result).toMatchObject({ ok: true, eligible: false, reason: 'profile_unavailable' });
+      }
+    });
+
+    test('the profile row query fails: profile_unavailable', async () => {
+      expect(await ctx({ service_completion_profiles: readError() })).toMatchObject({ eligible: false, reason: 'profile_unavailable' });
+    });
+
+    test('the catalog service query fails: profile_unavailable', async () => {
+      expect(await ctx({ services: readError() })).toMatchObject({ eligible: false, reason: 'profile_unavailable' });
+    });
+
+    test('a SUCCESSFUL read that finds no profile row may still synthesize one (as before; a synthesized profile is never a recurring program visit)', async () => {
+      expect(await ctx({ service_completion_profiles: undefined })).toMatchObject({ eligible: true, visitType: 'other' });
+    });
+
+    test('the submit preflight: the same probe failure is a 503 retry, never an approval', async () => {
+      const expectedVisit = {
+        propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
+        isCallback: false, address: {}, technicianId: 'tech-1',
+      };
+      const run = (options, tables = {}) => preflightLawnFastCompletion({
+        knex: fakeKnex(baseTables(tables), options), svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit,
+      });
+      expect(await run({ hasTableFails: true }, PROJECT_BACKED)).toMatchObject({ status: 503, payload: { code: 'completion_profile_lookup_failed' } });
+      expect(await run({}, PROJECT_BACKED)).toMatchObject({ status: 409, payload: { reason: 'project_backed' } });
+    });
   });
 });
 
@@ -257,7 +312,11 @@ describe('buildLawnFastWateringPreview: any move-guard or plan read failure with
 
   test('week plan read fails (gate on): no sentence', async () => {
     gates.irrigationWeekPlan = true;
-    loadCurrentWeekPlan.mockRejectedValue(readError());
+    // The loader reads the module-level db: its irrigation_week_plans query fails.
+    globalDb.mockImplementation(() => {
+      const chain = { where: () => chain, first: () => Promise.reject(readError()) };
+      return chain;
+    });
     expectWithheld(await preview({}), 'week_plan');
   });
 
@@ -321,7 +380,7 @@ describe('client-supplied ids are checked before they reach a uuid column (22P02
     const calls = [];
     const knex = uuidStrictKnex(baseTables(), calls);
     const expectedVisit = {
-      propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: 'cat-1', serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
+      propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
       isCallback: false, address: {}, technicianId: 'tech-1',
     };
     const result = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: 'not-a-uuid', expectedVisit });

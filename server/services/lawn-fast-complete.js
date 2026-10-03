@@ -132,7 +132,12 @@ async function loadBillingMode(svc, knex, readFailures) {
  */
 async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true } = {}) {
   if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
-  const base = await resolveEligibility(serviceId, knex);
+  // STRICT profile read: the non-strict resolver swallows a failed availability probe
+  // into a synthesized profile that has lost projectBacked / requiresProject /
+  // companions, which would approve a project-backed or companion visit. A failed
+  // read is a null profile here (profile_unavailable); a SUCCESSFUL read that finds
+  // no profile row may still synthesize one, as it always has.
+  const base = await resolveEligibility(serviceId, knex, { strict: true });
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile } = base;
   const readFailures = new Set();
@@ -392,6 +397,26 @@ async function loadLatestAssessment(svc, knex) {
 // The advisory photo set. A failed read is recorded and reads as no photo status
 // (no warning to show, nothing refused): the floor is advisory, so withholding it
 // is neither more permissive nor blocking.
+// Whether the customer report would accept this assessment for the visit. The
+// report resolves its lawn assessment through the property-history resolver when
+// GATE_LAWN_PROPERTY_HISTORY is on: installedForVisit picks the visit's installed
+// row (resolveVisit rejects a link whose property differs from the visit's), and
+// resolveLawnAssessmentAndHistory then requires historyForAssessment's current row
+// to be that same assessment (property scope: a NULL property on either side, a
+// customer with one property, a recorded move, all decided there). The SAME two
+// calls decide it here, so an assessment captured before the office moved the visit
+// to another property is not a usable confirmed assessment. With the gate off the
+// report does no property check, and neither does this. Reads throw (callers fail
+// closed).
+async function assessmentUsableForReport(svc, assessmentRow, knex) {
+  if (!featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) return true;
+  const history = require('./lawn-assessment-history');
+  const installed = await history.installedForVisit({ customerId: svc.customer_id, serviceId: svc.id }, knex);
+  if (!installed || String(installed.id) !== String(assessmentRow.id)) return false;
+  const resolved = await history.historyForAssessment(installed, { knex });
+  return !!resolved.current && String(resolved.current.id) === String(assessmentRow.id);
+}
+
 async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
   try {
     return await knex('lawn_assessment_photos').where({ assessment_id: assessmentId }).select('zone', 'quality_gate_passed');
@@ -454,15 +479,47 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
 }
 
 // The height-of-cut capture is optional: a failed flag read hides it (false), the
-// less permissive side, and is recorded.
+// less permissive side, and is recorded. The shared isUserFeatureEnabled swallows
+// its own query failure into the default, so the same predicate is read here to
+// keep the failure visible.
 async function loadTurfHeightCapture(technicianId, knex, readFailures) {
-  if (!technicianId) return false;
+  if (!isUuid(technicianId)) return false;
   try {
-    return await require('./feature-flags').isUserFeatureEnabled(technicianId, 'turf-height-capture', false, knex);
+    const row = await knex('user_feature_flags').where({ user_id: technicianId, flag_key: 'turf-height-capture' }).first('enabled');
+    return row ? !!row.enabled : false;
   } catch {
     readFailures.add('turf_height_flag');
     return false;
   }
+}
+
+// The visit's latest assessment and whether Fast Complete may count it. A failed
+// assessment read reads as "no confirmed assessment" (Complete stays disabled, and
+// the submit preflight checks the database itself), never as confirmed. A confirmed
+// assessment the report would reject (captured for the visit's former property) is
+// unusable with the SAME verdict the submit enforces; a failed property check reads
+// as unusable too.
+async function loadAssessmentState(svc, knex, readFailures) {
+  let assessmentRow = null;
+  let assessmentReadFailed = false;
+  let assessmentUnusable = null;
+  try {
+    assessmentRow = await loadLatestAssessment(svc, knex);
+  } catch (err) {
+    logger.warn(`[lawn-fast] assessment unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    assessmentReadFailed = true;
+    readFailures.add('assessment');
+  }
+  if (assessmentRow && assessmentRow.confirmed_by_tech === true) {
+    try {
+      if (!(await assessmentUsableForReport(svc, assessmentRow, knex))) assessmentUnusable = 'property_scope';
+    } catch (err) {
+      logger.warn(`[lawn-fast] assessment property check unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+      assessmentUnusable = 'property_check_failed';
+      readFailures.add('assessment_property_check');
+    }
+  }
+  return { assessmentRow, assessmentReadFailed, assessmentUnusable };
 }
 
 /**
@@ -479,18 +536,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
   if (reason) return { ok: true, eligible: false, reason, visitType, service };
 
-  // A failed assessment read reads as "no confirmed assessment" (Complete stays
-  // disabled, and the submit preflight checks the database itself), never as
-  // confirmed.
-  let assessmentRow = null;
-  let assessmentReadFailed = false;
-  try {
-    assessmentRow = await loadLatestAssessment(svc, knex);
-  } catch (err) {
-    logger.warn(`[lawn-fast] assessment unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
-    assessmentReadFailed = true;
-    readFailures.add('assessment');
-  }
+  const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;
   const typed = !!profile.findingsType;
   const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
@@ -515,7 +561,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     assessment: {
       exists: !!assessmentRow,
       id: assessmentRow?.id ?? null,
-      confirmed: assessmentRow?.confirmed_by_tech === true,
+      confirmed: assessmentRow?.confirmed_by_tech === true && !assessmentUnusable,
+      // Why a confirmed assessment is not usable (null otherwise): 'property_scope' =
+      // the report would reject it for this visit's property; the tech analyzes again.
+      unusableReason: assessmentUnusable,
       readFailed: assessmentReadFailed,
     },
     // Advisory only: a light photo set is a warning, never a refusal. null when
@@ -635,6 +684,18 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
         error: 'Confirm the lawn assessment before completing this service so it appears in the customer report.',
         code: 'lawn_assessment_unconfirmed',
         lawnAssessmentId: assessment.id,
+      },
+    };
+  }
+  // The customer report must be able to use it: the SAME property-scope verdict the
+  // context reports (assessmentUsableForReport). A failed check throws, never passes.
+  if (!(await assessmentUsableForReport(svc, assessment, knex))) {
+    return {
+      status: 400,
+      payload: {
+        error: 'This lawn assessment was captured for a different property than this visit. Analyze and confirm it again for this visit.',
+        code: 'lawn_fast_assessment_required',
+        reason: 'property_scope',
       },
     };
   }
