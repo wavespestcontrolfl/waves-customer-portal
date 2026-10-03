@@ -1216,17 +1216,14 @@ describe('update-details wiring (source guards)', () => {
   test('the trim runs the SHARED cancellation follow-through, not a copy of it (Codex #3337 r4)', () => {
     // Three review rounds each found a different piece of the cancellation
     // pipeline missing from the trim. Both surfaces now call one module.
+    // The card, fee-alert, invoice-void and tracker-cancel obligations are
+    // executed by visit-cancellation-followthrough-load.test.js; the two
+    // tracker-failure recorders are only stubbed there, so they stay pinned.
     const shared = fs.readFileSync(path.join(__dirname, '../services/visit-cancellation-followthrough.js'), 'utf8');
-    // Every obligation lives in the shared module...
-    expect(shared).toContain('handleCardHoldCancellation');
-    expect(shared).toContain('handleAppointmentCardCancellation');
-    expect(shared).toContain('alertUnresolvedCancellationFee');
-    expect(shared).toContain('voidOpenInvoicesForCancelledService');
-    expect(shared).toContain('trackTransitions.cancel');
     expect(shared).toContain('recordTrackTransitionResultFailure');
     expect(shared).toContain('recordTrackTransitionFailure');
 
-    // ...and BOTH cancel surfaces call it rather than inlining their own.
+    // BOTH cancel surfaces call the shared module rather than inlining their own.
     const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(dispatchSrc).toContain("require('../services/visit-cancellation-followthrough')");
     expect(dispatchSrc).toContain("source: 'admin-dispatch'");
