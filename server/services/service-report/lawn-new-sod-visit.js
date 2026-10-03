@@ -14,23 +14,24 @@
  *      the verdict across day 21), never the clock, never the completion time.
  *
  *   2. PROPERTY IDENTITY. property_preferences is the customer's PRIMARY home's
- *      row, so a sod date applies only to a visit at that home. A visit whose
- *      stamped service address diverges from the primary address (the shared
- *      stampedDivergesSql rule the job card and the PDF loader use) is another
- *      property: normal report. A visit that cannot be found, or whose address
- *      cannot be judged (no linked appointment), is UNKNOWN, and unknown is
- *      never active.
+ *      row, so a sod date applies only to a visit PROVEN to be at that home:
+ *      the unit-aware chain in visit-property-scope.js (the visit's stamp, else its
+ *      property_id, else its source estimate) must POSITIVELY match the customer's
+ *      primary address; a visit with no such evidence counts only on an account
+ *      proven to have a single premises. "Not demonstrably elsewhere" is never
+ *      proof: anything unproven is the normal report.
  *
  * The result never throws. `reason` says why the mode is not active:
- *   'active' | 'no_date' | 'outside_window' | 'divergent_address' |
- *   'unknown_visit' | 'read_failed'
+ *   'active' | 'no_date' | 'outside_window' | 'other_property' |
+ *   'unproven_property' | 'unknown_visit' | 'read_failed'
  * 'read_failed' is a query that threw: report callers render the normal report
  * and treat the render as uncacheable; the watering text fails closed (sends
  * nothing).
  */
 
 const { newSodMode, ymdOrNull } = require('./lawn-new-sod');
-const { stampedDivergesSql } = require('../stamped-address');
+const linkage = require('../estimate-property-linkage');
+const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
 
 const inactive = (reason, extra = {}) => ({ active: false, laidOn: null, dayNumber: null, visitDay: null, reason, ...extra });
 
@@ -39,25 +40,61 @@ function newSodVisitDay({ serviceDate = null, scheduledDate = null } = {}) {
   return ymdOrNull(serviceDate) || ymdOrNull(scheduledDate) || null;
 }
 
-async function loadVisitIdentity(knex, { serviceRecordId, scheduledServiceId }) {
+const APPOINTMENT_COLUMNS = [
+  'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.property_id', 'ss.source_estimate_id',
+  'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
+];
+
+// The visit's records and the customer's primary address. null = the visit does not exist
+// (or belongs to another customer).
+async function loadVisit(knex, { customerId, serviceRecordId, scheduledServiceId }) {
+  let record = null;
   if (serviceRecordId) {
-    const row = await knex('service_records as sr')
-      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
-      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+    record = await knex('service_records as sr')
       .where('sr.id', serviceRecordId)
-      .first(
-        'sr.service_date',
-        'ss.scheduled_date',
-        'ss.id as ss_id',
-        knex.raw(`${stampedDivergesSql('ss', 'c')} as address_diverges`),
-      );
-    return row ? { serviceDate: row.service_date, scheduledDate: row.scheduled_date, linked: row.ss_id != null, diverges: row.address_diverges } : null;
+      .first('sr.service_date', 'sr.scheduled_service_id', 'sr.customer_id');
+    if (!record) return null;
+    if (record.customer_id != null && String(record.customer_id) !== String(customerId)) return null;
   }
-  const row = await knex('scheduled_services as ss')
-    .join('customers as c', 'ss.customer_id', 'c.id')
-    .where('ss.id', scheduledServiceId)
-    .first('ss.scheduled_date', knex.raw(`${stampedDivergesSql('ss', 'c')} as address_diverges`));
-  return row ? { serviceDate: null, scheduledDate: row.scheduled_date, linked: true, diverges: row.address_diverges } : null;
+  const appointmentId = (record && record.scheduled_service_id) || scheduledServiceId || null;
+  const appointment = appointmentId
+    ? await knex('scheduled_services as ss').where('ss.id', appointmentId).first(...APPOINTMENT_COLUMNS)
+    : null;
+  if (appointment && appointment.customer_id != null && String(appointment.customer_id) !== String(customerId)) return null;
+  if (!record && !appointment) return null;
+  const customer = await knex('customers as c')
+    .where('c.id', customerId)
+    .first('c.address_line1', 'c.address_line2', 'c.city', 'c.zip', 'c.has_multi_home');
+  if (!customer) return null;
+  return { record, appointment, customer };
+}
+
+/**
+ * Is this visit POSITIVELY at the customer's primary home? The preference row (and so the
+ * sod date) belongs to the primary home. "Not demonstrably elsewhere" is not proof: an
+ * unstamped appointment can still be linked to a secondary property by property_id or by
+ * the estimate that created it, and a bare street compare misses an apartment/unit
+ * difference. So this is the same unit-aware chain the other property-scoped readers use
+ * (visit-property-scope.js): the visit's own stamp, else its property_id's address, else
+ * its source estimate's address, compared with the primary address by sameResolvedProperty.
+ * A visit with NO evidence of any of those is the primary only when the account is
+ * PROVEN single-premises (customerHasOnlyPrimaryPremises). Anything else is unproven.
+ *
+ * @returns {Promise<'primary'|'other'|'unproven'|'read_failed'>}
+ */
+async function proveVisitAtPrimaryHome(knex, { customerId, appointment, customer }) {
+  let lookupFailed = false;
+  const scope = await resolveVisitPropertyScope(appointment || {}, knex, { onLookupFailure: () => { lookupFailed = true; } });
+  if (lookupFailed) return 'read_failed';
+  const primaryKey = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
+  // A primary address with no street or no locality cannot be compared with anything.
+  if (!primaryKey || linkage.scopeKeyLacksLocality(primaryKey)) return 'unproven';
+  if (scope.hasEvidence) {
+    if (!scope.key) return 'unproven';
+    return sameResolvedProperty(scope.key, primaryKey) ? 'primary' : 'other';
+  }
+  const only = await customerHasOnlyPrimaryPremises(knex, customerId, customer, primaryKey, { unresolvedFails: true });
+  return only ? 'primary' : 'unproven';
 }
 
 /**
@@ -77,18 +114,23 @@ async function resolveNewSodVerdict(knex, { customerId, prefs, serviceRecordId =
       if (!customerId) return inactive('unknown_visit');
       row = await knex('property_preferences').where({ customer_id: customerId }).first('sod_laid_on');
     }
-    // No date: nothing else matters, and no identity query is spent.
+    // No date: nothing else matters, and no visit query is spent.
     if (!ymdOrNull(row && row.sod_laid_on)) return inactive('no_date');
-    if (!serviceRecordId && !scheduledServiceId) return inactive('unknown_visit');
+    if (!customerId || (!serviceRecordId && !scheduledServiceId)) return inactive('unknown_visit');
 
-    const identity = await loadVisitIdentity(knex, { serviceRecordId, scheduledServiceId });
-    if (!identity || !identity.linked) return inactive('unknown_visit');
-    // Only a strict `false` proves the visit is at the primary home.
-    if (identity.diverges === true) return inactive('divergent_address');
-    if (identity.diverges !== false) return inactive('unknown_visit');
-
-    const visitDay = newSodVisitDay(identity);
+    const visit = await loadVisit(knex, { customerId, serviceRecordId, scheduledServiceId });
+    if (!visit) return inactive('unknown_visit');
+    const visitDay = newSodVisitDay({
+      serviceDate: visit.record && visit.record.service_date,
+      scheduledDate: visit.appointment && visit.appointment.scheduled_date,
+    });
     if (!visitDay) return inactive('unknown_visit');
+
+    const where = await proveVisitAtPrimaryHome(knex, { customerId, ...visit });
+    if (where === 'read_failed') return inactive('read_failed');
+    if (where === 'other') return inactive('other_property', { visitDay });
+    if (where !== 'primary') return inactive('unproven_property', { visitDay });
+
     const mode = newSodMode(row, visitDay);
     return mode.active
       ? { ...mode, visitDay, reason: 'active' }

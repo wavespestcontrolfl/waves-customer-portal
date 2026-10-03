@@ -24,8 +24,17 @@ function makeStore(prefs) {
     q.merge = async (patch) => { store.prefs = { ...(q.__row || {}), ...patch }; return [1]; };
     q.first = async () => {
       if (table === 'property_preferences') return store.prefs;
-      // The visit identity: a visit stamped with the customer's CURRENT primary address.
-      return { service_date: store.visitDay, scheduled_date: store.visitDay, ss_id: 'ss-1', address_diverges: false };
+      const home = store.home || HOME;
+      // The visit is stamped at the customer's CURRENT primary address (the mirror follows a move).
+      if (table === 'service_records as sr') return { service_date: store.visitDay, scheduled_service_id: 'ss-1', customer_id: 'cust-1' };
+      if (table === 'scheduled_services as ss') {
+        return {
+          id: 'ss-1', customer_id: 'cust-1', scheduled_date: store.visitDay, property_id: null, source_estimate_id: null,
+          service_address_line1: home.address_line1, service_address_line2: null, service_address_city: home.city, service_address_zip: home.zip,
+        };
+      }
+      if (table === 'customers as c') return { ...home, address_line2: null, has_multi_home: false };
+      return null;
     };
     // Lead / estimate fan-out reads: nothing to propagate.
     q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
@@ -80,6 +89,7 @@ describe('a move inside the new-sod window', () => {
     const counts = await propagateCustomerAddressChange({ before: HOME, after: NEW_HOME }, store.db);
     expect(counts.property_preferences).toBe(1);
     expect(store.prefs.sod_laid_on).toBeNull();
+    store.home = NEW_HOME; // the customer row now mirrors the new primary; the next visit is stamped there
     // Only the move guard changed; the customer's sprinkler settings are untouched.
     expect(store.prefs.irrigation_run_minutes).toBe(20);
     expect(store.prefs.irrigation_home_changed_at).toBeInstanceOf(Date);
@@ -87,6 +97,12 @@ describe('a move inside the new-sod window', () => {
     expect(store.raws[0].sql).toMatch(/pg_advisory_xact_lock/);
 
     expect(await resolveNewSodVerdict(store.db, { customerId: 'cust-1', serviceRecordId: 'sr-1' })).toMatchObject({ active: false, reason: 'no_date' });
+    // Why the clearing matters: the new-home visit would otherwise PASS the property proof
+    // (stamp and primary agree on the new address) and inherit the old home's date.
+    const kept = makeStore({ customer_id: 'cust-1', sod_laid_on: daysAgo(5) });
+    kept.visitDay = today();
+    kept.home = NEW_HOME;
+    expect(await resolveNewSodVerdict(kept.db, { customerId: 'cust-1', serviceRecordId: 'sr-1' })).toMatchObject({ active: true });
     const { out, sendCustomerMessage } = await textFor(store);
     expect(out).toEqual({ status: 'sent' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);

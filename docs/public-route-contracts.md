@@ -2201,9 +2201,11 @@ date is set) changes `/api/reports/:token/data` for a LAWN visit only, and only 
 is from that day through day 21 inclusive. The visit's own day is the judge: the
 service record's `service_date` (America/New_York), never the assessment's capture date
 (a redo, or `GATE_LAWN_PROPERTY_HISTORY` off, cannot move it) and never the clock, so a
-reopened report reads the same. The sod date belongs to the customer's primary home, so a
-visit whose stamped service address diverges from it, or that cannot be tied to its
-appointment, gets the normal report; a move of the primary home (address edit or removal,
+reopened report reads the same. The sod date belongs to the customer's primary home, so the visit must be PROVEN at
+that home (the unit-aware visit-property-scope chain: stamp, else property link, else
+source estimate, matched to the primary address; a visit with none counts only on a
+proven single-premises account); a visit at another property, or one that cannot be
+proven, gets the normal report; a move of the primary home (address edit or removal,
 different-homes merge, primary-property promotion) clears the sod date in the same
 transaction, so the next visit at the new home is the normal report; a failed read of the visit gives the normal report
 too, uncacheable, with an emailed PDF deferred. One resolver
@@ -2220,10 +2222,15 @@ visit applied no herbicide or pre-emergent and its products were readable; no `m
 day', detail: 'Keep the sod moist with a light watering each day until it has rooted.',
 action: 'new_sod', visitInPlanWeek: true, prescribesRun: false }` (no `afterHold`,
 `afterTreatment` or `depthInches`); `reportV2.water.status` is `'unknown'`,
-`reportV2.water.explanation` is `null` and `water.coverageWatch` is `false`;
+`reportV2.water.explanation` is `null` (also for a product whose label needs watering in; that
+note stays in `reportV2.aftercare`) and `water.coverageWatch` is `false`;
 `reportV2.snapshot.seasonalNote` is "Once the sod has rooted, you can start mowing and we
 can begin your regular lawn care." (no `seasonalNoteSource`), and under the v6 copy gate
-`reportV2.lead.whatToExpect` carries the same sentence; the water/coverage finding cards
+`reportV2.lead.whatToExpect` carries the same sentence, while the v6 durable freeze
+(`structured_notes.lawnCopyV6`) is neither written nor replayed for an active visit (the
+lead's `applied` is the deterministic treatment sentence, `watching` is absent and no
+headline override applies; computed in memory only, so an older normal freeze is left
+untouched and replays again when the mode ends or the gate is off); the water/coverage finding cards
 (`insights[].category === 'water'`) and `reportV2.mowing` (null) are withheld for the
 visit. The watering instruction the engine would build is not built, so
 `reportV2.aftercare` is the legacy product-label note, nothing is frozen under

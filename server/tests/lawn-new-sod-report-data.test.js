@@ -127,10 +127,18 @@ const fixtures = (prefs = []) => ({
 });
 
 
-// The shared resolver's visit-identity read (lawn-new-sod-visit.js): the service record's
-// own day, its linked appointment and whether the stamped address diverges from the home.
-const IDENTITY = (over = {}) => ({ 'sr.id': 'svc-lawn-w1', service_date: '2026-09-30', scheduled_date: '2026-09-30', ss_id: 'ss-current', address_diverges: false, ...over });
-const withIdentity = (prefs, identity = IDENTITY()) => ({ ...fixtures(prefs), 'service_records as sr': identity ? [identity] : [] });
+// The shared resolver's reads (lawn-new-sod-visit.js): the service record's own day, its
+// appointment (stamped at the customer's primary address) and the customer's primary address.
+const HOME = { line1: '100 Example Court', city: 'Bradenton', zip: '34201' };
+const withIdentity = (prefs, { record = {}, appointment = {}, customer = {} } = {}) => ({
+  ...fixtures(prefs),
+  'service_records as sr': [{ 'sr.id': 'svc-lawn-w1', service_date: '2026-09-30', scheduled_service_id: 'ss-current', customer_id: 'cust-lawn-w1', ...record }],
+  'scheduled_services as ss': [{
+    'ss.id': 'ss-current', id: 'ss-current', customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-30', property_id: null, source_estimate_id: null,
+    service_address_line1: HOME.line1, service_address_line2: null, service_address_city: HOME.city, service_address_zip: HOME.zip, ...appointment,
+  }],
+  'customers as c': [{ 'c.id': 'cust-lawn-w1', address_line1: HOME.line1, address_line2: null, city: HOME.city, zip: HOME.zip, has_multi_home: false, ...customer }],
+});
 
 const SOD_PREFS = (sod_laid_on) => [{ customer_id: 'cust-lawn-w1', sod_laid_on }];
 const GATES = ['GATE_LAWN_NEW_SOD_MODE', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_FORECAST'];
@@ -272,23 +280,90 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
   });
 });
 
+describe('GATE_LAWN_NEW_SOD_MODE: the documented payload keys, with a product that needs watering in', () => {
+  const saved = process.env.GATE_LAWN_NEW_SOD_MODE;
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_NEW_SOD_MODE; else process.env.GATE_LAWN_NEW_SOD_MODE = saved; });
+
+  // A fertilizer whose label says to water it in (irrigation_required + a legacy note): the normal
+  // engine turns that into a watering restriction that overwrites the card's explanation.
+  const needsWateringIn = () => {
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: {
+      ...facts(null), name: 'Test Fertilizer', category: 'fertilizer', activeIngredient: 'urea',
+      irrigationRequired: true, irrigationNotes: 'Water in with 1/4 inch after application.',
+    } } });
+    const service = { ...serviceWith(null), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
+    const fx = {
+      ...withIdentity(SOD_PREFS('2026-09-25')),
+      service_products: [{ id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Test Fertilizer', product_category: 'fertilizer', created_at: '2026-09-30T18:00:00Z' }],
+    };
+    return buildReportV1Data(service, 'token-w1', makeKnex(fx));
+  };
+
+  test('control: without new-sod mode the product\'s watering restriction fills the card explanation', async () => {
+    const v2 = (await needsWateringIn()).reportV2;
+    expect(v2.water.explanation).toBeTruthy();
+  });
+
+  test('new-sod mode pins every documented key, and no late assignment brings watering text back', async () => {
+    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+    const data = await needsWateringIn();
+    const v2 = data.reportV2;
+    expect(v2.banner).toEqual({
+      state: 'new_sod',
+      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.', 'We are holding weed control until the sod has rooted.'],
+      holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'new_sod',
+    });
+    expect(v2.water).toMatchObject({
+      status: 'unknown', explanation: null, coverageWatch: false,
+      weekPlan: { title: 'New sod: water lightly every day', detail: 'Keep the sod moist with a light watering each day until it has rooted.', action: 'new_sod', visitInPlanWeek: true, prescribesRun: false },
+    });
+    expect(data.lawnAssessment.waterContext.weekPlan.title).toBe('New sod: water lightly every day');
+    expect(v2.snapshot.seasonalNote).toBe('Once the sod has rooted, you can start mowing and we can begin your regular lawn care.');
+    expect(v2.snapshot.seasonalNoteSource).toBeUndefined();
+    expect(v2.mowing).toBeNull();
+    expect(v2.insights.filter((c) => c.category === 'water' || c.category === 'mowing')).toEqual([]);
+    // The product's own aftercare note is the separate legacy block, and it stays.
+    expect(v2.aftercare.watering).toBeTruthy();
+    // No engine watering voice anywhere else in the reconciled customer text.
+    const customerText = JSON.stringify({ water: v2.water, snapshot: { ...v2.snapshot, treatmentSummary: null }, insights: v2.insights });
+    expect(customerText).not.toMatch(/ease back|easing back|too much water|dry out between|skip your|lower the mower|raise the mower/i);
+  });
+});
+
 describe('GATE_LAWN_NEW_SOD_MODE: one visit day and one property for the report', () => {
   const saved = process.env.GATE_LAWN_NEW_SOD_MODE;
   beforeEach(() => { process.env.GATE_LAWN_NEW_SOD_MODE = 'true'; });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_NEW_SOD_MODE; else process.env.GATE_LAWN_NEW_SOD_MODE = saved; });
   const render = (extra) => buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex({ ...withIdentity(SOD_PREFS('2026-09-25')), ...extra }));
 
-  test('a visit at another property (stamped address diverges from the home) is the normal report', async () => {
-    const data = await render({ 'service_records as sr': [IDENTITY({ address_diverges: true })] });
+  const renderWith = (parts) => buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex(withIdentity(SOD_PREFS('2026-09-25'), parts)));
+
+  test('a visit at another property (the stamp is another address) is the normal report', async () => {
+    const data = await renderWith({ appointment: { service_address_line1: '200 Sample Lane', service_address_zip: '34202' } });
     expect(data.reportV2.banner?.state).not.toBe('new_sod');
     expect(JSON.stringify(data)).not.toMatch(/New sod/);
   });
 
-  test('a visit whose address cannot be judged (no linked appointment, or no record row) is the normal report', async () => {
-    for (const identity of [IDENTITY({ ss_id: null }), IDENTITY({ address_diverges: null })]) {
-      expect((await render({ 'service_records as sr': [identity] })).reportV2.banner?.state).not.toBe('new_sod');
-    }
-    expect((await render({ 'service_records as sr': [] })).reportV2.banner?.state).not.toBe('new_sod');
+  test('an UNSTAMPED appointment linked to a secondary property by property_id is the normal report (not demonstrably elsewhere is not proof)', async () => {
+    const fx = withIdentity(SOD_PREFS('2026-09-25'), {
+      appointment: { service_address_line1: null, service_address_city: null, service_address_zip: null, property_id: 'p2' },
+    });
+    fx.customer_properties = [{ id: 'p2', address_line1: '200 Sample Lane', address_line2: null, city: 'Bradenton', zip: '34202' }];
+    const data = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex(fx));
+    expect(data.reportV2.banner?.state).not.toBe('new_sod');
+  });
+
+  test('the same street in another unit is the normal report (the unit counts)', async () => {
+    const data = await renderWith({ customer: { address_line2: 'Apt 4' }, appointment: { service_address_line2: 'Apt 7' } });
+    expect(data.reportV2.banner?.state).not.toBe('new_sod');
+  });
+
+  test('a visit that cannot be proven at the home (multi-home account, no stamp, no link) is the normal report', async () => {
+    const data = await renderWith({
+      customer: { has_multi_home: true },
+      appointment: { service_address_line1: null, service_address_city: null, service_address_zip: null },
+    });
+    expect(data.reportV2.banner?.state).not.toBe('new_sod');
   });
 
   test('an unreadable visit identity is the normal report, and the render is uncacheable and defers delivery', async () => {

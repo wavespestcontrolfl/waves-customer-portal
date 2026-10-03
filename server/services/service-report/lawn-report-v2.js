@@ -672,7 +672,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // its damp-area advice with a label-required watering-in (codex P1 r32).
   const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
-  if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
+  // New-sod mode keeps the card's explanation empty: the fixed week plan owns the watering
+  // story. The product's own aftercare note is not lost: it stays in `aftercare` below.
+  if (water && aftercareWaterAction && !newSod) water.explanation = aftercareWaterAction;
   const allInsights = buildLawnInsightCards({
     categories,
     water: water ? {

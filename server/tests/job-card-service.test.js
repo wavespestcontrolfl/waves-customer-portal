@@ -1153,9 +1153,15 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
   describe('new sod note (GATE_LAWN_NEW_SOD_MODE)', () => {
     const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
-    const lawnVisit = (over = {}) => ({ ...visit(false), service_type: 'Lawn Care Treatment Program', scheduled_date: '2026-10-05', ...over });
+    // The shared resolver's reads: the appointment stamped at the primary address, and the primary address.
+    const HOME = { address_line1: '100 Example Court', address_line2: null, city: 'Bradenton', zip: '34201' };
+    const lawnVisit = (over = {}) => ({
+      ...visit(false), service_type: 'Lawn Care Treatment Program', scheduled_date: '2026-10-05', property_id: null, source_estimate_id: null,
+      service_address_line1: HOME.address_line1, service_address_line2: null, service_address_city: HOME.city, service_address_zip: HOME.zip, ...over,
+    });
     const load = (row, sod = '2026-10-01') => jobCard.loadJobCardFacts('svc1', factsDb({
       'scheduled_services as ss': row,
+      'customers as c': { ...HOME, has_multi_home: false },
       property_preferences: { ...prefs, sod_laid_on: sod },
     }), deps);
     afterEach(() => { delete process.env.GATE_LAWN_NEW_SOD_MODE; });
@@ -1176,14 +1182,14 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
     test('on, but outside the window, before the sod date, no date, or a pest visit: no note', async () => {
       process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-      for (const [row, sod] of [[lawnVisit({ scheduled_date: '2026-10-23' }), '2026-10-01'], [lawnVisit({ scheduled_date: '2026-09-30' }), '2026-10-01'], [lawnVisit(), null], [visit(false), '2026-10-01'], [lawnVisit({ address_diverges: null }), '2026-10-01']]) {
+      for (const [row, sod] of [[lawnVisit({ scheduled_date: '2026-10-23' }), '2026-10-01'], [lawnVisit({ scheduled_date: '2026-09-30' }), '2026-10-01'], [lawnVisit(), null], [visit(false), '2026-10-01'], [lawnVisit({ service_address_city: null, service_address_zip: null }), '2026-10-01']]) {
         expect((await load(row, sod)).facts).not.toHaveProperty('newSod');
       }
     });
 
     test('on, a visit at a non-primary address never shows the primary home\'s sod', async () => {
       process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-      expect((await load(lawnVisit({ address_diverges: true }))).facts).not.toHaveProperty('newSod');
+      expect((await load(lawnVisit({ address_diverges: true, service_address_line1: '200 Sample Lane', service_address_zip: '34202' }))).facts).not.toHaveProperty('newSod');
     });
   });
 

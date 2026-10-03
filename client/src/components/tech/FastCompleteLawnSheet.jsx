@@ -195,6 +195,8 @@ const findingsTypeUndecidable = (data) => !('findingsType' in data)
 const optionalContextFields = (data) => ({
   findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
+  // New-sod mode (GATE_LAWN_NEW_SOD_MODE): "New sod laid Oct 1", from the loaded context itself.
+  newSodNote: typeof data?.newSod?.note === 'string' && data.newSod.note ? data.newSod.note : null,
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -678,6 +680,13 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
             {photoAdvisory && <p className="tech-visit-muted" role="status">{photoAdvisory}</p>}
           </section>
           <ProductsSection ctx={ctx} products={products} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
+          {/* New-sod mode: the notice comes from the loaded context, so it shows with no
+              products picked and when the watering preview fails or is withheld. */}
+          {ctx.newSodNote && (
+            <section className="tech-visit-choice-section" aria-label="New sod">
+              <p className="tech-visit-muted" data-testid="lawn-fast-new-sod-note">{ctx.newSodNote}</p>
+            </section>
+          )}
           <WateringPreview base={base} request={request} productIds={activeIds} />
           {typed && (
             <ChoiceSection title="Lawn condition" columns={3}>
@@ -843,10 +852,6 @@ function WateringPreview({ base, request, productIds }) {
     const lines = data.sentence ? [data.sentence] : [];
     body = (
       <>
-        {/* New-sod mode: the report prints its fixed new-sod lines, so say why. */}
-        {typeof data.newSod?.note === 'string' && data.newSod.note && (
-          <p className="tech-visit-muted" data-testid="lawn-fast-new-sod-note">{data.newSod.note}</p>
-        )}
         {lines.map((line) => <p key={line} className="tech-visit-promise-text">{line}</p>)}
         {data.mowHold?.line && <p className="tech-visit-promise-text">{data.mowHold.line}</p>}
         {Array.isArray(data.provisional) && data.provisional.includes('completionTime') && (

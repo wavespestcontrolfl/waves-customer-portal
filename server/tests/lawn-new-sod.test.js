@@ -225,31 +225,19 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
   });
   afterEach(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
-  // A fake knex for the shared resolver: the preference row, then the visit identity.
-  function fakeDb({ prefs, identity, throws = false }) {
-    const db = jest.fn((table) => {
-      const q = {};
-      for (const m of ['where', 'leftJoin', 'join']) q[m] = () => q;
-      q.first = async () => {
-        if (throws) throw new Error('connection reset');
-        return table === 'property_preferences' ? prefs : identity;
-      };
-      return q;
-    });
-    db.raw = (sql) => sql;
-    return db;
-  }
-  const IDENTITY = (over = {}) => ({ service_date: '2026-10-05', scheduled_date: '2026-10-05', ss_id: 'svc-1', address_diverges: false, ...over });
+  const { visitFacts, fakeKnex } = require('./helpers/new-sod-fake-knex');
+  const baseAppt = visitFacts().appointment;
 
   function harness(dbOpts) {
     const sendCustomerMessage = jest.fn(async () => ({ sent: true }));
     const getTemplate = jest.fn(async (key, vars) => `Watering: ${vars.watering_lines}`);
     const mergeNotes = jest.fn(async () => {});
-    const db = fakeDb(dbOpts);
+    const db = jest.fn(fakeKnex(dbOpts));
+    db.raw = (sql) => sql;
     return {
       state: {
         record: { id: 'rec-1', structured_notes: {} },
-        svc: { id: 'svc-1', customer_id: 'cust-1', cust_phone: '+19415550100' },
+        svc: { id: 'ss-1', customer_id: 'c1', cust_phone: '+19415550100' },
         notes: { lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['Skip watering until 8:00 PM tonight.'], completedAt: new Date().toISOString() } } },
         isBackfill: false, deliveryMode: 'auto_send', internalOnly: false, completionTextRequested: true,
       },
@@ -257,7 +245,7 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
       sendCustomerMessage, getTemplate, mergeNotes, db,
     };
   }
-  const ACTIVE = { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY() };
+  const ACTIVE = visitFacts();
 
   test('gate off: the property row is never read and the text goes out as before', async () => {
     const h = harness(ACTIVE);
@@ -274,24 +262,48 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
     expect(h.mergeNotes).not.toHaveBeenCalled();
   });
 
-  test('gate on, sod window over, no date, no row, a divergent address or an unknown visit: the text goes out as before', async () => {
+  test('gate on, sod window over, no date, no row, another or unproven property, an unknown visit: the text goes out as before', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
     for (const opts of [
-      { prefs: { sod_laid_on: '2025-12-01' }, identity: IDENTITY() },
-      { prefs: { sod_laid_on: null }, identity: IDENTITY() },
-      { prefs: null, identity: IDENTITY() },
-      { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY({ address_diverges: true }) },
-      { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY({ ss_id: null }) },
-      { prefs: { sod_laid_on: '2026-10-01' }, identity: null },
+      visitFacts({ prefs: { sod_laid_on: '2025-12-01' } }),
+      visitFacts({ prefs: { sod_laid_on: null } }),
+      visitFacts({ prefs: null }),
+      visitFacts({ appointment: { ...baseAppt, service_address_line1: '200 Sample Lane', service_address_zip: '34202' } }),
+      // An unstamped appointment linked to a secondary property: unproven is NOT new sod.
+      visitFacts({ appointment: { ...baseAppt, service_address_line1: null, service_address_city: null, service_address_zip: null, property_id: 'p2' },
+        propertyById: { p2: { address_line1: '200 Sample Lane', address_line2: null, city: 'Bradenton', zip: '34202' } } }),
+      visitFacts({ record: null, appointment: null }),
     ]) {
       const h = harness(opts);
       expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     }
   });
 
+  // Day 21 visited and completed after ET midnight into day 22: the verdict is the
+  // VISIT's service day, never the completion time the frozen instruction carries.
+  test('a day-21 visit completed after ET midnight of day 22 is still new sod; a day-22 visit is not', async () => {
+    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-23T05:30:00Z')); // 01:30 ET on day 22
+    try {
+      const completedAt = '2026-10-23T05:00:00Z'; // 01:00 ET on day 22
+      const run = async (serviceDay) => {
+        const h = harness(visitFacts({
+          record: { service_date: serviceDay, scheduled_service_id: 'ss-1', customer_id: 'c1' },
+          appointment: { ...baseAppt, scheduled_date: serviceDay },
+        }));
+        h.state.notes.lawnWateringFreeze.wateringInstruction.completedAt = completedAt;
+        return (await sendLawnWateringSms(h.state, h.deps)).status;
+      };
+      expect(await run('2026-10-22')).toBe('skip_new_sod');
+      expect(await run('2026-10-23')).not.toBe('skip_new_sod');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('gate on, anything unreadable: fail closed, nothing sent and no marker written', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    const h = harness({ ...ACTIVE, throws: true });
+    const h = harness({ ...ACTIVE, throwOn: 'customers as c' });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_new_sod_unreadable' });
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
     expect(h.mergeNotes).not.toHaveBeenCalled();

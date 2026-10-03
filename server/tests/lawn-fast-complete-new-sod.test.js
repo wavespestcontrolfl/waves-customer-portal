@@ -126,9 +126,15 @@ afterAll(() => {
 });
 
 const prefsWith = (sod_laid_on) => ({ ...PREFS, sod_laid_on });
-// The shared resolver's appointment read (scheduled date + whether the stamped address diverges).
-const APPT = (over = {}) => ({ scheduled_date: '2026-10-05', address_diverges: false, ...over });
-const withAppt = (tables) => ({ 'scheduled_services as ss': APPT(), ...tables });
+// The shared resolver's reads (lawn-new-sod-visit.js): the appointment (stamped at the primary
+// address) and the customer's primary address.
+const HOME = { address_line1: '100 Example Court', city: 'Bradenton', zip: '34201' };
+const APPT = (over = {}) => ({
+  id: VISIT, customer_id: CUSTOMER, scheduled_date: '2026-10-05', property_id: null, source_estimate_id: null,
+  service_address_line1: HOME.address_line1, service_address_line2: null, service_address_city: HOME.city, service_address_zip: HOME.zip, ...over,
+});
+const CUSTOMER_ROW = { ...HOME, address_line2: null, has_multi_home: false };
+const withAppt = (tables) => ({ 'scheduled_services as ss': APPT(), 'customers as c': CUSTOMER_ROW, ...tables });
 const ctx = (tables) => buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(withAppt(tables))), technicianId: TECH });
 const preview = (tables) => buildLawnFastWateringPreview({
   serviceId: VISIT, productIds: [P_HERB], knex: fakeKnex(baseTables(withAppt(tables))), now: new Date('2026-10-05T14:00:00Z'),
@@ -152,12 +158,12 @@ describe('Lawn Fast Complete context: the New sod note', () => {
     }
   });
 
-  test('gate on, a visit at another property or one whose address cannot be judged: no note', async () => {
+  test('gate on, a visit at another property, one with a locality-less stamp, or none: no note', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    for (const appt of [APPT({ address_diverges: true }), APPT({ address_diverges: null }), undefined]) {
+    for (const appt of [APPT({ service_address_line1: '200 Sample Lane', service_address_zip: '34202' }), APPT({ service_address_city: null, service_address_zip: null }), undefined]) {
       expect(await ctx({ property_preferences: prefsWith('2026-10-01'), 'scheduled_services as ss': appt })).not.toHaveProperty('newSod');
     }
-    const result = await preview({ property_preferences: prefsWith('2026-10-01'), 'scheduled_services as ss': APPT({ address_diverges: true }) });
+    const result = await preview({ property_preferences: prefsWith('2026-10-01'), 'scheduled_services as ss': APPT({ service_address_line1: '200 Sample Lane', service_address_zip: '34202' }) });
     expect(result.sentence).toMatch(/^Skip your turf watering until/);
     expect(result).not.toHaveProperty('newSod');
   });

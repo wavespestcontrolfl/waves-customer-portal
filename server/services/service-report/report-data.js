@@ -5905,7 +5905,30 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       }
 
-      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
+      if (reportV2 && newSodActive && featureGates.lawnReportCopyV6Live()) {
+        // GATE_LAWN_NEW_SOD_MODE: while new-sod mode is ACTIVE for this visit the v6 durable
+        // freeze is neither written nor replayed. A freeze made now would hold copy derived
+        // from the new-sod report for ever (first writer wins, and it would replay after the
+        // gate goes off); an older normal freeze may carry watering-derived headline / watching /
+        // expectation copy. The lead's three fields for this render are computed in memory
+        // from fixed sentences: what we applied (the same deterministic treatment sentence the
+        // writer uses), the fixed expectation line, and no headline override or "watching" line
+        // (the lead falls back to the snapshot's own status headline). Nothing here touches
+        // structured_notes.lawnCopyV6, so the normal freeze path is untouched for every other
+        // render (gate off, or mode inactive).
+        const { buildTreatmentSummary: summarizeTreatment } = require('./treatment-summary');
+        const applied = summarizeTreatment(reportV2.treatment, { noTiming: true });
+        Object.defineProperty(reportV2, 'copyV6', {
+          value: {
+            headline: null,
+            whatWeDid: typeof applied === 'string' && applied.trim() ? applied.trim() : null,
+            whatToExpect: NEW_SOD_COPY.expect,
+            watching: null,
+            whatToExpectStatic: NEW_SOD_COPY.expect,
+          },
+          enumerable: false, writable: true, configurable: true,
+        });
+      } else if (reportV2 && featureGates.lawnReportCopyV6Live()) {
         // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
         // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
         // read while this is live). Fixed sentences from this visit's facts, no
@@ -6003,17 +6026,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
           }
         }
-      }
-      // GATE_LAWN_NEW_SOD_MODE: the lead's "What to expect" is the fixed new-sod
-      // sentence, never the frozen v6 expectation rows. Only an existing carrier
-      // is touched (v6 live): with the v6 gate off the lead has no such field and
-      // the snapshot's seasonal note already carries the sentence. The frozen
-      // entry itself is left as it was; this is the in-process hand-off only.
-      if (reportV2 && newSodActive && Object.prototype.hasOwnProperty.call(reportV2, 'copyV6')) {
-        Object.defineProperty(reportV2, 'copyV6', {
-          value: { ...(reportV2.copyV6 || LAWN_COPY_V6_EMPTY), whatToExpect: NEW_SOD_COPY.expect, whatToExpectStatic: NEW_SOD_COPY.expect },
-          enumerable: false, writable: true, configurable: true,
-        });
       }
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.
