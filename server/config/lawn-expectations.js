@@ -16,9 +16,10 @@
  *    that is not in PRODUCT_CLASS gets NO line (fail closed). A name mapped
  *    to `null` is a recorded decision to say nothing.
  *  - Every window carries `source`: 'proposed' (a default awaiting owner
- *    sign-off) or 'catalog' (the number is quoted from a species-catalog
+ *    sign-off), 'catalog' (the number is quoted from a species-catalog
  *    recovery_note; `catalogQuote` holds the verbatim note so a test can prove
- *    it still exists).
+ *    it still exists) or 'label' (the number is read off the product's EPA
+ *    label; `labelRef` names the label and `labelQuote` holds its words).
  *  - Short-lived products (iron, potassium) are `transient`: they can never
  *    yield a "behind" progress state.
  *  - Customer lines say nothing about watering, rain, sprinklers, mowing,
@@ -50,7 +51,13 @@ const MAX_LINE_WORDS = 33;
 // trimmed name, never a prefix or substring.
 const FAMILY = {
   BROADLEAF: 'herbicide_broadleaf',
-  SEDGE: 'herbicide_sedge',
+  // Label-sourced rows (owner 2026-10-03): each of these products states its
+  // own results timeline on the EPA label, so each has its own row worded
+  // from that label instead of sharing a family default.
+  CELSIUS: 'herbicide_celsius',
+  SPEEDZONE: 'herbicide_speedzone',
+  SEDGEHAMMER: 'herbicide_sedgehammer',
+  DISMISS: 'herbicide_dismiss',
   PRE_EMERGENT: 'pre_emergent',
   GRANULAR_N: 'granular_fertilizer',
   POTASSIUM: 'potassium_feed',
@@ -61,19 +68,19 @@ const FAMILY = {
 
 const PRODUCT_CLASS_ENTRIES = [
   // Post-emergent broadleaf herbicide, spray
-  ['Celsius WG', FAMILY.BROADLEAF],
-  ['SpeedZone Southern', FAMILY.BROADLEAF],
-  ['SpeedZone Southern EW', FAMILY.BROADLEAF],
+  ['Celsius WG', FAMILY.CELSIUS],
+  ['SpeedZone Southern', FAMILY.SPEEDZONE],
+  ['SpeedZone Southern EW', FAMILY.SPEEDZONE],
   ['LESCO Three-Way Selective Herbicide', FAMILY.BROADLEAF],
   ['Atrazine 4L', FAMILY.BROADLEAF],
 
   // Sedge herbicide
-  ['SedgeHammer Plus', FAMILY.SEDGE],
-  ['Sedgehammer Plus Halosulfuron-Methyl 5% Post Emergent Soluble Herbicide', FAMILY.SEDGE],
-  ['Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide', FAMILY.SEDGE],
-  ['Dismiss', FAMILY.SEDGE],
-  ['Dismiss 64 oz', FAMILY.SEDGE],
-  ['Dismiss NXT', FAMILY.SEDGE],
+  ['SedgeHammer Plus', FAMILY.SEDGEHAMMER],
+  ['Sedgehammer Plus Halosulfuron-Methyl 5% Post Emergent Soluble Herbicide', FAMILY.SEDGEHAMMER],
+  ['Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide', FAMILY.SEDGEHAMMER],
+  ['Dismiss', FAMILY.DISMISS],
+  ['Dismiss 64 oz', FAMILY.DISMISS],
+  ['Dismiss NXT', FAMILY.DISMISS],
 
   // Pre-emergent (judged by absence)
   ['Prodiamine 65 WDG', FAMILY.PRE_EMERGENT],
@@ -169,6 +176,11 @@ const proposed = (minDays, maxDays, extra = {}) => ({ minDays, maxDays, source: 
 const catalog = (minDays, maxDays, catalogRef, extra = {}) => ({
   minDays, maxDays, source: 'catalog', catalogRef, ...extra,
 });
+// A window read off the product's EPA label: `labelRef` names the label
+// (registration number and year) and `labelQuote` holds its words verbatim.
+const label = (minDays, maxDays, labelRef, labelQuote, extra = {}) => ({
+  minDays, maxDays, source: 'label', labelRef, labelQuote, ...extra,
+});
 
 // A progress window for ONE metric. mode 'gain': the score is expected to
 // rise, so "behind" needs no gain by closeDays. mode 'hold': the score is
@@ -178,6 +190,11 @@ const catalog = (minDays, maxDays, catalogRef, extra = {}) => ({
 const judged = (mode, extra = {}) => ({
   mode, fullMinDays: null, source: 'proposed', ...extra,
 });
+
+// Verbatim EPA label text behind the label-sourced rows below.
+const CELSIUS_LABEL_QUOTE = 'Weed growth ceases within hours after application of CELSIUS WG. Symptoms progress from yellowing or reddening/purpling to necrosis, resulting in control of weeds within 1-4 weeks after application, depending on the sensitivity of the weed and environmental conditions.';
+const SPEEDZONE_LABEL_QUOTE = 'Generally, the injury symptoms can be noticed within hours of the application and plant death can occur within 7 to 14 days.';
+const SEDGEHAMMER_LABEL_QUOTE = 'Herbicide symptoms are likely to show within 2 weeks as a necrotic ring at the base of the plant, even though the leaves and stems remain green and a deep leathery green in color.';
 
 // `byNextVisit` keys: too_early (the next visit lands before the first
 // visible change), partial (some change, the full result not yet), visible
@@ -205,10 +222,8 @@ const PRODUCT_ROWS = {
     limits: [],
     secondApp: {
       possible: true,
+      // No cap: the yearly cap is Celsius's own, and Celsius has its own row.
       line: 'Larger or deeper-rooted weeds can need a second application at a later visit.',
-      cappedLine: 'A different weed-control product may be used at a later visit if weeds remain.',
-      cappedBy: 'celsius',
-      cap: CELSIUS_YTD_CAP,
     },
     byNextVisit: {
       too_early: 'Weeds usually take about a week to show a change, so your next visit is early for a final read.',
@@ -219,9 +234,108 @@ const PRODUCT_ROWS = {
     contactTrigger: 'If treated weeds are still fully green after about 3 weeks, let us know.',
   },
 
-  herbicide_sedge: {
-    id: 'herbicide_sedge',
-    family: FAMILY.SEDGE,
+  // Celsius WG, EPA Reg. 432-1507 (2021 label).
+  herbicide_celsius: {
+    id: 'herbicide_celsius',
+    family: FAMILY.CELSIUS,
+    mode: null,
+    appliesTo: 'selective weed control',
+    metric: 'weed_suppression',
+    metricWindows: {
+      weed_suppression: judged('gain', { startDays: 1, fullMinDays: 7, closeDays: 28, source: 'label' }),
+    },
+    transient: false,
+    judgedByAbsence: false,
+    approved: true,
+    windows: {
+      first: label(0, 1, 'EPA 432-1507 (2021)', CELSIUS_LABEL_QUOTE),
+      full: label(7, 28, 'EPA 432-1507 (2021)', CELSIUS_LABEL_QUOTE),
+    },
+    visibleChange: 'Treated weeds stop growing within hours. They then yellow or turn reddish-purple and die back, with control in about 1 to 4 weeks depending on the weed and the weather.',
+    limits: [],
+    secondApp: {
+      possible: true,
+      // Label: "a follow-up application made 4-6 weeks later may be needed if regrowth is observed."
+      line: 'A follow-up application about 4 to 6 weeks later may be needed if weeds regrow.',
+      cappedLine: 'A different weed-control product may be used at a later visit if weeds remain.',
+      cappedBy: 'celsius',
+      cap: CELSIUS_YTD_CAP,
+    },
+    byNextVisit: {
+      partial: 'By your next visit, treated weeds should have stopped growing and may be yellowing or turning reddish-purple.',
+      visible: 'By your next visit, most treated weeds should be yellowing, browning or both.',
+      complete: 'By your next visit, most treated weeds should be yellow, brown or fading. Any still green then get a second look.',
+    },
+    contactTrigger: 'If treated weeds are still green and growing after about 4 weeks, let us know.',
+  },
+
+  // SpeedZone Southern, EPA Reg. 2217-835 (2015 label), and SpeedZone
+  // Southern EW, EPA Reg. 2217-1031 (2024 label): the same timeline sentence.
+  herbicide_speedzone: {
+    id: 'herbicide_speedzone',
+    family: FAMILY.SPEEDZONE,
+    mode: null,
+    appliesTo: 'selective weed control',
+    metric: 'weed_suppression',
+    metricWindows: {
+      weed_suppression: judged('gain', { startDays: 1, fullMinDays: 7, closeDays: 21 }),
+    },
+    transient: false,
+    judgedByAbsence: false,
+    approved: true,
+    windows: {
+      first: label(0, 1, 'EPA 2217-835 (2015) / 2217-1031 (2024)', SPEEDZONE_LABEL_QUOTE),
+      full: label(7, 14, 'EPA 2217-835 (2015) / 2217-1031 (2024)', SPEEDZONE_LABEL_QUOTE),
+    },
+    visibleChange: 'Treated weeds usually show injury within hours, and they can die within about 7 to 14 days.',
+    // Label: "provides little or no residual activity at recommended use rates."
+    limits: ['It works on the weeds present at treatment and does little to stop new ones from sprouting.'],
+    secondApp: null,
+    byNextVisit: {
+      partial: 'By your next visit, treated weeds should be showing injury, with die-back still to come.',
+      visible: 'By your next visit, most treated weeds should be dying back.',
+      complete: 'By your next visit, most treated weeds should have died back. Any still green then get a second look.',
+    },
+    contactTrigger: 'If treated weeds show no change after about 2 weeks, let us know.',
+  },
+
+  // SedgeHammer Plus, EPA Reg. 81880-24 (2020 label). The label says the
+  // leaves STAY GREEN at first, so no line here reads "still green" as failure.
+  herbicide_sedgehammer: {
+    id: 'herbicide_sedgehammer',
+    family: FAMILY.SEDGEHAMMER,
+    mode: null,
+    appliesTo: 'sedge control',
+    metric: 'weed_suppression',
+    metricWindows: {
+      // Label: a second treatment "may be required 6 - 10 weeks after the initial treatment".
+      weed_suppression: judged('gain', { startDays: 14, fullMinDays: 42, closeDays: 70 }),
+    },
+    transient: false,
+    judgedByAbsence: false,
+    approved: true,
+    windows: {
+      first: label(14, 14, 'EPA 81880-24 (2020)', SEDGEHAMMER_LABEL_QUOTE),
+      full: null,
+    },
+    visibleChange: 'Sedge usually shows the treatment within about 2 weeks, starting at the base of the plant. Its leaves can stay green for a while even though the treatment is working.',
+    limits: ['Larger or older sedge can need a second treatment about 6 to 10 weeks later.'],
+    secondApp: null,
+    byNextVisit: {
+      too_early: 'Sedge usually takes up to about 2 weeks to show the treatment, so your next visit may be early for a read.',
+      visible: 'By your next visit, treated sedge should show the treatment at its base, even if its leaves are still green.',
+    },
+    contactTrigger: 'If sedge is still growing strongly after about 6 weeks, let us know.',
+  },
+
+  // Dismiss, EPA Reg. 279-3295 (2024 label): "will generally control sedges
+  // for at least 60 days." Dismiss NXT, EPA Reg. 101563-315 (2026 label):
+  // "will generally control sedges for up to 60 days." Neither label's
+  // directions state how fast results show ("Visible results in 24 hours" is
+  // optional marketing claim text), so there is no speed or by-next-visit line.
+  herbicide_dismiss: {
+    id: 'herbicide_dismiss',
+    family: FAMILY.DISMISS,
     mode: null,
     appliesTo: 'sedge control',
     metric: 'weed_suppression',
@@ -231,20 +345,12 @@ const PRODUCT_ROWS = {
     transient: false,
     judgedByAbsence: false,
     approved: true,
-    windows: {
-      first: proposed(7, 14, { needsLabelCheck: true }),
-      full: proposed(21, 28, { needsLabelCheck: true }),
-    },
-    visibleChange: 'Sedge usually yellows within about 1 to 2 weeks and browns down over about 3 to 4 weeks.',
-    limits: ['It regrows from underground tubers, so repeat treatment is common.'],
+    windows: { first: null, full: null },
+    visibleChange: 'This treatment generally controls sedge for about 60 days.',
+    limits: ['Sedge regrows from underground tubers, so repeat treatment is common.'],
     secondApp: null,
-    byNextVisit: {
-      too_early: 'Sedge usually takes 1 to 2 weeks to show a change, so your next visit is early for a final read.',
-      partial: 'By your next visit, treated sedge should be yellowing, with browning still to come.',
-      visible: 'By your next visit, treated sedge should be yellowing, browning or both.',
-      complete: 'By your next visit, treated sedge should be yellow or brown. Regrowth from the tubers is common, and a repeat treatment is expected.',
-    },
-    contactTrigger: 'If sedge is still fully green after about 4 weeks, let us know.',
+    byNextVisit: {},
+    contactTrigger: 'If treated sedge keeps spreading, let us know.',
   },
 
   pre_emergent: {
@@ -645,7 +751,7 @@ const ISSUE_ROWS = {
     behindEligible: false,
     approved: true,
     // Only used when no herbicide row applies on this visit.
-    onlyWithoutRows: [FAMILY.BROADLEAF, FAMILY.SEDGE],
+    onlyWithoutRows: [FAMILY.BROADLEAF, FAMILY.CELSIUS, FAMILY.SPEEDZONE, FAMILY.SEDGEHAMMER, FAMILY.DISMISS],
     windows: { first: null, full: null },
     visibleChange: 'Treatment for the weeds seen is planned for the next visit.',
     limits: [],
@@ -659,8 +765,11 @@ const ISSUE_ROWS = {
 
 // Priority when more than one row applies (primary row first).
 const ROW_PRIORITY = [
+  'herbicide_celsius',
+  'herbicide_speedzone',
   'herbicide_broadleaf',
-  'herbicide_sedge',
+  'herbicide_sedgehammer',
+  'herbicide_dismiss',
   'fungicide_curative',
   'insecticide_curative',
   'granular_fertilizer',

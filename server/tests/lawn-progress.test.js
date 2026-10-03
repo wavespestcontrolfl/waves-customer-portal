@@ -32,7 +32,10 @@ const PRIOR_DATE = '2026-06-01';
 
 // A product per family (exact catalog names) and the tag that makes a family curative.
 const PRODUCT = {
-  broadleaf: { name: 'Celsius WG' },
+  broadleaf: { name: 'LESCO Three-Way Selective Herbicide' },
+  celsius: { name: 'Celsius WG' },
+  speedZone: { name: 'SpeedZone Southern' },
+  sedgeHammer: { name: 'SedgeHammer Plus' },
   sedge: { name: 'Dismiss' },
   preEmergent: { name: 'Prodiamine 65 WDG' },
   granular: { name: 'LESCO 24-0-11' },
@@ -65,7 +68,7 @@ describe('rule 1: too_early is never behind', () => {
   ));
 
   it('covers every family that can be judged (config-derived)', () => {
-    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'fungicideCurative', 'granular', 'insecticideCurative', 'sedge']);
+    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative', 'sedge', 'sedgeHammer', 'speedZone']);
   });
 
   it.each(families)('%s: no behind on any day up to the close of the metric window, at any delta', (_name, app) => {
@@ -424,8 +427,14 @@ describe('transient, absence and unmapped rows are never behind', () => {
   });
 
   it('two products of one family are one row', () => {
+    const progress = run({ days: 30, applied: [{ name: 'SpeedZone Southern' }, { name: 'SpeedZone Southern EW' }], cur: { weed_suppression: 85 } });
+    expect(progress.items.filter((i) => i.rowId === 'herbicide_speedzone')).toHaveLength(1);
+  });
+
+  it('two label-sourced products are two rows, each judged on its own label window', () => {
     const progress = run({ days: 30, applied: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }], cur: { weed_suppression: 85 } });
-    expect(progress.items.filter((i) => i.rowId === 'herbicide_broadleaf')).toHaveLength(1);
+    expect(progress.items.filter((i) => i.metric === 'weed_suppression').map((i) => i.rowId).sort())
+      .toEqual(['herbicide_celsius', 'herbicide_speedzone']);
   });
 });
 
