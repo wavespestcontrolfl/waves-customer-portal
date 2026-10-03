@@ -734,6 +734,12 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   const inbound = await translateInbound(inboundMessage);
   if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
   if (inbound.isEnglish) return { english: true };
+  // A foreign-language iPhone reaction ("Понравилось «…»", "Le gustó “…”") reads as one only once it is in
+  // English; the webhook's reaction check is English-only. A quiet one is not answered, as an English one is not.
+  const asEnglishReaction = inbound.english.replace(/\u00ab/g, '\u201c').replace(/\u00bb/g, '\u201d');
+  if (require('./sms-intent').isQuietSmsReaction(asEnglishReaction)) {
+    return { skip: 'reaction', fields: { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english } };
+  }
   // the customer's thread and account, read before any other model call; the thread is cut at the triggering
   // text (threadAsOfTrigger), so a staff reply or newer text landing meanwhile never reaches the draft. Same
   // live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
@@ -845,9 +851,31 @@ async function translateAndCheck({ englishReply, language, languageCode, context
  * Never throws, never sends. Returns the stored row (saved:false when the
  * insert failed) for logging/tests.
  */
+// Owner 2026-10-03: answer in the customer's USUAL language. A customer whose
+// earlier texts (up to their last 10, reactions left out) are mostly English
+// gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
+// no trial. A first text, or one from a customer who mostly writes another
+// language, goes on. A read failure goes on too (the trial sends nothing).
+async function usuallyWritesEnglish(customerId, smsLogId) {
+  try {
+    const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
+    const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body');
+    const { isSmsReaction } = require('./sms-intent');
+    const { isEnglishInbound } = require('./sms-label-facts');
+    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b));
+    const english = bodies.filter((b) => isEnglishInbound(b)).length;
+    return english > bodies.length - english;
+  } catch (err) {
+    logger.warn(`[sms-translation] earlier texts not read: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId, hasMedia = false }) {
   // text only: a photo's caption is answered by the photo lanes, which this trial cannot see
   if (!trialEnabled() || hasMedia || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
+  if (await usuallyWritesEnglish(customer.id, smsLogId)) return null;
   const startedAt = Date.now();
   const save = async (verdict, holdReason, fields = {}, checks = undefined) => {
     const row = {

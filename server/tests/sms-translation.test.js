@@ -9,13 +9,15 @@ const mockDraft = jest.fn();
 let mockGateOn = true;
 
 const mockPrior = jest.fn(async () => []);
+const mockEarlier = jest.fn(async () => []);
 const mockTrigger = jest.fn(async () => ({ created_at: new Date('2026-10-02T12:00:00Z') }));
 const mockLoopsOpen = jest.fn(() => false);
 const mockEtaExpired = jest.fn(() => false);
 jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
-    where: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q, select: () => mockPrior(), first: () => mockTrigger(),
+    where: () => q, whereNot: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
+    select: (...cols) => (cols[0] === 'message_body' ? mockEarlier() : cols[0] === 'created_at' ? q : mockPrior()), first: () => mockTrigger(),
   };
   return q;
 }));
@@ -531,6 +533,30 @@ describe('runTranslationTrial', () => {
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row).toMatchObject({ verdict: 'held', hold_reason: 'live_eta_expired' });
     expect(mockEtaExpired.mock.calls[0][0]).toMatchObject({ reply: REPLY, factsAt: expect.any(Date) });
+  });
+
+  test('a customer who usually texts in English gets no trial for a one-off "Gracias"', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Are you coming this week?' }, { message_body: 'Ok thanks, see you Friday' }, { message_body: 'Liked “See you Friday”' }]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('a customer who usually texts in Spanish, or texts for the first time, goes on to the trial', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: '¿Pueden venir el jueves?' }, { message_body: 'Gracias, hasta luego' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'ready' });
+  });
+
+  test('a foreign-language iPhone reaction is skipped, as an English one is', async () => {
+    const quoted = 'Hi Nadia, we moved your service to Wed, Sep 23, 12:00 PM - 2:00 PM.';
+    scriptModels({ inbound: { is_english: false, language: 'Russian', language_code: 'ru', english: `Liked «${quoted}»` } });
+    const row = await runTranslationTrial({ inboundMessage: `Понравилось «${quoted}»`, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'skipped', hold_reason: 'reaction', language_code: 'ru' });
+    expect(mockDraft).not.toHaveBeenCalled();
   });
 
   test('trial drafting is metered on the translation lane', async () => {
