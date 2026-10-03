@@ -1072,6 +1072,21 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (LOCATION.some((k) => nz(extracted[k]))) dropAccountDetail('address', LOCATION);
       if (nz(input.email)) dropAccountDetail('email', ['email']); // readable or not: they named another
       if (nz(extracted.first_name) || nz(extracted.last_name)) dropAccountDetail('name', ['first_name', 'last_name']);
+      // …and details kept from an earlier yes are re-proven on every capture
+      // that still relies on them: a different person's name given now, or an
+      // account that is no longer eligible, takes ALL of them back.
+      let accountDetails = null;
+      let accountRead = false;
+      if (estimateRequested && detailsFromAccount.length) {
+        const statedFirstName = nz(extracted.first_name) || (detailsFromAccount.includes('name') ? null : nz(priorEstimateFields.first_name));
+        accountDetails = await accountDetailsForEstimate(ctx, { first_name: statedFirstName });
+        accountRead = true;
+        if (!accountDetails) {
+          dropAccountDetail('address', LOCATION);
+          dropAccountDetail('email', ['email']);
+          dropAccountDetail('name', ['first_name', 'last_name']);
+        }
+      }
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -1093,8 +1108,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // the office card (labelled as confirmed, not as said). Without the
       // yes nothing is taken from the account.
       const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
-      const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
-        ? await accountDetailsForEstimate(ctx, estimateFields) : null;
+      if (!accountRead && estimateRequested && REQUIRED.some((k) => !estimateFields[k])) {
+        accountDetails = await accountDetailsForEstimate(ctx, estimateFields);
+      }
       let accountCouldFill = false;
       if (accountDetails) {
         const acct = {

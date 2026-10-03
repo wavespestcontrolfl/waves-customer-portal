@@ -285,6 +285,21 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
   });
 
+  test('a different person\'s name given after the yes takes back every detail kept from the account', async () => {
+    holder.last_name = null; // the yes leaves the last name missing, so the call goes on
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: last_name/);
+    expect(store.bag()).toMatchObject({ email: 'dana@example.com', address_line1: '12 Test Street' });
+    const out = await ask({ first_name: 'Robin', last_name: 'Other' }, ctx);
+    expect(out).toMatch(/still missing: email, address_line1/);
+    expect(out).not.toMatch(/ONE question/);
+    expect(store.bag()).toMatchObject({ first_name: 'Robin', last_name: 'Other', details_from_account: 'none' });
+    expect(store.bag().email).toBeUndefined();
+    expect(store.bag().address_line1).toBeUndefined();
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+  });
+
   test('an unreadable email given on the capture is not replaced by the account\'s', async () => {
     const out = await ask({ use_account_details: true, email: 'dana at work dot' });
     expect(out).toMatch(/still missing: email/);
