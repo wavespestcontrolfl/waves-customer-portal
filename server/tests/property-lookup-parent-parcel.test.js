@@ -250,6 +250,19 @@ describe('the whole lookup when every fact provider fails', () => {
     }
   });
 
+  test('the county layer switched off is a skipped check too, unless the statewide layer finds a parcel', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    process.env.COUNTY_PARCEL_GIS_DISABLED = '1';
+    try {
+      lookupCountyParcelByPoint.mockResolvedValue(null);
+      const diag = {};
+      await lookupPropertyFromAITrio(TYPED, geo, diag, { commercialSuiteSizing: true, retainParentParcel: true });
+      expect(diag.parentParcelCheckRan).toBe(false);
+    } finally {
+      delete process.env.COUNTY_PARCEL_GIS_DISABLED;
+    }
+  });
+
   test('a direct caller that did not ask to keep the parent parcel gets no context record, gates on or not', async () => {
     process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());

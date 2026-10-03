@@ -2014,6 +2014,12 @@ function statewideParcelLayerDisabled() {
   return typeof fn === 'function' && fn() === true;
 }
 
+// The county layer's own kill switch (county-parcel-gis.js isDisabled reads
+// the same variable the same way): off, it returns null without asking.
+function countyParcelLayerDisabled() {
+  return process.env.COUNTY_PARCEL_GIS_DISABLED === '1' || process.env.COUNTY_PARCEL_GIS_DISABLED === 'true';
+}
+
 function pointInsideParcelPolygon(polygon, lng, lat) {
   const fn = require('./parcel-gis').pointInsidePolygon;
   return typeof fn === 'function' && fn(polygon, lng, lat) === true;
@@ -2470,7 +2476,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       timeoutMs: gisTimeoutMs,
       diag: pointDiag,
     })));
-    if (pointDiag.errors.length) pointLookupFailed = true;
+    // A query error, or the county layer switched off: skipped, not a clean
+    // "no parcel" (re-enabling it must be able to retry this address).
+    if (pointDiag.errors.length || countyParcelLayerDisabled()) pointLookupFailed = true;
     // The county roll answered for this point (condo unit folio: only then is
     // "no stacked building here" a definitive, cacheable outcome — a failed or
     // timed-out leg also reads null and must stay retryable).
