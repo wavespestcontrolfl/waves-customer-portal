@@ -112,6 +112,161 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
   };
 }
 
+// ── The report flow (any pest visit) ──────────────────────────────────────
+// That sheet's note is the tech's own words, so its mic answers words for the
+// note box and the products are read from the note when the report is written.
+
+const clipExtension = (type) => (type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : type.includes('mpeg') ? 'mp3' : 'webm');
+export const NOTE_CLIP_ERROR = "Couldn't hear that. Try again, or type it.";
+
+// The note's mic on our own transcriber (owner ruling 2026-10-03), heard with the
+// sheet's product names: `onClip` for VisitNote (undefined with voice fill off, so
+// the mic is as it was), and a short message when a clip could not be heard.
+export function useNoteClip({ enabled, request, serviceId, onText }) {
+  const [state, setState] = useState({ error: '', unavailable: false });
+  const onClip = useCallback(async (blob, durationSeconds) => {
+    if (!blob || !blob.size) return;
+    setState((prev) => ({ ...prev, error: '' }));
+    try {
+      const form = new FormData();
+      const type = (blob.type || 'audio/webm').split(';')[0];
+      if (Number.isFinite(durationSeconds) && durationSeconds > 0) form.append('duration_seconds', String(Math.round(durationSeconds)));
+      form.append('audio', blob, `note.${clipExtension(type)}`);
+      const data = await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/dictation`, { method: 'POST', body: form });
+      const text = String(data?.text || '').trim();
+      if (text) onText(text);
+      else setState((prev) => ({ ...prev, error: "Didn't catch anything. Tap the mic and try again." }));
+    } catch (err) {
+      // Gate turned off since the sheet opened: the mic goes back to how it was.
+      setState(err?.status === 404 ? { error: '', unavailable: true } : { error: NOTE_CLIP_ERROR, unavailable: false });
+    }
+  }, [request, serviceId, onText]);
+  return { onClip: enabled && !state.unavailable ? onClip : undefined, error: state.error };
+}
+
+// A spray's way is the note's own read on this sheet (visit-voice-facts), so a
+// product's spray way is not a tap here; any other way (a bait, a granule) is.
+const withoutSprayWay = (product, ops) => (ops.sprayMethods.has(product.method) ? { ...product, method: '' } : product);
+const withFill = (rows, added, patches) => {
+  const known = new Set(rows.map((row) => String(row.productId)));
+  return [
+    ...rows.map((row) => (patches[row.productId] ? { ...row, ...patches[row.productId] } : row)),
+    ...added.filter((row) => !known.has(String(row.productId))),
+  ];
+};
+
+// The products the note names, read when the report is written and applied as
+// unconfirmed rows: `read(note)` asks, `settle(fill, sprayMethod)` turns the answer
+// into taps and answers the rows as they then stand (the report is written from
+// those). Confirms and Checks hold Complete & send until the tech answers each.
+// `products` is the sheet's useProductRows; `ops` its row rules.
+export function useProductVoiceFill({ enabled, request, serviceId, products, ctx, ops }) {
+  const [checks, setChecks] = useState([]);
+  const [confirms, setConfirms] = useState([]);
+  const [heard, setHeard] = useState({ products: {}, visit: '' });
+  const [unavailable, setUnavailable] = useState(false);
+  const nextId = useRef(0);
+  // A Check the tech already answered is not raised again by the next read of the
+  // same note.
+  const answered = useRef(new Set());
+  // A product the fill added that the tech then removed stays removed: the next
+  // read of the same note does not bring it back.
+  const addedByFill = useRef(new Set());
+  const declined = useRef(new Set());
+  const latest = useRef({ products, ctx, ops });
+  latest.current = { products, ctx, ops };
+  const rowsRef = useRef(products.rows);
+  rowsRef.current = products.rows;
+  const on = enabled && !unavailable;
+
+  const read = useCallback(async (note) => {
+    try {
+      return await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/products`, { method: 'POST', body: JSON.stringify({ note }) });
+    } catch (err) {
+      if (err?.status === 404) setUnavailable(true);
+      // A failed read fills nothing; the tech picks the products by hand.
+      return null;
+    }
+  }, [request, serviceId]);
+
+  const settle = useCallback((fill, sprayMethod) => {
+    const rows = rowsRef.current;
+    if (!fill || fill.status !== 'read') return rows;
+    const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps } = latest.current;
+    const plan = planVoiceFill({
+      fill: {
+        products: (fill.products || []).filter((product) => !declined.current.has(String(product.productId))).map((product) => withoutSprayWay(product, sheetOps)),
+        unclear: fill.unclear,
+      },
+      rows,
+      form: { method: sprayMethod },
+      ctx: sheetCtx,
+      ops: sheetOps,
+    });
+    sheetProducts.applyFill(plan.added, plan.patches);
+    const filled = withFill(rows, plan.added, plan.patches);
+    rowsRef.current = filled;
+    for (const row of plan.added) addedByFill.current.add(String(row.productId));
+    setConfirms((prev) => [
+      ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
+      ...plan.confirms.map((confirm) => ({ ...confirm, id: ++nextId.current })),
+    ]);
+    setHeard((prev) => ({ ...prev, products: { ...prev.products, ...plan.heard.products } }));
+    setChecks((prev) => {
+      const open = new Set(prev.map((check) => check.text));
+      const fresh = plan.checks.filter((check) => !open.has(check.text) && !answered.current.has(check.text));
+      return fresh.length ? [...prev, ...fresh.map((check) => ({ ...check, id: ++nextId.current }))] : prev;
+    });
+    return filled;
+  }, []);
+
+  // Fixing the row a Check or a confirm points at answers it.
+  const { rows } = products;
+  useEffect(() => {
+    const form = { method: '' };
+    const onSheet = new Set(rows.map((row) => String(row.productId)));
+    for (const id of addedByFill.current) {
+      if (onSheet.has(id)) continue;
+      addedByFill.current.delete(id);
+      declined.current.add(id);
+    }
+    setChecks((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
+    setConfirms((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
+  }, [rows]);
+
+  const dismiss = useCallback((id) => setChecks((prev) => {
+    const check = prev.find((entry) => entry.id === id);
+    if (check) answered.current.add(check.text);
+    return prev.filter((entry) => entry.id !== id);
+  }), []);
+  const confirmsRef = useRef(confirms);
+  confirmsRef.current = confirms;
+  // ✓ makes the row the tech's own: a later read raises a Check against it, never
+  // replaces it.
+  const confirm = useCallback((id) => {
+    const item = confirmsRef.current.find((entry) => entry.id === id);
+    const key = String(item?.watch || '').split(':')[1];
+    const { products: sheetProducts, ops: sheetOps } = latest.current;
+    const row = rowsRef.current.find((r) => String(r.productId) === key);
+    const ownWay = row?.added && !sheetOps.followsVisitMethod(row);
+    if (row) sheetProducts.updateRow(row.productId, ownWay ? { amountPicked: true, methodPicked: true } : { amountPicked: true });
+    setConfirms((prev) => prev.filter((entry) => entry.id !== id));
+  }, []);
+
+  const pending = checks.length > 0 || confirms.length > 0;
+  return {
+    // what is already on the sheet stays reachable if the gate turns off later
+    enabled: enabled && (!unavailable || pending),
+    read: on ? read : null,
+    settle,
+    checks,
+    confirms,
+    confirm,
+    dismiss,
+    heard,
+  };
+}
+
 function MicIcon() {
   return (
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

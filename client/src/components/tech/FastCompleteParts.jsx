@@ -413,7 +413,9 @@ export function ChoiceSection({ title, action, columns = 2, children }) {
 // (DictationButton's upload fallback), and renders nothing where neither works.
 // `children` (the report flow's photos, GATE_NOTE_BOX_PHOTOS) sit inside the
 // note's box under the words; without them the note is exactly as before.
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, children }) {
+// `onClip` (voice fill on the report flow): the mic records and the clip goes to
+// our own transcriber, which answers the words for this box.
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children }) {
   const noteId = useId();
   const text = (
     <Textarea
@@ -432,7 +434,7 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
         <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
       </div>
       <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
+        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
         {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
       </div>
     </section>

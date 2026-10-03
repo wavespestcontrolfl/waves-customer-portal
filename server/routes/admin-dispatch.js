@@ -4607,6 +4607,80 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
   } catch (err) { next(err); }
 });
 
+// The report flow's two voice-fill reads (any untyped pest visit, a regular visit
+// or a re-service; same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence).
+// Each is a paid call with its own staff bucket, so a long note dictated in pieces
+// never spends the product read's budget.
+const voiceFillBucket = (max, error) => require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error },
+});
+const voiceFillDictationLimiter = voiceFillBucket(40, 'Too many dictation clips. Type your notes for now.');
+const voiceFillProductsLimiter = voiceFillBucket(30, 'Too many voice fills. Pick the products by hand for now.');
+// A refusal about the visit itself (gone, not a pest visit the sheet takes).
+const voiceFillVisitRefusal = (res, reason) => res
+  .status(reason === 'not_pest_re_service' || reason === 'not_eligible' ? 409 : recapStatusForReason(reason))
+  .json({ error: reason, code: reason });
+const VOICE_FILL_VISIT_REASONS = new Set(['not_found', 'not_pest_re_service', 'not_eligible']);
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/dictation
+// multipart: audio (the recording), duration_seconds
+// The report flow's note mic (owner ruling 2026-10-03, "always our transcriber"):
+// the clip is transcribed with the sheet's own product names and the words come
+// back for the note box, where the tech reads and edits them. Nothing is stored;
+// the audit line carries sizes only. Silence answers { text: '' }.
+router.post('/:serviceId/fast-complete/voice-fill/dictation', fastCompleteVoiceFillGate, voiceFillDictationLimiter, voiceFillClipOwner, voiceFillClipParse, async (req, res, next) => {
+  try {
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
+    const { baseType, filename } = dictationClipType(req.file);
+    if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
+    const result = await VoiceFill.transcribeVisitClip({
+      serviceId: req.params.serviceId, audio: req.file.buffer, mimeType: baseType, filename,
+      durationSeconds: Number(req.body?.duration_seconds) || 0,
+    });
+    const size = `bytes=${req.file.buffer.length} type=${baseType}`;
+    if (!result.ok) {
+      logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=false reason=${result.reason}`);
+      if (result.reason === 'nothing_heard') return res.json({ text: '' });
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.status(502).json({ error: 'Transcription unavailable. Type your notes instead.' });
+    }
+    logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=true chars=${result.text.length}`);
+    return res.json({ text: result.text });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/products
+// body: { note }
+// The report flow's product read: the products the note names, each with the
+// amount, unit and way the tech said for it and the words it stood on, checked by
+// the same rules as the re-service sheet's fill (services/fast-complete-voice-fill.js
+// voiceProductsFromNote). It only suggests: the sheet shows each as an unconfirmed
+// row the tech confirms, and writes nothing here. A failed read answers
+// { available: true, status: 'failed' }, never an error, so the sheet carries on
+// with the products picked by hand. The audit line carries counts only.
+router.post('/:serviceId/fast-complete/voice-fill/products', fastCompleteVoiceFillGate, voiceFillProductsLimiter, async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text', code: 'bad_note' });
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const result = await VoiceFill.voiceProductsFromNote({ serviceId: req.params.serviceId, note });
+    if (!result.ok) {
+      logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${note.trim().length} ok=false reason=${result.reason}`);
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.json({ enabled: true, available: true, status: 'failed', reason: result.reason, products: [], unclear: [] });
+    }
+    logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${result.chars} ok=true products=${result.fill.products.length} unclear=${result.fill.unclear.length}`);
+    return res.json({ enabled: true, available: true, status: 'read', products: result.fill.products, unclear: result.fill.unclear });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the

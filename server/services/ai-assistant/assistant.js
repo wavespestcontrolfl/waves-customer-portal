@@ -37,9 +37,122 @@ function escalationPriority(customerMessage) {
   return 'normal';
 }
 
+const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
+async function persistedPortalTurn(channel, identifier, customerId, turn) {
+  if (!turn?.requestRowId) return null;
+  const query = db('agent_messages as message')
+    .innerJoin('agent_sessions as conversation', 'conversation.id', 'message.conversation_id')
+    .where({ 'message.portal_chat_request_id': turn.requestRowId, 'message.role': 'user',
+      'conversation.channel': channel, 'conversation.channel_identifier': identifier });
+  if (customerId) query.where('conversation.customer_id', customerId);
+  else query.whereNull('conversation.customer_id');
+  return runQuery(query.select('conversation.*',
+    'message.id as portal_turn_message_id', 'message.content as portal_turn_message_content').first(), turn, 'portal turn recovery');
+}
+async function isolateRecoveredPortalTurn(conversation, channel, identifier, customerId, turn) {
+  if (!conversation.portal_turn_message_id || !turn?.transaction) return conversation;
+  return turn.transaction('portal turn recovery isolation', async (trx) => {
+    const message = await trx('agent_messages').where({
+      id: conversation.portal_turn_message_id,
+      portal_chat_request_id: turn.requestRowId,
+      role: 'user',
+    }).forUpdate().first();
+    if (!message) return conversation;
+
+    const scoped = trx('agent_sessions').where({
+      id: message.conversation_id, channel, channel_identifier: identifier,
+    });
+    if (customerId) scoped.where('customer_id', customerId);
+    else scoped.whereNull('customer_id');
+    const source = await scoped.forUpdate().first();
+    if (!source) return conversation;
+
+    const cutoff = trx('agent_messages').select('created_at').where('id', message.id);
+    const laterUser = await trx('agent_messages')
+      .where({ conversation_id: source.id, role: 'user' })
+      .where((later) => later.where('created_at', '>', cutoff.clone())
+        .orWhere((sameTime) => sameTime.where('created_at', cutoff.clone()).where('id', '>', message.id)))
+      .first('id');
+    const recovered = {
+      ...source,
+      portal_turn_message_id: message.id,
+      portal_turn_message_content: message.content,
+    };
+    if (!laterUser) return recovered;
+
+    const firstName = safeFirstNameFromSnapshot(source.context_snapshot);
+    const [fork] = await trx('agent_sessions').insert({
+      customer_id: source.customer_id || null,
+      channel: source.channel,
+      channel_identifier: source.channel_identifier,
+      status: 'timeout',
+      last_activity_at: trx.fn.now(),
+      timeout_at: trx.fn.now(),
+      message_count: 1,
+      context_snapshot: { version: MINIMAL_CONTEXT_VERSION, ...(firstName ? { firstName } : {}) },
+      resolved_by: 'timeout',
+    }).returning('*');
+    await trx('agent_messages')
+      .where({ conversation_id: source.id, portal_chat_request_id: turn.requestRowId })
+      .update({ conversation_id: fork.id });
+    await trx('agent_sessions').where('id', source.id).update({
+      message_count: trx.raw('GREATEST(COALESCE(message_count, 0) - 1, 0)'),
+    });
+    await trx('portal_chat_requests').where('id', turn.requestRowId).update({ conversation_id: fork.id });
+    return {
+      ...fork,
+      portal_turn_message_id: message.id,
+      portal_turn_message_content: message.content,
+    };
+  });
+}
+function portalReplay(conversation, fallback) {
+  if (!conversation.portal_turn_message_id) return { content: fallback, cursor: null, isolate: false };
+  const cursor = { id: conversation.portal_turn_message_id, content: conversation.portal_turn_message_content };
+  const legacy = conversation.customer_id
+    && parsedContextSnapshot(conversation.context_snapshot)?.version !== MINIMAL_CONTEXT_VERSION;
+  const expired = conversation.status !== 'active' || new Date(conversation.timeout_at).getTime() <= Date.now();
+  return { content: cursor.content, cursor, isolate: legacy || expired };
+}
 const waitFor = (work, turn, stage) => turn
   ? turn.waitFor(work, stage)
   : (typeof work === 'function' ? work() : work);
+
+// The same assistant serves coordinated portal turns and uncoordinated SMS.
+// Keep the persistence/deadline fork at that boundary so the model/tool loop
+// below follows one path in both channels.
+function assistantTurnExecution(turn) {
+  return {
+    requestFields: turn ? { portal_chat_request_id: turn.requestRowId } : {},
+    assertActive(stage) {
+      if (turn) turn.assertActive(stage);
+    },
+    providerOptions() {
+      return turn ? turn.providerOptions() : undefined;
+    },
+    escalationOptions(options) {
+      return turn ? { ...options, turn } : options;
+    },
+    write(stage, operation) {
+      return turn?.transaction ? turn.transaction(stage, operation) : operation(db);
+    },
+    persistCommittedResult(executor, result) {
+      return turn?.persistCommittedResult
+        ? turn.persistCommittedResult(executor, result)
+        : result;
+    },
+    rememberCommittedResult(result) {
+      return turn?.rememberCommittedResult ? turn.rememberCommittedResult(result) : result;
+    },
+    rethrowDeadline(err) {
+      if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    },
+    handleWriteError(err, message) {
+      if (err?.code === 'PORTAL_CHAT_DEADLINE' || turn) throw err;
+      logger.error(`[ai-assistant] ${message}: ${err.message}`);
+    },
+  };
+}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -120,9 +233,8 @@ function laneExtras(lane) {
 // earlier tool in this turn produced still shows under the hand-off reply (a
 // charge question shows the card AND hands off the "why"), except a free
 // re-service booking button: a turn that hands off is one the team decides.
-function handOffReply(escResult, lane) {
+function prepareHandOff(lane) {
   if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
-  return { ...escResult, ...laneExtras(lane) };
 }
 const ESCALATE_AFTER_READ_BACK = {
   escalated: false,
@@ -141,7 +253,7 @@ const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
 // `secondaryProperty`: the portal session is scoped to a non-primary saved
 // property (the route decides; anything but false withholds the re-service
 // button, which books at the primary address).
-function portalLane(channel, { secondaryProperty = true } = {}) {
+function portalLane(channel, { secondaryProperty = true, replay = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
   const gates = require('../../config/feature-gates');
   // Three independent gates: the payment card, the past-visit facts and the
@@ -152,7 +264,9 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   // The lawn line of the re-service offer: its own gate, on top of the offer's.
   const reserviceLawn = reservice && gates.portalChatReserviceLawnLive();
   // The confirmed email-change hand-off: its own gate.
-  const emailChange = gates.portalChatEmailChangeLive();
+  // A crashed turn cannot confirm an address from a later transcript read-back.
+  // Recover its original ask through the ordinary account-change handoff instead.
+  const emailChange = !replay && gates.portalChatEmailChangeLive();
   return {
     prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange }),
     tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange }),
@@ -430,7 +544,7 @@ class WavesAssistant {
    * Process an incoming message from any channel.
    * Returns { reply, conversationId, escalated, escalationId }
    */
-  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty }) {
+  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty, turn = null }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[ai-assistant] ANTHROPIC_API_KEY not configured');
       return { reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control", escalated: false };
@@ -439,31 +553,48 @@ class WavesAssistant {
     // 1. Find or create conversation (respecting 30-min timeout)
     let conversation;
     try {
-      conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone);
+      conversation = await this.resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn);
+      conversation = await isolateRecoveredPortalTurn(
+        conversation, channel, channelIdentifier || customerPhone, customerId, turn,
+      );
     } catch (convErr) {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
       return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
     }
+    const replay = portalReplay(conversation, message);
+    const turnMessage = replay.content;
 
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel, { secondaryProperty });
-    const trigger = this.matchedEscalationTrigger(message, channel);
+    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor) });
+    turn?.registerFallbackExtras?.(() => laneExtras(lane));
+    const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
     // 3. Save the user message
     try {
-      await db('agent_messages').insert({
-        conversation_id: conversation.id,
-        role: 'user',
-        content: message,
-        channel,
-      });
-      await db('agent_sessions').where('id', conversation.id).update({
-        message_count: (conversation.message_count || 0) + 1,
-        last_activity_at: new Date(),
-        timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
-      });
+      const persist = async (executor) => {
+        const messageInsert = executor('agent_messages').insert({
+          conversation_id: conversation.id,
+          role: 'user',
+          content: turnMessage,
+          channel,
+          ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
+        }).onConflict().ignore();
+        if (turn) {
+          const inserted = await messageInsert.returning('id');
+          if (!inserted.length) return;
+        } else {
+          await messageInsert;
+        }
+        await executor('agent_sessions').where('id', conversation.id).update({
+          message_count: (conversation.message_count || 0) + 1,
+          last_activity_at: new Date(),
+          timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
+        });
+      };
+      if (turn) await turn.transaction('user message persistence', persist);
+      else await persist(db);
     } catch (msgErr) {
       logger.error(`[ai-assistant] Failed to save user message: ${msgErr.message}`);
     }
@@ -475,25 +606,29 @@ class WavesAssistant {
       // lane the customer still gets the payment card and Open Billing
       // button under the hand-off reply, as a model-led hand-off would give.
       if (topic === 'billing' && lane.payments) {
-        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
+        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards, lane.context, turn);
       }
       // The keyword hand-off runs before the model, so nobody judged whether
       // this message confirmed an address the chat had just read back: the
       // address rides on the same hand-off for the team to confirm.
-      const emailReadBack = lane.emailChange ? await emailReadBackAwaitingAnswer(conversation.id, message) : null;
-      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic, ...(emailReadBack ? { emailReadBack } : {}) });
+      const emailReadBack = lane.emailChange ? await emailReadBackAwaitingAnswer(conversation.id, turnMessage, turn) : null;
+      const escResult = await this.escalate(conversation, turnMessage, 'Sensitive topic detected in customer message', {
+        topic, ...(emailReadBack ? { emailReadBack } : {}), ...(turn ? { turn } : {}),
+      });
       return { ...escResult, ...laneExtras(lane) };
     }
 
     // 5. Build conversation history for Claude
     // Portal chat reads the newest messages; other channels keep the original
     // oldest-first read.
-    const history = await this.buildHistory(conversation.id, { newest: lane.portal === true });
+    const history = await this.buildHistory(conversation.id, {
+      newest: lane.portal === true, turn, through: replay.cursor, isolate: replay.isolate,
+    });
     // The customer's own words this turn, which the re-service tool
     // classifies (the model's reading of them never decides what is covered).
     // Only this message counts: an earlier report is never carried forward
     // past a later "they're gone now".
-    if (lane.reservice || lane.emailChange) lane.context.customerMessage = message;
+    lane.context.customerMessage = turnMessage;
     // The chat whose messages the email-change check reads.
     if (lane.emailChange) lane.context.conversationId = conversation.id;
 
@@ -508,7 +643,7 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
-      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
+      return await this.answerWithTools({ conversation, message: turnMessage, history, contextStr, lane, customerId, channel, turn });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       // A card or button a tool already built this turn still shows under
@@ -517,14 +652,20 @@ class WavesAssistant {
     }
   }
 
+  async resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn) {
+    const recovered = await persistedPortalTurn(channel, channelIdentifier || customerPhone, customerId, turn);
+    return recovered || this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn);
+  }
+
   /**
    * One model turn: the tool-use loop for a saved customer message. Runs the
    * lane's prompt and tools, executes tool calls (an escalate call ends the
    * turn with the hand-off reply), saves and returns the reply. Throws on a
    * provider failure; processMessage owns the fallback reply.
    */
-  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel }) {
+  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel, turn = null }) {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const execution = assistantTurnExecution(turn);
 
     let messages = history;
     let finalReply = '';
@@ -547,7 +688,8 @@ class WavesAssistant {
     // Tool-use loop — Claude may call multiple tools before responding
     let lastResponse = null;
     let loopExhausted = true;
-    for (let turn = 0; turn < 5; turn++) {
+    for (let round = 0; round < 5; round++) {
+      execution.assertActive('model round');
       const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
         model: MODEL,
         ...anthropicEffortConfig(MODEL),
@@ -555,15 +697,17 @@ class WavesAssistant {
         system,
         tools: lane.tools,
         messages: withCacheBreakpoint(messages),
-      }), { laneId: 'portal_assistant' });
+      }, execution.providerOptions()), { laneId: 'portal_assistant' });
+      execution.assertActive('model response');
 
       // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
       // customer turns is the prod verification signal.
       const u = response.usage || {};
+      const [inputTokens, cacheWrite, cacheRead, outputTokens] =
+        ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'].map((key) => u[key] ?? 0);
       logger.info(
-        `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
-        `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
-        `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+        `[ai-assistant] usage turn=${round} in=${inputTokens} ` +
+        `cache_write=${cacheWrite} cache_read=${cacheRead} out=${outputTokens}`
       );
 
       // Check if Claude wants to use tools
@@ -601,22 +745,31 @@ class WavesAssistant {
         if (readBackAsked && answeredInsteadOfRun(toolUse, toolResults)) continue;
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
+          prepareHandOff(lane);
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-            { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
-          return handOffReply(escResult, lane);
+            execution.escalationOptions({ gap: toolUse.input.not_supported === true, topic: toolUse.input.topic }));
+          return { ...escResult, ...laneExtras(lane) };
         }
 
-        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards, lane.context);
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards, lane.context, turn);
+        execution.assertActive('tool result');
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
 
         // Log tool usage
-        await db('agent_messages').insert({
-          conversation_id: conversation.id,
-          role: 'tool_use',
-          content: toolUse.name,
-          tool_calls: JSON.stringify(toolUse.input),
-          tool_results: JSON.stringify(result),
-        }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
+        try {
+          const row = {
+            conversation_id: conversation.id,
+            role: 'tool_use',
+            content: toolUse.name,
+            tool_calls: JSON.stringify(toolUse.input),
+            tool_results: JSON.stringify(result),
+            ...execution.requestFields,
+          };
+          await execution.write('tool transcript', (executor) => executor('agent_messages').insert(row));
+        } catch (err) {
+          execution.rethrowDeadline(err);
+          logger.error(`[ai-assistant] Failed to log tool use: ${err.message}`);
+        }
 
         // Only the email-change tool returns these two fields.
         readBackAsked = readBackAsked || Boolean(result.read_back);
@@ -624,9 +777,10 @@ class WavesAssistant {
         // The email-change check passed: the confirmed address goes to the
         // team, and the turn ends with the hand-off reply.
         if (result.confirmed_email) {
+          prepareHandOff(lane);
           const escResult = await this.escalate(conversation, message, 'Customer confirmed a new email address in portal chat',
-            { topic: 'account_change', newEmail: result.confirmed_email });
-          return handOffReply(escResult, lane);
+            execution.escalationOptions({ topic: 'account_change', newEmail: result.confirmed_email }));
+          return { ...escResult, ...laneExtras(lane) };
         }
       }
 
@@ -650,30 +804,43 @@ class WavesAssistant {
       return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
     }
 
-    // Save the assistant reply
-    await db('agent_messages').insert({
-      conversation_id: conversation.id,
-      role: 'assistant',
-      content: finalReply,
-      channel,
-      sent_to_customer: true,
-    }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
-
-    // generated marks true model output — canned fallbacks and the
-    // deterministic escalation template never carry it, so the portal's
-    // "report AI content" affordance only attaches to real AI replies.
-    return {
+    // The transcript and the exact portal response are one durable outcome.
+    // If final receipt cleanup later fails, the coordinator can return and
+    // replay this checkpoint without regenerating the answer.
+    let replyResult = {
       reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
       // Buttons the portal tools asked for, shown under the reply.
       ...laneExtras(lane),
     };
+    try {
+      const row = {
+        conversation_id: conversation.id,
+        role: 'assistant',
+        content: finalReply,
+        channel,
+        sent_to_customer: true,
+        ...execution.requestFields,
+      };
+      const persisted = await execution.write('assistant reply persistence', async (executor) => {
+        await executor('agent_messages').insert(row).onConflict().ignore();
+        return execution.persistCommittedResult(executor, replyResult);
+      });
+      replyResult = execution.rememberCommittedResult(persisted);
+    } catch (err) {
+      execution.handleWriteError(err, 'Failed to save reply');
+    }
+
+    // generated marks true model output — canned fallbacks and the
+    // deterministic escalation template never carry it, so the portal's
+    // "report AI content" affordance only attaches to real AI replies.
+    return replyResult;
 
   }
 
   /**
    * Get or create an active conversation. Timeout after 30 min of inactivity.
    */
-  async getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone) {
+  async getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn = null) {
     const now = new Date();
     const identifier = channelIdentifier || customerPhone;
 
@@ -689,10 +856,10 @@ class WavesAssistant {
       .where({ channel, channel_identifier: identifier, status: 'active' });
     if (customerId) existingQuery.where({ customer_id: customerId });
     else existingQuery.whereNull('customer_id');
-    const existing = await existingQuery
+    const existing = await runQuery(existingQuery
       .where('timeout_at', '>', now)
       .orderBy('last_activity_at', 'desc')
-      .first();
+      .first(), turn, 'conversation lookup');
 
     // Do not carry legacy full-context snapshots/history across this security
     // boundary. Those conversations may contain model replies grounded in
@@ -708,8 +875,9 @@ class WavesAssistant {
       .where({ channel, channel_identifier: identifier, status: 'active' });
     if (customerId) staleQuery.where({ customer_id: customerId });
     else staleQuery.whereNull('customer_id');
-    await staleQuery
-      .update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+    if (!turn) {
+      await staleQuery.update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+    }
 
     // Keep model context deliberately small. The legacy full-context
     // aggregator included payment history, property flags, SMS/call summaries,
@@ -718,10 +886,10 @@ class WavesAssistant {
     let contextSnapshot = null;
     try {
       if (customerId) {
-        const customer = await db('customers')
+        const customer = await runQuery(db('customers')
           .where({ id: customerId })
           .select('first_name')
-          .first();
+          .first(), turn, 'customer context');
         if (customer?.first_name) {
           contextSnapshot = { version: MINIMAL_CONTEXT_VERSION, firstName: customer.first_name };
         } else {
@@ -733,7 +901,7 @@ class WavesAssistant {
     }
 
     // Create new conversation — pass plain object for jsonb column (Knex serializes it)
-    const [conv] = await db('agent_sessions').insert({
+    const conversationRow = {
       customer_id: customerId || null,
       channel,
       channel_identifier: identifier,
@@ -742,7 +910,21 @@ class WavesAssistant {
       timeout_at: new Date(now.getTime() + CONVERSATION_TIMEOUT_MS),
       message_count: 0,
       context_snapshot: contextSnapshot,
-    }).returning('*');
+    };
+    let conv;
+    if (turn) {
+      conv = await turn.transaction('conversation creation', async (trx) => {
+        const scopedStale = trx('agent_sessions')
+          .where({ channel, channel_identifier: identifier, status: 'active' });
+        if (customerId) scopedStale.where({ customer_id: customerId });
+        else scopedStale.whereNull('customer_id');
+        await scopedStale.update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+        const [created] = await trx('agent_sessions').insert(conversationRow).returning('*');
+        return created;
+      });
+    } else {
+      [conv] = await db('agent_sessions').insert(conversationRow).returning('*');
+    }
 
     return conv;
   }
@@ -754,12 +936,23 @@ class WavesAssistant {
   // so a long chat still reaches its latest turn (portal chat). Without it,
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
-  async buildHistory(conversationId, { newest = false } = {}) {
-    const msgs = await db('agent_messages')
+  async buildHistory(conversationId, { newest = false, turn = null, through = null, isolate = false } = {}) {
+    if (isolate) return [{ role: 'user', content: through.content }];
+    const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
-      .whereIn('role', ['user', 'assistant'])
+      .whereIn('role', ['user', 'assistant']);
+    if (through?.id) {
+      // Keep PostgreSQL's full timestamp precision; a JS Date loses microseconds.
+      const cutoff = db('agent_messages').select('created_at').where('id', through.id);
+      historyQuery.where((bounded) => bounded
+        .where('created_at', '<', cutoff.clone())
+        .orWhere((sameTime) => sameTime
+          .where('created_at', cutoff.clone())
+          .where('id', '<=', through.id)));
+    }
+    const msgs = await runQuery(historyQuery
       .orderBy([{ column: 'created_at', order: newest ? 'desc' : 'asc' }, ...(newest ? [{ column: 'id', order: 'desc' }] : [])])
-      .limit(20);
+      .limit(20), turn, 'conversation history');
     const ordered = newest ? msgs.reverse() : msgs;
     // The model's input must open with a customer turn: a newest-20 window
     // can start on an assistant row, which is dropped.

@@ -1,5 +1,13 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+// The send route loads several heavy modules lazily, each on the first request
+// that reaches its branch (the plain send, the suggested-reply path, the
+// post-send sweep). Whichever test gets there first pays that cold load, which
+// takes 4 to 8 s on a busy runner against Jest's 5 s default. #5763 gave one
+// test room; a later test on another branch then failed main the same way
+// (2026-10-03). The whole file gets the room, so the next new branch does too.
+jest.setTimeout(20000);
+
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn(async () => ({ rows: [] }));
