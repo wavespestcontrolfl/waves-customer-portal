@@ -26,6 +26,8 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
       Tree and shrub sheet for {service.id}
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
+      <button type="button" onClick={() => onCompleted({ invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 85, invoicePaymentActionRequired: true })}>Sheet completed unpaid</button>
+      <button type="button" onClick={() => onCompleted({ invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 85, invoiceStatus: 'paid' })}>Sheet completed paid</button>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
   ),
@@ -33,6 +35,9 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
 </div> }));
+vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
+  default: ({ invoiceId }) => <div>Payment sheet for {invoiceId}</div>,
+}));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 
@@ -117,6 +122,22 @@ describe('Dispatch completion routing for Tree & Shrub', () => {
     await waitFor(() => expect(loads()).toBe(before + 1));
     expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
+  });
+
+  it('hands an unpaid invoice to the payment sheet, like a CompletionPanel completion', async () => {
+    mount([visit('svc-ts-unpaid')]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-ts-unpaid' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sheet completed unpaid' }));
+    expect(await screen.findByText('Payment sheet for inv-fixture')).toBeInTheDocument();
+    expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
+  });
+
+  it('opens no payment sheet when the invoice is already paid', async () => {
+    mount([visit('svc-ts-paid')]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-ts-paid' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sheet completed paid' }));
+    await waitFor(() => expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/Payment sheet/)).not.toBeInTheDocument();
   });
 
   it('just closes on a plain close', async () => {

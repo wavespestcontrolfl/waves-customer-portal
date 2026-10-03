@@ -1903,13 +1903,13 @@ export default function DispatchPageV2({
               void fetchSchedule(date, { silent: true });
             }
           }}
-          onCompleted={() => {
+          onCompleted={(response) => {
             // Same bookkeeping a CompletionPanel completion runs: flip the
-            // row to completed, invalidate the mobile week cache, refetch.
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch.
             const serviceId = treeShrubFastService.id;
             setTreeShrubFastService(null);
-            handleStatusChange(serviceId, "completed");
-            setScheduleRefreshKey((k) => k + 1);
+            applyCompletionResult(serviceId, response, null);
             void fetchSchedule(date, { silent: true });
           }}
           onFullForm={() => {
