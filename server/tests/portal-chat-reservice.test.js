@@ -5,6 +5,8 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/reschedule-public', () => ({ _internals: { loadById: jest.fn(), pageEligibility: jest.fn() } }));
+const mockCatalog = jest.fn();
+jest.mock('../routes/reservice-public', () => ({ _internals: { loadLaneCatalog: (...a) => mockCatalog(...a) } }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jest.fn() }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
 const mockGates = { reserviceStreamline: true };
@@ -43,6 +45,7 @@ beforeEach(() => {
   });
   reschedulePage.loadById.mockResolvedValue({ id: 'svc-callback-1' });
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
+  mockCatalog.mockResolvedValue({ pest: { serviceKey: 'pest_re_service' }, lawn: { serviceKey: 'lawn_re_service' } });
 });
 
 const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerWords: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
@@ -62,7 +65,7 @@ test('a bookable line: a booking button the server built, and the model is told 
   const { result, actions } = await offer('pest');
 
   expect(mockScheduler.loadReserviceLaneAvailability).toHaveBeenCalledWith('cust-1');
-  expect(actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs_1' }]);
+  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs_1' }]);
   expect(result.offered).toBe(true);
   expect(result.instruction).toMatch(/rodents, termites, mosquitoes/);
   expect(JSON.stringify(result)).not.toMatch(/tok_rs_1/);
@@ -148,6 +151,30 @@ test.each([
   expect(actions).toEqual([]);
   expect(result.offered).toBe(false);
   expect(result.instruction).toMatch(/Do not offer or imply a free visit/);
+});
+
+test.each([
+  ['the lane has no catalog row (partial seed: the page renders not_eligible)', () => mockCatalog.mockResolvedValue({ pest: { serviceKey: 'pest_re_service' } })],
+  ['the catalog read fails', () => mockCatalog.mockRejectedValue(new Error('db down'))],
+])('%s: no button', async (_label, arrange) => {
+  arrange();
+  mockScheduler.loadReserviceLaneAvailability.mockResolvedValue({ eligible: ['pest', 'lawn'], open: {}, bookable: ['pest', 'lawn'], verified: true, hasRecurringPlan: true });
+
+  const { result, actions } = await offer('lawn');
+
+  expect(actions).toEqual([]);
+  expect(result.offered).toBe(false);
+});
+
+test('pest and lawn both offered in one turn share one button', async () => {
+  mockScheduler.loadReserviceLaneAvailability.mockResolvedValue({ eligible: ['pest', 'lawn'], open: {}, bookable: ['pest', 'lawn'], verified: true, hasRecurringPlan: true });
+  const actions = [];
+  const context = { secondaryProperty: false, customerWords: ['The ants are back and weeds are coming back all over the lawn'] };
+
+  await executeToolCall('offer_reservice', { service_line: 'pest' }, 'cust-1', actions, null, context);
+  await executeToolCall('offer_reservice', { service_line: 'lawn' }, 'cust-1', actions, null, context);
+
+  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs_1' }]);
 });
 
 test('a token that fails the link shape gives no button', async () => {

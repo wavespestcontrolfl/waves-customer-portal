@@ -35,6 +35,7 @@ jest.mock('../services/reservice-scheduler', () => {
     loadReserviceLaneAvailability: (...a) => mockLaneState(...a),
   };
 });
+jest.mock('../routes/reservice-public', () => ({ _internals: { loadLaneCatalog: async () => ({ pest: { serviceKey: 'pest_re_service' }, lawn: { serviceKey: 'lawn_re_service' } }) } }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -266,7 +267,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
     expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
     expect(mockLaneState).toHaveBeenCalledWith('cust-1');
-    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' }]);
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }]);
     const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
     expect(toolResult).not.toMatch(/tok_rs/);
   });
@@ -307,7 +308,25 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     const sent = mockCreate.mock.calls[0][0].messages;
     const textOf = (m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => b.text).join(''));
     expect(sent.map(textOf)).toEqual(['The ants are back in the kitchen', 'Sorry to hear that. Want me to check your plan?', 'yes please']);
-    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' }]);
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }]);
+  });
+
+  test('a newest-20 window that opens on an assistant row starts at the customer turn after it', async () => {
+    mockRecentWords = () => [
+      { role: 'user', content: 'yes please' },
+      { role: 'assistant', content: 'Want me to check your plan?' },
+      { role: 'user', content: 'The ants are back in the kitchen' },
+      { role: 'assistant', content: 'Hi Pat, how can I help?' },
+    ];
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Tap below.' }] });
+
+    await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    const sent = mockCreate.mock.calls[0][0].messages;
+    expect(sent[0]).toEqual(expect.objectContaining({ role: 'user', content: 'The ants are back in the kitchen' }));
+    expect(sent).toHaveLength(3);
   });
 
   test('SMS keeps the original oldest-first history read', async () => {

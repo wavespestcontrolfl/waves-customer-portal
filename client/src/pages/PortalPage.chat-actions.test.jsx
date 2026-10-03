@@ -75,6 +75,16 @@ describe('assistant reply buttons', () => {
     expect(onNavigate).toHaveBeenCalledWith('billing');
   });
 
+  it('renders every button the server can build at once: six tabs, three reschedule links, the re-service link and two booked re-service moves', async () => {
+    const tabs = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'].map((tab) => ({ type: 'tab', label: `Open ${tab}`, tab }));
+    const links = ['a', 'b', 'c', 'd', 'e'].map((t) => ({ type: 'link', label: `Reschedule ${t}`, href: `/reschedule/tok_${t}` }));
+    await ask({ reply: 'Here you go.', actions: [...tabs, ...links, { type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }] });
+
+    expect(screen.getByRole('link', { name: 'Book your free re-service' })).toHaveAttribute('href', '/reservice/tok_rs');
+    expect(screen.getAllByRole('link')).toHaveLength(6);
+    expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(6);
+  });
+
   it('a reply with no actions renders no buttons', async () => {
     await ask({ reply: 'Ghost ants follow moisture.' });
     expect(screen.getByText('Ghost ants follow moisture.')).toBeInTheDocument();

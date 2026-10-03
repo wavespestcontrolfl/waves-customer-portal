@@ -879,6 +879,10 @@ router.post(
   },
 );
 
+// The page's own catalog read, for the portal assistant's re-service offer:
+// a lane missing here renders not_eligible, so no button may promise it.
+router._internals = { loadLaneCatalog };
+
 router._test = {
   TOKEN_RE,
   MAX_DETAILS_LENGTH,

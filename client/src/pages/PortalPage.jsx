@@ -16226,7 +16226,9 @@ function chatActionsOf(actions) {
   return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
     (a.type === 'link' && typeof a.href === 'string' && /^\/(reschedule|reservice)\/[A-Za-z0-9_-]+$/.test(a.href))
     || (a.type === 'tab' && CHAT_ACTION_TABS.includes(a.tab))
-  )).slice(0, 9);
+  // The server's distinct targets: six tabs, three reschedule links, one
+  // re-service link and up to two booked re-service reschedule links.
+  )).slice(0, 12);
 }
 
 // Fact cards the assistant may show under a reply (GATE_PORTAL_CHAT_FACTS).

@@ -637,6 +637,9 @@ class WavesAssistant {
       .orderBy([{ column: 'created_at', order: newest ? 'desc' : 'asc' }, ...(newest ? [{ column: 'id', order: 'desc' }] : [])])
       .limit(20);
     const ordered = newest ? msgs.reverse() : msgs;
+    // The model's input must open with a customer turn: a newest-20 window
+    // can start on an assistant row, which is dropped.
+    while (newest && ordered.length && ordered[0].role !== 'user') ordered.shift();
 
     return ordered.map(m => ({ role: m.role, content: m.content }));
   }

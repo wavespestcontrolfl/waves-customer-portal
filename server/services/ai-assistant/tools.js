@@ -537,10 +537,19 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
     };
   }
   if (!state.verified || !state.bookable.includes(line)) return RESERVICE_HAND_OFF;
+  // The page drops a lane whose catalog row is missing (a partial seed) and
+  // renders not_eligible, so the lane must be in the page's own catalog read.
+  const catalog = await require('../../routes/reservice-public')._internals.loadLaneCatalog().catch((err) => {
+    logger.warn(`[ai-assistant] re-service catalog read failed, no button: ${err.message}`);
+    return null;
+  });
+  if (!catalog?.[line]) return RESERVICE_HAND_OFF;
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token');
   const token = String(customer?.reservice_token || '');
   if (!/^[A-Za-z0-9_-]+$/.test(token)) return RESERVICE_HAND_OFF;
-  addAction(actions, { type: 'link', label: `Book your free ${RESERVICE_LINE_WORDS[line]} re-service`, href: `/reservice/${token}` });
+  // One label for both lines: the page lets the customer pick the line, and a
+  // second call for the other line shares this href (one button).
+  addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
     offered: true,
     instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button to book it is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to pick a time. Do not state or promise a time yourself. The free visit covers ${line === 'pest' ? 'general pest control' : 'lawn care'} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
