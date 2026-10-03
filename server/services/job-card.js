@@ -44,6 +44,8 @@ const {
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { isSmsReaction } = require('./sms-intent');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 const { parsePackSize } = require('./product-costing');
 const { getAreaRainfall } = require('./lawn-water-area');
@@ -318,6 +320,59 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
+// The customer's own texts since the last visit (else the last 30 days),
+// up to the visit's start — the calls line's window. Inbound only; a
+// tapback quotes a Waves text and is never their words; an unresolved
+// review-ask reservation is not a delivered message. null = unreadable
+// (the card says so), never an empty history.
+const TEXTS_FALLBACK_DAYS = 30;
+const TEXTS_MAX = 3;
+async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
+  const until = untilInstant ? new Date(untilInstant) : new Date();
+  const since = sinceInstant ? new Date(sinceInstant) : new Date(until.getTime() - TEXTS_FALLBACK_DAYS * 86400000);
+  try {
+    const rows = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: customerId }))
+      .where('direction', 'inbound')
+      .where('created_at', '>', since)
+      .where('created_at', '<', until)
+      .select('created_at', 'message_body', 'message_type')
+      .orderBy('created_at', 'desc')
+      // Over-fetch: tapbacks are dropped before three are kept.
+      .limit(12);
+    return rows
+      .filter((r) => r.message_type !== 'sms_reaction' && !isSmsReaction(r.message_body))
+      .map((r) => ({ date: etDateString(new Date(r.created_at)), text: clean(r.message_body, 300) }))
+      .filter((r) => r.text)
+      .slice(0, TEXTS_MAX);
+  } catch (err) {
+    logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+// Photos the customer sent before the visit (GATE_VISIT_PREP_PHOTOS's own
+// hardened reader — the Visit Brief's "Customer flagged"): topic, where,
+// their note and how many photos. The thumbnails come from
+// GET /admin/schedule/:id/visit-prep-photos, which owns the signing and
+// the reassignment recheck. Gate off or unreadable = no key.
+async function loadPrepPhotos(dbh, svc) {
+  if (!require('../config/feature-gates').visitPrepPhotosLive()) return undefined;
+  try {
+    const flagged = await require('./visit-prep').customerFlaggedFacts(svc, dbh);
+    if (!flagged?.length) return null;
+    return flagged.map((f) => ({
+      sentAt: f.sentAt,
+      topic: f.topic,
+      locationOnProperty: f.locationOnProperty,
+      note: clean(f.note, 500) || null,
+      photoIds: f.photoIds,
+    }));
+  } catch (err) {
+    logger.warn(`[job-card] prep photos unavailable for ${svc.id}: ${err.code || err.name || 'error'}`);
+    return undefined;
+  }
+}
+
 async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant = null) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
@@ -462,9 +517,13 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadOpenIssues(dbh, svc.customer_id),
     loadAddons(dbh, svc.id),
   ]);
-  const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
+  const visitStart = svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null;
+  const customerContext = customerContextEnabled();
+  const [calls, rain7d, texts, prepPhotos] = await Promise.all([
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
+    customerContext ? loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, visitStart) : Promise.resolve(undefined),
+    customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
   const alternateAddress = Boolean(svc.address_diverges);
@@ -496,14 +555,22 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     // Display copies of the notes, complete and code-scrubbed: the facts
     // below are bounded for the model grounding and may lose a restriction
     // stated later in the text.
-    notes: scrubKnownCodes({
-      instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
-      visitNotes: clean(svc.notes, 2000) || null,
-      chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
-      petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
-      // Only with the gate on, so the payload is byte-identical off.
-      ...(customerContextEnabled() ? { customerRequest: customerRequestNote(svc) } : {}),
-    }, knownCodes),
+    notes: {
+      ...scrubKnownCodes({
+        instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
+        visitNotes: clean(svc.notes, 2000) || null,
+        chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+        petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
+        // Only with the gate on, so the payload is byte-identical off.
+        ...(customerContext ? { customerRequest: customerRequestNote(svc) } : {}),
+      }, knownCodes),
+      // Texts and photos carry dates and photo ids; only their words are
+      // scrubbed, so a code that happens to be digits never mangles an id.
+      ...(customerContext ? {
+        customerTexts: texts && texts.map((t) => ({ ...t, text: scrubKnownCodes(t.text, knownCodes) })),
+        ...(prepPhotos !== undefined ? { prepPhotos: prepPhotos && prepPhotos.map((p) => ({ ...p, note: scrubKnownCodes(p.note, knownCodes) })) } : {}),
+      } : {}),
+    },
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property

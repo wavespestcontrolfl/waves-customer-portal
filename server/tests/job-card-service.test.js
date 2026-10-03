@@ -1377,10 +1377,69 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect((await load({ customer_request: 'Ants by the pool', customer_request_source: 'email' })).notes.customerRequest).toEqual({ text: 'Ants by the pool', source: null, pests: [] });
     });
 
+    // factsDb's chain is not awaitable as a list; sms_log gets one that is.
+    const withTexts = (row, texts) => {
+      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
+      return Object.assign((table) => {
+        if (table !== 'sms_log') return base(table);
+        const chain = {};
+        for (const m of ['where', 'whereRaw', 'select', 'orderBy', 'limit']) chain[m] = () => chain;
+        chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(texts)).then(res, rej);
+        return chain;
+      }, { raw: base.raw });
+    };
+
+    test('on → the customer\'s texts, newest three, tapbacks dropped, codes scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const texts = [
+        { created_at: '2026-09-03T15:00:00Z', message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' },
+        { created_at: '2026-09-02T15:00:00Z', message_body: 'Ants are back by the pool, gate is 4545#', message_type: 'sms' },
+        { created_at: '2026-09-01T15:00:00Z', message_body: 'Thanks', message_type: 'sms_reaction' },
+        { created_at: '2026-08-30T15:00:00Z', message_body: 'Also wasps by the lanai', message_type: 'sms' },
+        { created_at: '2026-08-29T15:00:00Z', message_body: 'See you Thursday', message_type: 'sms' },
+        { created_at: '2026-08-28T15:00:00Z', message_body: 'Fourth one', message_type: 'sms' },
+      ];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts({}, texts), deps);
+      expect(out.notes.customerTexts.map((t) => t.date)).toEqual(['2026-09-02', '2026-08-30', '2026-08-29']);
+      expect(out.notes.customerTexts[0].text).toMatch(/^Ants are back by the pool/);
+      expect(out.notes.customerTexts[0].text).not.toContain('4545');
+      // Texts stay display-only: the paragraph never reads them.
+      expect(JSON.stringify(out.facts)).not.toContain('pool');
+    });
+
+    test('on → an unreadable text history is null, not an empty list', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts({}, new Error('down')), deps);
+      expect(out.notes.customerTexts).toBeNull();
+    });
+
+    test('photos: only with GATE_VISIT_PREP_PHOTOS too, from the Visit Brief reader; ids and dates never scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const visitPrep = require('../services/visit-prep');
+      const flagged = [{ id: 'sub1', sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: 'Nest by gate 4545#', photoIds: ['aaaa-4545-bbbb'] }];
+      const spy = jest.spyOn(visitPrep, 'customerFlaggedFacts').mockResolvedValue(flagged);
+      try {
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        expect(spy).not.toHaveBeenCalled();
+        process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+        const out = await load({});
+        expect(out.notes.prepPhotos).toEqual([{ sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: expect.not.stringContaining('4545'), photoIds: ['aaaa-4545-bbbb'] }]);
+        spy.mockRejectedValueOnce(new Error('down'));
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        spy.mockResolvedValueOnce(null);
+        expect((await load({})).notes.prepPhotos).toBeNull();
+      } finally {
+        spy.mockRestore();
+        delete process.env.GATE_VISIT_PREP_PHOTOS;
+      }
+    });
+
     test('only exactly "true" turns it on', async () => {
       for (const v of ['1', 'TRUE', 'yes']) {
         process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = v;
-        expect((await load(booked)).notes).not.toHaveProperty('customerRequest');
+        const notes = (await load(booked)).notes;
+        expect(notes).not.toHaveProperty('customerRequest');
+        expect(notes).not.toHaveProperty('customerTexts');
       }
     });
   });
