@@ -271,6 +271,15 @@ describe('round-2 classification', () => {
     expect(out).toMatchObject({ errors: 1, notFound: 0 });
   });
 
+  test('linked record GETs answering with a non-record page are errors, not not_found', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0974')]);
+    fakeAca({ 'BLD9801-0974': { pages: ['<html>Scheduled maintenance</html>'] } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ errors: 1, notFound: 0 });
+  });
+
   test('a page with partial facts (no conditioned sq ft) is an ok read', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
     const clock = fakeClock();

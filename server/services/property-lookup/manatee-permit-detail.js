@@ -275,6 +275,12 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
     const { text: page } = await politeFetch(polite, `${CAP_BASE}${link}`, { cookies, timeoutMs: timeout, referer: CAP_HOME_URL, step: 'permit record' });
     const facts = judge(page, true);
     if (facts) return { status: 'ok', facts };
+    // A linked page that is not a record page at all (maintenance / login
+    // reply to the GET) is an outage, not evidence the permit is absent. A
+    // real record page for ANOTHER permit (shared number prefix) is fine.
+    if (labelValuePairs(page).length === 0) {
+      throw new TransientAcaError('permit record link returned a page that is not a record');
+    }
   }
   if (sawRecord) return { status: 'no_fields', facts: null };
   // not_found only on the county's own empty-search notice (live 10-03:
