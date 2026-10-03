@@ -850,19 +850,35 @@ describe('anniversary and tenure', () => {
     P.selectReviewEntries([pest], win);
     expect(pest.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
     const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Set(['c1']) });
+    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLiveFamilies: [] }]]) });
+    expect(accepted.anniversary).toMatchObject({ date: null });
+    const churned = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([churned], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLiveFamilies: ['tree_shrub'] }]]) });
+    expect(churned.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' }); // same-family cancelled rows = rescheduling
+    const other = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([other], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLiveFamilies: ['pest_control'] }]]) });
+    expect(other.anniversary).toMatchObject({ date: null }); // another family's cancelled series = a second program
+    const accepted2 = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([accepted2], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLiveFamilies: [] }]]) });
     expect(accepted.anniversary).toMatchObject({ date: null });
   });
   test('the account-activity gate is ONE query: accepted by status or timestamp, any completed visit, a live recurring add-on', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const body = src.slice(src.indexOf('async function loadAccountActivity'), src.indexOf('async function loadLiveTerms'));
     expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
-    // any row that is NOT a live upcoming one — completed, cancelled, skipped, past — of any family or kind
-    expect(body).toMatch(/FROM scheduled_services s WHERE s\.customer_id = c\.id AND NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\)/);
-    expect(body).not.toMatch(/s\.status = 'completed'\)/);
+    expect(body).toMatch(/s\.status = 'completed'\)/); // any completed visit, any family / kind
+    // per-family: non-live rows (cancelled / skipped / past) are listed by family; another family's = a second program
+    expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\}\)/);
+    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\) AS non_live_families/);
     expect(body).toMatch(/\[today, today, customerIds\]/); // two date bindings, in order
+    const act = new Map([['c1', { accountActivity: false, nonLiveFamilies: ['pest_control'] }], ['c2', { accountActivity: false, nonLiveFamilies: ['pest_control', 'lawn_care'] }], ['c3', { accountActivity: true, nonLiveFamilies: [] }]]);
+    expect(P.accountActiveFor(act, 'c1', 'pest_control')).toBe(false); // the same program rescheduled
+    expect(P.accountActiveFor(act, 'c1', 'lawn_care')).toBe(true); // a cancelled pest series = another program
+    expect(P.accountActiveFor(act, 'c2', 'pest_control')).toBe(true);
+    expect(P.accountActiveFor(act, 'c3', 'pest_control')).toBe(true);
+    expect(P.accountActiveFor(act, 'c9', 'pest_control')).toBe(false);
     expect(body).toMatch(/FROM service_records sr WHERE sr\.customer_id = c\.id AND sr\.status = 'completed'/); // imported history often lives only there
-    expect(body).not.toMatch(/LINE_SQL/);
+    expect(body).toMatch(/FROM scheduled_services s WHERE s\.customer_id = c\.id AND s\.status = 'completed'\)/); // the completed clause carries no family filter
     expect(body).toMatch(/scheduled_service_addons/);
     expect(body).toMatch(/\$\{ADDON_LINE_IS_PLAN_SQL\}/);
     expect(body).toMatch(/\$\{LIVE_STATUS_SQL\}/);
@@ -1432,7 +1448,7 @@ describe('engine replay guards', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
     // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
-    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, activeAccounts: inputs\.activeAccounts \|\| new Set\(\) \}\)/);
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, activeAccounts: inputs\.activeAccounts \|\| new Map\(\) \}\)/);
     const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
     expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
     expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');

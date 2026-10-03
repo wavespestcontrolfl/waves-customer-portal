@@ -1654,43 +1654,59 @@ async function loadEstimates(dbh, estimateIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-// Customers with ANY portal activity that says the account did not simply
-// arrive by import with one running program — the one gate the import
-// exception in resolveAnniversary reads (Codex #5668 r1–r2 found a new
-// signal each round when these were judged piecemeal):
-//   • an accepted estimate on the account, by status OR timestamp (a legacy
-//     row can be status accepted with accepted_at NULL), linked or not;
-//   • ANY scheduled_services row that is not a live upcoming one — completed,
-//     cancelled (a program swept before its first completion keeps its
-//     rows as status cancelled: cancellation-processor.js), skipped, or
-//     simply in the past — of any family or kind (the per-line dating map
-//     filters these; the account gate must not) — or a completed service_records row
-//     (imported / legacy history often lives ONLY there:
-//     estimate-conversion-guard.js);
+// Portal activity per account that says it did not simply arrive by import
+// with one running program — the one gate the import exception in
+// resolveAnniversary reads (Codex #5668 r1–r7 found a new signal each round
+// when these were judged piecemeal). Account-wide signals:
+//   • an accepted estimate, by status OR timestamp (a legacy row can be
+//     status accepted with accepted_at NULL), linked or not;
+//   • a completed scheduled_services row of ANY kind (an inspection, a
+//     specialty visit — the per-line dating map filters these; the account
+//     gate must not) or a completed service_records row (imported / legacy
+//     history often lives ONLY there: estimate-conversion-guard.js);
 //   • a live upcoming row carrying a recurring add-on program
 //     (ADDON_LINE_IS_PLAN_SQL, minus the keys admin-schedule.js
 //     ONE_TIME_ADDON_SERVICE_KEYS treats as one-time whatever their
 //     pattern column says — waveguard_membership is the signup fee, not
 //     a program): a second program the plan-line count cannot see.
+// Per-FAMILY signal: a non-live row (cancelled — a program swept before its
+// first completion keeps status cancelled, cancellation-processor.js —
+// skipped, or simply past) in a family OTHER than the line's own. The same
+// family's cancelled rows are that one program being rescheduled (prod
+// read 2026-10-03: every one of the 10 no-history import accounts carries
+// cancelled 2026 pest series and nothing else), not a second program.
 const ONE_TIME_ADDON_SERVICE_KEYS = Object.freeze(['waveguard_membership']); // mirror of admin-schedule.js
 async function loadAccountActivity(dbh, customerIds, { today }) {
-  if (!customerIds.length) return new Set();
+  if (!customerIds.length) return new Map();
   const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
   const oneTimeAddonKeys = ONE_TIME_ADDON_SERVICE_KEYS.map((k) => `'${k}'`).join(', ');
   const { rows } = await dbh.raw(`
     SELECT c.id AS customer_id,
       (EXISTS (SELECT 1 FROM estimates e WHERE e.customer_id = c.id AND (e.accepted_at IS NOT NULL OR e.status = 'accepted'))
-       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?))
+       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
        OR EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed')
        OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
                   LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
                   WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL}
                     AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys}))
-      ) AS account_activity
+      ) AS account_activity,
+      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL}), '{}') FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_families
     FROM customers c WHERE c.id = ANY(?::uuid[])
   `, [today, today, customerIds]);
   const ids = new Set(customerIds.map(String));
-  return new Set(rows.filter((r) => r.account_activity === true).map((r) => String(r.customer_id)).filter((id) => ids.has(id)));
+  const out = new Map();
+  for (const r of rows) {
+    if (!ids.has(String(r.customer_id))) continue;
+    out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLiveFamilies: Array.isArray(r.non_live_families) ? r.non_live_families.map(String) : [] });
+  }
+  return out;
+}
+// The gate for ONE line: account-wide activity, or a non-live row in another family.
+function accountActiveFor(activity, customerId, familyKey) {
+  const a = activity && activity.get ? activity.get(String(customerId)) : null;
+  if (!a) return false;
+  return a.accountActivity || a.nonLiveFamilies.some((f) => f !== familyKey);
 }
 
 async function loadLiveTerms(dbh, customerIds, { today }) {
@@ -2265,7 +2281,7 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
   return { reviewDate: anchor, carriedFrom: latest.batch_key };
 }
 
-function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, activeAccounts = new Set() }) {
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, activeAccounts = new Map() }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
   // active PROGRAMS per account, counted as normalized program identities:
@@ -2290,7 +2306,7 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
       accountCreatedAt: entry.customer.created_at,
       onlyActiveFamily: onlyProgramFor(entry),
-      accountHasActivity: !!entry.acceptedAt || activeAccounts.has(String(entry.customer.id)),
+      accountHasActivity: !!entry.acceptedAt || accountActiveFor(activeAccounts, entry.customer.id, entry.familyKey),
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -2476,7 +2492,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, activeAccounts: inputs.activeAccounts || new Set() });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, activeAccounts: inputs.activeAccounts || new Map() });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
@@ -3225,7 +3241,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, accountActiveFor, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
