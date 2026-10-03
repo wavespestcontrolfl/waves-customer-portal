@@ -145,7 +145,7 @@ async function flushDispatchQualityDates(qualityDates) {
   return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -304,10 +304,11 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   void require('./tech-visit-notifications').notifyAssignmentChange({
     visitId: jobId, fromTechId, toTechId: newTechId, actorId: noticeActorId === undefined ? actorId : noticeActorId, trx,
     snapshot: { ...rowSnapshot, ...overrides },
-    // A same-save schedule change (noticeSnapshot) moves the visit off the
-    // row's slot: that slot is the card's previous day, so a move off
-    // today/tomorrow stays a today/tomorrow change (Codex #5783 P2).
-    previous: Object.keys(overrides).length ? rowSnapshot : null,
+    // The card's previous day, so a move off today/tomorrow stays a
+    // today/tomorrow change: a caller whose row ALREADY moved names the old
+    // slot (noticePrevious — a grouped unit move); a same-save schedule change
+    // (noticeSnapshot) moves the visit off the row's slot (Codex #5783/#5786).
+    previous: noticePrevious || (Object.keys(overrides).length ? rowSnapshot : null),
   });
 
   if (emit) {

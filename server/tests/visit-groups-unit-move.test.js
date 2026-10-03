@@ -683,7 +683,9 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     // skipVisitSeam: the per-row seam must not run on a half-reassigned visit (codex r16 P1) — step 4 runs it per member after the retarget
     // expectTechnicianId = the PLANNED pre-move tech (local audit): a newer operator reassignment is never overwritten
     // noticeActorId: the card names the rebooker's initiatedBy when no staff row was given; actorId (resolved_by) stays null
-    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1', noticeActorId: 'admin' });
+    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1', noticeActorId: 'admin',
+      // the member's slot before the unit move: the cards' previous day (Codex #5786 P2)
+      noticePrevious: { date: '2026-08-30', windowStart: '09:00', windowEnd: '10:00' } });
     // every moved member reports the slot it landed on, for the caller's fenced bookkeeping
     expect(out.visitMove.members.find((m) => m.id === 'b').landed).toEqual({ scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' });
     // and the parent still carries the technician

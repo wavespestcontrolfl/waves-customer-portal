@@ -122,6 +122,19 @@ test('a run that moved visits sends the one summary push after the run is record
   }
 });
 
+test('the summary push still goes out when the audit row update fails (the per-visit pushes were held)', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    audit.completeRun.mockRejectedValueOnce(new Error('audit down'));
+    await expect(runAutoDispatch({ mode: 'apply' })).rejects.toThrow('audit down');
+    expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledWith({ runId: 'run1' });
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('apply requested without the server gate is downgraded to a dry-run recommendation', async () => {
   const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
   delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
