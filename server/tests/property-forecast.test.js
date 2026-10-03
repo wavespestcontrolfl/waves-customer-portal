@@ -138,6 +138,41 @@ describe('fetchPropertyForecast', () => {
     expect(f.hourly.map((r) => r.time)).toEqual(['2026-10-03T12:00', '2026-10-03T13:00', '2026-10-03T14:00']);
   });
 
+  test('an off-the-hour edge drops the interval that starts before from or ends after to', async () => {
+    // 13:00 = rain 12:00-13:00, 14:00 = 13:00-14:00, 15:00 = 14:00-15:00, 16:00 = 15:00-16:00
+    global.fetch = okFetch(hourlyPayload({
+      rainAt: { '2026-10-03T13:00': 0.1, '2026-10-03T14:00': 0.2, '2026-10-03T15:00': 0.4, '2026-10-03T16:00': 0.8 },
+    }));
+    const { fetchPropertyForecast } = load();
+    const base = { latitude: 27.1, longitude: -82.5, now: NOW };
+    // from 12:30: the 12:00-13:00 interval is half outside -> first counted slot is 14:00
+    expect((await fetchPropertyForecast({ ...base, from: '2026-10-03T12:30', to: '2026-10-03T15:00' })).precipitationInTotal).toBe(0.6);
+    // to 14:30: the 14:00-15:00 interval is half outside -> last counted slot is 14:00
+    expect((await fetchPropertyForecast({ ...base, from: '2026-10-03T12:00', to: '2026-10-03T14:30' })).precipitationInTotal).toBe(0.3);
+    // both edges off the hour: only 13:00-14:00 and 14:00-15:00 are whole -> slots 14:00 and 15:00
+    expect((await fetchPropertyForecast({ ...base, from: '2026-10-03T12:30', to: '2026-10-03T15:30' })).precipitationInTotal).toBe(0.6);
+    // no whole interval inside the window -> null
+    expect((await fetchPropertyForecast({ ...base, from: '2026-10-03T12:10', to: '2026-10-03T12:50' })).precipitationInTotal).toBeNull();
+  });
+
+  test('the fall-back day keeps both 01:00 hours, so its 25-hour total counts the repeated hour', async () => {
+    const { etDayWindow, fetchPropertyForecast } = load();
+    const day = etDayWindow('2026-11-01');
+    expect((day.to - day.from) / 3600000).toBe(25);
+    const time = [];
+    for (let h = 0; h < 24; h += 1) {
+      time.push(`2026-11-01T${String(h).padStart(2, '0')}:00`);
+      if (h === 1) time.push('2026-11-01T01:00'); // 01:00 EST, the repeated wall hour
+    }
+    time.push('2026-11-02T00:00');
+    // 0.3 is stamped on the repeated 01:00 (EST); 0.1 on the next day's 00:00
+    const precipitation = time.map((_, i) => (i === 2 ? 0.3 : i === time.length - 1 ? 0.1 : 0));
+    global.fetch = okFetch({ hourly: { time, precipitation } });
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
+    expect(f.hourly).toHaveLength(25);
+    expect(f.precipitationInTotal).toBe(0.4);
+  });
+
   test('a calendar-day window totals stamps 01:00 through the next day 00:00', async () => {
     const { etDayWindow, fetchPropertyForecast } = load();
     global.fetch = okFetch(hourlyPayload({

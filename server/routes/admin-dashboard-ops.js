@@ -267,9 +267,26 @@ router.get('/weather', async (req, res, next) => {
         ? await fetchPropertyForecast({ ...DASHBOARD_WEATHER_LOCATION, ...dayWindow, timeoutMs: 5000 })
         : null;
       if (forecast && forecast.status === 'ok' && forecast.hourly.length > 0) {
+        // A day's figure is reported only when EVERY hour stamp of that ET day
+        // (00:00-23:00; 23 on the spring-forward day, 25 on the fall-back day) has a
+        // reading for it, derived from the ET day window rather than assuming 24.
+        // Otherwise that figure is null, which is what the daily API answered for a
+        // day it could not aggregate: the tile shows "no data" rather than a max or a
+        // sum over a handful of hours.
+        const slotCount = Math.round((dayWindow.to - dayWindow.from) / 3600000);
+        const byAt = new Map(forecast.hourly.map((h) => [h.at, h]));
+        const dayValues = (key) => {
+          const values = [];
+          for (let i = 0; i < slotCount; i += 1) {
+            const v = byAt.get(new Date(dayWindow.from.getTime() + i * 3600000).toISOString())?.[key];
+            if (v == null) return null;
+            values.push(v);
+          }
+          return values;
+        };
         const maxOf = (key) => {
-          const values = forecast.hourly.map((h) => h[key]).filter((v) => v != null);
-          return values.length ? Math.max(...values) : null;
+          const values = dayValues(key);
+          return values ? Math.max(...values) : null;
         };
         const temp = maxOf('temperature_f');
         const humidity = maxOf('humidity_pct');
@@ -278,15 +295,13 @@ router.get('/weather', async (req, res, next) => {
         // Open-Meteo's own daily precipitation_sum (the value this tile showed before)
         // is built ("simple 24 hour aggregation from hourly values"). It is NOT the
         // module's interval total (stamps 01:00-24:00), which would differ by the
-        // one hour of rain that straddles midnight. Null unless every hour is present.
-        const rainRows = forecast.hourly.map((h) => h.precipitation_in);
-        const rain = rainRows.every((v) => v != null)
-          ? Math.round(rainRows.reduce((sum, v) => sum + v, 0) * 1000) / 1000
-          : null;
+        // one hour of rain that straddles midnight.
+        const rainValues = dayValues('precipitation_in');
+        const rain = rainValues ? Math.round(rainValues.reduce((sum, v) => sum + v, 0) * 1000) / 1000 : null;
         if (rain > 0.5) alerts.push({ level: 'red', text: `Rain: ${rain}"` });
         if (wind > 15) alerts.push({ level: 'amber', text: `Wind: ${wind} mph` });
         if (temp > 95) alerts.push({ level: 'amber', text: `Heat: ${temp}°F` });
-        return res.json({ source: 'open-meteo', date, temp, humidity: humidity ?? undefined, windSpeed: wind, rainfall: rain, alerts });
+        return res.json({ source: 'open-meteo', date, temp, humidity, windSpeed: wind, rainfall: rain, alerts });
       }
     } catch {}
 

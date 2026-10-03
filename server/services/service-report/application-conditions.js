@@ -165,9 +165,15 @@ function normalizeForecastPayload(payload) {
   const wind = column('wind_speed_10m');
   const gust = column('wind_gusts_10m');
   const hourly = [];
+  let prevMs = null;
   times.forEach((time, i) => {
-    const ms = parseETDateTime(String(time)).getTime();
+    let ms = parseETDateTime(String(time)).getTime();
     if (!Number.isFinite(ms)) return;
+    // The fall-back day repeats the 01:00 wall time; parseETDateTime resolves both
+    // to the first (EDT) instant. Rows are chronological, so a stamp that does not
+    // advance is the repeated hour: place it one hour after the previous row.
+    if (prevMs != null && ms <= prevMs) ms = prevMs + HOUR_MS;
+    prevMs = ms;
     hourly.push({
       ms,
       time: String(time),
@@ -254,17 +260,20 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
   // Instantaneous readings (temperature, humidity, wind) are the hour stamps in [from, to).
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
   // Open-Meteo's hourly `precipitation` is "sum of the preceding hour": the value
-  // stamped 13:00 is the rain that fell 12:00-13:00. The intervals that lie
-  // INSIDE [from, to] are therefore the slots stamped in (from, to]. A total is
-  // only stated when EVERY one of those slots has a reading: a payload that
-  // stops short of the window (including the final slot at `to`), or skips
-  // hours, would otherwise read as a smaller (or zero) rain total. Slots are
-  // whole hours in UTC, which ET hours always align to; a window edge that is
-  // not on the hour covers only the whole-hour intervals inside it.
+  // stamped 13:00 is the rain that fell 12:00-13:00. The total counts the
+  // intervals that lie wholly INSIDE the window: a slot stamped S counts only
+  // when S - 1h >= from and S <= to, so on-the-hour edges take the slots stamped
+  // in (from, to], and an edge off the hour drops the partly-outside interval
+  // (from 12:30 the first counted slot is 14:00; to 14:30 the last is 14:00). A
+  // total is only stated when EVERY counted slot has a reading: a payload that
+  // stops short of the window (including the final slot), or skips hours, would
+  // otherwise read as a smaller (or zero) total. No whole interval inside the
+  // window (e.g. 12:10-12:50) -> null. Slots are whole hours in UTC, which ET
+  // hours always align to.
   const byMs = new Map(entry.hourly.map((r) => [r.ms, r]));
   let total = 0;
   let complete = false;
-  for (let slot = Math.floor(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS; slot <= toMs; slot += HOUR_MS) {
+  for (let slot = Math.ceil(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS; slot <= toMs; slot += HOUR_MS) {
     const r = byMs.get(slot);
     if (!r || r.precipitation_in == null) { complete = false; break; }
     complete = true;
@@ -294,8 +303,11 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
 //             // rows are the hour stamps in [from, to). precipitation_in is the rain
 //             // in the hour ENDING at that stamp (Open-Meteo "sum of the preceding
 //             // hour"); the other fields are readings AT the stamp.
-//     precipitationInTotal }                      // inches that fell INSIDE the window = the slots
-//                                                 // stamped in (from, to]; null unless every one is present
+//     precipitationInTotal }                      // inches that fell INSIDE the window: the whole-hour
+//                                                 // intervals fully inside [from, to] (slots stamped S
+//                                                 // with S-1h >= from and S <= to). Edges off the hour
+//                                                 // drop the partly-outside interval. null if there is
+//                                                 // no whole interval or any needed slot is missing.
 //   { status: 'unavailable', reason, source: 'open_meteo', checkedAt }
 // `from`/`to` are Dates, epoch ms, or ISO strings (a zone-less string is ET);
 // the default window is the current hour through the next 24 h. `timeoutMs` is
