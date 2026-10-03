@@ -75,13 +75,15 @@ jest.mock('../services/email-template-library', () => {
     ...actual,
     loadTemplateByKey: jest.fn(async (key) => {
       const { TEMPLATE } = require('../models/migrations/20261001200000_rate_review_letter_email_template')._private;
+      // the template as it stands after 20261003140000 (subject = {{subject_line}})
+      const subjectMigration = require('../models/migrations/20261003140000_rate_review_letter_subject_line')._private;
       if (key !== TEMPLATE.key) return null;
       return {
         template: {
           template_key: TEMPLATE.key, name: TEMPLATE.name, mode: 'service', status: 'active', active_version_id: 'v1', send_stream: 'transactional_required',
-          required_variables: JSON.stringify(TEMPLATE.required), allowed_variables: JSON.stringify([...TEMPLATE.required, ...TEMPLATE.optional]),
+          required_variables: JSON.stringify(TEMPLATE.required), allowed_variables: JSON.stringify([...TEMPLATE.required, ...TEMPLATE.optional, subjectMigration.VAR]),
         },
-        activeVersion: { id: 'v1', subject: TEMPLATE.subject, preview_text: TEMPLATE.preview, blocks: TEMPLATE.blocks, text_body: null },
+        activeVersion: { id: 'v1', subject: subjectMigration.NEW_SUBJECT, preview_text: TEMPLATE.preview, blocks: TEMPLATE.blocks, text_body: null },
       };
     }),
   };
@@ -677,6 +679,34 @@ describe('customer surfaces', () => {
     expect(res).toMatchObject({ sent: 0, uncertain: 0, inFlight: 1 });
     expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
     expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'recipient_changed' });
+  });
+
+  test('subject: a single-date letter keeps its date; a multi-date letter is neutral; the preview, the frozen letter and the sent email carry the same subject', async () => {
+    const EmailTemplateLibrary = require('../services/email-template-library');
+    const renderSubject = async (vars) => {
+      const loaded = await EmailTemplateLibrary.loadTemplateByKey(comms.TEMPLATE_KEY);
+      return EmailTemplateLibrary.renderTemplate({ template: loaded.template, version: loaded.activeVersion, payload: { ...vars, company_phone: '(941) 555-0100' } }).subject;
+    };
+    // single date
+    mockDb.reset(book());
+    const previewSingle = (await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW })).subject;
+    expect(previewSingle).toBe('Your Waves rate from December 10, 2026');
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(await renderSubject(emailLeg.mock.calls[0][0].vars)).toBe(previewSingle);
+    expect(JSON.parse(notices()[0].metadata).letter.subject_line).toBe(previewSingle);
+    // multi date
+    emailLeg.mockClear();
+    const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1), second] });
+    b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+    mockDb.reset(b);
+    const previewMulti = (await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW })).subject;
+    expect(previewMulti).toBe('Your Waves rates are changing. See the dates in your notice');
+    expect(previewMulti).not.toMatch(/December/);
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(await renderSubject(emailLeg.mock.calls[0][0].vars)).toBe(previewMulti);
+    expect(JSON.parse(notices()[0].metadata).letter.subject_line).toBe(previewMulti);
+    expect(JSON.parse(notices()[1].metadata).letter.subject_line).toBe(previewMulti);
   });
 
   test('held_lines: two prepared approved lines, one suppressed → NEITHER is sent (bucket heldLines = 1); both sendable → one letter with both', async () => {

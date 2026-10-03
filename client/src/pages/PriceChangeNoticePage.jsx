@@ -95,7 +95,7 @@ function RateReviewNotice({ data }) {
         fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
         color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading,
       }}>
-        Your rate from {first.effectiveDate}
+        {new Set(lines.map((l) => l.effectiveDate)).size > 1 ? 'Your rates are changing' : `Your rate from ${first.effectiveDate}`}
       </h1>
       <p style={BODY}>
         Hi {data.firstName}, this is your written notice, at least 30 days ahead, as promised when you signed up.

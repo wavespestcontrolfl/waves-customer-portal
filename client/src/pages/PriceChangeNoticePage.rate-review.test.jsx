@@ -93,4 +93,24 @@ describe('PriceChangeNoticePage v2', () => {
     await screen.findByRole('heading', { level: 1 });
     expect(document.body.textContent).toMatch(/applications completed before it are billed at your current rate, monthly dues stay at your current amount through the month before it, and a prepaid plan stays exactly as it is until it renews/);
   });
+
+  it('the heading does not claim one date for a letter whose lines start on different dates; a single-date letter keeps it', async () => {
+    renderWith({
+      ...legacy,
+      review: { firstName: 'Testcust', costBlock: 'Costs.', hasPrepay: false, lines: [
+        { service: 'Pest control', unit: 'application', current: '$117', next: '$121', change: '$4', effectiveDate: 'December 10, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+        { service: 'Lawn care', unit: 'month', current: '$40', next: '$44', change: '$4', effectiveDate: 'December 20, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+      ] },
+    });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Your rates are changing' })).toBeInTheDocument();
+    cleanup();
+    renderWith({
+      ...legacy,
+      review: { firstName: 'Testcust', costBlock: 'Costs.', hasPrepay: false, lines: [
+        { service: 'Pest control', unit: 'application', current: '$117', next: '$121', change: '$4', effectiveDate: 'December 10, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+        { service: 'Lawn care', unit: 'application', current: '$40', next: '$44', change: '$4', effectiveDate: 'December 10, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+      ] },
+    });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Your rate from December 10, 2026' })).toBeInTheDocument();
+  });
 });

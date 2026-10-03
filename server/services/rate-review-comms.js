@@ -226,12 +226,26 @@ function lineFor(notice, snapshot, customer) {
   };
 }
 
+// One date states it; lines that start on different dates point at the notice instead
+// (the same rule as the text pointer and the public page heading).
+function distinctDates(lines) {
+  return new Set(lines.map((l) => ymd(l.effectiveDate))).size;
+}
+function subjectLine(ordered) {
+  return distinctDates(ordered) > 1
+    ? 'Your Waves rates are changing. See the dates in your notice'
+    : `Your Waves rate from ${dateLabel(ordered[0].effectiveDate)}`;
+}
+
 // The email payload (and the frozen page content) for one customer's lines.
 function letterPayload({ customer, prefs = null, lines, costBlock, noticeUrl }) {
   const ordered = [...lines].sort(byEffective);
   const payload = {
     first_name: greetingName(customer, prefs),
     effective_date: dateLabel(ordered[0].effectiveDate),
+    // The subject (template variable, migration 20261003140000): the dated wording for a
+    // single-date letter, neutral wording when the lines start on different dates.
+    subject_line: subjectLine(ordered),
     cost_block: costBlock,
     notice_url: noticeUrl,
     prepay_note: ordered.some((l) => l.unit === 'year')
@@ -735,6 +749,7 @@ async function claimLines(dbh, entry) {
 function frozenLetter(entry, payload, costBlock) {
   return {
     first_name: payload.first_name,
+    subject_line: payload.subject_line,
     cost_block: costBlock,
     lines: entry.lines.map((l) => ({
       notice_id: l.noticeId, family_key: l.familyKey, service: l.serviceLabel, unit: l.unit,
