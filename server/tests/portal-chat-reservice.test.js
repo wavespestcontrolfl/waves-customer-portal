@@ -64,7 +64,7 @@ beforeEach(() => {
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
 });
 
-const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerMessage: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
+const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerMessage: WEEDS } : PRIMARY, actions = [], turn = null) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context, turn)
   .then((result) => ({ result, actions }));
 
 test('the tool is in the set only when its gate is on, and escalate stays last', () => {
@@ -78,8 +78,8 @@ test('the tool is in the set only when its gate is on, and escalate stays last',
 test('a lane the page would book: a booking button the server built, and the model is told the visit is free', async () => {
   const { result, actions } = await offer('pest');
 
-  expect(mockPage.pageLaneState).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-  expect(mockPage.reserviceLocationReviewRequired).toHaveBeenCalledWith(CUSTOMER);
+  expect(mockPage.pageLaneState).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', db);
+  expect(mockPage.reserviceLocationReviewRequired).toHaveBeenCalledWith(CUSTOMER, db);
   expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]);
   expect(result.offered).toBe(true);
   expect(result.instruction).toMatch(/rodents, termites, mosquitoes/);
@@ -87,6 +87,60 @@ test('a lane the page would book: a booking button the server built, and the mod
   expect(result.instruction).toMatch(/Do not say whether times are open or promise a time/);
   expect(result.instruction).not.toMatch(/pick a time/);
   expect(JSON.stringify(result)).not.toMatch(/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+});
+
+test('a coordinated offer keeps every read on its bounded executor and checks the turn before adding the button', async () => {
+  const database = jest.fn((table) => db(table));
+  const turn = {
+    transaction: jest.fn(async (_stage, read) => read(database)),
+    assertActive: jest.fn(),
+  };
+
+  const { result, actions } = await offer('pest', PRIMARY, [], turn);
+
+  expect(turn.transaction).toHaveBeenCalledWith('re-service offer', expect.any(Function));
+  expect(mockOpen).toHaveBeenCalledWith('cust-1', database);
+  expect(database).toHaveBeenCalledWith('customers');
+  expect(mockPage.pageLaneState).toHaveBeenCalledWith('a'.repeat(64), database);
+  expect(mockPage.reserviceLocationReviewRequired).toHaveBeenCalledWith(CUSTOMER, database);
+  expect(turn.assertActive).toHaveBeenCalledWith('re-service button');
+  expect(result.offered).toBe(true);
+  expect(actions).toHaveLength(1);
+});
+
+test('a coordinated already-booked result keeps the move check on its bounded executor', async () => {
+  mockOpen.mockResolvedValue({ pest: BOOKED_PEST });
+  const database = jest.fn((table) => db(table));
+  const turn = {
+    transaction: jest.fn(async (_stage, read) => read(database)),
+    assertActive: jest.fn(),
+  };
+
+  const { result, actions } = await offer('pest', PRIMARY, [], turn);
+
+  expect(database).toHaveBeenCalledWith('scheduled_services');
+  expect(reschedulePage.loadById).toHaveBeenCalledWith('svc-callback-1', database);
+  expect(reschedulePage.pageEligibility).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-callback-1' }), expect.any(Date), database);
+  expect(turn.assertActive).toHaveBeenCalledWith('re-service button');
+  expect(result.already_booked.date).toBe('Oct 9, 2026');
+  expect(actions).toHaveLength(1);
+});
+
+test.each([
+  ['open callback', (deadline) => mockOpen.mockRejectedValue(deadline)],
+  ['customer token', (deadline) => { tokenRow = Promise.reject(deadline); tokenRow.catch(() => {}); }],
+  ['page state', (deadline) => mockPage.pageLaneState.mockRejectedValue(deadline)],
+  ['location review', (deadline) => mockPage.reserviceLocationReviewRequired.mockRejectedValue(deadline)],
+  ['booked callback lookup', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); bookedRow = Promise.reject(deadline); bookedRow.catch(() => {}); }],
+  ['reschedule visit', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); reschedulePage.loadById.mockRejectedValue(deadline); }],
+  ['reschedule eligibility', (deadline) => { mockOpen.mockResolvedValue({ pest: BOOKED_PEST }); reschedulePage.pageEligibility.mockRejectedValue(deadline); }],
+])('a portal deadline from the %s read propagates without adding an action', async (_label, arrange) => {
+  const deadline = Object.assign(new Error('expired'), { code: 'PORTAL_CHAT_DEADLINE' });
+  arrange(deadline);
+  const actions = [];
+
+  await expect(offer('pest', PRIMARY, actions)).rejects.toBe(deadline);
+  expect(actions).toEqual([]);
 });
 
 test('a second offer call in one turn adds no second button', async () => {
@@ -130,7 +184,7 @@ test('a re-service already booked in the line: its date and window, a button to 
 
   expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control Re-Service, Oct 9', href: '/reschedule/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' }]);
   // The reschedule page's own verdict on that very visit decides the button.
-  expect(reschedulePage.loadById).toHaveBeenCalledWith('svc-callback-1');
+  expect(reschedulePage.loadById).toHaveBeenCalledWith('svc-callback-1', db);
   expect(result.offered).toBe(false);
   expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
   expect(result.instruction).toMatch(/Do not offer another one/);
