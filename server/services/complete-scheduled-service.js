@@ -6275,14 +6275,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
-            // Durable across a post-commit effects resume. This is the
-            // original completed visit, not whatever the mutable schedule
-            // row may describe when a failed photo upload is retried.
-            servicePhotoVisit,
             // Frozen with the record itself, so no reader (recap-delivery's
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // Durable across a post-commit effects resume. This is the
+            // original completed visit, not whatever the mutable schedule
+            // row may describe when a failed photo upload is retried.
+            servicePhotoVisit,
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
