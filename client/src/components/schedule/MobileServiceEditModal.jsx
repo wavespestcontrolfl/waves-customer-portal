@@ -132,8 +132,16 @@ export default function MobileServiceEditModal({
         }),
       });
       // The whole stop could not be reassigned after the rest saved.
-      if (result?.comboMove && result.comboMove.moved !== true) {
-        showScheduleSaveNotice(`The other changes were saved, but the stop's technician was not changed: ${result.comboMove.needsAttention?.message || result.comboMove.error || 'check the schedule.'}`);
+      // The same three outcomes the Edit appointment form reports: partly
+      // done, not confirmed, or refused. Never "not changed" for the first two.
+      const stopMove = result?.comboMove;
+      if (stopMove && stopMove.moved !== true) {
+        const reason = stopMove.needsAttention?.message || stopMove.error || 'Check the schedule.';
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The technician change did not confirm, so the stop may or may not have changed: check the schedule. (${reason})`
+            : `The other changes were saved, but the stop's technician was not changed: ${reason}`);
       }
       // Advisory schedule-overlap notes — the save committed (conflicts no
       // longer block admin edits); say what now stacks before closing.
