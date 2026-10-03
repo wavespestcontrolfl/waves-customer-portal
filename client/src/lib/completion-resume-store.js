@@ -16,6 +16,8 @@
 // IndexedDB (or a failing one) resolves null / false, which leaves today's
 // behavior — marker only, mismatch on retry → Billing Recovery.
 
+import { etDateString } from "./timezone";
+
 const DB_NAME = "waves-completion-resume";
 const STORE = "bodies";
 const DB_VERSION = 1;
@@ -267,10 +269,23 @@ export function deleteFastCompletionAttempt(serviceId, operatorId, expectedBody)
   ));
 }
 
+// An attempt's visit is past `cutoff` (YYYY-MM-DD, ET) when the later of the
+// day it was saved (ET) and its body's expectedVisit.scheduledDate falls
+// before it; a row with no visit date is never judged past it.
+function pastScheduledCutoff(record, cutoff) {
+  const scheduled = String(record?.body?.expectedVisit?.scheduledDate || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduled)) return false;
+  const saved = etDateString(new Date(Number(record.storedAt) || 0));
+  return (saved > scheduled ? saved : scheduled) < cutoff;
+}
+
 // `operatorId` scopes a sweep to one operator's own attempts (by key and by
-// the row's owner), so a shorter window for one role never deletes another
+// the row's owner), so one role's shorter window never deletes another
 // operator's attempts on a shared device (pre-push P0 on 1dc0f16fb9).
-export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS, { operatorId = null } = {}) {
+// `scheduledCutoff` expires by the visit's date instead of the row's age, on
+// the server's own inclusive day, so a row never goes while the server would
+// still take its retry (pre-push P0 on f405ea3185).
+export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS, { operatorId = null, scheduledCutoff = null } = {}) {
   const prefix = operatorId ? `${FAST_COMPLETION_PREFIX}${String(operatorId)}:` : FAST_COMPLETION_PREFIX;
   return withStore(FAST_COMPLETION_DB_NAME, "readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
@@ -279,7 +294,8 @@ export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_R
         .filter((key) => key.startsWith(prefix))
         .map((key) => mutateFastCompletionRow(key, (record) => (
           record && (!operatorId || String(record.operatorId) === String(operatorId))
-            && now - Number(record.storedAt || 0) >= maxAgeMs ? { delete: true } : null
+            && (scheduledCutoff ? pastScheduledCutoff(record, scheduledCutoff) : now - Number(record.storedAt || 0) >= maxAgeMs)
+            ? { delete: true } : null
         ))),
     ))
     .then((results) => results.filter(Boolean).length);

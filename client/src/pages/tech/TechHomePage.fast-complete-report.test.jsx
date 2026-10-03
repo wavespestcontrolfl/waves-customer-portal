@@ -36,6 +36,7 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
 import TechHomePage from './TechHomePage';
+import { addETDays, etDateString } from '../../lib/timezone';
 
 const row = (id, overrides = {}) => ({
   id,
@@ -226,7 +227,6 @@ it('two off-route saved completions show when each was saved and what it holds (
   expect(within(picker).getByText(/^saved on this device · Advion WDG · Kitchen/)).toBeInTheDocument();
 });
 
-const DAY = 24 * 60 * 60 * 1000;
 
 it('an unreadable re-scan keeps the saved completions this device listed, and says so (GitHub Codex P2 on 458cc517e5)', async () => {
   mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
@@ -279,15 +279,13 @@ it('a visit with a saved retry the device cannot read now opens nothing (GitHub 
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
-it('a technician lets a saved retry go at the server\'s 7-day window: off the list, and swept (GitHub Codex P2 on 458cc517e5)', async () => {
-  mocks.attempts.set('old', { body: { idempotencyKey: 'old-key', reportDraftBase: {} }, summary: 'Old report', storedAt: Date.now() - 8 * DAY });
-  mocks.attempts.set('recent', { body: { idempotencyKey: 'recent-key', reportDraftBase: {} }, summary: 'Recent report', storedAt: Date.now() - 2 * DAY });
+it('a technician\'s device sweeps its own saved retries on the server\'s access cutoff, never another operator\'s (GitHub Codex P2 on 458cc517e5; pre-push P0s on 1dc0f16fb9 and f405ea3185)', async () => {
   rows = [];
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
-  expect(await sheetService()).toMatchObject({ id: 'recent' });
-  // Its own attempts only: another operator's on a shared device keep the
-  // store's own sweep (pre-push P0 on 1dc0f16fb9).
-  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), 7 * DAY, { operatorId: 'tech-fixture' });
+  await screen.findByRole('button', { name: /Project Report/ });
+  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), undefined, {
+    operatorId: 'tech-fixture', scheduledCutoff: etDateString(addETDays(new Date(), -7)),
+  });
+  // Every operator's rows keep the store's own sweep.
   expect(mocks.prune).toHaveBeenCalledWith();
 });

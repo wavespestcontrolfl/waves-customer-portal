@@ -67,7 +67,7 @@ import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
-import { etDateString } from '../../lib/timezone';
+import { addETDays, etDateString } from '../../lib/timezone';
 import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
 import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
@@ -259,12 +259,14 @@ function withoutRecoveryAttempt(scan, serviceId) {
   return { ...scan, attempts };
 }
 const RECOVERY_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
-// A technician reaches a visit for 7 days after it (TECH_ACCESS_WINDOW_DAYS,
-// server/services/technician-visit-scope.js): a saved retry older than that
-// can only be refused, so a technician's device lets it go then. Office roles,
-// which the server does not limit, keep the store's own retention (GitHub
-// Codex P2 on 458cc517e5).
-const TECH_RETRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
+// A technician reaches a visit while its scheduled date is on or after today
+// (ET) less 7 days (techAccessCutoff, server/services/technician-visit-scope.js).
+// A technician's device lets its own saved retries go once their visit is past
+// that same cutoff, never sooner, and never another operator's on a shared
+// device; office roles, which the server does not limit, keep the store's own
+// retention (GitHub Codex P2 on 458cc517e5; pre-push P0s on 1dc0f16fb9 and
+// f405ea3185).
+const TECH_ACCESS_WINDOW_DAYS = 7;
 function fastCompletionRecoveryKind(attempt) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
@@ -620,10 +622,11 @@ export default function TechHomePage({ section = 'today' }) {
   useEffect(() => {
     pruneRecapClipDrafts().catch(() => {});
     pruneFastCompletionAttempts().catch(() => {});
-    // A technician's own retries also go at the server's 7-day window; never
-    // another operator's on a shared device (pre-push P0 on 1dc0f16fb9).
     if (currentRole === 'technician' && staffIdForDevice) {
-      pruneFastCompletionAttempts(Date.now(), TECH_RETRY_HORIZON_MS, { operatorId: staffIdForDevice }).catch(() => {});
+      pruneFastCompletionAttempts(Date.now(), undefined, {
+        operatorId: staffIdForDevice,
+        scheduledCutoff: etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS)),
+      }).catch(() => {});
     }
   }, []);
 
@@ -754,15 +757,11 @@ export default function TechHomePage({ section = 'today' }) {
         if (knownRecoveryIds.current.size) setRecoveryReadNotice(RECOVERY_READ_NOTICE);
         return;
       }
-      // A technician's retry past the server's window is gone from the list
-      // (an attempt with no stored time is kept).
-      const horizon = currentRole === 'technician' ? Date.now() - TECH_RETRY_HORIZON_MS : -Infinity;
-      const live = result.attempts.filter((attempt) => !(Number(attempt.storedAt) <= horizon));
-      setFastRecoveryScan({ operatorId: staffIdForDevice, attempts: new Map(live.map((attempt) => [attempt.serviceId, attempt])) });
+      setFastRecoveryScan({ operatorId: staffIdForDevice, attempts: new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt])) });
       setRecoveryReadNotice((notice) => (notice === RECOVERY_READ_NOTICE ? '' : notice));
     });
     return () => { active = false; };
-  }, [schedule, staffIdForDevice, currentRole, recoveryScanTick, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
+  }, [schedule, staffIdForDevice, recoveryScanTick, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
   // Once this operator's device has been scanned, its attempts stand while a
   // later route refresh or sheet close re-scans: keying the scan to the
   // schedule object made every refresh disable the completion buttons for a
