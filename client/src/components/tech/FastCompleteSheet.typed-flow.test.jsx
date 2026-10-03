@@ -106,7 +106,7 @@ const SERVICE = {
 async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
   // The first render pays the sheet's cold import; a slow machine gets time.
-  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 5000 });
+  await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
 }
 
 function addProduct(name, amount) {
@@ -119,7 +119,7 @@ function addProduct(name, amount) {
 async function generate(note = NOTE) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-  await screen.findByText('Report the customer will see', {}, { timeout: 5000 });
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 
 const recordCard = (label = 'Cockroach Treatment') => screen.getByRole('region', { name: `${label} record heard from you` });
@@ -176,7 +176,10 @@ describe('the typed record on the sheet', () => {
     expect(body).not.toHaveProperty('clientPestRating');
     expect(body).not.toHaveProperty('structuredObservations');
     expect(body.products).toEqual([expect.objectContaining({ productId: 'gel' })]);
-  });
+    // The file's first full flow pays the sheet's cold start: under CI load it
+    // ran past the defaults (PR #5690's and later client jobs), as the sibling
+    // FastCompleteSheet.test.jsx's first full flow does.
+  }, 20000);
 
   test('a typed visit needs no product: its work is in its own form', async () => {
     const request = makeRequest({ typedFacts: { ...READ, values: { species: 'German', activity_level: 'Low' } } });
