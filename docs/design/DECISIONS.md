@@ -2855,7 +2855,7 @@ present only when the gate is on, never persisted as a column and never in
 customer copy; the extra calls' tokens are added to the run's token columns. No
 migration. Off, or unset: byte-identical to today. Cost shape: a confident read
 draws no extra call; an unsure-or-serious read draws one Sol re-read; only a
-name dispute also draws one Fable call. Full detail: `CLAUDE.md`'s "Lawn visit
+name dispute also draws one Fable call. Full detail: `docs/gates-and-env.md`'s "Lawn visit
 assessment name referee" paragraph and `server/services/lawn-visit-referee.js`.
 
 ## 2026-09-29 — Cockroach "Work completed today" chips become an auto-filled field derived from the recorded products
