@@ -26,7 +26,8 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
-const { newSodMode, sodLaidLabel, buildNewSodBanner } = require('./service-report/lawn-new-sod');
+const { sodLaidLabel, buildNewSodBanner } = require('./service-report/lawn-new-sod');
+const { resolveNewSodVerdict } = require('./service-report/lawn-new-sod-visit');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 
@@ -284,14 +285,12 @@ async function loadReportWateringContext(svc, knex) {
  */
 async function loadNewSodNote(svc, knex) {
   if (typeof featureGates.lawnNewSodModeLive !== 'function' || !featureGates.lawnNewSodModeLive()) return null;
-  try {
-    const prefs = await knex('property_preferences').where({ customer_id: svc.customer_id }).first('sod_laid_on');
-    const sod = newSodMode(prefs, etCalendarDayOf(svc.scheduled_date));
-    return sod.active ? { laidOn: sod.laidOn, note: sodLaidLabel(sod.laidOn) } : null;
-  } catch (err) {
-    logger.warn(`[lawn-fast] new-sod note unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  }
+  // The shared verdict (lawn-new-sod-visit.js): the appointment's day and its
+  // property, so a visit at another property, or one whose address cannot be
+  // judged, shows no note. A failed read is no note too.
+  const verdict = await resolveNewSodVerdict(knex, { customerId: svc.customer_id, scheduledServiceId: svc.id });
+  if (verdict.reason === 'read_failed') logger.warn(`[lawn-fast] new-sod note unavailable for ${svc.id}`);
+  return verdict.active ? { laidOn: verdict.laidOn, note: sodLaidLabel(verdict.laidOn) } : null;
 }
 
 /**

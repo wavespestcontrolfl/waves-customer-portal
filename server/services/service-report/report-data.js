@@ -43,8 +43,9 @@ const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const {
-  newSodMode, buildNewSodBanner, buildNewSodWeekPlan, weedControlMayHaveBeenApplied, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
+  buildNewSodBanner, buildNewSodWeekPlan, weedControlMayHaveBeenApplied, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
 } = require('./lawn-new-sod');
+const { resolveNewSodVerdict } = require('./lawn-new-sod-visit');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -3731,10 +3732,23 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // snapshot may say to skip a run after rain, which is wrong for new sod. Gate
   // off = no read, no change. A failed prefs read is the normal report (fail
   // closed; it already marks the render uncacheable via prefsReadFailed).
+  // The verdict comes from the ONE shared resolver (lawn-new-sod-visit.js): the
+  // VISIT's day (service record date, never the assessment's capture date, so a
+  // redo or GATE_LAWN_PROPERTY_HISTORY cannot move it) and the visit's property
+  // (a stamped address that diverges from the primary home, or one that cannot be
+  // judged, is the normal report). A query that throws is the normal report AND an
+  // uncacheable, delivery-deferring render (newSodReadFailed below).
   let newSodState = NEW_SOD_INACTIVE;
+  let newSodReadFailed = false;
   if (typeof featureGates.lawnNewSodModeLive === 'function' && featureGates.lawnNewSodModeLive() && !prefsReadFailed) {
-    newSodState = newSodMode(propertyPrefs, ymd(assessment.visit_date || assessment.service_date));
-    if (newSodState.active) waterContext.weekPlan = buildNewSodWeekPlan();
+    const verdict = await resolveNewSodVerdict(knex, { customerId: service.customer_id, prefs: propertyPrefs, serviceRecordId: service.id });
+    if (verdict.reason === 'read_failed') {
+      newSodReadFailed = true;
+      if (readFailures) readFailures.add('new_sod_identity');
+    } else if (verdict.active) {
+      newSodState = { active: true, laidOn: verdict.laidOn, dayNumber: verdict.dayNumber };
+      waterContext.weekPlan = buildNewSodWeekPlan();
+    }
   }
 
   // The week's rain / ET₀ (water insights) could not be fetched or frozen.
@@ -3776,12 +3790,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // from an independent, possibly-successful prefs read) stamps that state
     // — caching the mismatch would serve the wrong water balance until the
     // customer's next prefs edit.
-    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed,
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed || newSodReadFailed,
     // Dedicated flag for DELIVERY: a pinned (emailed) render must not ship a
     // payload that fell back to tech values because the prefs read blipped —
     // unlike a pending weather week, a retry can fix this, so pdf-queue
     // throws retryable on it instead of serving the bytes.
-    portalPrefsReadFailed: prefsReadFailed,
+    portalPrefsReadFailed: prefsReadFailed || newSodReadFailed,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {

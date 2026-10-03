@@ -1176,7 +1176,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
     test('on, but outside the window, before the sod date, no date, or a pest visit: no note', async () => {
       process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-      for (const [row, sod] of [[lawnVisit({ scheduled_date: '2026-10-23' }), '2026-10-01'], [lawnVisit({ scheduled_date: '2026-09-30' }), '2026-10-01'], [lawnVisit(), null], [visit(false), '2026-10-01']]) {
+      for (const [row, sod] of [[lawnVisit({ scheduled_date: '2026-10-23' }), '2026-10-01'], [lawnVisit({ scheduled_date: '2026-09-30' }), '2026-10-01'], [lawnVisit(), null], [visit(false), '2026-10-01'], [lawnVisit({ address_diverges: null }), '2026-10-01']]) {
         expect((await load(row, sod)).facts).not.toHaveProperty('newSod');
       }
     });

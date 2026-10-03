@@ -2198,8 +2198,15 @@ route, query parameter or customer message.
 payload, the lawn PDF cache key and every text unchanged, key for key, even when the
 date is set) changes `/api/reports/:token/data` for a LAWN visit only, and only when
 `property_preferences.sod_laid_on` is set and the visit's America/New_York calendar day
-is from that day through day 21 inclusive. The visit's own day is the judge, not the
-clock, so a reopened report reads the same. It adds no key; it replaces the content of
+is from that day through day 21 inclusive. The visit's own day is the judge: the
+service record's `service_date` (America/New_York), never the assessment's capture date
+(a redo, or `GATE_LAWN_PROPERTY_HISTORY` off, cannot move it) and never the clock, so a
+reopened report reads the same. The sod date belongs to the customer's primary home, so a
+visit whose stamped service address diverges from it, or that cannot be tied to its
+appointment, gets the normal report; a failed read of the visit gives the normal report
+too, uncacheable, with an emailed PDF deferred. One resolver
+(`lawn-new-sod-visit.js`) serves the report, the Fast Complete sheet, the job card and
+the watering text. It adds no key; it replaces the content of
 existing ones with FIXED sentences (no model, no number the business has not stated, no
 "21 days"): `reportV2.banner` becomes `{ state: 'new_sod', lines, holdUntil: null,
 waterInBy: null, expiresAt: null, ruleSource: 'new_sod' }` with `lines` = "Water your

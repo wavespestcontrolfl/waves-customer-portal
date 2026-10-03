@@ -26,7 +26,7 @@
 const logger = require('../logger');
 const { lawnWateringSmsLive, lawnWateringRuleLive, lawnNewSodModeLive } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
-const { newSodMode } = require('./lawn-new-sod');
+const { resolveNewSodVerdict } = require('./lawn-new-sod-visit');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
@@ -155,16 +155,16 @@ async function sendLawnWateringSms(args, deps) {
     // this re-check covers an instruction frozen before the sod date was entered.
     // FAIL CLOSED: a preference that cannot be read sends nothing (and writes no
     // marker, so the report banner still carries the instruction).
+    // The verdict is the shared one (lawn-new-sod-visit.js): the visit's service-record
+    // day and its property, the same as the report, never the completion time.
     let newSodActive = false;
     if (typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()) {
-      try {
-        const prefs = await deps.db('property_preferences').where({ customer_id: svc.customer_id }).first('sod_laid_on');
-        const visitDay = etDateString(completedAt ? new Date(completedAt) : new Date());
-        newSodActive = newSodMode(prefs, visitDay).active;
-      } catch (prefErr) {
-        logger.warn(`[lawn-watering-sms] new-sod preference unreadable for service_record ${record.id}; no text sent: ${prefErr.message}`);
+      const verdict = await resolveNewSodVerdict(deps.db, { customerId: svc.customer_id, serviceRecordId: record.id, scheduledServiceId: svc.id });
+      if (verdict.reason === 'read_failed') {
+        logger.warn(`[lawn-watering-sms] new-sod verdict unreadable for service_record ${record.id}; no text sent`);
         return { status: 'skip_new_sod_unreadable' };
       }
+      newSodActive = verdict.active;
     }
     const plan = lawnWateringSmsPlan({
       instruction,

@@ -216,7 +216,6 @@ describe('the watering text never goes to an active new-sod property', () => {
 
 describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
   const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
-  const { etDateString } = require('../utils/datetime-et');
   const KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_NEW_SOD_MODE'];
   let saved;
   beforeEach(() => {
@@ -226,11 +225,27 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
   });
   afterEach(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
-  function harness(prefsRead) {
+  // A fake knex for the shared resolver: the preference row, then the visit identity.
+  function fakeDb({ prefs, identity, throws = false }) {
+    const db = jest.fn((table) => {
+      const q = {};
+      for (const m of ['where', 'leftJoin', 'join']) q[m] = () => q;
+      q.first = async () => {
+        if (throws) throw new Error('connection reset');
+        return table === 'property_preferences' ? prefs : identity;
+      };
+      return q;
+    });
+    db.raw = (sql) => sql;
+    return db;
+  }
+  const IDENTITY = (over = {}) => ({ service_date: '2026-10-05', scheduled_date: '2026-10-05', ss_id: 'svc-1', address_diverges: false, ...over });
+
+  function harness(dbOpts) {
     const sendCustomerMessage = jest.fn(async () => ({ sent: true }));
     const getTemplate = jest.fn(async (key, vars) => `Watering: ${vars.watering_lines}`);
     const mergeNotes = jest.fn(async () => {});
-    const db = jest.fn(() => ({ where: () => ({ first: prefsRead }) }));
+    const db = fakeDb(dbOpts);
     return {
       state: {
         record: { id: 'rec-1', structured_notes: {} },
@@ -242,34 +257,41 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
       sendCustomerMessage, getTemplate, mergeNotes, db,
     };
   }
-  const today = () => etDateString(new Date());
+  const ACTIVE = { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY() };
 
   test('gate off: the property row is never read and the text goes out as before', async () => {
-    const h = harness(async () => ({ sod_laid_on: today() }));
+    const h = harness(ACTIVE);
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     expect(h.db).not.toHaveBeenCalled();
   });
 
   test('gate on, active new-sod property: no template read, no send, no marker', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    const h = harness(async () => ({ sod_laid_on: today() }));
+    const h = harness(ACTIVE);
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_new_sod' });
     expect(h.getTemplate).not.toHaveBeenCalled();
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
     expect(h.mergeNotes).not.toHaveBeenCalled();
   });
 
-  test('gate on, sod window over or no date: the text goes out as before', async () => {
+  test('gate on, sod window over, no date, no row, a divergent address or an unknown visit: the text goes out as before', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    for (const row of [{ sod_laid_on: '2025-12-01' }, { sod_laid_on: null }, null]) {
-      const h = harness(async () => row);
+    for (const opts of [
+      { prefs: { sod_laid_on: '2025-12-01' }, identity: IDENTITY() },
+      { prefs: { sod_laid_on: null }, identity: IDENTITY() },
+      { prefs: null, identity: IDENTITY() },
+      { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY({ address_diverges: true }) },
+      { prefs: { sod_laid_on: '2026-10-01' }, identity: IDENTITY({ ss_id: null }) },
+      { prefs: { sod_laid_on: '2026-10-01' }, identity: null },
+    ]) {
+      const h = harness(opts);
       expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     }
   });
 
-  test('gate on, preference unreadable: fail closed, nothing sent and no marker written', async () => {
+  test('gate on, anything unreadable: fail closed, nothing sent and no marker written', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    const h = harness(async () => { throw new Error('connection reset'); });
+    const h = harness({ ...ACTIVE, throws: true });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_new_sod_unreadable' });
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
     expect(h.mergeNotes).not.toHaveBeenCalled();

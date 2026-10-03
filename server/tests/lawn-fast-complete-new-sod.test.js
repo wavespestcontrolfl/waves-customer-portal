@@ -126,9 +126,12 @@ afterAll(() => {
 });
 
 const prefsWith = (sod_laid_on) => ({ ...PREFS, sod_laid_on });
-const ctx = (tables) => buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(tables)), technicianId: TECH });
+// The shared resolver's appointment read (scheduled date + whether the stamped address diverges).
+const APPT = (over = {}) => ({ scheduled_date: '2026-10-05', address_diverges: false, ...over });
+const withAppt = (tables) => ({ 'scheduled_services as ss': APPT(), ...tables });
+const ctx = (tables) => buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables(withAppt(tables))), technicianId: TECH });
 const preview = (tables) => buildLawnFastWateringPreview({
-  serviceId: VISIT, productIds: [P_HERB], knex: fakeKnex(baseTables(tables)), now: new Date('2026-10-05T14:00:00Z'),
+  serviceId: VISIT, productIds: [P_HERB], knex: fakeKnex(baseTables(withAppt(tables))), now: new Date('2026-10-05T14:00:00Z'),
 });
 
 describe('Lawn Fast Complete context: the New sod note', () => {
@@ -147,6 +150,16 @@ describe('Lawn Fast Complete context: the New sod note', () => {
     for (const sod of ['2026-09-01', '2026-10-06', null]) {
       expect(await ctx({ property_preferences: prefsWith(sod) })).not.toHaveProperty('newSod');
     }
+  });
+
+  test('gate on, a visit at another property or one whose address cannot be judged: no note', async () => {
+    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+    for (const appt of [APPT({ address_diverges: true }), APPT({ address_diverges: null }), undefined]) {
+      expect(await ctx({ property_preferences: prefsWith('2026-10-01'), 'scheduled_services as ss': appt })).not.toHaveProperty('newSod');
+    }
+    const result = await preview({ property_preferences: prefsWith('2026-10-01'), 'scheduled_services as ss': APPT({ address_diverges: true }) });
+    expect(result.sentence).toMatch(/^Skip your turf watering until/);
+    expect(result).not.toHaveProperty('newSod');
   });
 
   test('gate on, preference unreadable: no note, and the context still answers', async () => {

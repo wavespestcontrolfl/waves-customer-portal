@@ -127,6 +127,11 @@ const fixtures = (prefs = []) => ({
 });
 
 
+// The shared resolver's visit-identity read (lawn-new-sod-visit.js): the service record's
+// own day, its linked appointment and whether the stamped address diverges from the home.
+const IDENTITY = (over = {}) => ({ 'sr.id': 'svc-lawn-w1', service_date: '2026-09-30', scheduled_date: '2026-09-30', ss_id: 'ss-current', address_diverges: false, ...over });
+const withIdentity = (prefs, identity = IDENTITY()) => ({ ...fixtures(prefs), 'service_records as sr': identity ? [identity] : [] });
+
 const SOD_PREFS = (sod_laid_on) => [{ customer_id: 'cust-lawn-w1', sod_laid_on }];
 const GATES = ['GATE_LAWN_NEW_SOD_MODE', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_FORECAST'];
 
@@ -134,7 +139,7 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
   const saved = {};
   beforeEach(() => { for (const g of GATES) { saved[g] = process.env[g]; delete process.env[g]; } });
   afterEach(() => { for (const g of GATES) { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; } });
-  const render = (rule, prefs, extra = {}, opts = {}) => buildReportV1Data(serviceWith(rule), 'token-w1', makeKnex({ ...fixtures(prefs), ...extra }), opts);
+  const render = (rule, prefs, extra = {}, opts = {}) => buildReportV1Data(serviceWith(rule), 'token-w1', makeKnex({ ...withIdentity(prefs), ...extra }), opts);
 
   test('gate off: the payload is byte-identical with the date set or not', async () => {
     // Control: the same prefs row with no sod date (a row's mere presence already shapes turfProfile).
@@ -155,7 +160,7 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
   test('the PDF cache key moves only while the gate is live and a sod date is set', async () => {
     const sig = async (prefs) => (await resolveCanonicalLawnRender(
       { id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', service_line: 'lawn', service_date: '2026-09-30' },
-      makeKnex(fixtures(prefs)),
+      makeKnex(withIdentity(prefs)),
     )).signature;
     const noDate = await sig(SOD_PREFS(null));
     // Gate off: the date changes nothing (a prefs edit moves updated_at, not this).
@@ -198,7 +203,7 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
     const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: { ...facts(null), name: 'Iron Plus', category: 'supplement', activeIngredient: 'iron' } } });
     const service = { ...serviceWith(null), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
     const knex = makeKnex({
-      ...fixtures(SOD_PREFS('2026-09-25')),
+      ...withIdentity(SOD_PREFS('2026-09-25')),
       service_products: [{ id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Iron Plus', product_category: 'supplement', created_at: '2026-09-30T18:00:00Z' }],
     });
     const v2 = (await buildReportV1Data(service, 'token-w1', knex)).reportV2;
@@ -261,8 +266,52 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const service = serviceWith(HOLD);
     const frozen = { ...service, structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.'], minutes: {}, ruleSource: 'label' } } }) };
-    const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures(SOD_PREFS('2026-09-25'))));
+    const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(withIdentity(SOD_PREFS('2026-09-25'))));
     expect(data.reportV2.banner.state).toBe('new_sod');
     expect(JSON.stringify(data.reportV2)).not.toMatch(/Skip your turf watering/);
+  });
+});
+
+describe('GATE_LAWN_NEW_SOD_MODE: one visit day and one property for the report', () => {
+  const saved = process.env.GATE_LAWN_NEW_SOD_MODE;
+  beforeEach(() => { process.env.GATE_LAWN_NEW_SOD_MODE = 'true'; });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_NEW_SOD_MODE; else process.env.GATE_LAWN_NEW_SOD_MODE = saved; });
+  const render = (extra) => buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex({ ...withIdentity(SOD_PREFS('2026-09-25')), ...extra }));
+
+  test('a visit at another property (stamped address diverges from the home) is the normal report', async () => {
+    const data = await render({ 'service_records as sr': [IDENTITY({ address_diverges: true })] });
+    expect(data.reportV2.banner?.state).not.toBe('new_sod');
+    expect(JSON.stringify(data)).not.toMatch(/New sod/);
+  });
+
+  test('a visit whose address cannot be judged (no linked appointment, or no record row) is the normal report', async () => {
+    for (const identity of [IDENTITY({ ss_id: null }), IDENTITY({ address_diverges: null })]) {
+      expect((await render({ 'service_records as sr': [identity] })).reportV2.banner?.state).not.toBe('new_sod');
+    }
+    expect((await render({ 'service_records as sr': [] })).reportV2.banner?.state).not.toBe('new_sod');
+  });
+
+  test('an unreadable visit identity is the normal report, and the render is uncacheable and defers delivery', async () => {
+    const data = await render({ 'service_records as sr': FAIL });
+    expect(data.reportV2.banner?.state).not.toBe('new_sod');
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    expect(data.lawnAssessment.portalPrefsReadFailed).toBe(true);
+  });
+
+  test('the verdict follows the service record day, not the assessment: a redo on another day does not move it across day 21', async () => {
+    // Visit 2026-09-30, sod 2026-09-09: day 21, active. Redo the assessment on later days.
+    const sodDay21 = withIdentity(SOD_PREFS('2026-09-09'));
+    for (const redoDay of ['2026-09-30', '2026-10-02', '2026-10-20', '2026-09-20']) {
+      const fx = { ...sodDay21, lawn_assessments: [{ ...sodDay21.lawn_assessments[0], service_date: redoDay, created_at: `${redoDay}T14:00:00Z` }] };
+      const data = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex(fx));
+      expect(data.reportV2.banner?.state).toBe('new_sod');
+    }
+    // And day 22 stays out whatever the assessment's day.
+    const day22 = withIdentity(SOD_PREFS('2026-09-08'));
+    for (const redoDay of ['2026-09-30', '2026-09-10']) {
+      const fx = { ...day22, lawn_assessments: [{ ...day22.lawn_assessments[0], service_date: redoDay, created_at: `${redoDay}T14:00:00Z` }] };
+      const data = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex(fx));
+      expect(data.reportV2.banner?.state).not.toBe('new_sod');
+    }
   });
 });

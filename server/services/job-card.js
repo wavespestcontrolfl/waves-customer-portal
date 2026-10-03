@@ -21,7 +21,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue, lawnNewSodModeLive } = require('../config/feature-gates');
-const { newSodMode, sodLaidLabel } = require('./service-report/lawn-new-sod');
+const { sodLaidLabel } = require('./service-report/lawn-new-sod');
+const { resolveNewSodVerdict } = require('./service-report/lawn-new-sod-visit');
 const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
 const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
@@ -552,12 +553,13 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
   // visit inside the property's new-sod window, so the technician knows the
   // report says daily light watering and no mowing. The primary home's row only
   // (propertyPrefs is null at an alternate address). Gate off: no key at all.
-  const newSodNote = serviceLine === 'lawn' && typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()
-    ? (() => {
-      const sod = newSodMode(propertyPrefs, etCalendarDayOf(svc.scheduled_date));
-      return sod.active ? sodLaidLabel(sod.laidOn) : null;
-    })()
-    : null;
+  // The shared verdict (lawn-new-sod-visit.js), the same one the report, the Fast
+  // Complete sheet and the watering text use: the appointment's day and its property.
+  let newSodNote = null;
+  if (serviceLine === 'lawn' && typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()) {
+    const verdict = await resolveNewSodVerdict(dbh, { customerId: svc.customer_id, prefs: prefs || null, scheduledServiceId: svc.id });
+    if (verdict.active) newSodNote = sodLaidLabel(verdict.laidOn);
+  }
   // Every code on file is scrubbed from the facts even when none is shown:
   // a primary-home code pasted into a visit note must not surface on an
   // alternate-address card.
