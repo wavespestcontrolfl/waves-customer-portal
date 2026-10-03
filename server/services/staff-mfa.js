@@ -422,10 +422,14 @@ async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = 
   });
 }
 
+// Lock order everywhere: account row, then factor row, then recovery codes
+// (verification takes factor row then codes), so turning it off never
+// deadlocks against a recovery-code sign-in.
 // Returns { ok: true } or { ok: false, reason: 'revoked' }.
 async function disable(technicianId, { expectedTokenVersion } = {}) {
   return db.transaction(async (trx) => {
     if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
+    await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
     await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();
     await trx('technicians').where({ id: technicianId }).update({ mfa_enabled_at: null, updated_at: trx.fn.now() });

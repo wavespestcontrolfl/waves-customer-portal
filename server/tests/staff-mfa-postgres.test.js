@@ -220,4 +220,15 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     // Locked: even the right code is refused, and nothing reset the lock.
     expect((await staffMfa.verifySecondFactor(techId, right)).reason).toBe('locked');
   });
+  test('turning it off while a recovery code is being used never deadlocks', async () => {
+    const { recoveryCodes } = await enroll();
+    const results = await Promise.allSettled([
+      staffMfa.disable(techId, { expectedTokenVersion: 2 }),
+      staffMfa.verifySecondFactor(techId, recoveryCodes[0]),
+      staffMfa.disable(techId, { expectedTokenVersion: 2 }),
+      staffMfa.verifySecondFactor(techId, recoveryCodes[1]),
+    ]);
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();
+  });
 });
