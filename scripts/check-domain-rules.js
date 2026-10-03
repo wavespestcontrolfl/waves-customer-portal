@@ -41,12 +41,13 @@
  *      once reached 197 KB, 171 KB of it per-gate env documentation that
  *      now lives in docs/gates-and-env.md and is read on demand.
  *
- *   7. gate-index — every GATE_* variable the code reads has a line in the
- *      generated docs/gate-index.md, so a lookup by name never comes back
- *      empty for a gate that exists. 448 of 555 gates
- *      had no entry when the index was added. Fix: `npm run gates:index`.
- *      On Railway the rule only warns: a PR that was green before the rule
- *      landed must not block a production deploy.
+ *   7. gate-index — docs/gate-index.md is exactly what
+ *      scripts/generate-gate-index.js writes from the code: one line per
+ *      GATE_* variable the code reads, with its reader files. A lookup by
+ *      name never comes back empty for a gate that exists, and never names
+ *      a reader that is gone. Fix: `npm run gates:index`. On Railway the
+ *      rule only warns: a PR that was green before the rule landed must not
+ *      block a production deploy.
  *
  * Scope: the whole production server tree (server/) + client/src.
  * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
@@ -236,21 +237,23 @@ if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
 }
 
 // =========================================================================
-// Gate index (rule 7) — every gate the code reads has a generated index line.
+// Gate index (rule 7) — docs/gate-index.md matches what the code implies.
 // =========================================================================
-const { scanGates } = require('./lib/gate-scan');
-const { INDEX_FILE: GATE_INDEX_FILE, indexedGates } = require('./generate-gate-index');
-const gateIndexPath = path.join(ROOT, GATE_INDEX_FILE);
-const gateIndex = indexedGates(fs.existsSync(gateIndexPath) ? fs.readFileSync(gateIndexPath, 'utf8') : '');
-const unindexedGates = [...scanGates().entries()].filter(([name]) => !gateIndex.has(name));
-if (unindexedGates.length) {
+const { INDEX_FILE: GATE_INDEX_FILE, expectedIndex, currentIndex } = require('./generate-gate-index');
+const expectedGateLines = expectedIndex().split('\n');
+const currentGateLines = new Set(currentIndex().split('\n'));
+const expectedGateLineSet = new Set(expectedGateLines);
+const staleGateLines = [
+  ...expectedGateLines.filter((line) => !currentGateLines.has(line)).map((line) => `missing or changed: ${line}`),
+  ...[...currentGateLines].filter((line) => !expectedGateLineSet.has(line)).map((line) => `no longer true: ${line}`),
+];
+if (staleGateLines.length || expectedIndex() !== currentIndex()) {
   const onRailway = Object.keys(process.env).some((key) => key.startsWith('RAILWAY_'));
-  for (const [name, gateFiles] of unindexedGates) {
-    console.error(`${gateFiles[0]}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
-    console.error(`    ${name} is read by the code but has no line in ${GATE_INDEX_FILE}.`);
-    console.error('    Run `npm run gates:index` and commit the file.\n');
-  }
-  if (!onRailway) violations += unindexedGates.length;
+  console.error(`${GATE_INDEX_FILE}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
+  for (const line of staleGateLines.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
+  if (staleGateLines.length > 10) console.error(`    ... and ${staleGateLines.length - 10} more line(s).`);
+  console.error('    The index differs from the gates the code reads. Run `npm run gates:index` and commit the file.\n');
+  if (!onRailway) violations += 1;
 }
 
 if (violations) {

@@ -110,5 +110,5 @@ The catalogue of documented `GATE_*` flags and env vars (default, where it is re
 
 - Look a variable up by name: `grep -n 'GATE_NAME' docs/gates-and-env.md docs/gate-index.md`. Each entry is one paragraph on one line; never read the whole file.
 - Document a new or changed variable there, in the same PR. Not here.
-- After adding, renaming or removing a `GATE_*` variable, run `npm run gates:index` and commit `docs/gate-index.md`; `npm run check:domain-rules` fails on a gate with no index line.
+- After adding, renaming or removing a `GATE_*` variable, or reading one from a new file, run `npm run gates:index` and commit `docs/gate-index.md`; `npm run check:domain-rules` fails when that file is out of date.
 - This file has a 24 KB budget (`npm run check:domain-rules`); it loads into every session.

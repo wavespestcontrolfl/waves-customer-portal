@@ -7,11 +7,12 @@
  * gate is.
  *
  * A gate is a GATE_* name the code READS from the environment:
- *   process.env.GATE_X, process.env['GATE_X'], env.GATE_X,
- *   gateEnvValue('GATE_X'), or any other call whose first string argument is
- *   the bare name ('GATE_X' as a whole quoted literal).
- * A GATE_* word that only appears in a comment, a message or as a prefix
- * (GATE_BOOK_) is not a gate.
+ *   process.env.GATE_X or env.GATE_X, process.env['GATE_X'],
+ *   a gate helper called with the name (gateEnvValue('GATE_X'),
+ *   gateEnvTimestamp('GATE_X'), gate('GATE_X')), or a gate-named constant
+ *   that holds the name for a later lookup (const GATE_ENV = 'GATE_X').
+ * A GATE_* word in a comment, a message, a list of retired names, an error
+ * code, or used as a prefix (GATE_BOOK_) is not a gate.
  */
 
 const fs = require('fs');
@@ -35,12 +36,14 @@ const FEATURE_GATES_FILE = 'server/config/feature-gates.js';
 // One read of a gate. The name must end in a letter or digit, so a prefix
 // used to build a name (GATE_BOOK_ + suffix) never matches.
 const NAME = 'GATE_[A-Z0-9_]*[A-Z0-9]';
+const QUOTED = `['"\`](${NAME})['"\`]`;
 const READ_PATTERNS = [
   new RegExp(`\\benv\\.(${NAME})\\b`, 'g'),
-  new RegExp(`\\benv\\[\\s*['"\`](${NAME})['"\`]\\s*\\]`, 'g'),
-  // A bare quoted name is a read (gateEnvValue('GATE_X'), a name list), but
-  // not an error code that happens to start with GATE_ ({ code: 'GATE_...' }).
-  new RegExp(`(?<!\\bcode:\\s*)['"\`](${NAME})['"\`]`, 'g'),
+  new RegExp(`\\benv\\[\\s*${QUOTED}\\s*\\]`, 'g'),
+  // gateEnvValue('GATE_X'), featureGates.gateEnvTimestamp('GATE_X'), gate('GATE_X')
+  new RegExp(`[A-Za-z0-9_$]*[gG]ate[A-Za-z0-9_$]*\\(\\s*${QUOTED}`, 'g'),
+  // const GATE_ENV = 'GATE_X'; const SUMMARY_GATE = 'GATE_X';
+  new RegExp(`\\b(?:const|let|var)\\s+[A-Za-z0-9_$]*(?:GATE|[gG]ate)[A-Za-z0-9_$]*\\s*=\\s*${QUOTED}`, 'g'),
 ];
 
 function walk(dir, out) {

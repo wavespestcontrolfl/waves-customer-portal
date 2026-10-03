@@ -9,8 +9,9 @@ describe('gate scan: what counts as a gate the code reads', () => {
       const a = process.env.GATE_ALPHA === 'true';
       const b = process.env['GATE_BRAVO'];
       const c = gateEnvValue('GATE_CHARLIE');
-      const d = gateEnvTimestamp("GATE_DELTA_SINCE");
-      const LIST = ['GATE_ECHO'];
+      const d = featureGates.gateEnvTimestamp("GATE_DELTA_SINCE");
+      const SUMMARY_GATE = 'GATE_ECHO';
+      const on = process.env[SUMMARY_GATE] === 'true';
     `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO', 'GATE_CHARLIE', 'GATE_DELTA_SINCE', 'GATE_ECHO']);
   });
 
@@ -21,6 +22,13 @@ describe('gate scan: what counts as a gate the code reads', () => {
          at call time */
       const url = 'https://example.com/a'; const on = process.env.GATE_AFTER_URL;
     `)).toEqual(['GATE_AFTER_URL']);
+  });
+
+  test('a retired-name list and a message are not reads', () => {
+    expect(names(`
+      const RETIRED = new Set(['GATE_OLD_GLASS', 'GATE_OLDER_GLASS']);
+      res.json({ error: 'GATE_NOT_A_GATE' });
+    `)).toEqual([]);
   });
 
   test('a name prefix and an error code are not gates', () => {

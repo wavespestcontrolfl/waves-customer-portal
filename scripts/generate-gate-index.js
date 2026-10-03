@@ -15,7 +15,8 @@
  * number would go stale with every edit above it.
  *
  * Run: `npm run gates:index` after adding, renaming or removing a gate.
- * `npm run check:domain-rules` fails when a gate the code reads has no line.
+ * `npm run check:domain-rules` fails when the file differs from what the
+ * code implies (a gate, a reader file or a description added or removed).
  */
 
 const fs = require('fs');
@@ -39,26 +40,34 @@ function indexLine(name, files, description) {
   return `- \`${name}\` — ${shown}${more}${tail}`;
 }
 
-// The gate names that have a line in the index file's text.
+// The gate names that have a line in an index text.
 function indexedGates(text) {
   return new Set([...text.matchAll(/^- `(GATE_[A-Z0-9_]+)`/gm)].map((m) => m[1]));
 }
 
-function main() {
-  const file = path.join(ROOT, INDEX_FILE);
+// The whole file the code implies right now.
+function expectedIndex() {
   const descriptions = headerDescriptions();
   const lines = [...scanGates().entries()]
     .map(([name, files]) => indexLine(name, files, descriptions.get(name)));
-  const next = `${HEADING}\n${lines.join('\n')}\n`;
-  const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  if (next === current) {
+  return `${HEADING}\n${lines.join('\n')}\n`;
+}
+
+function currentIndex() {
+  const file = path.join(ROOT, INDEX_FILE);
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+}
+
+function main() {
+  const next = expectedIndex();
+  if (next === currentIndex()) {
     console.log(`gates:index — ${INDEX_FILE} is up to date.`);
     return;
   }
-  fs.writeFileSync(file, next);
-  console.log(`gates:index — wrote ${lines.length} gate lines to ${INDEX_FILE}.`);
+  fs.writeFileSync(path.join(ROOT, INDEX_FILE), next);
+  console.log(`gates:index — wrote ${indexedGates(next).size} gate lines to ${INDEX_FILE}.`);
 }
 
 if (require.main === module) main();
 
-module.exports = { INDEX_FILE, indexedGates };
+module.exports = { INDEX_FILE, expectedIndex, currentIndex };
