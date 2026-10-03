@@ -156,8 +156,15 @@ const LINK_RES = [
   /(?<![A-Za-z0-9_)\]])\/[A-Za-z0-9_.~%-]+(?:\/[A-Za-z0-9_.~%:@+=,-]+)+/g,
 ];
 const maskLinks = (text) => LINK_RES.reduce((out, re) => out.replace(re, '[link]'), text);
-const LONG_TOKEN_RE = /[A-Za-z0-9_-]{32,}/g;
-const maskTokens = (text) => text.replace(LONG_TOKEN_RE, (run) => (/\d/.test(run) ? '[token]' : run));
+// Format-agnostic credential detection (the repo mints hex of 16-64 characters and base64url of 22-64: the floor is the
+// 22-character randomBytes(16) base64url, so the thresholds sit below it). A run is a credential, not prose, when it is
+//   - 20 or more characters of [A-Za-z0-9_-]  (no spaces: prose and ordinary slugs of that length are rare), OR
+//   - 16 or more characters of base64/base64url/hex alphabet ([A-Za-z0-9_+/=-]) holding BOTH a letter and a digit.
+// Shorter codes ("INV-2026-0042", "Taurus SC 2gal", a 6-8 character short code) are not touched.
+const TOKEN_RUN_20_RE = /[A-Za-z0-9_-]{20,}/g;
+const TOKEN_RUN_16_RE = /[A-Za-z0-9_+/=-]{16,}/g;
+const maskTokens = (text) => text.replace(TOKEN_RUN_20_RE, '[token]')
+  .replace(TOKEN_RUN_16_RE, (run) => (/\d/.test(run) && /[A-Za-z]/.test(run) ? '[token]' : run));
 // Emails, links, card numbers, tokens and UUIDs are masked in every string. A UUID in free text can be a bearer value
 // (an automation preview_token is one), so a UUID is only left alone in a STRUCTURAL id field, which the egress
 // scrubber exempts by key (STRUCTURAL_ID_KEYS below), never by pattern.
@@ -182,8 +189,17 @@ function scrub(value, max = 240) {
 // later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
 // The fields the tools return as record references (what a follow-up read needs): invoice, customer, payment, plan,
 // term and statement ids. Only these keys keep a UUID.
+// Enum-like fields whose values are machine words (error codes such as target_clarification_required, roles such as
+// covered_by_prepay_term), which the long-run token rule would otherwise read as a credential.
+const ENUM_KEYS = new Set(['code', 'role', 'kind', 'state', 'status', 'term_status', 'refund_status', 'source']);
 const STRUCTURAL_ID_KEYS = new Set(['id', 'invoice_id', 'customer_id', 'payment_id', 'plan_id', 'term_id', 'statement_id']);
 function scrubEgress(value, secrets = [], key = null) {
+  // A number that is 13+ integer digits is a card-number shape, not money: masked.
+  if (typeof value === 'number') return Number.isFinite(value) && Math.abs(value) >= 1e12 ? '[number]' : value;
+  // A machine code (an error code, a role, a status): lowercase letters and underscores only, under an enum-like key.
+  if (typeof value === 'string' && ENUM_KEYS.has(key) && /^[a-z][a-z_]{1,63}$/.test(value)) return value;
+  // An invoice number is a short quoted reference (the repo's own /^[A-Za-z0-9-]+$/ shape), never a credential.
+  if (typeof value === 'string' && key === 'invoice_number' && /^[A-Za-z0-9-]{1,40}$/.test(value)) return value;
   if (typeof value === 'string') return STRUCTURAL_ID_KEYS.has(key) && UUID_RE.test(value) ? value : maskSensitive(value, secrets);
   if (Array.isArray(value)) return value.map((inner) => scrubEgress(inner, secrets, key));
   if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([inner, innerValue]) => [inner, scrubEgress(innerValue, secrets, inner)]));
@@ -641,7 +657,9 @@ async function accountSummary(InvoiceService, customer, today, database) {
   if (reconcileCount > 0) unknowns.push(`${reconcileCount} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
   if (otherNotCollectible > 0) unknowns.push(`${otherNotCollectible} unpaid invoice(s) are not collectible from this customer (for example billed to a third party, or nothing due after credit) and are not in total_due.`);
   if (unavailableCount > 0) unknowns.push(`${unavailableCount} invoice(s) changed hands during the read and are left out of every figure here: ask again.`);
-  const notYetSent = (invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status));
+  // Presented to the customer = the canonical alreadyDeliveredForFirstSend (delivery stamps OR a delivered status), not status alone.
+  const { alreadyDeliveredForFirstSend } = require('../invoice');
+  const notYetSent = (invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status)) && !alreadyDeliveredForFirstSend(invoice);
   const summary = {
     total_due: sum(rowsWhere(() => true)),
     // Derived from the fenced collectible rows (null when the read is incomplete), never the raw status total.
@@ -772,16 +790,33 @@ async function listForCustomer(customer, input, database, secrets) {
 
 const LINE_ITEM_CAP = 50;
 // Bounded like the payment and plan histories: one more than the cap is read to know whether it was cut.
+// A line-item number outside a plausible range (abs above 1,000,000, 13+ integer digits, or not a number) is withheld:
+// the JSON is operator-supplied and a card-number shape in a numeric field would otherwise pass as a number.
+const PLAUSIBLE_LINE_NUMBER = 1000000;
+function plausibleNumber(value, tally) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || Math.abs(number) > PLAUSIBLE_LINE_NUMBER || String(Math.trunc(Math.abs(number))).length >= 13) {
+    tally.implausible = true;
+    return null;
+  }
+  return number;
+}
 function lineItems(raw) {
   const parsed = parseLineItems(raw).slice(0, LINE_ITEM_CAP + 1);
-  return { items: parsed.slice(0, LINE_ITEM_CAP).map((item) => ({
-    description: scrub(item.description || item.name, 200),
-    quantity: item.quantity === undefined || item.quantity === null ? null : Number(item.quantity),
-    unit_price: money(item.unit_price),
-    amount: money(item.amount),
-    category: scrub(item.category, 80),
-    is_discount: Number(item.amount) < 0,
-  })), truncated: parsed.length > LINE_ITEM_CAP };
+  const tally = { implausible: false };
+  const items = parsed.slice(0, LINE_ITEM_CAP).map((item) => {
+    const amount = plausibleNumber(item.amount, tally);
+    return {
+      description: scrub(item.description || item.name, 200),
+      quantity: plausibleNumber(item.quantity, tally),
+      unit_price: money(plausibleNumber(item.unit_price, tally)),
+      amount: money(amount),
+      category: scrub(item.category, 80),
+      is_discount: amount !== null && amount < 0,
+    };
+  });
+  return { items, truncated: parsed.length > LINE_ITEM_CAP, implausible: tally.implausible };
 }
 
 function paymentPlanDetail(allRows, fence) {
@@ -945,6 +980,7 @@ function annualPrepayProjection({ termId, role, term }) {
 // The warnings the detail carries for every bounded or failed optional read.
 function detailWarnings({ hold, plans, recorded, lines }) {
   const unknowns = [];
+  if (lines.implausible) unknowns.push('implausible line-item number withheld: a quantity, unit price or amount outside a plausible range was returned as null.');
   if (lines.truncated) unknowns.push(`This invoice has more than ${LINE_ITEM_CAP} line items: only the first ${LINE_ITEM_CAP} are shown (line_items_truncated), and discounts.discount_lines covers only those.`);
   if (hold.unknown) unknowns.push(hold.unknown);
   if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);

@@ -691,6 +691,52 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect((await read('get_invoice_detail', { invoice_id: list.invoices[0].id })).error).toBeUndefined();
   });
 
+  test('credential-shaped runs are masked whatever the format; prose, invoice numbers and product names survive', async () => {
+    const Q = await customer(`Creds${run}`, `Runs${run}`);
+    const b64u = crypto.randomBytes(16).toString('base64url'); // the 22-character floor the repo mints
+    const mixed16 = 'a1b2c3d4e5f6g7h8';
+    const hex20 = 'deadbeef1234567890ab';
+    const b64 = 'Zm9vYmFyKy9iYXo9QWJjMTIz'; // base64 with + / =
+    await invoice('q_cred', Q, { total: 5, title: `t ${b64u} m ${mixed16} h ${hex20} s ${b64} end`,
+      line_items: JSON.stringify([{ description: 'INV-2026-0042 Taurus SC 2gal Quarterly pest control service WPC-2026-0412 Bifen IT 1 gallon', quantity: 1, unit_price: 5, amount: 5, category: 'service' }]) });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.q_cred.id });
+    const text = json(detail);
+    for (const secret of [b64u, mixed16, hex20, b64.slice(0, 18)]) expect(text).not.toContain(secret);
+    expect(detail.invoice.title).toBe('t [token] m [token] h [token] s [token] end');
+    expect(detail.line_items[0].description).toBe('INV-2026-0042 Taurus SC 2gal Quarterly pest control service WPC-2026-0412 Bifen IT 1 gallon');
+    // The structural references stay: the invoice id, the invoice number.
+    expect(detail.invoice.id).toBe(inv.q_cred.id);
+    expect(detail.invoice.invoice_number).toBe(inv.q_cred.invoice_number);
+  });
+
+  test('implausible numbers in line-item JSON are withheld with a warning; a card-number shape never leaves as a number', async () => {
+    const Q = await customer(`Nums${run}`, `Bad${run}`);
+    const row = await invoice('q_nums', Q, { total: 5, line_items: JSON.stringify([
+      { description: 'bad qty', quantity: 4111111111111111, unit_price: 5, amount: 5, category: 'a' },
+      { description: 'bad price', quantity: 1, unit_price: 4111111111111111, amount: 5, category: 'a' },
+      { description: 'bad amount', quantity: 1, unit_price: 5, amount: -4111111111111111, category: 'a' },
+      { description: 'fine', quantity: 2, unit_price: 12.5, amount: 25, category: 'a' },
+    ]) });
+    const detail = await read('get_invoice_detail', { invoice_id: row.id });
+    expect(detail.line_items[0]).toMatchObject({ quantity: null, unit_price: 5, amount: 5 });
+    expect(detail.line_items[1]).toMatchObject({ quantity: 1, unit_price: null, amount: 5 });
+    expect(detail.line_items[2]).toMatchObject({ amount: null, is_discount: false });
+    expect(detail.line_items[3]).toMatchObject({ quantity: 2, unit_price: 12.5, amount: 25 });
+    expect(json(detail)).not.toMatch(/4111/);
+    expect(detail.unknowns.join(' ')).toMatch(/implausible line-item number withheld/);
+    expect((await read('get_invoice_detail', { invoice_id: inv.credited.id })).unknowns.join(' ')).not.toMatch(/implausible/);
+  });
+
+  test('"presented to the customer" follows the delivery stamps (alreadyDeliveredForFirstSend), not status alone', async () => {
+    const Q = await customer(`Stamped${run}`, `Presented${run}`);
+    // A Text/App leg accepted but the Email sidecar must retry: status stays scheduled with sms_sent_at.
+    await invoice('q_pres_stamped', Q, { total: 30, status: 'scheduled', sms_sent_at: REFERENCE });
+    await invoice('q_pres_email', Q, { total: 10, status: 'sending', email_sent_at: REFERENCE });
+    await invoice('q_pres_unsent', Q, { total: 20, status: 'scheduled' });
+    const { account_summary: summary } = await read('get_customer_invoices', { customer_id: Q });
+    expect(summary).toMatchObject({ total_due: 60, not_yet_sent_due: 20, presented_self_pay_due: 40 });
+  });
+
   test('line items are bounded at 50 with a truncation flag, a warning, and a bounded discounts block', async () => {
     const Q = await customer(`Lines${run}`, `Many${run}`);
     const many = Array.from({ length: 60 }, (_, n) => ({ description: `Line ${n}`, quantity: 1, unit_price: n % 2 ? -1 : 1, amount: n % 2 ? -1 : 1, category: 'service' }));
