@@ -858,10 +858,16 @@ describe('anniversary and tenure', () => {
     const body = src.slice(src.indexOf('async function loadAccountActivity'), src.indexOf('async function loadLiveTerms'));
     expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
     expect(body).toMatch(/s\.status = 'completed'\)/); // no family / kind filter on the account gate
+    expect(body).toMatch(/FROM service_records sr WHERE sr\.customer_id = c\.id AND sr\.status = 'completed'/); // imported history often lives only there
     expect(body).not.toMatch(/LINE_SQL/);
     expect(body).toMatch(/scheduled_service_addons/);
     expect(body).toMatch(/\$\{ADDON_LINE_IS_PLAN_SQL\}/);
     expect(body).toMatch(/\$\{LIVE_STATUS_SQL\}/);
+    // the signup-fee add-on (one-time whatever its pattern column says) is not a program
+    expect(body).toMatch(/scheduled_service_addons\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)/);
+    expect(P.ONE_TIME_ADDON_SERVICE_KEYS).toEqual(['waveguard_membership']);
+    const sched = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(sched).toMatch(/const ONE_TIME_ADDON_SERVICE_KEYS = new Set\(\['waveguard_membership'\]\)/); // the mirror stays in step
   });
   test('a portal-sold line on an account that predates it by > 90 days is flagged, not held', () => {
     const out = P.resolveAnniversary({ firstCompletedVisit: '2026-09-05', acceptedAt: '2026-09-01T15:00:00Z', memberSince: '2024-05-11' });

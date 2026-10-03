@@ -1649,19 +1649,27 @@ async function loadEstimates(dbh, estimateIds) {
 //     row can be status accepted with accepted_at NULL), linked or not;
 //   • a completed scheduled_services row of ANY kind — any family, an
 //     inspection, a specialty visit (the per-line dating map filters these;
-//     the account gate must not);
+//     the account gate must not) — or a completed service_records row
+//     (imported / legacy history often lives ONLY there:
+//     estimate-conversion-guard.js);
 //   • a live upcoming row carrying a recurring add-on program
-//     (ADDON_LINE_IS_PLAN_SQL): a second program the plan-line count
-//     cannot see.
+//     (ADDON_LINE_IS_PLAN_SQL, minus the keys admin-schedule.js
+//     ONE_TIME_ADDON_SERVICE_KEYS treats as one-time whatever their
+//     pattern column says — waveguard_membership is the signup fee, not
+//     a program): a second program the plan-line count cannot see.
+const ONE_TIME_ADDON_SERVICE_KEYS = Object.freeze(['waveguard_membership']); // mirror of admin-schedule.js
 async function loadAccountActivity(dbh, customerIds, { today }) {
   if (!customerIds.length) return new Set();
   const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+  const oneTimeAddonKeys = ONE_TIME_ADDON_SERVICE_KEYS.map((k) => `'${k}'`).join(', ');
   const { rows } = await dbh.raw(`
     SELECT c.id AS customer_id,
       (EXISTS (SELECT 1 FROM estimates e WHERE e.customer_id = c.id AND (e.accepted_at IS NOT NULL OR e.status = 'accepted'))
        OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
+       OR EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed')
        OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
-                  WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL})
+                  WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL}
+                    AND COALESCE(scheduled_service_addons.service_key, '') NOT IN (${oneTimeAddonKeys}))
       ) AS account_activity
     FROM customers c WHERE c.id = ANY(?::uuid[])
   `, [today, customerIds]);
@@ -3201,7 +3209,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence, isCompositeCatalogKey,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
