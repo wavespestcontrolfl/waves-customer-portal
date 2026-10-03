@@ -171,8 +171,8 @@ describe('AI response reports', () => {
     const olderConversationId = '11111111-1111-4111-8111-111111111111';
     const newerConversationId = '22222222-2222-4222-8222-222222222222';
     api.request
-      .mockResolvedValueOnce({ reply: 'Older assistant reply.', conversationId: olderConversationId })
-      .mockResolvedValueOnce({ reply: 'Newer assistant reply.', conversationId: newerConversationId })
+      .mockResolvedValueOnce({ reply: 'Repeated assistant reply.', conversationId: olderConversationId })
+      .mockResolvedValueOnce({ reply: 'Repeated assistant reply.', conversationId: newerConversationId })
       .mockResolvedValueOnce({ success: true });
     render(<ChatWidget customer={customer} initialQuestion="First question" onClose={() => {}} onNavigate={() => {}} />);
     await settle();
@@ -188,7 +188,7 @@ describe('AI response reports', () => {
     expect(JSON.parse(reportCall[1].body)).toEqual({
       sessionId: JSON.parse(chatCall[1].body).sessionId,
       conversationId: olderConversationId,
-      messageContent: 'Older assistant reply.',
+      messageContent: 'Repeated assistant reply.',
     });
   });
 });
