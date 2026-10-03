@@ -874,33 +874,28 @@ function isReactionToOurText(body, outbound) {
   return outbound.some((o) => squash(o).startsWith(quote));
 }
 
-// An address span: a house number, up to four words, then a street word ("123 Bayshore Dr", "830 Main St").
-// Only the span is set aside ("123 Main St. Hasta luego" still votes on "Hasta luego"); "2 hours works" has none.
-const ADDRESS_SPAN_RE = /\b\d{1,6}\s+(?:[\p{L}'-]+\s+){0,3}(?:st|street|rd|road|dr|drive|ln|lane|ave|avenue|blvd|boulevard|ct|court|cir|circle|pl|place|ter|terrace|way|pkwy|parkway|hwy|highway|trl|trail|loop|cv|cove|pt|point|sq|square)\b\.?/giu;
-
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
     const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
       .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body', 'created_at');
-    // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen)
+    if (!rows.length) return false;
+    // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen); the
+    // window reaches 30 days before the oldest reply read, whatever the number of our texts in it
+    const oldest = new Date(Math.min(...rows.map((r) => new Date(r.created_at).getTime())) - 30 * 86400000);
     const outbound = await db('sms_log').where({ customer_id: customerId, direction: 'outbound' })
-      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(50).select('message_body', 'created_at');
+      .where('created_at', '<', trigger).where('created_at', '>=', oldest).orderBy('created_at', 'desc').limit(1000).select('message_body', 'created_at');
     const sentBefore = (at) => outbound.filter((o) => new Date(o.created_at) < new Date(at)).map((o) => o.message_body);
     const { isSmsReaction } = require('./sms-intent');
-    const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
+    const { languageVote } = require('./sms-label-facts');
     // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
-    // contact details are not language: an email, a link and an address span are set aside, and a reply with no
-    // words left does not vote
-    const bodies = rows.filter((r) => typeof r.message_body === 'string' && r.message_body.trim()
+    // each remaining reply votes on its words alone: links, emails, an address (with its unit, state and zip) and
+    // mid-sentence names do not vote (languageVote); a reply with no words left has no vote
+    const votes = rows.filter((r) => typeof r.message_body === 'string' && r.message_body.trim()
         && !isSmsReaction(r.message_body) && !isReactionToOurText(r.message_body, sentBefore(r.created_at)))
-      .map((r) => r.message_body)
-      .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').replace(ADDRESS_SPAN_RE, ' ').trim())
-      .filter((b) => /\p{L}/u.test(b));
-    // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
-    // (a capitalized word mid-sentence is a name - "Thanks Nadia" stays English; "Perfecto" or "Ok. Perfecto" does not)
-    const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b, { namesExempt: 'mid-sentence' })).length;
-    return english > bodies.length - english;
+      .map((r) => languageVote(r.message_body)).filter(Boolean);
+    const english = votes.filter((v) => v === 'english').length;
+    return english > votes.length - english;
   } catch (err) {
     logger.warn(`[sms-translation] earlier texts not read: ${err.code || err.name || 'error'}`);
     return false;

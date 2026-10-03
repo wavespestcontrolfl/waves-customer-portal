@@ -615,6 +615,12 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
   });
 
+  test('an address with its unit, state and zip has no vote ("123 Main St Apt 4", "830 Bayshore Dr FL 34250")', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: '123 Main St Apt 4' }, { message_body: '830 Bayshore Dr FL 34250' }, { message_body: 'Ok thanks' }, { message_body: 'Gracias' }, { message_body: 'See you then' }]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
   test('only the address span is set aside: "123 Main St. Hasta luego" still votes foreign', async () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok thanks' }, { message_body: 'See you then' }, { message_body: 'Gracias' }, { message_body: '123 Main St. Hasta luego' }]);
     scriptModels({ inbound: SPANISH_INBOUND });

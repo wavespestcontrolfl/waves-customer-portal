@@ -1041,15 +1041,10 @@ const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|q
 function hasUnknownShortWord(text, { namesExempt = false, maxWords = 4 } = {}) {
   const c = canonText(text);
   if (isPureReaction(c)) return false;
-  const plain = stripMarks(c);
-  const matches = [...plain.matchAll(/\p{L}+/gu)];
-  const words = matches.map((m) => m[0]);
+  const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
   if (!words.length || words.length > maxWords) return false;
-  // 'mid-sentence': only a capitalized word that does not start a sentence is a name ("Thanks Nadia"); a word
-  // after a full stop or at the start ("Ok. Perfecto", "Perfecto") is capitalized because it leads
-  const leads = (i) => /(?:^|[.!?\u3002\uFF01\uFF1F])[^\p{L}]*$/u.test(plain.slice(0, matches[i].index));
-  return words.some((raw, i) => {
-    if (namesExempt && /^\p{Lu}/u.test(raw) && (namesExempt !== 'mid-sentence' || !leads(i))) return false;
+  return words.some((raw) => {
+    if (namesExempt && /^\p{Lu}/u.test(raw)) return false;
     const w = raw.toLowerCase();
     return !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w));
   });
@@ -1090,11 +1085,12 @@ function foreignWordSet() {
   return foreignWordSetCache;
 }
 // The tokens that can speak for the text's language: lower-cased, accents removed, with names and addresses left out.
-function languageTokens(text, { keepNames = false } = {}) {
+function languageTokens(text, { keepNames = false, dropNames = false } = {}) {
   // Title Case or ALL CAPS text is not a run of names: when nearly every word after the first is capitalized, every word counts
   // ("Hi this is Marisol Quintanilla" stays a name; "Can The Dogs Go Out Now" does not).
   const rest = (stripMarks(text).match(/[A-Za-z]{2,}/g) || []).slice(1);
-  const keepCapitalized = keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length);
+  // (dropNames: a mid-sentence capitalized word is always a name - the language-history vote, where "Thanks Nadia" is English)
+  const keepCapitalized = !dropNames && (keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length));
   // contractions are one word ("i'm" -> "im", "don\u2019t" -> "dont"), as the lexicon spells them
   const raws = text.replace(/(\p{L})['\u2019](\p{L})/gu, '$1$2').split(/\s+/).filter(Boolean);
   // An address is a house number followed, within four words, by a street word ("4821 Weatherby Oaks Cir"): only those words are
@@ -1135,6 +1131,18 @@ function languageTokens(text, { keepNames = false } = {}) {
   });
   return tokens;
 }
+// One earlier customer text's vote on the language they usually write (the any-language trial): 'english',
+// 'foreign', or null when no language is left once links, emails, an address with its unit / state / zip, and
+// mid-sentence names are set aside (languageTokens). A short text (up to 4 words) with a word the lexicon does
+// not know is foreign ("Perfecto", "Ok. Vale"), as the trial's own prefilter reads it.
+function languageVote(text) {
+  const plain = canonText(String(text || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '));
+  const tokens = languageTokens(plain, { dropNames: true });
+  if (!tokens.length) return null;
+  if (!isEnglishInbound(plain)) return 'foreign';
+  return tokens.length <= 4 && tokens.some((w) => !englishKnown(w)) ? 'foreign' : 'english';
+}
+
 function isUnverifiedLanguageInbound(inbound) {
   if (inboundOverCap(Array.isArray(inbound) ? inbound[0] : inbound)) return true;
   const original = canonText(Array.isArray(inbound) ? inbound[0] : inbound).replace(/https?:\/\/[^\s"'\u201d\u2019]+|www\.[^\s"'\u201d\u2019]+|[^\s"'\u201c\u2018]+@[^\s"'\u201d\u2019]+/g, ' ');
@@ -1818,6 +1826,7 @@ module.exports = {
   isEnglishInbound,
   hasUnknownShortWord,
   untranslatedWords,
+  languageVote,
   nonEnglishTimingWords,
   labelFactsForInbound,
   parseReentryText,
