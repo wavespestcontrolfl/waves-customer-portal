@@ -15,6 +15,8 @@ const {
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
+// The occurrence fields a manual no-show's reschedule_log freezes (missed-appointment onSkip).
+const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
 const { applyAssignable } = require('../services/technician-eligibility');
@@ -2809,6 +2811,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.
     let transition = null;
+    // A manual no-show's reschedule_log freezes the occurrence as it stood when the
+    // status flipped — read under THIS transaction's row lock, never the
+    // pre-transaction `svc` snapshot an edit could have raced (Codex #5669 r1).
+    let noShowOccurrence = null;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -2834,7 +2840,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // fail it too, not just a technician_id compare) before
         // transitionJobStatus ever runs — the SAME check the field-confirm
         // path below reuses instead of re-verifying itself.
-        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status'], {
+        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status', ...NO_SHOW_OCCURRENCE_FIELDS], {
           // A same-status resend of an already-TERMINAL row (cancelled/
           // skipped — job-status.js's own ONE_WAY_FROM_STATUSES; 'completed'
           // can't reach here, it's refused earlier as USE_COMPLETION_FLOW,
@@ -2850,6 +2856,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        if (toStatus === 'no_show' && lockedRow) noShowOccurrence = { id: svc.id, ...lockedRow };
         // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
         if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
@@ -3228,8 +3235,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
           .first('id');
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
-          // the occurrence as it was when marked no-show (svc is the transition's read)
-          await missedAppointment.onSkip(svc.id, 'manual_no_show', undefined, { occurrence: svc });
+          // the occurrence as it stood under the transition's row lock
+          await missedAppointment.onSkip(svc.id, 'manual_no_show', undefined, { occurrence: noShowOccurrence });
         }
       } catch (e) { logger.error(`[admin-dispatch] no-show reschedule_log record failed: ${e.message}`); }
     }
