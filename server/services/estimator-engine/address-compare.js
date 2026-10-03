@@ -98,9 +98,13 @@ function canonicalizeLeadingUnit(s) {
   return str;
 }
 
-function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedUnit = false } = {}) {
-  const a = canonicalizeLeadingUnit(rawA);
-  const b = canonicalizeLeadingUnit(rawB);
+// The comparator's own parse of one address: the normalized street line
+// (house number + street, aliases applied), the unit key, the ZIP-5 and the
+// normalized city. ONE implementation shared by sameStreetAddress and by
+// addressPremiseKey (set-wide bucketing), so a bucket key can never disagree
+// with the pairwise comparator.
+function addressParts(raw) {
+  const a = canonicalizeLeadingUnit(raw);
   const normSegment = (s) => canonicalizeRouteTokens(String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -147,7 +151,60 @@ function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedU
       unit: unitLineValueKey(split.unit),
     };
   };
-  const [aa, bb] = [streetAndUnit(a), streetAndUnit(b)];
+  const { street, unit } = streetAndUnit(a);
+  // Last 5-digit token = ZIP — EXCEPT when it is the address's leading
+  // house number ("12345 Tamiami Trl" with no real ZIP): treating the house
+  // number as a ZIP made the same parcel compare unequal against its stored
+  // ZIP-carrying form, bypassing the duplicate guard. A missing ZIP must
+  // compare conservatively equal, per the design note below.
+  const zipOf = (str0) => {
+    const str = String(str0 || '').trim();
+    const m = str.match(/\b(\d{5})\b(?!.*\b\d{5}\b)/);
+    if (!m) return null;
+    if (m.index === 0 && !/^\d{5}$/.test(str)) return null;
+    return m[1];
+  };
+  // Full-city equality, not token overlap — North Port vs Port Charlotte
+  // share a token but are different parcels. Parsed cities can carry a
+  // formatting-dependent state/ZIP tail ("Bradenton FL 34205" when the last
+  // comma is missing) — strip those tokens or the same city compares
+  // unequal across formats.
+  const cityOf = (s) => {
+    const raw = String(parsed(s).city || '').trim();
+    // A short pure-number "city" is a mis-split route number, and a bare
+    // directional "city" is a mis-split post-directional (see the street
+    // re-attach above) — never localities; comparing either against the
+    // other side's real city would reject the same parcel.
+    if (/^\d{1,4}$/.test(raw)) return '';
+    if (BARE_DIRECTIONAL_CITY.has(raw.toLowerCase())) return '';
+    return normSegment(raw)
+      .split(' ')
+      .filter(Boolean)
+      .filter((t) => t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t))
+      .join(' ');
+  };
+  return { street, unit, zip: zipOf(a), city: cityOf(a) };
+}
+
+// Set-wide bucketing key: house number + normalized street line + unit key,
+// from the SAME parse the comparator uses. Two addresses that
+// sameStreetAddress(..., { requireExactUnit: true }) calls the same premise
+// always share this key (street equality and unit equality are both
+// required by the comparator; ZIP and city only ever disagree-to-reject, so
+// they stay out of the key and are confirmed pairwise). null = no street.
+function addressPremiseKey(raw) {
+  const { street, unit } = addressParts(raw);
+  return street ? `${street}|${unit || ''}` : null;
+}
+
+// The comparator's own unit key for one address ('' when it names no unit).
+function addressUnitKey(raw) {
+  return addressParts(raw).unit || '';
+}
+
+function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedUnit = false } = {}) {
+  const aa = addressParts(rawA);
+  const bb = addressParts(rawB);
   const [na, nb] = [aa.street, bb.street];
   if (!na || !nb || na !== nb) return false;
   // Property credentials are scoped to the exact priced unit: a building-
@@ -169,41 +226,8 @@ function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedU
   // compares equal conservatively. Only two explicit, different unit IDs are
   // proven separate service addresses.
   if (aa.unit && bb.unit && aa.unit !== bb.unit) return false;
-  // Last 5-digit token = ZIP — EXCEPT when it is the address's leading
-  // house number ("12345 Tamiami Trl" with no real ZIP): treating the house
-  // number as a ZIP made the same parcel compare unequal against its stored
-  // ZIP-carrying form, bypassing the duplicate guard. A missing ZIP must
-  // compare conservatively equal, per the design note above.
-  const zip = (s) => {
-    const str = String(s || '').trim();
-    const m = str.match(/\b(\d{5})\b(?!.*\b\d{5}\b)/);
-    if (!m) return null;
-    if (m.index === 0 && !/^\d{5}$/.test(str)) return null;
-    return m[1];
-  };
-  const [za, zb] = [zip(a), zip(b)];
-  if (za && zb && za !== zb) return false;
-  // Full-city equality, not token overlap — North Port vs Port Charlotte
-  // share a token but are different parcels. Parsed cities can carry a
-  // formatting-dependent state/ZIP tail ("Bradenton FL 34205" when the last
-  // comma is missing) — strip those tokens or the same city compares
-  // unequal across formats.
-  const cityString = (s) => {
-    const raw = String(parsed(s).city || '').trim();
-    // A short pure-number "city" is a mis-split route number, and a bare
-    // directional "city" is a mis-split post-directional (see the street
-    // re-attach above) — never localities; comparing either against the
-    // other side's real city would reject the same parcel.
-    if (/^\d{1,4}$/.test(raw)) return '';
-    if (BARE_DIRECTIONAL_CITY.has(raw.toLowerCase())) return '';
-    return normSegment(raw)
-      .split(' ')
-      .filter(Boolean)
-      .filter((t) => t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t))
-      .join(' ');
-  };
-  const [ca, cb] = [cityString(a), cityString(b)];
-  if (ca && cb && ca !== cb) return false;
+  if (aa.zip && bb.zip && aa.zip !== bb.zip) return false;
+  if (aa.city && bb.city && aa.city !== bb.city) return false;
   return true;
 }
 
@@ -236,6 +260,8 @@ function addressCompletesGatheredStreet(finalAddress, gatheredAddress) {
 
 module.exports = {
   sameStreetAddress,
+  addressPremiseKey,
+  addressUnitKey,
   addressAddsLocality,
   addressCompletesGatheredStreet,
   STREET_TOKEN_ALIASES,

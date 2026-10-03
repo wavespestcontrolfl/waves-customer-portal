@@ -97,6 +97,102 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
 }
 
 /**
+ * The shadow decide step's rows (sms_offer_decisions) and how its would-move
+ * calls compare with what actually happened. A would-move is scored only once
+ * its 48h window has closed (by `observedAt`), and only against a logged move
+ * of that visit INTO the named time inside that window (`movesByVisit`:
+ * visit id → reschedule_log rows { created_at, new_date, new_window }), so a
+ * past report never changes as the calendar moves on. A move made in the
+ * admin Edit form logs nothing and counts as unmatched (the report says so).
+ */
+// reschedule_log.initiated_by values for moves no person asked for.
+const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk']);
+
+// A logged move of `visitId` into date + start, inside [t0, t0 + 48h].
+function movedInto(movesByVisit, visitId, t0, date, start) {
+  return (movesByVisit.get(String(visitId || '')) || []).some((m) => {
+    const t = new Date(m.created_at).getTime();
+    const mStart = String(m.new_window || '').split('-')[0].slice(0, 5).padStart(5, '0');
+    const mDate = m.new_date instanceof Date ? m.new_date.toISOString().slice(0, 10) : String(m.new_date || '').slice(0, 10);
+    return t >= t0 && t <= t0 + FOLLOW_WINDOW_MS && mDate === date && mStart === start;
+  });
+}
+
+/**
+ * Recall, the exit bar's other half: of the visit-move offers whose 48h has
+ * closed and whose visit was then moved INTO one of the offered times inside
+ * that window (a real accept, whoever acted on it), how many got a would-move
+ * decision for that same time. Precision (summarizeDecisions) alone would let
+ * a step that sends almost every real accept to staff look perfect.
+ */
+function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt = new Date()) {
+  const observedMs = new Date(observedAt).getTime();
+  const byOffer = new Map();
+  for (const d of decisions) {
+    if (!d.sms_offer_id) continue;
+    if (!byOffer.has(String(d.sms_offer_id))) byOffer.set(String(d.sms_offer_id), []);
+    byOffer.get(String(d.sms_offer_id)).push(d);
+  }
+  // One real accept per actual move into an offered time (an offer replaced
+  // by one carrying the same time is still one accept). It counts as caught
+  // when ANY offer that carried that time before the move got a would-move
+  // for it, decided before the move happened.
+  const accepts = new Map();
+  for (const o of offers) {
+    if (o.kind !== 'move_visit' || !o.scheduled_service_id) continue;
+    const t0 = new Date(o.sent_at).getTime();
+    if (t0 + FOLLOW_WINDOW_MS > observedMs) continue;
+    const slots = typeof o.slots === 'string' ? JSON.parse(o.slots) : (o.slots || []);
+    for (const m of movesByVisit.get(String(o.scheduled_service_id)) || []) {
+      const t = new Date(m.created_at).getTime();
+      const slot = slots.find((sl) => sl?.date && sl?.start && movedInto(new Map([[String(o.scheduled_service_id), [m]]]), o.scheduled_service_id, t0, sl.date, sl.start));
+      if (!slot) continue;
+      const key = `${o.scheduled_service_id}|${t}`;
+      if (!accepts.has(key)) accepts.set(key, { at: t, slot, offers: [] });
+      accepts.get(key).offers.push(o);
+    }
+  }
+  const out = { real_accepts: accepts.size, caught: 0 };
+  for (const { at, slot, offers: carriers } of accepts.values()) {
+    const hit = carriers.some((offer) => (byOffer.get(String(offer.id)) || []).some((d) => {
+      if (d.outcome !== 'would_move') return false;
+      // The reply (not the classifier's row) must precede the move.
+      const repliedAt = d.replied_at || d.created_at;
+      if (repliedAt && new Date(repliedAt).getTime() > at) return false;
+      const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
+      return would.date === slot.date && would.start === slot.start;
+    }));
+    if (hit) out.caught += 1;
+  }
+  return out;
+}
+
+function summarizeDecisions(decisions, movesByVisit = new Map(), observedAt = new Date()) {
+  const observedMs = new Date(observedAt).getTime();
+  const out = { total: decisions.length, move_offers_decided: 0, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0 };
+  // The exit bar's sample: distinct visit-move offers with a real decision
+  // (several texts on one offer, booking offers and errors do not add to it).
+  out.move_offers_decided = new Set(decisions
+    .filter((d) => d.offer_kind === 'move_visit' && d.outcome !== 'error' && d.sms_offer_id)
+    .map((d) => String(d.sms_offer_id))).size;
+  for (const d of decisions) {
+    out.by_outcome[d.outcome] = (out.by_outcome[d.outcome] || 0) + 1;
+    if (d.action) out.by_action[d.action] = (out.by_action[d.action] || 0) + 1;
+    const refusals = typeof d.refusals === 'string' ? JSON.parse(d.refusals) : (d.refusals || []);
+    for (const r of refusals) out.refusals[r] = (out.refusals[r] || 0) + 1;
+    if (d.outcome !== 'would_move') continue;
+    // From the reply's arrival: staff can act before the classifier's row lands.
+    const t0 = new Date(d.replied_at || d.created_at).getTime();
+    if (t0 + FOLLOW_WINDOW_MS > observedMs) continue;
+    out.would_move_matured += 1;
+    const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
+    if (movedInto(movesByVisit, would.scheduled_service_id, t0, would.date, would.start)) out.would_move_matched += 1;
+    else out.would_move_unmatched += 1;
+  }
+  return out;
+}
+
+/**
  * Pure. Every argument is a list of rows already limited to the report window
  * (follow-up rows may run 48h past its end).
  *   inbound       [{ customer_id, body, created_at }]
@@ -110,7 +206,7 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
  *                 the change rate is over matured texts, so a text from the
  *                 last two days never counts as not followed before it could be.
  */
-function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, now = new Date(), observedAt = now } = {}) {
+function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, decisions = null, offerDecisions = null, movesByVisit = new Map(), now = new Date(), observedAt = now } = {}) {
   const observedMs = new Date(observedAt).getTime();
   const flagged = inbound.filter((r) => r.customer_id && isSchedulingText(r.body));
   const moveTimes = byCustomer(moves, 'created_at');
@@ -145,6 +241,7 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     per_week: perWeek,
     followed_within_48h: followed,
     offers: offerSummary,
+    decisions: decisions ? { ...summarizeDecisions(decisions, movesByVisit, observedAt), recall: summarizeRecall(offers || [], offerDecisions || decisions, movesByVisit, observedAt) } : null,
   };
 }
 
@@ -170,6 +267,48 @@ function parseReportInstant(value, fallback, now = new Date()) {
   return parsed;
 }
 
+// A decision with the moment its text ARRIVED (replied_at: scoring starts
+// there, not when the detached classifier finished) and its offer's kind.
+function decisionRows(dbh) {
+  return dbh('sms_offer_decisions as d')
+    .leftJoin('sms_log as sl', 'sl.id', 'd.inbound_sms_log_id')
+    .leftJoin('sms_offers as o', 'o.id', 'd.sms_offer_id')
+    .select('d.sms_offer_id', 'd.action', 'd.outcome', 'd.refusals', 'd.would_have', 'd.created_at',
+      'sl.created_at as replied_at', 'o.kind as offer_kind');
+}
+
+// The logged moves of every visit a would-move named or a visit-move offer
+// was for, from the earliest of those on.
+async function loadMovesForScoring(dbh, decisions, offers) {
+  const ids = new Set();
+  let first = Infinity;
+  for (const d of decisions) {
+    if (d.outcome !== 'would_move') continue;
+    const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
+    if (would.scheduled_service_id) ids.add(String(would.scheduled_service_id));
+    first = Math.min(first, new Date(d.replied_at || d.created_at).getTime());
+  }
+  for (const o of offers) {
+    if (o.kind !== 'move_visit' || !o.scheduled_service_id) continue;
+    ids.add(String(o.scheduled_service_id));
+    first = Math.min(first, new Date(o.sent_at).getTime());
+  }
+  if (!ids.size) return new Map();
+  // Only moves that can be someone's answer to an offer: the system's own
+  // placements (weather, auto-dispatch, bulk and machine moves) are not.
+  const rows = await dbh('reschedule_log').whereIn('scheduled_service_id', [...ids])
+    .where('created_at', '>=', new Date(first))
+    .where((q) => q.whereNull('initiated_by').orWhereNotIn('initiated_by', AUTOMATIC_MOVE_INITIATORS))
+    .select('scheduled_service_id', 'created_at', 'new_date', 'new_window');
+  const map = new Map();
+  for (const r of rows) {
+    const key = String(r.scheduled_service_id);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  }
+  return map;
+}
+
 /** Read the rows for [since, until) and summarise them. `dbh` is a knex handle. */
 async function loadFunnel({ since, until = new Date(), dbh = require('../models/db') } = {}) {
   const from = new Date(since);
@@ -181,16 +320,26 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     .where({ direction: 'inbound' }).whereNotNull('customer_id')
     .where('created_at', '>=', from).where('created_at', '<', to)
     .select('customer_id', 'message_body as body', 'created_at');
+  const hasDecisions = await dbh.schema.hasTable('sms_offer_decisions');
+  const decisions = hasDecisions
+    ? await decisionRows(dbh).where('d.created_at', '>=', from).where('d.created_at', '<', to)
+    : null;
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers
     ? await dbh('sms_offers').where('sent_at', '>=', from).where('sent_at', '<', to)
-      .select('customer_id', 'kind', 'status', 'sent_at', 'expires_at', 'closed_at', 'slots')
+      .select('id', 'customer_id', 'kind', 'scheduled_service_id', 'status', 'sent_at', 'expires_at', 'closed_at', 'slots')
     : null;
+  // Recall follows each offer in the window to its decisions, wherever they
+  // fall in time (a reply can land after the report's end).
+  const offerDecisions = (hasDecisions && offers?.length)
+    ? await decisionRows(dbh).whereIn('d.sms_offer_id', offers.map((o) => o.id))
+    : [];
+  const movesByVisit = await loadMovesForScoring(dbh, decisions || [], offers || []);
   const customerIds = [...new Set([
     ...inbound.filter((r) => isSchedulingText(r.body)).map((r) => r.customer_id),
     ...(offers || []).map((o) => o.customer_id).filter(Boolean),
   ])];
-  if (!customerIds.length) return summarizeFunnel({ inbound, offers, now: to, observedAt });
+  if (!customerIds.length) return summarizeFunnel({ inbound, offers, decisions, offerDecisions, movesByVisit, now: to, observedAt });
   const [moves, cancels, bookings] = await Promise.all([
     dbh('reschedule_log').whereIn('customer_id', customerIds).whereNot('initiated_by', 'system')
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
@@ -201,7 +350,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
-  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, now: to, observedAt });
+  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, decisions, offerDecisions, movesByVisit, now: to, observedAt });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, summarizeDecisions, summarizeRecall, AUTOMATIC_MOVE_INITIATORS, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };

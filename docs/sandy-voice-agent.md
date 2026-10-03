@@ -15,7 +15,7 @@ document does not activate anything.
 Last verified against code: 2026-09-25 (Sandy slice 1, PRs #4817/#4818/#4831
 — measurement, model isolation, streaming — plus this PR's benchmark/eval
 work). Verify env defaults against `server/config/feature-gates.js` and the
-"Voice relay (Sandy) tuning" paragraph of `CLAUDE.md` before relying on this
+"Voice relay (Sandy) tuning" paragraph of `docs/gates-and-env.md` before relying on this
 page for an activation decision; those are the enforced source of truth.
 
 ## 1. Current capabilities
