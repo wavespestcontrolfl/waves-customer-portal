@@ -960,6 +960,13 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeCustomerSummary(clean, 'high')).toBe(clean);
   });
 
+  test('a result timeline phrased around watering or mowing is dropped too (no care-plan exemption)', () => {
+    expect(safeCustomerSummary('The front edge is dry. Color should return in 2-3 weeks once watering is corrected.', 'high'))
+      .toBe('The front edge is dry.');
+    expect(safeCustomerSummary('The lawn was cut low. It should thicken within 60 days at a higher mowing height.', 'high'))
+      .toBe('The lawn was cut low.');
+  });
+
   test('lowerConfidence returns the more conservative value', () => {
     expect(lowerConfidence('high', 'low')).toBe('low');
     expect(lowerConfidence('low', 'high')).toBe('low');

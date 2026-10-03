@@ -946,7 +946,10 @@ function residualDefinitiveClaim(text) {
 // with no timing passes through untouched; null when nothing usable remains.
 function withoutResultTimingSentences(text) {
   const sentences = String(text).split(/(?<=[.!?])\s+/);
-  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence));
+  // No care-plan exemption here: a timeline phrased around watering or mowing
+  // ("color should return in 2-3 weeks once watering is corrected") is still a
+  // result promise in a customer summary.
+  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence, { carePlanExempt: false }));
   if (kept.length === sentences.length) return text;
   return kept.length ? kept.join(' ') : null;
 }
