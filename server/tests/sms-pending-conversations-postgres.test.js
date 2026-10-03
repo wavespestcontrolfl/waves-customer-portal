@@ -197,7 +197,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
   async function seedCall({
     phone = '+19415550100', ours = '+19415550190', direction = 'inbound', status = 'completed',
     answeredBy = direction === 'inbound' ? 'human' : null, duration = 99,
-    bridged = direction === 'outbound',
+    amd = direction === 'outbound' ? 'human' : null,
   } = {}) {
     const createdAt = tick;
     tick = new Date(tick.getTime() + 1000);
@@ -205,7 +205,9 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
       id: randomUUID(), direction, status, answered_by: answeredBy, duration_seconds: duration,
       from_phone: direction === 'inbound' ? phone : ours,
       to_phone: direction === 'inbound' ? ours : phone,
-      bridged_at: bridged ? createdAt : null, created_at: createdAt,
+      // Stamped when staff presses 1, before the customer's phone rings.
+      bridged_at: direction === 'outbound' ? createdAt : null,
+      metadata: amd ? JSON.stringify({ amd: { answered_by: amd } }) : null, created_at: createdAt,
     });
   }
 
@@ -235,7 +237,11 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await seedCall({ status: 'no-answer', answeredBy: null, duration: 0 });
     await seedCall({ answeredBy: null, duration: 1 });
     await seedCall({ direction: 'outbound', answeredBy: 'voicemail', duration: 42 });
-    await seedCall({ direction: 'outbound', duration: 14, bridged: false });
+    // Staff waited on a ringing line: the row is completed, bridged and long,
+    // but the customer leg never answered.
+    await seedCall({ direction: 'outbound', duration: 75, amd: null });
+    await seedCall({ direction: 'outbound', duration: 61, amd: 'machine_start' });
+    await seedCall({ direction: 'outbound', duration: 30, amd: 'unknown' });
     await seedCall({ direction: 'outbound', duration: 21 });
     await seedCall({ direction: 'outbound', status: 'initiated', duration: null });
     // A real conversation with someone else.

@@ -18,7 +18,7 @@ async function createSmsResponseTables(trx) {
       );
       CREATE TABLE call_log (
         id uuid PRIMARY KEY, customer_id uuid, direction varchar(12), from_phone varchar(32), to_phone varchar(32),
-        status varchar(20), answered_by varchar(20), duration_seconds integer, bridged_at timestamptz,
+        status varchar(20), answered_by varchar(20), duration_seconds integer, bridged_at timestamptz, metadata jsonb,
         created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));

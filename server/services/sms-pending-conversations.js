@@ -22,9 +22,12 @@ const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
 // context (outbound_events joins on it).
 const REPLY_LOOKBACK = "INTERVAL '24 hours'";
 
-// An outbound call has no "a person answered" stamp until the recording is
-// processed, and a bridged leg that reached voicemail runs about 20 seconds.
-// Shorter than this is not counted as having spoken with the customer.
+// An outbound row's status, duration and bridged_at all describe the STAFF
+// leg (bridged_at is stamped when staff presses 1, before the customer's
+// phone rings), so none of them proves the customer picked up. The proof is
+// the customer leg's own answering-machine detection, metadata.amd, written
+// by /outbound-amd: only 'human' counts, and a row without it fails closed.
+// The duration floor drops a pickup that ended before anything was said.
 const MIN_SPOKEN_OUTBOUND_SECONDS = 30;
 
 // Shared source for the Messages needs-response badge, filtered inbox, and
@@ -220,7 +223,8 @@ async function loadPendingSmsConversations({
         AND ${callPeer} = li.peer
       WHERE spoken.status = 'completed'
         AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
-          OR (spoken.direction = 'outbound' AND spoken.bridged_at IS NOT NULL
+          OR (spoken.direction = 'outbound'
+            AND spoken.metadata->'amd'->>'answered_by' = 'human'
             AND COALESCE(spoken.answered_by, '') NOT IN ('voicemail', 'ai_agent')
             AND COALESCE(spoken.duration_seconds, 0) >= ${MIN_SPOKEN_OUTBOUND_SECONDS}))
     ), all_stop_events AS MATERIALIZED (
