@@ -682,6 +682,14 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
     expect((await run([miss(visitNow)])).out.missedVisit).toBeNull();
   });
 
+  test('stale newer rows never hide a valid older miss (no small cap before the checks)', async () => {
+    const stale = [1, 2, 3, 4, 5, 6].map((n) => miss({ id: `rl-stale-${n}`, scheduled_service_id: `visit-s${n}`, ss_status: 'completed' }));
+    const { out, conn } = await run([...stale, miss({ id: 'rl-old', original_date: '2026-09-26' })]);
+    expect(out.missedVisit).toMatchObject({ logId: 'rl-old', date: '2026-09-26' });
+    const q = conn.calls.find((c) => c.table === 'reschedule_log');
+    expect(hasOp(q.ops, 'limit', (a) => a[0] >= 100)).toBe(true);
+  });
+
   test('nothing confirmed: no missed visit', async () => {
     expect((await run([])).out.missedVisit).toBeNull();
   });

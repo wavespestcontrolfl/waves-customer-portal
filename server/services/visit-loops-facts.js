@@ -450,7 +450,10 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     .whereRaw("COALESCE(rl.miss_confirmed_by, '') NOT LIKE 'dispatch%'")
     .whereRaw("COALESCE(ss.status, '') <> 'no_show'")
     .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
-    .limit(5)
+    // every confirmed, unsettled row of the week (one customer: a handful at most).
+    // No small cap: the checks below drop stale rows, and a cap applied first could
+    // hide a valid older miss behind them. 100 is a backstop only.
+    .limit(100)
     .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.occurrence_service_type',
       'ss.status as ss_status', 'ss.track_state as ss_track_state', 'ss.scheduled_date as ss_scheduled_date', 'ss.window_start as ss_window_start', 'ss.window_end as ss_window_end')) || [];
   const { settlementFromVisit } = require('./not-closed-out');
