@@ -202,6 +202,21 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "true"));
   });
 
+  it("when the answered lookup comes back still unresolved (the business could not be re-checked), the question stays, no answer reads as chosen, and Generate stays disabled", async () => {
+    lookupReply = (body) => (body.occupancy
+      ? { ...unresolvedProfile(), businessIdentity: undefined }
+      : unresolvedProfile());
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    await screen.findByRole("region", { name: "Property lookup results" });
+    expect(await screen.findByText(QUESTION)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Just their space" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "false");
+    pickPest();
+    expect(screen.getByRole("button", { name: "Generate Estimate", exact: true })).toBeDisabled();
+  });
+
   it("Clear All forgets the answer: the same address typed again is asked again", async () => {
     await lookUp();
     fireEvent.click(screen.getByRole("button", { name: "Just their space" }));

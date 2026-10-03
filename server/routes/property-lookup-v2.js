@@ -34,6 +34,7 @@ const {
   SCOPE: BUSINESS_SCOPE,
   buildBusinessScopeContext,
   effectiveSuiteUnitKey,
+  UNAVAILABLE_IDENTITY,
   normalizeOccupancyAnswer,
   assertScopeAnswered,
 } = require('../services/property-lookup/business-scope');
@@ -257,18 +258,22 @@ function businessIdentityKeySuffix(options) {
 // else, so it is never stamped on the record or the cache row and a cache
 // hit asks again. `budgetMs` is the time the lookup can still spare (null =
 // no deadline); with too little left the leg is skipped. Fail-open: any miss
-// is null and the lookup proceeds exactly as before. Never throws.
+// is null and the lookup proceeds exactly as before — except when the CSR
+// already answered the scope question: then a miss is UNAVAILABLE_IDENTITY,
+// which keeps the question open (no price) instead of dropping the answer.
+// Never throws.
 async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, budgetMs = null }) {
   if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return null;
+  const miss = options.occupancyAnswer ? UNAVAILABLE_IDENTITY : null;
   try {
     const eligible = detectCategory(record, aiAnalysis) === 'COMMERCIAL' || !hasCountyEvidence(record);
     if (!eligible || options.cacheOnly === true) return null;
-    if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return null;
+    if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return miss;
     const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, BUSINESS_IDENTITY_TIMEOUT_MS);
-    return await identifyBusinessAtAddress({ address, lat, lng, timeoutMs });
+    return (await identifyBusinessAtAddress({ address, lat, lng, timeoutMs })) || miss;
   } catch (err) {
     logger.warn('[property-lookup] business identity leg failed', { reason: err?.name || 'error' });
-    return null;
+    return miss;
   }
 }
 

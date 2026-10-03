@@ -204,6 +204,33 @@ function adminProfileFields(identity, scope, typedSubpremise, occupancyAnswer) {
   };
 }
 
+// The CSR answered the scope question, but the re-run could not reach Places
+// to confirm the business the answer is about. The answer cannot be applied
+// to an unknown business and must not be dropped either (that would restore
+// whole-building sizing and unblock pricing), so the question stays open: no
+// price until an answered lookup succeeds. Classification is left alone.
+const UNAVAILABLE_IDENTITY = Object.freeze({ unavailable: true });
+const UNCONFIRMED_SCOPE_REASON = `Could not confirm the business at this address just now, so the answer was not applied. ${OCCUPANCY_QUESTION} Answer again to retry — square footage is not priced until then.`;
+
+function unconfirmedScopeContext(baseCategory, baseSubtype) {
+  return {
+    active: false,
+    category: baseCategory,
+    subtype: baseSubtype,
+    flipped: false,
+    decision: SCOPE.UNRESOLVED,
+    question: OCCUPANCY_QUESTION,
+    unitKey: null,
+    source: (base) => base,
+    flags: [{ field: 'squareFootage', reason: UNCONFIRMED_SCOPE_REASON, priority: 'HIGH' }],
+    profileFields: {
+      serviceScopeDecision: SCOPE.UNRESOLVED,
+      serviceScopeQuestion: OCCUPANCY_QUESTION,
+      occupancyAnswer: null,
+    },
+  };
+}
+
 /**
  * The whole business-scope context the profile builder consumes, in one pure
  * call. `active` is false (and every field inert) unless an identity arrived,
@@ -217,6 +244,7 @@ function buildBusinessScopeContext({
   scopeSignals = {},
   occupancyAnswer = null,
 }) {
+  if (identity?.unavailable === true) return unconfirmedScopeContext(baseCategory, baseSubtype);
   const classification = applyBusinessClassification({
     identity, baseCategory, baseSubtype, recordPricingType,
   });
@@ -275,6 +303,7 @@ module.exports = {
   unresolvedScopeError,
   assertScopeAnswered,
   OCCUPANCY_QUESTION,
+  UNAVAILABLE_IDENTITY,
   BUSINESS_DETECTION_SOURCE,
   normalizeOccupancyAnswer,
   businessIdentified,

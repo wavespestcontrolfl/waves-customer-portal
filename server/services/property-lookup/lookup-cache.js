@@ -353,6 +353,16 @@ const EVIDENCE_BACKFILL_KEYS = {
   _commercialSuiteSize: 'TRUE',
 };
 
+// The profile as it may be stored. The business a Places lookup listed at the
+// address (GATE_LOOKUP_BUSINESS_IDENTITY: name, type, tenant count) is shown
+// for one request and never kept: Google's Places policies allow storing a
+// place ID and nothing else. The scope decision is our own and stays.
+function enrichedSnapshotForStorage(enriched) {
+  if (!enriched || typeof enriched !== 'object' || !('businessIdentity' in enriched)) return enriched;
+  const { businessIdentity: _dropped, ...rest } = enriched;
+  return rest;
+}
+
 async function attachEvidenceToCachedLookup(address, key, value) {
   if (isCacheDisabled() || !value) return;
   const guard = EVIDENCE_BACKFILL_KEYS[key];
@@ -566,7 +576,7 @@ async function saveLookup(address, result, attemptId) {
       ai_analysis: JSON.stringify(result.aiAnalysis),
       parcel: record._parcel ? JSON.stringify(record._parcel) : null,
       providers: JSON.stringify(record._aiProviders || []),
-      enriched_snapshot: result.enriched ? JSON.stringify(result.enriched) : null,
+      enriched_snapshot: result.enriched ? JSON.stringify(enrichedSnapshotForStorage(result.enriched)) : null,
       lookup_ms: Number.isFinite(result.meta?.lookupMs) ? result.meta.lookupMs : null,
       // Freshness anchor for the override-vs-data comparison in
       // getCachedLookup (updated_at also moves on override saves).
@@ -700,6 +710,7 @@ module.exports = {
   attachAddressAuditToCachedLookup,
   attachCommercialSuiteSizeToCachedLookup,
   saveLookup,
+  enrichedSnapshotForStorage,
   markLookupAttempt,
   claimLiveRefresh,
   sweepStalePendingAttempts,

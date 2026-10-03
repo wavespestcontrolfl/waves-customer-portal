@@ -5147,7 +5147,9 @@ export default function EstimateToolViewV2({
               <ScopeQuestionPrompt
                 profile={enrichedProfile}
                 question={scopeQuestion}
-                answer={occupancyRef.current.address === form.address.trim() ? occupancyRef.current.answer : ""}
+                // While the question is open no answer stands (the server
+                // could not apply it), so neither button reads as chosen.
+                answer={!scopeQuestion && occupancyRef.current.address === form.address.trim() ? occupancyRef.current.answer : ""}
                 busy={lookupStatus.type === "loading"}
                 onAnswer={answerScope}
               />

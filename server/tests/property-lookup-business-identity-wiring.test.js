@@ -367,6 +367,54 @@ describe('nothing from Places is stored', () => {
   });
 });
 
+describe('the stored lookup snapshot', () => {
+  const { enrichedSnapshotForStorage } = jest.requireActual('../services/property-lookup/lookup-cache');
+  beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
+
+  test('the profile a fresh lookup returns names the business; the snapshot stored for it does not', async () => {
+    const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+    expect(result.enriched.businessIdentity).toMatchObject({ name: 'Example Nail Bar' });
+    const [, saved] = saveLookup.mock.calls[0];
+    const stored = enrichedSnapshotForStorage(saved.enriched);
+    expect(stored).not.toHaveProperty('businessIdentity');
+    expect(JSON.stringify(stored)).not.toMatch(/Example Nail Bar|nail_salon|places\/EXAMPLE1/);
+    // Our own decision stays for lead history and the replay harness.
+    expect(stored).toMatchObject({ serviceScopeDecision: 'scope_unresolved', category: 'COMMERCIAL' });
+    // The live response is not mutated by storing it.
+    expect(saved.enriched.businessIdentity).toMatchObject({ name: 'Example Nail Bar' });
+  });
+
+  test('a profile with no business identity is stored as it is', () => {
+    const profile = { category: 'RESIDENTIAL', homeSqFt: 2000 };
+    expect(enrichedSnapshotForStorage(profile)).toBe(profile);
+    expect(enrichedSnapshotForStorage(null)).toBeNull();
+  });
+});
+
+describe('an answered lookup whose Places re-check fails', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  beforeEach(() => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    placesReply = () => ({ ok: false, status: 503, json: async () => ({}) });
+  });
+
+  test('the answer is not dropped into whole-building pricing: the question stays open and pricing is refused', async () => {
+    const p = (await run({ occupancyAnswer: 'suite' })).enriched;
+    expect(placesFetch).toHaveBeenCalledTimes(1);
+    expect(p.serviceScopeDecision).toBe('scope_unresolved');
+    expect(p.serviceScopeQuestion).toBe('Are we treating just your space or the whole building?');
+    expect(p.occupancyAnswer).toBeNull();
+    expect(p).not.toHaveProperty('businessIdentity');
+    expect(p.fieldVerifyFlags.some((f) => f.priority === 'HIGH' && /Could not confirm the business/.test(f.reason))).toBe(true);
+    expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'COMMERCIAL_SCOPE_UNRESOLVED', statusCode: 409 }));
+  });
+
+  test('with no answer sent, a failed Places call is still no signal at all', async () => {
+    const p = (await run()).enriched;
+    for (const key of NEW_KEYS) expect(p).not.toHaveProperty(key);
+  });
+});
+
 describe('the lookup time budget', () => {
   const { prepareBusinessIdentity } = _private;
   const input = (budgetMs) => ({
