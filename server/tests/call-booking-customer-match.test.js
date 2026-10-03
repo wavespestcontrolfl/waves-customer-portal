@@ -300,7 +300,7 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
   });
 
   test('customer_creation_failed expectation follows the same predicate', () => {
-    expect(source).toMatch(/const customerExpected = !!\(\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone/);
+    expect(source).toMatch(/const customerExpected = (!householdHoldActive && )?!!\(\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone/);
   });
 
   test('the blank-name customer gets its missing_first_name card at creation (fail-soft, one card per call)', () => {
@@ -311,7 +311,6 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
     expect(site).toContain('catch (cardErr)');
     // the booking path files through the SAME idempotent helper
     expect(source).toContain('fileMissingFirstNameCard(conn, {');
-    expect(source).not.toMatch(/findHouseholdCustomerByAddress|GATE_CALL_HOUSEHOLD|household_address_match/);
   });
 
   test('the confirmation greeting falls back to "there"', () => {

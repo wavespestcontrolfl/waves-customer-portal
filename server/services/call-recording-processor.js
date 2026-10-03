@@ -892,6 +892,7 @@ const CONFIRM_REASON_TEXT = {
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   missing_first_name: "no first name on file for this customer — get the account holder's first name",
+  household_address_match: "caller's number is not on file but the address belongs to one existing customer — confirm before booking",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
@@ -3925,6 +3926,165 @@ async function missingFirstNameCardStillOpen(conn, callLogId) {
     .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
     .whereIn('status', ['open', 'in_progress']).first('id');
   return !!card;
+}
+
+// Is the call's card for `reasonCode` still an open task (open or claimed)? Read under the
+// finalization triage lock so a concurrent close is seen. Pure of side effects.
+async function triageCardStillOpen(conn, callLogId, reasonCode) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: reasonCode })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
+}
+
+// ── Household hold (GATE_CALL_HOUSEHOLD_HOLD) ──────────────────────────────
+// A caller from a number NOT on file whose validated service address belongs to exactly ONE
+// existing live residential customer is HELD for the office: no new customer, no auto-booking,
+// ONE household_address_match card. Nothing is written to any customer — the office books on the
+// existing account by hand, links the call, or dismisses the card ("it is really someone new").
+
+// Pure: every trigger condition that needs no database read. `addressOk` is the caller's
+// verdict-and-exact-match check (firstNameAdvisoryAddressOk on a non-recovered address) and
+// `createBranchOpen` says the customer-create branch below would otherwise have run.
+function householdHoldEligible({
+  gateLive = false, customerId = null, hasLinkOverride = false, explicitUnlink = false, phone = null,
+  isVoicemail = false, isSpam = false, nonCustomerNature = false, commercialCall = false,
+  createBranchOpen = false, addressOk = false,
+} = {}) {
+  return !!gateLive && !customerId && !hasLinkOverride && !explicitUnlink && !!phone
+    && !!createBranchOpen && !isVoicemail && !isSpam && !nonCustomerNature && !commercialCall && !!addressOk;
+}
+
+// Is this number on ANY live customer — primary, secondary or a service-contact slot? Wider
+// than the call matcher on purpose (secondary_phone is outside ordinary matching but is
+// identity evidence): a number that belongs to an account is never a "stranger at the address".
+async function householdPhoneOnFile(conn, key) {
+  if (!key) return false;
+  const hit = await conn('customers').whereNull('deleted_at')
+    .where(function orPhones() {
+      for (const col of [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone']) {
+        this.orWhereRaw(key.length === 10
+          ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+          : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`, [key]);
+      }
+    })
+    .first('id');
+  return !!hit;
+}
+
+const HOUSEHOLD_COMMERCIAL_KINDS = ['commercial', 'business'];
+const isCommercialKind = (v) => HOUSEHOLD_COMMERCIAL_KINDS.includes(String(v || '').trim().toLowerCase());
+// The call's stored address as the verdict-input shape addressesExactlyMatch compares against.
+const householdCallAddress = (a = {}) => ({
+  street_line_1: a.address_line1, street_line_2: a.address_line2, city: a.city, postal_code: a.zip,
+});
+
+// Every LIVE customer that could be at this address, with each address SOURCE it could match
+// on (the customer row and every active customer_properties row). The SQL narrowing is only
+// the NECESSARY condition that the house-number token appears as a whole token; the decision
+// itself is addressesExactlyMatch, in the classifier. No LIMIT: the count must be complete.
+async function loadHouseholdCandidates(conn, address = {}) {
+  const tokens = [...new Set((String(address.address_line1 || '').match(/\b\d+[a-z]?\b/gi) || []).map((t) => t.toLowerCase()))];
+  if (!tokens.length) return { customers: [], sourcesById: new Map() };
+  const houseRe = `(^|[^0-9a-z])(${tokens.join('|')})([^0-9a-z]|$)`;
+  const sourcesById = new Map(); // customer id -> [{ address_line1, address_line2, city, zip, commercial }]
+  const take = (rows, idCol) => {
+    for (const r of rows) {
+      const list = sourcesById.get(r[idCol]) || [];
+      list.push({
+        address_line1: r.address_line1, address_line2: r.address_line2, city: r.city, zip: r.zip,
+        // The classification rides the address SOURCE: a commercial property row refuses the
+        // match even when the customer row says residential.
+        commercial: [r.property_type, r.occupancy_type].some(isCommercialKind),
+      });
+      sourcesById.set(r[idCol], list);
+    }
+  };
+  take(await conn('customers').whereNull('deleted_at').whereRaw('address_line1 ~* ?', [houseRe])
+    .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'property_type'), 'id');
+  if (await conn.schema.hasTable('customer_properties')) {
+    take(await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
+      .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip', 'property_type', 'occupancy_type'), 'customer_id');
+  }
+  const customers = sourcesById.size
+    ? await conn('customers').whereIn('id', [...sourcesById.keys()]).whereNull('deleted_at')
+      .select('id', 'first_name', 'last_name', 'active', 'property_type', 'waveguard_tier')
+    : [];
+  return { customers, sourcesById };
+}
+
+// Pure. Claim "exactly one" over the COMPLETE set, then judge that one account. A customer
+// counts when it is live (the loader dropped soft-deleted rows), not explicitly inactive
+// (a NULL flag still counts, so it can never hide a second household) and one of its address
+// sources equals the call's address on street line 1 + unit + city + ZIP-5 (addressesExactlyMatch:
+// suffix aliases, case, punctuation; a unit on one side only is a different door). The one match
+// must then be residential. { customer, reason: 'address_match' } or { customer: null, reason }.
+function classifyHouseholdCandidates({ customers = [], sourcesById = new Map() } = {}, address = {}) {
+  const wanted = householdCallAddress(address);
+  const matched = customers.filter((c) => c.active !== false
+    && (sourcesById.get(c.id) || []).some((src) => addressesExactlyMatch(src, wanted)));
+  if (matched.length === 0) return { customer: null, reason: 'no_address_match' };
+  if (matched.length > 1) return { customer: null, reason: 'multiple_customers_at_address' };
+  const [match] = matched;
+  if (match.active !== true) return { customer: null, reason: 'not_active' };
+  if (isCommercialKind(match.property_type) || String(match.waveguard_tier || '') === 'Commercial'
+    || (sourcesById.get(match.id) || []).some((src) => src.commercial)) {
+    return { customer: null, reason: 'commercial_account' };
+  }
+  return { customer: match, reason: 'address_match' };
+}
+
+// The database half of the trigger: the caller's number is on no live customer, and the call's
+// address belongs to exactly ONE live residential customer. Returns { customer, reason }; reads
+// only. A database error propagates — the household decision must fail the pass (bounded retry),
+// never quietly fall through to creating the duplicate customer the hold exists to prevent.
+async function findHouseholdCustomerByAddress({ phone, address = {}, conn = db } = {}) {
+  const refuse = (reason) => ({ customer: null, reason });
+  const key = phoneKey(phone);
+  if (!key) return refuse('no_phone');
+  if (await householdPhoneOnFile(conn, key)) return refuse('phone_on_file');
+  return classifyHouseholdCandidates(await loadHouseholdCandidates(conn, address), address);
+}
+
+// File the ONE household_address_match card for a held call. Everything — the ownership and
+// link re-check, the dedup read and the insert — runs in ONE transaction under the per-call
+// triage lock, taken BEFORE the first read (the global lock order), so a Resolve / Dismiss and
+// a concurrent filer serialize with this decision. Never inside a booking transaction.
+// Returns:
+//   'open'   — a card is open / claimed for the call (filed now, or already standing);
+//   'waived' — the office DISMISSED this call's card ("it is really someone new"): no hold, no
+//              re-file — the call proceeds as it would without the gate;
+//   'moved'  — this pass no longer owns the call, or the call is now linked to a customer.
+// A RESOLVED card does not block a fresh one: filing again means the call is still unlinked and
+// still triggers.
+async function fileHouseholdHoldCard(conn, { callLogId, procToken = null, customerId, extracted = {}, phone, service = null, extraction }) {
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    if (procToken) {
+      const owned = await trx('call_log').where({ id: callLogId, processing_token: procToken })
+        .whereNull('customer_id').first('id');
+      if (!owned) return 'moved';
+    }
+    const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'household_address_match' })
+      .select('status');
+    if (rows.some((row) => ['open', 'in_progress'].includes(row.status))) return 'open';
+    if (rows.some((row) => row.status === 'dismissed')) return 'waived';
+    await trx('triage_items').insert(buildTriageItem({
+      callLogId,
+      flag: 'household_address_match',
+      extraction,
+      severity: 'blocking',
+      extraPayload: {
+        suggested_customer_id: String(customerId),
+        heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+        caller_phone: phone || null,
+        address: [extracted.address_line1, extracted.address_line2, extracted.city, extracted.zip].filter(Boolean).join(', ') || null,
+        preferred_date_time: extracted.preferred_date_time || null,
+        service,
+      },
+    })).onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+    return 'open';
+  });
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -12189,6 +12349,9 @@ const CallRecordingProcessor = {
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
+    // GATE_CALL_HOUSEHOLD_HOLD: set when this call is HELD for the office at an existing
+    // customer's address (no customer created, no booking, one household_address_match card).
+    let householdHoldActive = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -12209,6 +12372,73 @@ const CallRecordingProcessor = {
         // duplicate customer (codex round-10 P2).
         avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
+      // GATE_CALL_HOUSEHOLD_HOLD: nobody matched the caller's number, yet the validated service
+      // address belongs to exactly ONE live residential customer — a household member calling from
+      // a number not on file. Creating a customer here and booking would double-book the account,
+      // so the call is HELD: nothing is created, nothing is booked, nothing is written to any
+      // customer, and ONE office card asks a person to decide (book on that account by hand, link
+      // the call, or dismiss: it is really someone new). Evaluated exactly where the customer would
+      // otherwise be created; every trigger condition is in householdHoldEligible + the finder.
+      // Gate off: none of this runs. A database failure here throws (the pass retries): falling
+      // through would create the very duplicate this hold prevents.
+      if (!existing && !sharedPhoneAmbiguity.candidates
+        && require('../config/feature-gates').callHouseholdHoldLive()
+        && householdHoldEligible({
+          gateLive: true,
+          customerId,
+          hasLinkOverride: !!customerLinkOverride,
+          explicitUnlink,
+          phone,
+          isVoicemail: !!extracted.is_voicemail,
+          isSpam: !!extracted.is_spam,
+          nonCustomerNature: !!v2NonCustomerCallNature,
+          commercialCall: v2CanonicalExtraction?.property?.property_type === 'commercial'
+            || v2CanonicalExtraction?.property?.hoa_common_area_service === true,
+          createBranchOpen: !!(extracted.first_name || firstNameAdvisoryCreate),
+          addressOk: !addressRecovery?.recovered
+            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null),
+        })) {
+        const householdMatch = await findHouseholdCustomerByAddress({
+          phone,
+          address: {
+            address_line1: extracted.address_line1,
+            address_line2: extracted.address_line2 || null,
+            city: extracted.city,
+            zip: extracted.zip,
+          },
+        }).catch((lookupErr) => {
+          // Code/name only — a knex error's message embeds the bound phone and address.
+          logger.error(`[call-proc] household hold lookup failed for ${maskSid(callSid)}: ${lookupErr.code || lookupErr.name || 'db_error'} — failing the pass (retryable)`);
+          throw new Error('household_hold_lookup_unavailable');
+        });
+        if (householdMatch.customer) {
+          let cardState;
+          try {
+            cardState = await fileHouseholdHoldCard(db, {
+              callLogId: call.id,
+              procToken,
+              customerId: householdMatch.customer.id,
+              extracted,
+              phone,
+              service: extracted.matched_service || extracted.requested_service || null,
+              extraction: v2CanonicalExtraction || undefined,
+            });
+          } catch (holdErr) {
+            // Code/name only — the bound payload carries the call's address and phone.
+            logger.error(`[call-proc] household hold card failed for ${maskSid(callSid)}: ${holdErr.code || holdErr.name || 'db_error'} — failing the pass (retryable)`);
+            throw new Error('household_hold_card_unavailable');
+          }
+          if (cardState === 'waived') {
+            logger.info(`[call-proc] household hold waived for ${maskSid(callSid)}: the office dismissed this call's card`);
+          } else {
+            householdHoldActive = true;
+            // Counted toward review_status only while the card is open (re-judged at finalization under the lock).
+            if (cardState === 'open' && !bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');
+          }
+        } else {
+          logger.info(`[call-proc] household hold not triggered for ${maskSid(callSid)}: ${householdMatch.reason}`);
+        }
+      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -12239,6 +12469,9 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+      } else if (householdHoldActive) {
+        // Held for the office (GATE_CALL_HOUSEHOLD_HOLD): the customer is deliberately NOT created.
+        logger.info(`[call-proc] Holding ${maskSid(callSid)} for the office: caller's number is not on file, address belongs to one existing customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -14097,7 +14330,8 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    // A household hold (GATE_CALL_HOUSEHOLD_HOLD) deliberately creates no customer: never a creation failure.
+    const customerExpected = !householdHoldActive && !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16953,7 +17187,20 @@ const CallRecordingProcessor = {
         addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
       });
     }
-    if (v2RoutingBlocked) {
+    if (householdHoldActive) {
+      // GATE_CALL_HOUSEHOLD_HOLD: no customer exists for this call, so every booking branch below
+      // (each needs customerId) is already closed in legacy, shadow AND enforce routing; this result
+      // names the hold, sends nothing, and — via heldReasons in the enforce fallback — keeps the
+      // generic "booked call without customer" card from piling a second card on the household one.
+      appointmentResult = {
+        service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'household_address_match',
+      };
+      logger.info(`[call-proc] Appointment held for ${maskSid(callSid)}: household address match (office decides)`);
+    } else if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
@@ -20562,7 +20809,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert', 'household_address_match']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
@@ -21480,9 +21727,13 @@ const CallRecordingProcessor = {
       // closed card's reason must not reopen review. Judged under the lock just taken.
       const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
         || await missingFirstNameCardStillOpen(trx, call.id);
+      // …and the household-hold reason (GATE_CALL_HOUSEHOLD_HOLD) while its card stands.
+      const householdStillOpen = !bridgeNeedsConfirmation.includes('household_address_match')
+        || await triageCardStillOpen(trx, call.id, 'household_address_match');
       const reviewReasonCount = bridgeNeedsConfirmation
         .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
-          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
+          && (r !== 'missing_first_name' || firstNameStillOwed)
+          && (r !== 'household_address_match' || householdStillOpen)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -22809,6 +23060,13 @@ CallRecordingProcessor._test = {
   addressesExactlyMatch,
   fileMissingFirstNameCard,
   missingFirstNameCardStillOpen,
+  triageCardStillOpen,
+  householdHoldEligible,
+  householdPhoneOnFile,
+  loadHouseholdCandidates,
+  classifyHouseholdCandidates,
+  findHouseholdCustomerByAddress,
+  fileHouseholdHoldCard,
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
