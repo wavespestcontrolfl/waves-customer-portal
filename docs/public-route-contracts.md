@@ -2486,6 +2486,23 @@ Inbound media uses stable account/message/index storage keys across retries.
 Stale contact-correction reservations require a saved unified inbox message
 before promotion; failed route cancellation cannot replay an unrecorded source.
 Provider retry/fallback remains governed by the configured Twilio policy.
+SMS scheduling by text runs after the acknowledgment, never in the response.
+`GATE_SMS_SCHEDULING_DECIDE` (off unless `true`): an inbound text from a phone
+holding an open `sms_offers` row gets one `sms_offer_decisions` row recording
+what would be done; nothing else changes. `GATE_SMS_SCHEDULING_ACT_MOVE`
+(ships dark, off unless `true`; needs the decide gate): a recorded
+`would_move` from a text at most 15 minutes old moves that one visit (or the
+series, for a recurring visit's date move) through the reschedule link's own
+eligibility, one-day picker rebuild and mover. Under the move's locks it is
+refused, with the visit untouched and the text left to staff, when the visit
+differs from the one checked, the offer is no longer open, anything newer is
+on that phone-and-line conversation, a move was logged since the offer, a
+staff schedule-change request or an unanswered reminder reply-1/2 offer is
+open, or the booking is under office review or dispatch-owned. A move sends
+the customer the standard `appointment_rescheduled` text (the series text for
+a series move), subject to STOP and the send window: after hours it is held
+and the confirmation sweep sends it at 8:00 AM. The webhook response and
+status codes are unchanged by either gate.
 The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
 confirmed to four hours only after actual bell/push delivery evidence and a
 durable legacy receipt. Committed bells keep immutable message keys so lost

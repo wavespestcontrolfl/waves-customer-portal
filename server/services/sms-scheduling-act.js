@@ -153,6 +153,11 @@ async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = 
     // hours the text is held and the confirmation sweep sends it at 8 AM.
     // handleReschedule never throws: it returns the reminder row when the
     // sync ran and null when it could not (no row yet, or an error inside).
+    // "Ran" is the bar here, not "the text was delivered": a notice it could
+    // not send (opted out, held by the send window, a carrier refusal) is
+    // re-armed by handleReschedule itself (the 72h reminder or the 8 AM
+    // confirmation), exactly as for a move made from the reschedule link.
+    // Sending again from here would risk a second text.
     const synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
     if (synced) {
       await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') });
