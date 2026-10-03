@@ -443,13 +443,33 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   // absences (outTechIds); the day list's roster carries outToday.
   const working = (technicians || []).filter((t) => (outTechIds ? !outTechIds.includes(t.id) : !t.outToday));
   const allOut = (technicians || []).length > 0 && working.length === 0;
-  const openHours = useMemo(
-    () => (onCreateSlot && !allOut ? openHoursForDay(dateStr, services || [], { now, bookingHours }) : []),
-    [onCreateSlot, allOut, dateStr, services, now, bookingHours],
-  );
+  const workingKey = working.map((t) => t.id).join(',');
+  // An hour is open when ANY working tech is free in it (their own visits
+  // plus every unassigned one, as the desktop grid judges each column);
+  // `freeTechs` names who, so a single free tech is preselected. With no
+  // roster, the whole day's visits decide.
+  const { openHours, freeTechs } = useMemo(() => {
+    if (!onCreateSlot || allOut) return { openHours: [], freeTechs: new Map() };
+    const opts = { now, bookingHours };
+    if (!working.length) return { openHours: openHoursForDay(dateStr, services || [], opts), freeTechs: new Map() };
+    const unassigned = (services || []).filter((s) => !s.technicianId);
+    const free = new Map();
+    for (const t of working) {
+      const own = (services || []).filter((s) => s.technicianId === t.id);
+      for (const h of openHoursForDay(dateStr, [...own, ...unassigned], opts)) {
+        if (!free.has(h)) free.set(h, []);
+        free.get(h).push(t.id);
+      }
+    }
+    return { openHours: [...free.keys()].sort((a, b) => a - b), freeTechs: free };
+    // workingKey stands in for the filtered roster array.
+  }, [onCreateSlot, allOut, dateStr, services, now, bookingHours, workingKey]);
   const rows = useMemo(() => withOpenHours(sorted, openHours), [sorted, openHours]);
-  // One working tech on the roster: the open hour is theirs.
-  const soleTechId = working.length === 1 ? working[0].id : undefined;
+  // The one tech free in that hour, if only one is.
+  const soleFreeTech = (hour) => {
+    const ids = freeTechs.get(hour);
+    return ids && ids.length === 1 ? ids[0] : undefined;
+  };
   const today = isETToday(dateStr);
   return (
     <section>
@@ -519,7 +539,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
               date: dateStr,
               windowStart: hourToHHMM(hour),
               windowEnd: hourToHHMM(hour + 1),
-              techId: soleTechId,
+              techId: soleFreeTech(hour),
             })}
           />
         )))
@@ -539,18 +559,24 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
   );
 
   useEffect(() => {
-    if (mode !== 'week') return;
+    if (mode !== 'week') return undefined;
+    // A superseded request (the user moved on to another week) must not
+    // land late and replace the newer week's rows.
+    let current = true;
     setLoading(true);
     setError(null);
     adminFetch(`/admin/schedule/week?start=${weekStart}`)
       .then((j) => {
+        if (!current) return;
         setWeekData(j);
         setLoading(false);
       })
       .catch((e) => {
+        if (!current) return;
         setError(e.message || 'Failed to load week');
         setLoading(false);
       });
+    return () => { current = false; };
     // refreshKey bumps when a parent mutation (e.g. a rain-out that moves a
     // stop to another day) invalidates the cached week list.
   }, [mode, weekStart, refreshKey]);
@@ -627,7 +653,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
           // A week still loading shows the previous week's rows: no booking from them.
-          onCreateSlot={loading ? undefined : onCreateSlot}
+          onCreateSlot={loading || weekData?.startDate !== weekStart ? undefined : onCreateSlot}
           outTechIds={d.outTechIds || []}
           bookingHours={weekData?.bookingHours || null}
         />

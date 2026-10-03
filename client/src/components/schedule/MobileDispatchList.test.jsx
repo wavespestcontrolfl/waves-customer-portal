@@ -311,6 +311,7 @@ describe('MobileDispatchList week open hours', () => {
     fetch.mockResolvedValue({
       ok: true,
       json: async () => ({
+        startDate: '2026-07-13',
         days: [
           { date: '2026-07-14', services: [], outTechIds: ['tech-1'] },
           { date: '2026-07-15', services: [], outTechIds: [] },
@@ -327,5 +328,27 @@ describe('MobileDispatchList week open hours', () => {
     );
     await waitFor(() => expect(screen.getAllByRole('button', { name: /^Book open hour/ })).toHaveLength(12));
     vi.useRealTimers();
+  });
+});
+
+describe('MobileDispatchList open hours with two techs', () => {
+  it('keeps an hour open while another tech is free, and preselects that tech', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, technicianId: 'tech-a', windowStart: '09:00', windowEnd: '10:00' }]}
+        technicians={[{ id: 'tech-a', name: 'A Tech' }, { id: 'tech-b', name: 'B Tech' }]}
+        onCreateSlot={onCreateSlot}
+      />,
+    );
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 9–10 AM' }));
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ windowStart: '09:00', techId: 'tech-b' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 10–11 AM' }));
+    expect(onCreateSlot).toHaveBeenLastCalledWith(expect.objectContaining({ windowStart: '10:00', techId: undefined }));
   });
 });
