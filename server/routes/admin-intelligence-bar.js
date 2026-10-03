@@ -1010,6 +1010,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
 
   let preview;
+  let notesReadVersion = null; // update_customer notes: the version read with the notes (below)
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
     // confirmed — run them for the rich preview (on a copy: the stored
@@ -1184,14 +1185,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // shows what it deletes (Codex r1 on #5675). Read now and bound into
       // the contract; the customer-version pin refuses a commit after a
       // later edit. Fail closed: an unreadable current value is no card.
+      // The notes and the row version come from ONE read: the version pin
+      // below reuses it, so a note added after this read fails the commit's
+      // version check instead of being deleted unseen (pre-push P0).
       let current;
       try {
-        current = await db('customers').where('id', params.customer_id).first('crm_notes');
+        current = await db('customers').where('id', params.customer_id).first('crm_notes', db.raw('updated_at::text AS version'));
       } catch {
         return { failed: true, modelResult: { error: 'Could not read this customer\'s current notes — nothing was proposed. Try again in a moment.' } };
       }
-      const before = String(current?.crm_notes ?? '').trim();
+      if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
+      const before = String(current.crm_notes ?? '').trim();
       preview = { ...preview, notes_replaced: { before: before || null } };
+      notesReadVersion = current.version;
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
@@ -1658,9 +1664,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {
-      const current = await db('customers').where('id', params.customer_id).first(db.raw('updated_at::text AS version'));
-      if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
-      params._ib_customer_version = current.version;
+      if (notesReadVersion) params._ib_customer_version = notesReadVersion;
+      else {
+        const current = await db('customers').where('id', params.customer_id).first(db.raw('updated_at::text AS version'));
+        if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
+        params._ib_customer_version = current.version;
+      }
     }
   }
 

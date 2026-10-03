@@ -790,6 +790,12 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
       await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).update({ status: 'cancelled' });
 
+      // The notes read and the version pin are one read: the stored action's
+      // version is the row the card's "before" came from.
+      const overwriteRow = await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).first('params');
+      const pinned = (typeof overwriteRow.params === 'string' ? JSON.parse(overwriteRow.params) : overwriteRow.params)._ib_customer_version;
+      expect(pinned).toBe((await db('customers').where('id', customerA).first(db.raw('updated_at::text AS version'))).version);
+
       // Two direct writes in one model turn: each commits with its own
       // receipt (the frontier closes only after an unknown outcome).
       const source = (value, id) => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { lead_source: value } }, id });
