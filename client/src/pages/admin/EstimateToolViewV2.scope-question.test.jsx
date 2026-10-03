@@ -202,6 +202,39 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "true"));
   });
 
+  it("changing a decided scope blocks pricing until the lookup for the new answer succeeds: in flight, and after it fails", async () => {
+    let failAnswered = true;
+    lookupReply = (body) => (body.occupancy ? answeredProfile(body.occupancy) : { ...answeredProfile("suite"), occupancyAnswer: null });
+    const baseFetch = fetchMock.getMockImplementation();
+    let release;
+    fetchMock.mockImplementation((url, init) => {
+      if (String(url).endsWith("/estimator/property-lookup") && JSON.parse(init.body).occupancy && failAnswered) {
+        return new Promise((resolve) => { release = () => resolve(jsonResponse({ error: "lookup failed" }, { status: 500 })); });
+      }
+      return baseFetch(url, init);
+    });
+    await lookUp();
+    pickPest();
+    const generate = () => screen.getByRole("button", { name: "Generate Estimate", exact: true });
+    expect(generate()).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "The whole building" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    // In flight: the suite-sized profile is still on screen, so no pricing.
+    expect(generate()).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "The whole building" })).toBeEnabled());
+    // Failed: still blocked, and neither answer reads as applied.
+    expect(generate()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(generate());
+    expect(calcBodies()).toHaveLength(0);
+    // Answering again succeeds and unblocks.
+    failAnswered = false;
+    fireEvent.click(screen.getByRole("button", { name: "The whole building" }));
+    await waitFor(() => expect(generate()).toBeEnabled());
+    expect(screen.getByRole("button", { name: "The whole building" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("when the answered lookup comes back still unresolved (the business could not be re-checked), the question stays, no answer reads as chosen, and Generate stays disabled", async () => {
     lookupReply = (body) => (body.occupancy
       ? { ...unresolvedProfile(), businessIdentity: undefined }

@@ -2177,6 +2177,7 @@ export default function EstimateToolViewV2({
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
     occupancyRef.current = { address: "", answer: "" };
+    setScopePending(null);
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -2621,8 +2622,16 @@ export default function EstimateToolViewV2({
   const [scopeConflict, setScopeConflict] = useState("");
   const scopeUnresolved = enrichedProfile?.serviceScopeDecision === "scope_unresolved"
     && !enrichedProfile?.occupancyAnswer;
+  // An answer just clicked is not applied until the lookup it started comes
+  // back carrying it. Until then (in flight, or failed) the profile on screen
+  // is still sized for the OLD scope, so pricing stays blocked.
+  const [scopePending, setScopePending] = useState(null);
+  const scopeAnswerPending = !!scopePending
+    && scopePending.address === form.address.trim()
+    && enrichedProfile?.occupancyAnswer !== scopePending.answer;
   const scopeQuestion = scopeUnresolved
-    ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION) : scopeConflict;
+    ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION)
+    : (scopeAnswerPending ? SCOPE_QUESTION : scopeConflict);
   // A server-raised question belongs to the lookup it came from: a cleared
   // or re-addressed lookup (no profile) drops it.
   useEffect(() => {
@@ -3118,6 +3127,7 @@ export default function EstimateToolViewV2({
     lookupAbortRef.current?.abort();
     lookupSeqRef.current += 1;
     occupancyRef.current = { address: "", answer: "" };
+    setScopePending(null);
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -3177,6 +3187,7 @@ export default function EstimateToolViewV2({
   // sent with the re-run lookup, which returns the decided scope.
   function answerScope(answer) {
     occupancyRef.current = { address: form.address.trim(), answer };
+    setScopePending({ address: form.address.trim(), answer });
     void doLookup({ occupancy: answer });
   }
 
@@ -4373,6 +4384,7 @@ export default function EstimateToolViewV2({
   function nextEstimate() {
     if (dirty && !window.confirm("Start another estimate with unsaved changes?")) return;
     occupancyRef.current = { address: "", answer: "" };
+    setScopePending(null);
     onStartNew?.();
     // A fresh estimate is OUTSIDE any group build: a stale anchor would make
     // the next unrelated save carry groupWithEstimateId and 400 on the
@@ -5114,6 +5126,7 @@ export default function EstimateToolViewV2({
                     // The scope answer belongs to the estimate it was given
                     // for: the same address typed again is asked again.
                     occupancyRef.current = { address: "", answer: "" };
+                    setScopePending(null);
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
                     // The customer linkage survives Clear All (customerId is
