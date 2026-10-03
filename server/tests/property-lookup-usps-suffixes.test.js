@@ -252,3 +252,11 @@ describe('parcel search never loses a pre-suffix-table spelling', () => {
     expect(c).toEqual(expect.arrayContaining(['100 EXAMPLE LK E', '100 EXAMPLE LAKE E', '100 EXAMPLE LAKE EAST']));
   });
 });
+
+describe('bare-unit guard ignores a lone direction', () => {
+  test('"100 N AVE 2" keeps its number; a named street still peels', () => {
+    expect(_private.stripUnitDesignators('100 N AVE 2', { bareUnit: true })).toBe('100 N AVE 2');
+    expect(_private.stripUnitDesignators('100 NE AVE 1', { bareUnit: true })).toBe('100 NE AVE 1');
+    expect(_private.stripUnitDesignators('100 E EXAMPLE CT 3', { bareUnit: true })).toBe('100 E EXAMPLE CT');
+  });
+});
