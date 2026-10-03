@@ -6,19 +6,23 @@
  * gate the code reads has no line in that file), so both agree on what a
  * gate is.
  *
- * A gate is a GATE_* name the code READS from the environment:
- *   process.env.GATE_X or env.GATE_X, process.env['GATE_X'] (each also
- *   with optional chaining: env?.GATE_X),
- *   const { GATE_X } = process.env,
- *   a gate helper called with the name (gateEnvValue('GATE_X'),
- *   gateEnvTimestamp('GATE_X'), gate('GATE_X')), or a gate-named constant
- *   that holds the name for a later lookup (const GATE_ENV = 'GATE_X').
- * A GATE_* word in a comment, a message, a list of retired names, an error
- * code, or used as a prefix (GATE_BOOK_) is not a gate.
+ * A gate is a whole GATE_* name in the parsed code (never a comment):
+ *   - a property read from the environment: process.env.GATE_X, env?.GATE_X,
+ *     const { GATE_X } = process.env;
+ *   - a string that is exactly the name, wherever it sits: a helper argument
+ *     (gateEnvValue('GATE_X')), a bracket lookup, a constant, or an entry in
+ *     an array or map of gate names that is read later. Counting every such
+ *     string is deliberate: an indirect read cannot be told from a direct
+ *     one, and a missed gate is worse than an extra line.
+ * Two kinds of string are not gates: a name in a retired-names list
+ * (const RETIRED = new Set([...])) and an error code ({ code: 'GATE_...' }).
+ * A prefix used to build a name (GATE_BOOK_) is never a whole name.
  */
 
 const fs = require('fs');
 const path = require('path');
+// The parser scripts/check-portal-brand.js already uses in the same prebuild.
+const { parse } = require('@babel/parser');
 
 const ROOT = path.join(__dirname, '..', '..');
 const SCAN_DIRS = ['server', 'client/src'];
@@ -39,23 +43,8 @@ const EXCLUDE_PATTERNS = [
 
 const FEATURE_GATES_FILE = 'server/config/feature-gates.js';
 
-// One read of a gate. The name must end in a letter or digit, so a prefix
-// used to build a name (GATE_BOOK_ + suffix) never matches.
 const NAME = 'GATE_[A-Z0-9_]*[A-Z0-9]';
-const QUOTED = `['"\`](${NAME})['"\`]`;
-const READ_PATTERNS = [
-  // env.GATE_X, env?.GATE_X
-  new RegExp(`\\benv\\s*\\??\\.\\s*(${NAME})\\b`, 'g'),
-  // env['GATE_X'], env?.['GATE_X']
-  new RegExp(`\\benv\\s*(?:\\?\\.)?\\[\\s*${QUOTED}\\s*\\]`, 'g'),
-  // gateEnvValue('GATE_X'), featureGates.gateEnvTimestamp('GATE_X'), gate('GATE_X')
-  new RegExp(`[A-Za-z0-9_$]*[gG]ate[A-Za-z0-9_$]*\\s*(?:\\?\\.)?\\(\\s*${QUOTED}`, 'g'),
-  // const GATE_ENV = 'GATE_X'; const SUMMARY_GATE = 'GATE_X';
-  new RegExp(`\\b(?:const|let|var)\\s+[A-Za-z0-9_$]*(?:GATE|[gG]ate)[A-Za-z0-9_$]*\\s*=\\s*${QUOTED}`, 'g'),
-];
-
-const DESTRUCTURED = /\{([^{}]*)\}\s*=\s*(?:process\.)?env\b/g;
-const KEY = new RegExp(`^(${NAME})(?![A-Z0-9_])`);
+const WHOLE_NAME = new RegExp(`^${NAME}$`);
 
 function walk(dir, out) {
   let entries;
@@ -73,63 +62,96 @@ function walk(dir, out) {
   }
 }
 
-// Blank out comments, keeping line breaks, so a gate named only in prose is
-// not counted as read. String contents are kept: 'GATE_X' literals are reads.
-function stripComments(src) {
-  let out = '';
-  let i = 0;
-  let quote = null;
-  while (i < src.length) {
-    const ch = src[i];
-    const next = src[i + 1];
-    if (quote) {
-      out += ch;
-      if (ch === '\\') {
-        out += next === undefined ? '' : next;
-        i += 2;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      i += 1;
-    } else if (ch === '"' || ch === "'" || ch === '`') {
-      quote = ch;
-      out += ch;
-      i += 1;
-    } else if (ch === '/' && next === '/') {
-      while (i < src.length && src[i] !== '\n') i += 1;
-    } else if (ch === '/' && next === '*') {
-      i += 2;
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
-        if (src[i] === '\n') out += '\n';
-        i += 1;
-      }
-      i += 2;
-    } else {
-      out += ch;
-      i += 1;
-    }
-  }
-  return out;
+function isGateName(value) {
+  return typeof value === 'string' && WHOLE_NAME.test(value);
 }
 
-// The gate names one source file reads.
-function gatesInSource(src) {
-  const code = stripComments(src);
-  const names = new Set();
-  for (const pattern of READ_PATTERNS) {
-    pattern.lastIndex = 0;
-    let match;
-    while ((match = pattern.exec(code))) names.add(match[1]);
+// process.env, import.meta.env, or a bare `env` object.
+function isEnvObject(node) {
+  if (!node) return false;
+  if (node.type === 'Identifier') return node.name === 'env';
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+    return !node.computed && node.property.type === 'Identifier' && node.property.name === 'env';
   }
-  // const { GATE_X, GATE_Y: alias = 'off' } = process.env;
-  DESTRUCTURED.lastIndex = 0;
-  let block;
-  while ((block = DESTRUCTURED.exec(code))) {
-    for (const property of block[1].split(',')) {
-      const key = property.trim().match(KEY);
-      if (key) names.add(key[1]);
+  return false;
+}
+
+function keyName(node) {
+  if (!node) return null;
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'StringLiteral') return node.value;
+  return null;
+}
+
+// The whole text of a string, or of a template with no ${} part.
+function literalText(node) {
+  if (node.type === 'StringLiteral') return node.value;
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) return node.quasis[0].value.cooked;
+  return null;
+}
+
+const COMMENT_KEYS = new Set(['loc', 'leadingComments', 'trailingComments', 'innerComments']);
+
+// const { GATE_X, GATE_Y: alias = 'off' } = process.env;
+function collectDestructured(node, names) {
+  if (node.id.type !== 'ObjectPattern' || !isEnvObject(node.init)) return;
+  for (const property of node.id.properties) {
+    const key = property.type === 'ObjectProperty' && !property.computed ? keyName(property.key) : null;
+    if (isGateName(key)) names.add(key);
+  }
+}
+
+// Adds the gate names this one node reads. Returns true when the strings
+// under it are not gates (a retired-names list, an error code).
+function collect(node, names, excluded) {
+  switch (node.type) {
+    case 'StringLiteral':
+    case 'TemplateLiteral': {
+      const text = literalText(node);
+      if (!excluded && isGateName(text)) names.add(text);
+      return false;
     }
+    case 'MemberExpression':
+    case 'OptionalMemberExpression':
+      // env.GATE_X, env?.GATE_X (env['GATE_X'] is caught as a string)
+      if (!node.computed && isEnvObject(node.object) && isGateName(node.property.name)) {
+        names.add(node.property.name);
+      }
+      return false;
+    case 'VariableDeclarator':
+      collectDestructured(node, names);
+      // const RETIRED = new Set(['GATE_OLD']): names kept so they stay off.
+      return node.id.type === 'Identifier' && /retired/i.test(node.id.name);
+    case 'ObjectProperty':
+      // { code: 'GATE_CODE_BELLS_FAILED' } is an error code, not a gate.
+      return !node.computed && keyName(node.key) === 'code';
+    default:
+      return false;
   }
+}
+
+// The gate names one source file reads. Parsed, not pattern-matched, so
+// comments, regex literals and JSX text can never be mistaken for code.
+function gatesInSource(src, filename = 'source.js') {
+  const ast = parse(src, {
+    sourceType: 'unambiguous',
+    sourceFilename: filename,
+    errorRecovery: true,
+    allowReturnOutsideFunction: true,
+    plugins: ['jsx'],
+  });
+  const names = new Set();
+  const visit = (node, excluded) => {
+    if (!node || typeof node.type !== 'string') return;
+    const skipLiterals = excluded || collect(node, names, excluded);
+    for (const key of Object.keys(node)) {
+      if (COMMENT_KEYS.has(key)) continue;
+      const child = node[key];
+      if (Array.isArray(child)) for (const item of child) visit(item, skipLiterals);
+      else if (child && typeof child.type === 'string') visit(child, skipLiterals);
+    }
+  };
+  visit(ast.program, false);
   return names;
 }
 
@@ -143,7 +165,7 @@ function scanGates() {
   for (const rel of files.sort()) {
     const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
     if (!src.includes('GATE_')) continue;
-    for (const name of gatesInSource(src)) {
+    for (const name of gatesInSource(src, rel)) {
       if (!gates.has(name)) gates.set(name, new Set());
       gates.get(name).add(rel);
     }

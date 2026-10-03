@@ -240,22 +240,31 @@ if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
 // Gate index (rule 7) — docs/gate-index.md matches what the code implies.
 // =========================================================================
 const { INDEX_FILE: GATE_INDEX_FILE, expectedIndex, currentIndex } = require('./generate-gate-index');
-const expectedGateIndex = expectedIndex();
-const currentGateIndex = currentIndex();
-const expectedGateLines = expectedGateIndex.split('\n');
-const currentGateLines = new Set(currentGateIndex.split('\n'));
-const expectedGateLineSet = new Set(expectedGateLines);
-const staleGateLines = [
-  ...expectedGateLines.filter((line) => !currentGateLines.has(line)).map((line) => `missing or changed: ${line}`),
-  ...[...currentGateLines].filter((line) => !expectedGateLineSet.has(line)).map((line) => `no longer true: ${line}`),
-];
-if (expectedGateIndex !== currentGateIndex) {
-  // Markers Railway injects into a deployment's build, never a credential a
-  // developer exports (RAILWAY_TOKEN must not switch the rule off locally).
-  const onRailway = Boolean(process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA);
+// Markers Railway injects into a deployment's build, never a credential a
+// developer exports (RAILWAY_TOKEN must not switch the rule off locally).
+const onRailway = Boolean(process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA);
+const gateIndexProblems = [];
+try {
+  const expectedGateIndex = expectedIndex();
+  const currentGateIndex = currentIndex();
+  if (expectedGateIndex !== currentGateIndex) {
+    const expectedGateLines = expectedGateIndex.split('\n');
+    const currentGateLines = currentGateIndex.split('\n');
+    const expectedGateLineSet = new Set(expectedGateLines);
+    const currentGateLineSet = new Set(currentGateLines);
+    gateIndexProblems.push(
+      ...expectedGateLines.filter((line) => !currentGateLineSet.has(line)).map((line) => `missing or changed: ${line}`),
+      ...currentGateLines.filter((line) => !expectedGateLineSet.has(line)).map((line) => `no longer true: ${line}`),
+    );
+    if (!gateIndexProblems.length) gateIndexProblems.push('the lines are in a different order');
+  }
+} catch (err) {
+  gateIndexProblems.push(`the gate scan failed: ${err.message}`);
+}
+if (gateIndexProblems.length) {
   console.error(`${GATE_INDEX_FILE}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
-  for (const line of staleGateLines.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
-  if (staleGateLines.length > 10) console.error(`    ... and ${staleGateLines.length - 10} more line(s).`);
+  for (const line of gateIndexProblems.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
+  if (gateIndexProblems.length > 10) console.error(`    ... and ${gateIndexProblems.length - 10} more line(s).`);
   console.error('    The index differs from the gates the code reads. Run `npm run gates:index` and commit the file.\n');
   if (!onRailway) violations += 1;
 }

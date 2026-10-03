@@ -39,11 +39,26 @@ describe('gate scan: what counts as a gate the code reads', () => {
     `)).toEqual(['GATE_AFTER_URL']);
   });
 
-  test('a retired-name list and a message are not reads', () => {
+  test('reads a name held in an array or a map of gate names', () => {
+    expect(names(`
+      const on = ['GATE_ALPHA', 'GATE_BRAVO'].every(gateEnvValue);
+      const BY_KIND = { termite: 'GATE_CHARLIE' };
+      repairGates.push('GATE_DELTA');
+    `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO', 'GATE_CHARLIE', 'GATE_DELTA']);
+  });
+
+  test('a retired-name list and a longer message are not reads', () => {
     expect(names(`
       const RETIRED = new Set(['GATE_OLD_GLASS', 'GATE_OLDER_GLASS']);
-      res.json({ error: 'GATE_NOT_A_GATE' });
+      res.json({ error: 'GATE_ALPHA is off' });
     `)).toEqual([]);
+  });
+
+  test('a regex literal does not hide or invent a read', () => {
+    expect(names(`
+      const slash = /[//]/; const on = process.env.GATE_ALPHA;
+      const quote = /["']/; // gateEnvValue('GATE_FAKE')
+    `)).toEqual(['GATE_ALPHA']);
   });
 
   test('a name prefix and an error code are not gates', () => {
