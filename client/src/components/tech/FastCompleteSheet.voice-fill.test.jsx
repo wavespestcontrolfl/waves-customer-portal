@@ -274,8 +274,6 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(sent.get('duration_seconds')).toBe('7');
     expect(sent.get('audio')).toBeInstanceOf(Blob);
     expect(sent.has('transcript')).toBe(false);
-    // the old transcript route is never called
-    expect(request.calls.some((c) => c.path.endsWith('/voice-fill'))).toBe(false);
     expect(screen.getByLabelText('Tell me about the visit').value).not.toContain('perimeter outside for ants and roaches, Taurus');
     expect(screen.getByLabelText('Office note (not on the report)').value).not.toContain('Taurus six ounces');
 

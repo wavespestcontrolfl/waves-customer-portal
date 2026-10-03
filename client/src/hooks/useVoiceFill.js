@@ -52,7 +52,8 @@ export default function useVoiceFill({ request, serviceId, sheet }) {
           setState({ ...IDLE, unavailable: true });
           return null;
         }
-        if (err?.status === 413 && err?.code === 'clip_too_long') {
+        // Too many words (clip_too_long) or too many bytes (clip_too_large): shorter pieces fix both.
+        if (err?.status === 413) {
           setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_TOO_LONG }));
           return null;
         }

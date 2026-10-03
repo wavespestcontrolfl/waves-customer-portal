@@ -63,8 +63,8 @@ describe('useVoiceFill.fillFromClip', () => {
     expect(result.current.error).toBe(VOICE_FILL_NOTHING_HEARD);
   });
 
-  test('too long to fill at once asks for shorter pieces', async () => {
-    answer(413, { error: 'x', code: 'clip_too_long' });
+  test.each(['clip_too_long', 'clip_too_large'])('too long to fill at once (%s) asks for shorter pieces', async (code) => {
+    answer(413, { error: 'x', code });
     const { result } = setup();
     await act(async () => { expect(await result.current.fillFromClip(clip(), 600)).toBeNull(); });
     expect(result.current.error).toBe(VOICE_FILL_TOO_LONG);

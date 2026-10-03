@@ -3,8 +3,7 @@
  * from a recorded clip (owner ruling 2026-10-03, "always our transcriber"; dark
  * behind GATE_FAST_COMPLETE_VOICE_FILL). The transcriber and the model are mocked.
  *
- *  - Same dark gate, limiter and ownership fence as the transcript route, all
- *    ahead of the body parse.
+ *  - Dark gate, limiter and ownership fence, all ahead of the body parse.
  *  - The clip is transcribed with the sheet's own product names and aliases.
  *  - A transcriber or model failure is a 502; an unsupported audio type is a 415.
  *  - The audit line carries sizes and counts only: never the transcript or notes.
