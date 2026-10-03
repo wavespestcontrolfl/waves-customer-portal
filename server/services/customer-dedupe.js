@@ -850,12 +850,34 @@ const SAME_NAME_PHONE_SHARED_REASON = 'same_name_phone_shared';
 // The bucket key: first AND last name, after normName (so 'Unknown' / 'N/A' /
 // 'NA' placeholders are blank), periods and commas dropped and spaces squashed.
 // A one-letter side (an initial) is not a name: no key, never paired.
+function sameNamePart(raw) {
+  return normName(raw).replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function sameNameKey(row) {
-  const part = (raw) => normName(raw).replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
-  const first = part(row.first_name);
-  const last = part(row.last_name);
+  const first = sameNamePart(row.first_name);
+  const last = sameNamePart(row.last_name);
   if (first.length < 2 || last.length < 2) return null;
   return `${first}|${last}`;
+}
+
+// The SAME normalization in SQL (the merge-time recheck reloads the whole name
+// group by it). Any drift between the two only ever drops a member from the
+// reload, which refuses the pair: it fails closed.
+const sameNamePartSql = (col) => `btrim(regexp_replace(regexp_replace(lower(btrim(${col})), '[.,]', '', 'g'), '\\s+', ' ', 'g'))`;
+
+// ONE name comparison for the whole same-name kind. The key (above) treats
+// "O.Neil" and "ONeil" as one name, but classifyPair's normName keeps the
+// punctuation, which would read them as two different last names (red). The
+// same-name verdict therefore runs on rows whose names are already in the key's
+// form, in the finder, the pair recheck and the executor's locked re-check
+// alike. The phone and same-address queues keep classifying exactly as before.
+function canonicalNameRow(row) {
+  return { ...row, first_name: sameNamePart(row.first_name), last_name: sameNamePart(row.last_name) };
+}
+
+function classifySameNamePair(winner, loser, blockers) {
+  return classifyPair(canonicalNameRow(winner), canonicalNameRow(loser), blockers);
 }
 
 function sameNameLeadReason({ phonesMissing, phonesShared }) {
@@ -929,7 +951,7 @@ function assembleSameNameGroups({ byId, edges: allEdges }, { blockersById = new 
     for (const { ids } of edges.values()) {
       if (ids.includes(winner.id)) losers.push(byId.get(ids[0] === winner.id ? ids[1] : ids[0]));
     }
-    const verdicts = new Map(losers.map((loser) => [loser.id, classifyPair(winner, loser, blockersById.get(loser.id) || [])]));
+    const verdicts = new Map(losers.map((loser) => [loser.id, classifySameNamePair(winner, loser, blockersById.get(loser.id) || [])]));
     groups.push({
       kind: SAME_NAME_KIND,
       phone10: null,
@@ -941,7 +963,8 @@ function assembleSameNameGroups({ byId, edges: allEdges }, { blockersById = new 
         const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
         // What a merge would do with the loser's phone: the executor's own
         // prediction, so the confirmation copy can never promise otherwise.
-        const { status: carryStatus, slot: carrySlot } = predictWinnerBackfills(winner, loser).phoneCarry;
+        const predicted = predictWinnerBackfills(winner, loser);
+        const { status: carryStatus, slot: carrySlot } = predicted.phoneCarry;
         return {
           loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
           tier: verdict.tier === 'red' ? 'red' : 'yellow',
@@ -956,6 +979,11 @@ function assembleSameNameGroups({ byId, edges: allEdges }, { blockersById = new 
             phone_numbers: { winner: winner.phone || null, loser: loser.phone || null },
             addresses: { winner: addressOf(winner), loser: addressOf(loser) },
             phone_carry: { status: carryStatus, slot: carrySlot },
+            // What a plain merge does with the other address, from the
+            // executor's own backfill prediction: a kept customer with no street
+            // address TAKES the other record's whole address ('copied'); one
+            // with an address keeps it and the other is not saved ('kept').
+            address_outcome: predicted.backfills.address_line1 ? 'copied' : 'kept',
             names_compatible: verdict.namesOk,
             address: verdict.addrStatus,
           },
@@ -982,14 +1010,22 @@ function buildSameNameGroups(input) {
 // same-address queue's premise test needs them). Property read is best-effort,
 // like the same-address read: without it only customer-row addresses count as
 // "same address", which can only list MORE same-name pairs, never merge one.
-async function readSameNameRows(database, ids = null) {
+async function readSameNameRows(database, ids = null, group = null) {
   const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'account_id', 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
   const customerQuery = database('customers as c')
     .where((q) => q.where('c.active', true).orWhereNull('c.active'))
     .whereNull('c.deleted_at')
     .whereRaw("COALESCE(TRIM(c.first_name), '') <> ''")
     .whereRaw("COALESCE(TRIM(c.last_name), '') <> ''");
-  if (ids) customerQuery.whereIn('c.id', ids);
+  if (group) {
+    // The whole name group of a pair: every live customer whose normalized
+    // first AND last name equal the pair's, plus the pair itself.
+    customerQuery.where((q) => q.whereIn('c.id', group.ids)
+      .orWhere((n) => n.whereRaw(`${sameNamePartSql('c.first_name')} = ?`, [group.first])
+        .whereRaw(`${sameNamePartSql('c.last_name')} = ?`, [group.last])));
+  } else if (ids) {
+    customerQuery.whereIn('c.id', ids);
+  }
   const customers = await customerQuery.select(...customerColumns);
   // Only customers with a name twin need their properties read.
   const keyCounts = new Map();
@@ -1027,44 +1063,59 @@ async function findSameNameGroups(database = db, { failClosedOnDismissals = fals
   return assembleSameNameGroups(detected, { blockersById, upcomingVisits });
 }
 
-// The merge-time recheck for ONE same-name pair, scoped to that pair (two
-// customers, their properties, their dismissal row, their blockers): it runs
-// under the merge's row locks, so it never rescans the table. Same verdict
-// shape as sameAddressPairEligibility with ONE difference: the two addresses
-// differ by definition, so an address reason is NOT a refusal here. Both
-// actions admit the pair (a plain merge keeps the kept customer's address;
-// link-as-property keeps the other address as a second property); the
-// executor's own row-level refusals (two Stripe profiles, two payers, billing
-// modes) still apply to either.
+// The merge-time recheck for ONE same-name pair, validated against the
+// COMPLETE current name group, never the two rows alone: with three or more
+// customers sharing a name the queue picks ONE winner for the group, so a pair
+// is mergeable only when this exact winner -> loser edge is still on a card.
+// A candidate named over another candidate, or a newly stronger third twin,
+// therefore refuses (not_in_queue). The group is reloaded (customers, their
+// properties, their dismissals, their blockers) and put through the same
+// edge + assembly code the queue uses. It runs under the merge's row locks, so
+// it reads only this name's group, never the table. Same verdict shape as
+// sameAddressPairEligibility with ONE difference: the two addresses differ by
+// definition, so an address reason is NOT a refusal here. Both actions admit
+// the pair (a plain merge keeps the kept customer's address; link-as-property
+// keeps the other address as a second property); the executor's own row-level
+// refusals (two Stripe profiles, two payers, billing modes) still apply.
 async function sameNamePairEligibility(winnerId, loserId, database = db) {
   const gone = { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
-  const [a, b] = pairKey(winnerId, loserId);
+  const seed = (await readSameNameRows(database, [winnerId, loserId])).customers;
+  const seedWinner = seed.find((r) => String(r.id) === String(winnerId));
+  const seedLoser = seed.find((r) => String(r.id) === String(loserId));
+  if (!seedWinner || !seedLoser) return gone;
+  const key = sameNameKey(seedWinner);
+  if (!key || key !== sameNameKey(seedLoser)) return gone;
+  const { customers, properties } = await readSameNameRows(database, null, {
+    ids: [winnerId, loserId],
+    first: sameNamePart(seedWinner.first_name),
+    last: sameNamePart(seedWinner.last_name),
+  });
+  const memberIds = customers.map((r) => r.id);
   let dismissals;
   try {
-    dismissals = await database('customer_duplicate_dismissals').where({ customer_id_a: a, customer_id_b: b }).select('reason');
+    dismissals = await database('customer_duplicate_dismissals')
+      .whereIn('customer_id_a', memberIds).whereIn('customer_id_b', memberIds)
+      .select('customer_id_a', 'customer_id_b', 'reason');
   } catch (e) {
     logger.warn(`[customer-dedupe] same-name pair recheck: dismissals unreadable, refusing: ${e.message}`);
     return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
   }
   // An undo-merge sentinel does not hide the pair from a human (manual path).
-  if (dismissals.some((d) => d.reason !== UNDO_MERGE_DISMISSAL_REASON)) return gone;
-  const { customers, properties } = await readSameNameRows(database, [winnerId, loserId]);
-  const detected = sameNameEdges({ customers, properties });
-  if (!detected.edges.has(`${a}:${b}`)) return gone;
-  const winner = detected.byId.get(String(winnerId));
-  const loser = detected.byId.get(String(loserId));
-  const blockersById = await batchAutoBlockers(database, [winner, loser]);
-  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
-  if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
-  const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
-  const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
-  const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
-  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [sameNameLeadReason({ phonesMissing, phonesShared }), ...verdict.reasons] };
-  if (candidate.tier === 'red') {
-    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
+  const dismissed = new Set(dismissals
+    .filter((d) => d.reason !== UNDO_MERGE_DISMISSAL_REASON)
+    .map((d) => pairKey(d.customer_id_a, d.customer_id_b).join(':')));
+  const detected = sameNameEdges({ customers, properties, dismissed });
+  if (!detected.edges.size) return gone;
+  const blockersById = await batchAutoBlockers(database, customers);
+  const groups = assembleSameNameGroups(detected, { blockersById });
+  const found = groups.find((g) => String(g.winner.id) === String(winnerId));
+  const candidate = found && found.candidates.find((c) => String(c.loser.id) === String(loserId));
+  if (!candidate) return gone;
+  const verdict = { tier: candidate.tier, reasons: candidate.reasons };
+  if (verdict.tier === 'red') {
+    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate: verdict };
   }
-  return { eligible: true, code: 'eligible', reason: null, candidate };
+  return { eligible: true, code: 'eligible', reason: null, candidate: verdict };
 }
 
 // Canonical duplicate-eligibility recheck — the SINGLE place that answers
@@ -2893,8 +2944,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // that now reads as two different people (different last names at a
     // positively different address).
     const addr = addressCompat(winner, loser);
-    const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
-      && normName(winner.last_name) !== normName(loser.last_name);
+    // A same-name pair is judged by the same-name key's own normalization (the
+    // eligibility re-check above already did); every other kind is unchanged.
+    const [nameW, nameL] = pairKind === SAME_NAME_KIND
+      ? [canonicalNameRow(winner), canonicalNameRow(loser)]
+      : [winner, loser];
+    const lastNamesDiffer = normName(nameW.last_name) && normName(nameL.last_name)
+      && normName(nameW.last_name) !== normName(nameL.last_name);
     if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) {
       throw new Error('executeMerge: pair now reads as two different people — refresh the queue');
     }
@@ -6907,6 +6963,7 @@ module.exports = {
     SAME_ADDRESS_PHONE_SHARED_REASON,
     buildSameNameGroups,
     sameNameKey,
+    classifySameNamePair,
     SAME_NAME_REASON,
     SAME_NAME_PHONE_MISSING_REASON,
     SAME_NAME_PHONE_SHARED_REASON,

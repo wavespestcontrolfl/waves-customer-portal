@@ -169,7 +169,7 @@ maybeDescribe('findSameNameGroups (TEMP tables)', () => {
     expect(await check()).toBe('not_in_queue');
   });
 
-  test('the merge-time recheck reads only the pair, not the table', async () => {
+  test('the merge-time recheck reads only this name\'s group, not the table', async () => {
     const a = await customer({ pipeline_stage: 'active_customer' });
     const b = await customer();
     for (let i = 0; i < 30; i += 1) await customer({ first_name: `Filler${digits(i)}` });
@@ -182,9 +182,56 @@ maybeDescribe('findSameNameGroups (TEMP tables)', () => {
     const customerReads = seen.filter((q) => /from "customers" as "c"/.test(q.sql));
     expect(customerReads.length).toBeGreaterThan(0);
     for (const q of customerReads) {
+      // Either the pair by id, or the name group by its normalized name: never the whole table.
       expect(q.sql).toMatch(/"c"\."id" in \(/);
       expect(q.bindings).toEqual(expect.arrayContaining([a, b]));
     }
+  });
+
+  describe('three customers with one name: the recheck validates the exact winner -> loser edge on the whole group', () => {
+    test('candidate over candidate refuses; the real winner over each candidate is eligible', async () => {
+      const strong = await customer({ pipeline_stage: 'active_customer', stripe_customer_id: 'cus_syn_strong', created_at: new Date('2020-01-01') });
+      const b = await customer({ created_at: new Date('2021-01-01') });
+      const c = await customer({ created_at: new Date('2022-01-01') });
+      const check = async (w, l) => (await dedupe.duplicatePairEligibility(w, l, conn, { kind: 'same_name' })).code;
+      expect(await check(strong, b)).toBe('eligible');
+      expect(await check(strong, c)).toBe('eligible');
+      expect(await check(b, c)).toBe('not_in_queue');
+      expect(await check(c, b)).toBe('not_in_queue');
+      expect(await check(b, strong)).toBe('not_in_queue');
+    });
+
+    test('a stronger third twin that appears after the page loaded makes the old pair refuse', async () => {
+      const a = await customer({ pipeline_stage: 'active_customer', created_at: new Date('2020-01-01') });
+      const b = await customer({ created_at: new Date('2021-01-01') });
+      const groups = await dedupe.findSameNameGroups(conn);
+      expect(groups[0].winner.id).toBe(a);
+      expect((await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_name' })).code).toBe('eligible');
+      // A new twin with a Stripe profile and a portal login outranks the card's winner.
+      const stronger = await customer({ pipeline_stage: 'active_customer', stripe_customer_id: 'cus_syn_new', password_hash: 'x', created_at: new Date('2019-01-01') });
+      expect((await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+      expect((await dedupe.duplicatePairEligibility(stronger, b, conn, { kind: 'same_name' })).code).toBe('eligible');
+      expect((await dedupe.duplicatePairEligibility(stronger, a, conn, { kind: 'same_name' })).code).toBe('eligible');
+    });
+
+    test('a dismissal inside the group is honored: dismissing winner-vs-one-candidate leaves the other candidate\'s edge', async () => {
+      const strong = await customer({ pipeline_stage: 'active_customer', stripe_customer_id: 'cus_syn_strong2', created_at: new Date('2020-01-01') });
+      const b = await customer({ created_at: new Date('2021-01-01') });
+      const c = await customer({ created_at: new Date('2022-01-01') });
+      const [lo, hi] = [strong, b].sort();
+      await conn('customer_duplicate_dismissals').insert({ customer_id_a: lo, customer_id_b: hi, reason: 'two people', created_by: 'test' });
+      const check = async (w, l) => (await dedupe.duplicatePairEligibility(w, l, conn, { kind: 'same_name' })).code;
+      expect(await check(strong, b)).toBe('not_in_queue');
+      expect(await check(strong, c)).toBe('eligible');
+    });
+
+    test('the group is matched by the normalized name (punctuation and case variants are one group)', async () => {
+      const strong = await customer({ first_name: 'Pat', last_name: "O.Neil", pipeline_stage: 'active_customer', stripe_customer_id: 'cus_syn_strong3' });
+      const b = await customer({ first_name: 'pat', last_name: 'ONeil' });
+      const c = await customer({ first_name: 'PAT', last_name: 'O Neil'.replace(' ', '') });
+      expect(await dedupe.duplicatePairEligibility(strong, b, conn, { kind: 'same_name' })).toMatchObject({ code: 'eligible' });
+      expect((await dedupe.duplicatePairEligibility(b, c, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+    });
   });
 
   test('one bounded read: a fixed handful of queries however many customers there are', async () => {
@@ -352,6 +399,38 @@ maybeDescribe('same-name merge: both actions, phone carried under the consent ho
     } finally {
       await db('customer_duplicate_dismissals').where({ customer_id_a: lo, customer_id_b: hi }).del();
     }
+  });
+
+  test('punctuation-variant last names (O.Neil / ONeil) merge from the queue: not red in the finder, the recheck or the executor', async () => {
+    const stamp = digits(uniq());
+    const first = `Zed${stamp}`;
+    const { winnerId, loserId } = await namedPair({ winnerExtra: { first_name: first, last_name: `O.Neil${stamp}` }, loserExtra: { first_name: first, last_name: `ONeil${stamp}` } });
+    expect((await dedupe.duplicatePairEligibility(winnerId, loserId, undefined, { kind: 'same_name' })).code).toBe('eligible');
+    const result = await mergeSameName(winnerId, loserId);
+    expect(result.journalId).toBeTruthy();
+    expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
+  });
+
+  test('a kept customer with no address takes the other address on a plain merge (the evidence predicted it)', async () => {
+    const { winnerId, loserId, loserAddress } = await namedPair({ winnerExtra: { address_line1: null, city: null, zip: null, state: null } });
+    const result = await mergeSameName(winnerId, loserId);
+    expect(result.backfills).toMatchObject({ address_line1: loserAddress.address_line1 });
+    expect((await db('customers').where({ id: winnerId }).first()).address_line1).toBe(loserAddress.address_line1);
+  });
+
+  test('a candidate named over another candidate in a three-customer name group is refused by the locked re-check', async () => {
+    const strong = await namedPair();
+    const extraId = randomUUID();
+    made.customers.push(extraId);
+    await db('customers').insert({
+      id: extraId, first_name: strong.first, last_name: strong.last, phone: `+1941666${String(uniq()).padStart(4, '0').slice(-4)}`,
+      address_line1: `${uniq()} ${digits(uniq())} Way`, city: 'Venice', state: 'FL', zip: '34285', pipeline_stage: 'new_lead', active: true,
+    });
+    // strong.winnerId outranks both others; loser -> extra is candidate over candidate.
+    await expect(mergeSameName(strong.loserId, extraId)).rejects.toThrow(/no longer mergeable/);
+    expect((await db('customers').where({ id: extraId }).first()).deleted_at).toBeNull();
+    const result = await mergeSameName(strong.winnerId, extraId);
+    expect(result.journalId).toBeTruthy();
   });
 
   test('the executor refuses a same-name pair in auto mode, and without the locked queue pair', async () => {

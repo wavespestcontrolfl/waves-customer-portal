@@ -119,19 +119,32 @@ function sameAddressConfirm(customer, winner, evidence) {
   return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.trim();
 }
 
-// Confirmation text for a same-name merge. The two addresses and phones differ
-// (or one is missing), so the copy says which address the kept customer keeps
-// and which one is dropped, and what happens to the phone.
+// What a plain merge does with the other record's address, from the server's
+// own backfill prediction (evidence.address_outcome): a kept customer with NO
+// street address takes the other record's whole address ("copied"); one that
+// has an address keeps it and the other is not saved ("kept"). Older payloads
+// without the field read as "kept".
+function sameNameAddressPlan(customer, evidence) {
+  const kept = fmtAddress(evidence?.addresses?.winner);
+  const other = fmtAddress(evidence?.addresses?.loser);
+  const copied = evidence?.address_outcome === "copied" && !!other;
+  return { kept, other, copied, hasOther: !!other };
+}
+
+// Confirmation text for a same-name merge. The addresses and phones differ (or
+// one is missing), so the copy states which address the kept customer ends up
+// with and what becomes of the other one, using the predicted outcome only.
 function sameNameConfirm(customer, winner, evidence, { keepAddress }) {
-  const kept = fmtAddress(evidence?.addresses?.winner) || "no address on file";
-  const other = fmtAddress(evidence?.addresses?.loser) || "no address on file";
+  const plan = sameNameAddressPlan(customer, evidence);
   const state = evidence?.phone_state;
   let base = `They have the same name but are two customers with ${state === "shared_phone" ? "the same phone number (one record is not marked active, so they are not in the shared-phone list)" : "different phone numbers or addresses"}.`;
   if (state === "one_missing" || state === "both_missing") base = "They have the same name; a phone number is missing on at least one record.";
-  const addressLine = keepAddress
-    ? `${displayName(winner)} keeps ${kept}, and ${other} is saved as an additional property.`
-    : `${displayName(winner)} keeps ${kept}. ${other} is NOT saved — use Merge + keep address to save it.`;
-  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${addressLine} ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.trim();
+  let addressLine;
+  if (!plan.hasOther) addressLine = plan.kept ? `${displayName(winner)} keeps ${plan.kept}.` : "";
+  else if (plan.copied) addressLine = `${displayName(winner)} has no address on file, so ${plan.other} becomes their address.`;
+  else if (keepAddress) addressLine = `${displayName(winner)} keeps ${plan.kept || "their current address"}, and ${plan.other} is saved as an additional property.`;
+  else addressLine = `${displayName(winner)} keeps ${plan.kept || "their current address"}. ${plan.other} is NOT saved — use Merge + keep address to save it.`;
+  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${addressLine} ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.replace(/\s+/g, " ").trim();
 }
 
 function fmtAddress(addr) {
@@ -141,7 +154,7 @@ function fmtAddress(addr) {
 // matched (same-address cards only): the address this customer matched on —
 // their own row or a saved property. A saved-property match leads with that
 // address and labels the primary address as such.
-function CustomerLine({ customer, isWinner, showPhone = false, matched = null, phoneState = null }) {
+function CustomerLine({ customer, isWinner, showPhone = false, matched = null, phoneState = null, fullAddress = false }) {
   return (
     <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -167,7 +180,9 @@ function CustomerLine({ customer, isWinner, showPhone = false, matched = null, p
       )}
       <div className="break-words text-ui-body text-ink-secondary">
         {matched && matched.via === "property" ? "Primary address: " : ""}
-        {[customer.address_line1, customer.city, customer.zip].filter(Boolean).join(", ") || "No address on file"}
+        {(fullAddress
+          ? [customer.address_line1, customer.address_line2, customer.city, customer.zip]
+          : [customer.address_line1, customer.city, customer.zip]).filter(Boolean).join(", ") || "No address on file"}
       </div>
       <div className="break-words text-ui-body text-ink-secondary">
         {[customer.email, customer.pipeline_stage, `added ${fmtDate(customer.created_at)}`].filter(Boolean).join(" · ")}
@@ -281,7 +296,7 @@ export default function DuplicateCustomersPage() {
           )}
 
           <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-            <CustomerLine customer={group.winner} isWinner showPhone={reviewOnly} matched={keptMatched} phoneState={reviewOnly ? group.candidates[0]?.evidence?.phones?.winner : null} />
+            <CustomerLine customer={group.winner} isWinner showPhone={reviewOnly} fullAddress={sameName} matched={keptMatched} phoneState={reviewOnly ? group.candidates[0]?.evidence?.phones?.winner : null} />
           </div>
 
           <div className="grid gap-2">
@@ -294,7 +309,13 @@ export default function DuplicateCustomersPage() {
               // A same-name pair always offers BOTH actions: its addresses
               // differ by definition (or one is missing), and the office
               // chooses whether the other address survives as a property.
-              const addressConflict = sameName ? !!customer.address_line1 : reasons.some((r) => r.startsWith("address_"));
+              // The save-as-property action is offered only when it can do what
+              // it says: the other record has an address AND the kept customer
+              // already has one (when it has none, a plain merge copies the
+              // other address onto it, so there is nothing left to keep).
+              const addressConflict = sameName
+                ? (!!customer.address_line1 && evidence?.address_outcome !== "copied")
+                : reasons.some((r) => r.startsWith("address_"));
               return (
                 <div
                   key={customer.id}
@@ -305,7 +326,7 @@ export default function DuplicateCustomersPage() {
                       this column to slivers; md:basis-auto restores the
                       side-by-side row once there is width for both */}
                   <div className="min-w-0 basis-full flex-1 md:basis-auto">
-                    <CustomerLine customer={customer} showPhone={reviewOnly} matched={matchedAddress} phoneState={reviewOnly ? evidence?.phones?.loser : null} />
+                    <CustomerLine customer={customer} showPhone={reviewOnly} fullAddress={sameName} matched={matchedAddress} phoneState={reviewOnly ? evidence?.phones?.loser : null} />
                     {keptHere && keptMatched && fmtAddress(keptHere) !== fmtAddress(keptMatched) && (
                       <div className="break-words text-ui-body text-ink-secondary">
                         Kept customer matched this one at {fmtAddress(keptHere)}

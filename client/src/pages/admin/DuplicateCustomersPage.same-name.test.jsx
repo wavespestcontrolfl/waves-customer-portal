@@ -206,3 +206,89 @@ it("the same-address section and the same-name section render side by side", asy
   expect(await screen.findByText("Same address, different phone", { selector: "span.text-ui-caption" })).toBeInTheDocument();
   expect(screen.getByText("Same name, different phone and address", { selector: "span.text-ui-caption" })).toBeInTheDocument();
 });
+
+const withEvidence = (evidenceChanges, customerChanges = {}, winnerChanges = {}) => {
+  const group = JSON.parse(JSON.stringify(sameNameGroup));
+  group.winner = { ...group.winner, ...winnerChanges };
+  group.candidates[0].customer = { ...group.candidates[0].customer, ...customerChanges };
+  group.candidates[0].evidence = { ...group.candidates[0].evidence, ...evidenceChanges };
+  return { ...phoneOnly, sameNameGroups: [group] };
+};
+
+it("a kept customer with no address takes the other address: the confirm says so and the keep-address action is not offered", async () => {
+  mockApi({
+    list: withEvidence({
+      address_outcome: "copied",
+      addresses: { winner: { address_line1: null, address_line2: null, city: null, zip: null }, loser: sameNameGroup.candidates[0].evidence.addresses.loser },
+    }, {}, { address_line1: null, city: null, zip: null }),
+  });
+  renderPage();
+  const card = await loserCard();
+  expect(within(card).queryByRole("button", { name: "Merge + keep address" })).toBeNull();
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  const text = window.confirm.mock.calls[0][0];
+  expect(text).toContain("has no address on file, so 15-84 Sample Crest Loop, Sarasota, 34231 becomes their address");
+  expect(text).not.toContain("NOT saved");
+  expect(text).not.toContain("additional property");
+});
+
+it("when the kept customer has an address the confirm says the other one is NOT saved, and Merge + keep address calls it an additional property", async () => {
+  mockApi({ list: withEvidence({ address_outcome: "kept" }) });
+  renderPage();
+  const card = await loserCard();
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalledTimes(1));
+  expect(window.confirm.mock.calls[0][0]).toContain("is NOT saved");
+  fireEvent.click(within(card).getByRole("button", { name: "Merge + keep address" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalledTimes(2));
+  expect(window.confirm.mock.calls[1][0]).toContain("is saved as an additional property");
+});
+
+it("a merge from a record with no address says nothing about saving an address", async () => {
+  const noAddress = { address_line1: null, address_line2: null, city: null, zip: null };
+  mockApi({
+    list: withEvidence({ address_outcome: "kept", addresses: { winner: sameNameGroup.candidates[0].evidence.addresses.winner, loser: noAddress } }, noAddress),
+  });
+  renderPage();
+  const card = await loserCard();
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  const text = window.confirm.mock.calls[0][0];
+  expect(text).toContain("keeps 1584 Sample Crest Loop, Sarasota, 34231.");
+  expect(text).not.toContain("NOT saved");
+});
+
+it("shows the unit on both records so same-street, different-unit pairs are told apart", async () => {
+  mockApi({
+    list: withEvidence({
+      addresses: {
+        winner: { address_line1: "1584 Sample Crest Loop", address_line2: "Unit 4", city: "Sarasota", zip: "34231" },
+        loser: { address_line1: "1584 Sample Crest Loop", address_line2: "Unit 9", city: "Sarasota", zip: "34231" },
+      },
+    }, { address_line1: "1584 Sample Crest Loop", address_line2: "Unit 9" }, { address_line2: "Unit 4" }),
+  });
+  renderPage();
+  const card = await loserCard();
+  expect(within(card).getByText("1584 Sample Crest Loop, Unit 9, Sarasota, 34231")).toBeInTheDocument();
+  expect(screen.getByText("1584 Sample Crest Loop, Unit 4, Sarasota, 34231")).toBeInTheDocument();
+});
+
+it("a loser with no phone: the confirm says no number is saved, and a full contact list says to add it by hand", async () => {
+  mockApi({ list: withEvidence({ phone_state: "one_missing", phones: { winner: "usable", loser: "none" }, phone_carry: { status: "not_applicable" } }, { phone: "" }) });
+  renderPage();
+  const card = await loserCard();
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  expect(window.confirm.mock.calls[0][0]).toContain("has no usable phone number on file, so no number is saved");
+  expect(window.confirm.mock.calls[0][0]).not.toContain("is saved as a contact");
+});
+
+it("no free contact slot: the confirm warns the phone will NOT be saved", async () => {
+  mockApi({ list: withEvidence({ phone_carry: { status: "no_free_slot" } }) });
+  renderPage();
+  const card = await loserCard();
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  expect(window.confirm.mock.calls[0][0]).toContain("will NOT be saved");
+});
