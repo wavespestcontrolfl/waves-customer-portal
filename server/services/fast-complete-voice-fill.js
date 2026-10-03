@@ -609,13 +609,10 @@ function isRetracted(tokens, breaks, start, end, stops = []) {
 // mixing rate, never the amount used.
 const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square', 'sq', 'acre', 'acres', 'tank', 'liter', 'litre']);
 // also "for every gallon", "for each gallon", "to the gallon" ("in a gallon" is the tank mix, the amount used)
-// "per" is a rate only before a rate base ("per gallon", "per 1,000 sq ft"): a
-// transcriber hears "ounces, perimeter" as "ounces per meter", which is no rate.
-const perRate = (tokens, end) => {
-  if (tokens[end] !== 'per') return false;
-  const number = readSpokenNumber(tokens, end + 1);
-  return RATE_BASES.has(tokens[end + 1]) || Boolean(number && RATE_BASES.has(tokens[number.next]));
-};
+// Any "per" after a number is a rate, with one narrow exception: a transcriber
+// hears "ounces, perimeter" as "ounces per meter" / "per minute", and neither is
+// a dose denominator on this sheet.
+const perRate = (tokens, end) => tokens[end] === 'per' && !['meter', 'meters', 'minute', 'minutes'].includes(tokens[end + 1]);
 const isRate = (tokens, end) => perRate(tokens, end)
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
   || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))

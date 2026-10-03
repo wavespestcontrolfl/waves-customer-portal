@@ -1828,7 +1828,7 @@ describe('voice test findings (real recordings, 2026-10-03)', () => {
   });
 
   test('real rates are still rates', () => {
-    for (const t of ['Taurus four ounces per gallon.', 'Taurus four ounces per 1,000 square feet.', 'Taurus four ounces per thousand.']) {
+    for (const t of ['Taurus four ounces per gallon.', 'Taurus four ounces per 1,000 square feet.', 'Taurus four ounces per thousand.', 'Taurus four ounces per 100 linear feet.', 'Taurus four ounces per ten liters.']) {
       expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
     }
   });
