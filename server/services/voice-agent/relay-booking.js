@@ -674,101 +674,42 @@ async function requestBookingText(input = {}, ctx = {}) {
   // answer is not evidence), so a MULTI-PROPERTY account fails closed here and
   // a human calls back. Single-property and legacy accounts resolve through the
   // call pipeline's own linkage helper, and the visit carries the stamp.
-  let propertyLinkage = null;
-  // True once we know the account HAS at least one property row — after which a
-  // linkage failure may never degrade to the mirror address.
-  let linkageAttemptedWithProperties = false;
-  try {
-    const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
-    // `active`, not a soft-delete column — customer_properties has no
-    // `deleted_at`, so filtering on one made Postgres reject the query and the
-    // catch below scored EVERY account as zero properties. That is the guard
-    // failing OPEN, which is the one thing it must not do: fail closed on an
-    // unanswerable count (-1 is not "no properties", it is "ask a human").
-    const propertyCount = await db('customer_properties')
-      .where({ customer_id: customerId, active: true })
-      .count('* as count')
-      .first()
-      .then((r) => parseInt((r && r.count) || 0, 10))
-      .catch((err) => {
-        ctx.toolFailed = true;
-        logger.error(`[voice-relay-booking] property count failed for ${customerId} — refusing the booking: ${err.message}`);
-        return -1;
-      });
-    if (propertyCount < 0) {
-      return 'I could not confirm which property this account has on file, so nothing was booked. Capture the '
-        + 'lead with the address they mean and their preferred time; a Waves team member will call to confirm.';
-    }
-    if (propertyCount > 1) {
-      return 'This account has more than one property on file, and I cannot tell which one this visit is for, '
-        + 'so nothing was booked. Capture the lead with the property they mean and their preferred time, and '
-        + 'tell the caller a Waves team member will call to confirm which address.';
-    }
-    linkageAttemptedWithProperties = propertyCount >= 1;
-    // Empty extraction ⇒ the helper falls back to the on-file address, matches
-    // it against the property rows, and returns its geocode.
-    propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {}, db);
-    // …and a ONE-property account whose property the helper could not match is
-    // the same ambiguity as a multi-property one, quietly: propertyLinkage stays
-    // null, the visit is written with no property_id, and dispatch falls back to
-    // the customer's primary mirror address — the exact premise mix-up this
-    // guard exists to prevent. A property on file that cannot be resolved is a
-    // question for a human, not a fallback.
-    if (propertyCount === 1 && !(propertyLinkage && propertyLinkage.propertyId)) {
-      logger.warn(
-        `[voice-relay-booking] customer ${customerId} has one property on file that the linkage could not `
-        + 'resolve — refusing the booking rather than dispatching to the mirror address'
-      );
-      return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
-        + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
-    }
-  } catch (err) {
-    // ⭐ AND AN ERROR IS NOT A LEGACY ACCOUNT. Falling through here after a
-    // property WAS found sends the visit to the customer's mirror address with
-    // no property_id — the same wrong-premise dispatch the guard above refuses
-    // when it can see the ambiguity. Only an account with zero property rows
-    // may use the on-file address, and a failed COUNT already refused above.
-    logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
-    if (linkageAttemptedWithProperties) {
-      ctx.toolFailed = true;
-      return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
-        + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
-    }
+  // Resolved by the ONE helper the availability tools also use
+  // (resolveAccountBookingLocation), so a time is offered at the same pin this
+  // commit re-checks it at.
+  const located = await resolveAccountBookingLocation(db, customer);
+  if (located.toolFailed) ctx.toolFailed = true;
+  if (located.status === 'count_failed') {
+    return 'I could not confirm which property this account has on file, so nothing was booked. Capture the '
+      + 'lead with the address they mean and their preferred time; a Waves team member will call to confirm.';
   }
-
-  // ⭐ RE-VALIDATE AT THE ADDRESS THE TECH WILL ACTUALLY DRIVE TO.
-  //
-  // The OFFER was route-scored from whatever address the model handed
-  // find_slots — the caller's spoken words (relay-tools.resolveAvailability
-  // geocodes `address_line1`/`city`/`zip` from the tool input and never
-  // consults the matched account). The ROW this writer inserts carries no
-  // address at all: the visit is serviced at the customer's stored address.
-  // So an offer scored from one town could be committed as a visit in
-  // another, and the drive-time/zone engine — the entire reason this lane
-  // books through it instead of a generic calendar — would have validated a
-  // route nobody is driving.
-  //
-  // The account's own coordinates are therefore the authority for the commit
-  // re-check, resolved through the same helper the /book route uses (stored
-  // lat/lng first, geocoded street address behind it). Everything else about
-  // the offer is preserved deliberately (timeOfDay, expandOpenDays, date,
-  // start) — see revalidateSlot's note on why dropping those loses slots. If
-  // the slot does not survive at the real address, that is a stale offer like
-  // any other: nothing is booked and the agent finds fresh times.
-  // The property linkage's own geocode wins when it resolved one: that is the
-  // pin the visit will carry, so it is the origin the route must be scored from.
-  const bookingCoords = (propertyLinkage && propertyLinkage.lat && propertyLinkage.lng)
-    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
-    : await require('../../routes/booking')._internals.resolveBookingCoords({
-      lat: customer.latitude || null,
-      lng: customer.longitude || null,
-      address: [customer.address_line1, customer.city, customer.state, customer.zip]
-        .filter(Boolean).join(', ') || null,
-      city: customer.city || null,
-    }).catch(() => { ctx.toolFailed = true; return {}; });
-  if (!bookingCoords || !bookingCoords.lat || !bookingCoords.lng) {
+  if (located.status === 'multi_property') {
+    return 'This account has more than one property on file, and I cannot tell which one this visit is for, '
+      + 'so nothing was booked. Capture the lead with the property they mean and their preferred time, and '
+      + 'tell the caller a Waves team member will call to confirm which address.';
+  }
+  if (located.status === 'unresolved_property') {
+    return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
+      + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
+  }
+  if (located.status === 'no_location') {
     return 'Could not verify the service location for this account, so no booking request was placed. '
       + 'Capture the lead with the preferred time; a team member will call to schedule.';
+  }
+  const { propertyLinkage, coords: bookingCoords } = located;
+  // ⭐ A KNOWN CALLER IS BOOKED ONLY FROM TIMES LOOKED UP FOR THEIR OWN
+  // PROPERTY. This request carries no address: the visit is at the account's
+  // property. A slot scored for an address stated on the call (before the
+  // caller was recognised, or when the account read failed) may be another
+  // premise entirely, and it being open here too would book the wrong one.
+  // The availability tools build a full-tier caller's times at this same
+  // location and stamp them; anything else is looked up again. A third-party
+  // requester (the separate, default-off lane) keeps its human review.
+  if (!thirdParty && offer.accountCustomerId !== customerId) {
+    return 'That time was looked up for an address given on the call, not the service address on this '
+      + 'account, so nothing was booked. Call find_slots again WITHOUT an address — it uses the property on '
+      + 'the account — and offer those times. If the visit is for a different property, capture the lead '
+      + 'with that address and their preferred time; a Waves team member will call to confirm.';
   }
   // Never trust the model's memory of a slot: re-check the offered slot
   // through the same availability engine, right now, at the account's address.
@@ -1096,7 +1037,94 @@ async function attachLeadToVoiceBookingCard(callSid, leadId) {
   }
 }
 
+/**
+ * ⭐ WHERE A VOICE BOOKING FOR THIS ACCOUNT HAPPENS — one resolver for the
+ * offer and the commit. request_booking re-checks a slot at this location and
+ * stamps the visit with this property; get_availability / find_slots build a
+ * known caller's times from it, so a time is never offered at one pin and
+ * re-checked at another.
+ *
+ * `customer` is the live row (id, address_line1, city, state, zip, latitude,
+ * longitude). Returns `{ status }`:
+ *   'count_failed'        the property count could not be read (ask a human)
+ *   'multi_property'      more than one active property (which one?)
+ *   'unresolved_property' a property on file the linkage could not resolve
+ *   'no_location'         nothing geocodes
+ *   'ok'                  + `coords` {lat,lng} and `propertyLinkage` (or null
+ *                         for a legacy account with no property rows)
+ * `toolFailed` is true when a read failed rather than answered. Never throws.
+ */
+async function resolveAccountBookingLocation(db, customer) {
+  const customerId = customer.id;
+  let propertyLinkage = null;
+  // True once we know the account HAS at least one property row — after which a
+  // linkage failure may never degrade to the mirror address.
+  let linkageAttemptedWithProperties = false;
+  let toolFailed = false;
+  try {
+    const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
+    // `active`, not a soft-delete column — customer_properties has no
+    // `deleted_at`, so filtering on one made Postgres reject the query and the
+    // catch below scored EVERY account as zero properties. That is the guard
+    // failing OPEN, which is the one thing it must not do: fail closed on an
+    // unanswerable count (-1 is not "no properties", it is "ask a human").
+    const propertyCount = await db('customer_properties')
+      .where({ customer_id: customerId, active: true })
+      .count('* as count')
+      .first()
+      .then((r) => parseInt((r && r.count) || 0, 10))
+      .catch((err) => {
+        toolFailed = true;
+        logger.error(`[voice-relay-booking] property count failed for ${customerId} — refusing the booking: ${err.message}`);
+        return -1;
+      });
+    if (propertyCount < 0) return { status: 'count_failed', toolFailed };
+    if (propertyCount > 1) return { status: 'multi_property', toolFailed };
+    linkageAttemptedWithProperties = propertyCount >= 1;
+    // Empty extraction ⇒ the helper falls back to the on-file address, matches
+    // it against the property rows, and returns its geocode.
+    propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {}, db);
+    // …and a ONE-property account whose property the helper could not match is
+    // the same ambiguity as a multi-property one, quietly: propertyLinkage stays
+    // null, the visit is written with no property_id, and dispatch falls back to
+    // the customer's primary mirror address — the exact premise mix-up this
+    // guard exists to prevent. A property on file that cannot be resolved is a
+    // question for a human, not a fallback.
+    if (propertyCount === 1 && !(propertyLinkage && propertyLinkage.propertyId)) {
+      logger.warn(
+        `[voice-relay-booking] customer ${customerId} has one property on file that the linkage could not `
+        + 'resolve — refusing the booking rather than dispatching to the mirror address'
+      );
+      return { status: 'unresolved_property', toolFailed };
+    }
+  } catch (err) {
+    // ⭐ AND AN ERROR IS NOT A LEGACY ACCOUNT. Falling through here after a
+    // property WAS found sends the visit to the customer's mirror address with
+    // no property_id — the same wrong-premise dispatch the guard above refuses
+    // when it can see the ambiguity. Only an account with zero property rows
+    // may use the on-file address, and a failed COUNT already refused above.
+    logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
+    if (linkageAttemptedWithProperties) return { status: 'unresolved_property', toolFailed: true };
+  }
+  // The property linkage's own geocode wins when it resolved one: that is the
+  // pin the visit will carry, so it is the origin the route must be scored
+  // from. Behind it, the account's own coordinates through the same helper the
+  // /book route uses (stored lat/lng first, geocoded street address behind it).
+  const coords = (propertyLinkage && propertyLinkage.lat && propertyLinkage.lng)
+    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+    : await require('../../routes/booking')._internals.resolveBookingCoords({
+      lat: customer.latitude || null,
+      lng: customer.longitude || null,
+      address: [customer.address_line1, customer.city, customer.state, customer.zip]
+        .filter(Boolean).join(', ') || null,
+      city: customer.city || null,
+    }).catch(() => { toolFailed = true; return {}; });
+  if (!coords || !coords.lat || !coords.lng) return { status: 'no_location', toolFailed };
+  return { status: 'ok', coords: { lat: coords.lat, lng: coords.lng }, propertyLinkage, toolFailed };
+}
+
 module.exports = {
+  resolveAccountBookingLocation,
   allowsThirdPartyWrites,
   attachLeadToVoiceBookingCard,
   isBookingEnabled,
