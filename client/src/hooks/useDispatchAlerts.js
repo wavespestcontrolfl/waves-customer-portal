@@ -92,6 +92,18 @@ export function mergeHydration(prev, fetched, resolvedIds = null) {
   );
 }
 
+// Upsert by id with the INCOMING copy winning (a job-scoped server read is
+// authoritative for its own cards); everything else in `prev` is kept as is.
+// Same ordering as mergeHydration.
+export function upsertAlerts(prev, incoming) {
+  const byId = new Map();
+  for (const a of prev) byId.set(a.id, a);
+  for (const a of incoming) byId.set(a.id, { ...byId.get(a.id), ...a });
+  return Array.from(byId.values()).sort(
+    (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
+  );
+}
+
 // A broadcast for an id this board already saw resolve (or a row that is
 // itself resolved) is stale — e.g. an auto-move annotation delivered after a
 // concurrent dispatcher resolve — and must never resurrect a phantom card.
@@ -155,27 +167,39 @@ export function useDispatchAlerts() {
 
   // After a visit update, ask the server about THAT visit: the job-scoped
   // unresolved view is complete by construction and runs the same validity
-  // filter (and supersede) as the queue read. No open spray hold back = remove
-  // the loaded one; one back = replace the loaded one with it (its window may
-  // have changed). Nothing else on the board is touched.
+  // filter (and supersede) as the queue read. Apply rules, all in ONE
+  // functional state update (never from an array captured earlier):
+  //  - knownIds = the job's spray holds loaded when the request STARTED;
+  //  - upsert every open spray hold the server returned (server copy wins);
+  //  - remove only alerts in knownIds that the server did not return, so a
+  //    hold that ARRIVED by broadcast during the request is kept untouched;
+  //  - a newer request for the same job (per-job sequence) discards this
+  //    response entirely; a failed request changes nothing;
+  //  - no other type and no other job is ever touched.
+  const sprayRefreshSeqRef = useRef(new Map());
   const refreshJobSprayCards = useCallback(async (jobId) => {
+    const seq = (sprayRefreshSeqRef.current.get(jobId) || 0) + 1;
+    sprayRefreshSeqRef.current.set(jobId, seq);
+    const isJobSpray = (a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId;
+    const knownIds = new Set(alertsRef.current.filter(isJobSpray).map((a) => a.id));
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true&job_id=${encodeURIComponent(jobId)}`,
       { headers: adminAuthHeaders() }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const open = (Array.isArray(data.alerts) ? data.alerts : [])
-      .filter((a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !a.resolved_at);
+    if (sprayRefreshSeqRef.current.get(jobId) !== seq) return;
+    const open = (Array.isArray(data.alerts) ? data.alerts : []).filter((a) => isJobSpray(a) && !a.resolved_at);
     const openIds = new Set(open.map((a) => a.id));
-    const stale = alertsRef.current
-      .filter((a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !openIds.has(a.id))
-      .map((a) => a.id);
-    if (stale.length) markResolved(stale);
-    if (open.length) {
-      setAlerts((prev) => mergeHydration(prev.filter((a) => !(a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !openIds.has(a.id))), open, resolvedIdsRef.current));
-    }
-  }, [markResolved]);
+    const removeIds = new Set([...knownIds].filter((id) => !openIds.has(id)));
+    // Tombstone what the server no longer holds open, so a late broadcast for
+    // it cannot bring it back.
+    for (const id of removeIds) resolvedIdsRef.current.add(id);
+    setAlerts((prev) => upsertAlerts(
+      prev.filter((a) => !(isJobSpray(a) && removeIds.has(a.id))),
+      open.filter((a) => !resolvedIdsRef.current.has(a.id))
+    ));
+  }, []);
 
   // ---- initial hydration ----
   useEffect(() => {
