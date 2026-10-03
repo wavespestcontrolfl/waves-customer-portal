@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, portalToolsFor, executeToolCall, withoutEmails } = require('./tools');
+const { TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
@@ -351,9 +351,21 @@ function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange 
 // What the durable hand-off row says. A confirmed email change keeps both
 // addresses on it, so the request survives a bell that did not ring. They
 // are not put in `reason`, which is logged.
-function escalationSummary(reason, customer, newEmail) {
-  if (!newEmail) return reason;
-  return `${reason}. Email on file: ${String(customer?.email || '').trim() || 'none'}. New email: ${newEmail}`;
+function escalationSummary(reason, customer, { newEmail, emailReadBack }) {
+  const lines = emailChangeLines(customer, { newEmail, emailReadBack });
+  return lines ? `${reason}. ${lines.join('. ')}` : reason;
+}
+// The two addresses of an email change, for the saved row and the bell's
+// full text: confirmed (`newEmail`), or read back by the chat and answered by
+// a message nobody judged (`emailReadBack`, a keyword hand-off).
+function emailChangeLines(customer, { newEmail, emailReadBack }) {
+  if (!newEmail && !emailReadBack) return null;
+  return [
+    `Email on file: ${String(customer?.email || '').trim() || 'none'}`,
+    newEmail
+      ? `New email, confirmed by the customer in portal chat: ${newEmail}`
+      : `New email the chat had just read back, not yet confirmed (the message below is the customer's answer): ${emailReadBack}`,
+  ];
 }
 
 const TOPIC_WORDING = {
@@ -428,7 +440,11 @@ class WavesAssistant {
       if (topic === 'billing' && lane.payments) {
         await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
       }
-      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
+      // The keyword hand-off runs before the model, so nobody judged whether
+      // this message confirmed an address the chat had just read back: the
+      // address rides on the same hand-off for the team to confirm.
+      const emailReadBack = lane.emailChange ? await emailReadBackAwaitingAnswer(conversation.id, message) : null;
+      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic, ...(emailReadBack ? { emailReadBack } : {}) });
       return { ...escResult, ...laneExtras(lane) };
     }
 
@@ -728,7 +744,7 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail } = {}) {
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -743,7 +759,7 @@ class WavesAssistant {
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
       reason: this.classifyEscalation(customerMessage),
-      summary: escalationSummary(reason, customer, newEmail),
+      summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
       customer_message: customerMessage,
       ai_draft_response: null,
       priority,
@@ -775,7 +791,7 @@ class WavesAssistant {
     // sent, so SMS keeps its wording.)
     const isPortal = portalSelfServe(conversation.channel);
     const teamNotified = isPortal
-      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail });
+      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack });
 
     const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim(), newEmail });
 
@@ -813,7 +829,7 @@ class WavesAssistant {
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -823,6 +839,7 @@ class WavesAssistant {
       const wording = newEmail
         ? { area: 'Customers', action: require('../admin-alert-names').fitAction('Customers', name, [(who) => `Change ${who}'s email`]), why: `${name} confirmed a new email address in portal chat`, doneWhen: 'email_changed' }
         : { area: 'Comms', action: 'Reply to a portal chat request', why: `${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, doneWhen: 'customer_answered' };
+      const emailDetail = emailChangeLines(customer, { newEmail, emailReadBack });
       const result = await raiseAdminAlert('alert', {
         area: wording.area,
         action: wording.action,
@@ -836,12 +853,12 @@ class WavesAssistant {
         who: 'person',
       }, {
         bell: true,
-        dedupeKey: `portal-chat-escalation:${escalation.id}`,
+        // A chat hands off once, so a confirmed email change is one bell per
+        // chat: a confirmation the portal sent twice lands on the same one.
+        dedupeKey: newEmail ? `portal-chat-email-change:${conversation.id}` : `portal-chat-escalation:${escalation.id}`,
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
-        detail: newEmail
-          ? `Email on file: ${String(customer.email || '').trim() || 'none'}\nNew email, confirmed by the customer in portal chat: ${newEmail}\n\nCustomer's message: ${String(customerMessage || '')}`
-          : String(customerMessage || ''),
+        detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
       });
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),

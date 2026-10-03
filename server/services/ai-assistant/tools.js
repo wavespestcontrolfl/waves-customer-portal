@@ -661,7 +661,17 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
 // turn (its own logged result, never a re-reading of the reply), and the
 // assistant's last reply shows that same address. No list of confirmation
 // wording lives here.
-const EMAIL_SHAPE = /^[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+\.[A-Za-z]{2,}$/;
+//
+// ONE definition of an address for every check below: the characters an
+// unquoted local part may hold, an @, and a dotted domain. A match ends at
+// the first character a domain cannot hold, so "a@b.com,cancel" and
+// "a@b.com/cancel" are the address and then other words.
+const EMAIL_ADDRESS = "[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+";
+const EMAIL_SHAPE = new RegExp(`^${EMAIL_ADDRESS}$`);
+const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
+// An address shown or typed as a whole: followed by the end, a space, or
+// sentence punctuation, never by more of a longer token.
+const EMAIL_WHOLE_WORDS = new RegExp(`${EMAIL_ADDRESS}(?=$|\\s|[.,;:!?)\\]>"](?:\\s|$))`, 'g');
 const EMAIL_MAX_CHARS = 254;
 // Messages of the chat read for the check, newest first.
 const EMAIL_CHANGE_MESSAGES = 40;
@@ -675,7 +685,7 @@ const EMAIL_NOT_AN_ADDRESS = {
 };
 const EMAIL_NOT_TYPED = {
   sent: false,
-  instruction: 'This address is not in the customer\'s own messages in this chat. Ask the customer to type their new email address, and never guess, complete or correct one. If they cannot, use the escalate tool with topic account_change.',
+  instruction: 'This address is not in the customer\'s own messages in this chat. Ask the customer to type their new email address on its own, and never guess, complete or correct one. If they cannot, use the escalate tool with topic account_change.',
 };
 const EMAIL_UNCHANGED = {
   sent: false,
@@ -684,33 +694,25 @@ const EMAIL_UNCHANGED = {
 const emailReadBack = (address) => ({
   sent: false,
   read_back: address,
-  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address}, as plain text with no quotes or formatting around it, and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
+  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address}, as plain text with a space on each side and no quotes or formatting around it, and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
 });
 const sameEmail = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
-// Whether `text` shows exactly this address: not as the tail or head of a
-// longer one (a character an address can hold on either side).
-function showsEmail(text, address) {
-  const hay = String(text || '').toLowerCase();
-  const needle = address.toLowerCase();
-  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + 1)) {
-    const before = hay[at - 1] || ' ';
-    const after = hay.slice(at + needle.length);
-    if (!/[a-z0-9._%+@-]/.test(before) && !/^(?:[a-z0-9@-]|\.[a-z0-9])/.test(after)) return true;
-  }
-  return false;
-}
-// The email-shaped words of a text: an address ends at whitespace or at a
-// character no address holds unquoted (a comma, a bracket, a quote mark).
-const EMAIL_WORDS = /[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+/g;
+// A message with its addresses left out (the keyword hand-off match).
 const withoutEmails = (text) => String(text || '').replace(EMAIL_WORDS, ' ');
-// Whether the customer typed this address: one of their email-shaped words
-// is exactly it, once the sentence punctuation after it is dropped (an
-// address ends in a letter). Nothing in front is dropped: a leading
-// underscore or plus is part of an address.
-function customerTyped(text, address) {
-  const needle = address.toLowerCase();
-  return (String(text || '').toLowerCase().match(EMAIL_WORDS) || [])
-    .some((word) => word.replace(/[^a-z0-9]+$/, '') === needle);
+// Whether `text` holds exactly this address as a whole word: the customer
+// typed it, or the assistant showed it. A longer address around it, in front
+// or behind, is a different address.
+function hasEmail(text, address) {
+  return (String(text || '').match(EMAIL_WHOLE_WORDS) || []).some((word) => sameEmail(word, address));
+}
+// The chat's rows the check reads, newest first.
+function emailChangeRows(conversationId) {
+  return db('agent_messages')
+    .where('conversation_id', conversationId)
+    .whereIn('role', ['user', 'assistant', 'tool_use'])
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .limit(EMAIL_CHANGE_MESSAGES)
+    .select('role', 'content', 'tool_results');
 }
 // The address this tool told the model to read back in the previous turn,
 // when the assistant's reply that turn shows it. `rows` are newest first.
@@ -721,10 +723,10 @@ function customerTyped(text, address) {
 function pendingReadBack(rows, customerMessage) {
   const replyAt = rows.findIndex((r) => r.role === 'assistant');
   if (replyAt === -1) return null;
-  // Only this turn's own message may sit above the reply: any other customer
-  // message means the reply is not the one this message answers.
-  const since = rows.slice(0, replyAt).filter((r) => r.role === 'user');
-  if (since.length > 1 || (since.length === 1 && since[0].content !== customerMessage)) return null;
+  // Only this turn's own message may sit above the reply (more than once
+  // when the portal sent it twice): any other customer message means the
+  // reply is not the one this message answers.
+  if (rows.slice(0, replyAt).some((r) => r.role === 'user' && r.content !== customerMessage)) return null;
   const older = rows.slice(replyAt + 1);
   const turnEnd = older.findIndex((r) => r.role === 'user');
   const asked = (turnEnd === -1 ? older : older.slice(0, turnEnd))
@@ -733,7 +735,19 @@ function pendingReadBack(rows, customerMessage) {
   let result = asked.tool_results;
   try { if (typeof result === 'string') result = JSON.parse(result); } catch { return null; }
   const address = typeof result?.read_back === 'string' ? result.read_back : '';
-  return address && showsEmail(rows[replyAt].content, address) ? address : null;
+  return address && hasEmail(rows[replyAt].content, address) ? address : null;
+}
+// The address the chat read back last turn and this message answers, for a
+// hand-off the keyword match forces before the model sees the message (so
+// nobody judged whether it was confirmed). null when there is none or the
+// read fails.
+async function emailReadBackAwaitingAnswer(conversationId, customerMessage) {
+  try {
+    return pendingReadBack(await emailChangeRows(conversationId), customerMessage);
+  } catch (err) {
+    logger.warn(`[ai-assistant] pending email read-back read failed: ${err.message}`);
+    return null;
+  }
 }
 
 async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}) {
@@ -746,12 +760,7 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   let rows;
   let customer;
   try {
-    rows = await db('agent_messages')
-      .where('conversation_id', conversationId)
-      .whereIn('role', ['user', 'assistant', 'tool_use'])
-      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-      .limit(EMAIL_CHANGE_MESSAGES)
-      .select('role', 'content', 'tool_results');
+    rows = await emailChangeRows(conversationId);
     customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   } catch (err) {
     logger.warn(`[ai-assistant] email change check failed for ${customerId}: ${err.message}`);
@@ -760,7 +769,7 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   if (!customer) return EMAIL_HAND_OFF;
   // This turn's message first: its row is saved best-effort.
   const typed = [customerMessage, ...rows.filter((r) => r.role === 'user').map((r) => r.content)]
-    .some((text) => customerTyped(text, asked));
+    .some((text) => hasEmail(text, asked));
   if (!typed) return EMAIL_NOT_TYPED;
   if (sameEmail(asked, String(customer.email || '').trim())) return EMAIL_UNCHANGED;
   if (input.customer_confirmed !== true) return emailReadBack(asked);
@@ -790,4 +799,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };

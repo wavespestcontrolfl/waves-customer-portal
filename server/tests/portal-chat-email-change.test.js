@@ -133,7 +133,7 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(headline).toBe("Customers — Change Pat Sample's email");
   expect(why).toBe('Pat Sample confirmed a new email address in portal chat');
   expect(opts.detail).toBe(`Email on file: pat.old@example.com\nNew email, confirmed by the customer in portal chat: ${NEW}\n\nCustomer's message: Yes, that is right`);
-  expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-escalation:esc-1' }));
+  expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-email-change:conv-1' }));
   expect(opts.metadata).toEqual(expect.objectContaining({ severity: 'needs-you', who: 'person', doneWhen: 'email_changed', subject: { type: 'customer', id: 'cust-1' } }));
   expect(result).toEqual(expect.objectContaining({ escalated: true, escalationId: 'esc-1', teamNotified: true }));
   expect(result.reply).toMatch(new RegExp(`sent your new email address, ${NEW.replace(/\./g, '\\.')}, to our team`));
@@ -151,6 +151,40 @@ test('another tool already run this turn does not hide the read-back', async () 
 
   expect(result.escalated).toBe(true);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/New email, confirmed/);
+});
+
+test('a confirmation the portal sent twice still finds the read-back, and both land on one bell key', async () => {
+  afterReadBack('Yes');
+  chat.unshift({ role: 'user', content: 'Yes' });
+  mockCreate.mockResolvedValue(ask({ new_email: NEW, customer_confirmed: true }));
+
+  const [first, second] = await Promise.all([say('Yes'), say('Yes')]);
+
+  expect(first.escalated && second.escalated).toBe(true);
+  expect(NotificationService.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['portal-chat-email-change:conv-1', 'portal-chat-email-change:conv-1']);
+});
+
+test('a keyword hand-off that answers a read-back carries the address, marked not yet confirmed', async () => {
+  const message = afterReadBack('Yes that is right, and cancel my service');
+
+  const result = await say(message);
+
+  expect(mockCreate).not.toHaveBeenCalled();
+  expect(result.escalated).toBe(true);
+  const [, headline, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+  expect(headline).toBe('Comms — Reply to a portal chat request');
+  expect(opts.detail).toBe(`Email on file: pat.old@example.com\nNew email the chat had just read back, not yet confirmed (the message below is the customer's answer): ${NEW}\n\nCustomer's message: ${message}`);
+  expect(db.__bindings[0].some((value) => String(value).includes(`not yet confirmed (the message below is the customer's answer): ${NEW}`))).toBe(true);
+  // The customer is not told the email change was sent as confirmed.
+  expect(result.reply).not.toMatch(/new email address/);
+});
+
+test('a keyword hand-off with no read-back waiting is the plain hand-off', async () => {
+  chat = [{ role: 'user', content: 'cancel my service' }];
+
+  await say('cancel my service');
+
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toBe('cancel my service');
 });
 
 test('a confirmed change and an escalate call in one reply ring one bell, the one with the address', async () => {
@@ -174,7 +208,7 @@ test('when the bell does not ring the customer is not told the team has it', asy
   expect(result.teamNotified).toBe(false);
   expect(result.reply).toMatch(/saved your email change request/);
   // What was saved names both addresses: the request does not depend on the bell.
-  expect(db.__bindings[0]).toContain(`Customer confirmed a new email address in portal chat. Email on file: pat.old@example.com. New email: ${NEW}`);
+  expect(db.__bindings[0]).toContain(`Customer confirmed a new email address in portal chat. Email on file: pat.old@example.com. New email, confirmed by the customer in portal chat: ${NEW}`);
   expect(result.reply).not.toMatch(/sent your new email/);
 });
 
@@ -192,6 +226,8 @@ test.each([
   ['the assistant\'s last reply did not show the address', () => afterReadBack('Yes', 'What is the new address?')],
   ['the last reply showed a longer address', () => afterReadBack('Yes', `I have x${NEW}. Is that right?`)],
   ['the last reply showed it with an underscore in front', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`)],
+  ['the last reply showed it as the start of a longer token', () => afterReadBack('Yes', `I have ${NEW}_bad.net. Is that right?`)],
+  ['the last reply showed it with a longer domain', () => afterReadBack('Yes', `I have ${NEW}.au. Is that right?`)],
   ['the read-back was for another address', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`, { logged: readBackRow(`_${NEW}`) })],
   ['the only read-back is from this same turn', () => {
     afterReadBack(`Change it to ${NEW}, yes I am sure`, `Sure. Is ${NEW} the new one?`, { logged: null });
@@ -262,6 +298,7 @@ test('an address the customer types is not read as asking for the owner', async 
   expect(assistant.matchedEscalationTrigger(`${message}, and I want to cancel`, 'portal_chat')).toBe('cancel');
   // Only the address is left out, not words that touch it.
   expect(assistant.matchedEscalationTrigger('use pat.new@example.com,cancel my service', 'portal_chat')).toBe('cancel');
+  expect(assistant.matchedEscalationTrigger('use pat.new@example.com/cancel my service', 'portal_chat')).toBe('cancel');
   delete process.env[GATE];
   expect(assistant.matchedEscalationTrigger(message, 'portal_chat')).toBe('owner');
 });
