@@ -132,11 +132,11 @@ function serviceKeysFrom(data) {
 // with the autocomplete form (suffix spelled out, country appended, commas
 // dropped). Two addresses are the same only when they are equal word for
 // word after punctuation is dropped, suffix and direction words are
-// abbreviated and a trailing country is removed; the one ending allowed to
-// differ is a state or ZIP present on one side only. Anything else is a
-// change: another house number, street word, direction, unit or city, a
-// different ZIP, or a word added anywhere. No address part is guessed at,
-// so the rule can over-count an edit and never hide one.
+// abbreviated and a trailing country is removed. The one part allowed to
+// differ is the ending state and ZIP: each may be missing on one side.
+// Anything else is a change: another house number, street word, direction,
+// unit or city, a different ZIP, or a word added anywhere. No other address
+// part is guessed at, so the rule can over-count an edit and never hide one.
 const STREET_WORDS = Object.freeze({
   street: 'st', avenue: 'ave', av: 'ave', road: 'rd', drive: 'dr', boulevard: 'blvd', lane: 'ln',
   court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter', terr: 'ter', trail: 'trl', parkway: 'pkwy',
@@ -157,26 +157,29 @@ function addressTokens(value) {
   return tokens;
 }
 
-// The one ending that may differ: a state, a ZIP, or both, in that order,
-// with a +4 only straight after a 5-digit ZIP ("#1234" alone is a unit).
-function isStateZipTail(tail, before) {
-  let i = 0;
-  if (tail[i] === 'fl') i += 1;
-  let afterZip = i === 0 && /^\d{5}$/.test(before || '');
-  if (/^\d{5}$/.test(tail[i] || '')) { i += 1; afterZip = true; }
-  if (afterZip && /^\d{4}$/.test(tail[i] || '')) i += 1;
-  return i > 0 && i === tail.length;
+// Split off the ending "[state] [ZIP[+4]]" (in that order; a +4 only
+// straight after a 5-digit ZIP, so a lone "#1234" stays in the core as the
+// unit it is). The core keeps a house number, a street word and one more
+// word at least; with less than that nothing is split off.
+function splitAddress(tokens) {
+  const core = tokens.slice();
+  const out = { core: tokens, state: '', zip: '', plus4: '' };
+  let plus4 = '';
+  let zip = '';
+  let state = '';
+  if (core.length >= 2 && /^\d{4}$/.test(core[core.length - 1]) && /^\d{5}$/.test(core[core.length - 2])) plus4 = core.pop();
+  if (/^\d{5}$/.test(core[core.length - 1] || '')) zip = core.pop();
+  if (core[core.length - 1] === 'fl') state = core.pop();
+  if (core.length < 3 || !(zip || state)) return out;
+  return { core, state, zip, plus4 };
 }
 
 function sameProperty(a, b) {
-  const x = addressTokens(a);
-  const y = addressTokens(b);
-  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-  if (!short.every((t, i) => long[i] === t)) return false;
-  if (short.length === long.length) return true;
-  // A house number, a street word and one more word at least, before a
-  // missing state or ZIP is read as formatting.
-  return short.length >= 3 && isStateZipTail(long.slice(short.length), short[short.length - 1]);
+  const x = splitAddress(addressTokens(a));
+  const y = splitAddress(addressTokens(b));
+  if (x.core.length !== y.core.length || !x.core.every((t, i) => y.core[i] === t)) return false;
+  // Each ending part may be missing on one side; present on both, it must agree.
+  return ['state', 'zip', 'plus4'].every((k) => !x[k] || !y[k] || x[k] === y[k]);
 }
 
 // The WaveGuard setup fee stored two ways is not an edit. The builder's

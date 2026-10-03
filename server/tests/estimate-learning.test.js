@@ -255,6 +255,10 @@ describe('computeEditSummary', () => {
     expect(same('123 Main St', '123 Main St E')).toBe(true);
     expect(same('123 Main St', '123 Main St Apt 4')).toBe(true);
     expect(same('123 Main St Apt 4', '123 Main St')).toBe(true);
+    // A state inserted before a ZIP both sides share is formatting.
+    expect(same('123 Main St, Bradenton 34205', '123 Main St, Bradenton, FL 34205, USA')).toBeUndefined();
+    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton 34205-1234')).toBeUndefined();
+    expect(same('123 Main St, Bradenton, FL 34205-1234', '123 Main St, Bradenton, FL 34205-9999')).toBe(true);
     // A lone four-digit ending is a unit, not a ZIP+4.
     expect(same('123 Main St, Bradenton', '123 Main St, Bradenton #1234')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();
