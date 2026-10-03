@@ -77,3 +77,11 @@ describe('routine pest visit checklist agrees with the field rules', () => {
     expect([...new Set(exteriorHints)].sort()).toEqual(['Atticus Talak 7.9 F', 'Taurus SC']);
   });
 });
+
+test('Taurus is an if-due step, never selected base work (2 times a year)', () => {
+  const visit = protocols.pest.visits[0];
+  const taurusLine = Object.keys(visit.lineMeta).find((raw) => (visit.lineMeta[raw].catalogProductHints || []).includes('Taurus SC'));
+  expect(visit.secondary.split('\n')).toContain(taurusLine);
+  expect(visit.primary).not.toContain('non-repellent band');
+  expect(taurusLine).toMatch(/2 times a year/);
+});

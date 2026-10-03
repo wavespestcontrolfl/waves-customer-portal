@@ -1745,8 +1745,8 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Swept eaves, window frames, door frames, and lanai\nApplied non-repellent band to foundation (1 ft up, 1 ft out)\nTreated exterior perimeter band\nTreated eaves, lanai or pool cage, and garage\nTreated interior cracks & crevices (activity present)",
-        "secondary": "Placed glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
+        "primary": "Swept eaves, window frames, door frames, and lanai\nTreated exterior perimeter band\nTreated eaves, lanai or pool cage, and garage\nTreated interior cracks & crevices (activity present)",
+        "secondary": "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: rainy season, 2 times a year per home\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
           "Swept eaves, window frames, door frames, and lanai": {
             "scope": "exterior",
@@ -1755,7 +1755,7 @@
               "Webster"
             ]
           },
-          "Applied non-repellent band to foundation (1 ft up, 1 ft out)": {
+          "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: rainy season, 2 times a year per home": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
