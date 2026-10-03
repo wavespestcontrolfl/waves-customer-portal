@@ -862,6 +862,10 @@ async function stage(conn = db, { now = new Date() } = {}) {
     .whereNull('processing_token')
     .where('updated_at', '<=', readyBy)
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
+    // A call under an OPEN household hold is not a candidate AT ALL (it carries no decision marker, so
+    // left in it would be re-selected every sweep and could fill the batch ahead of newer leads). It
+    // re-enters the moment its card closes: dismissed -> staged on the next sweep.
+    .whereRaw("NOT EXISTS (SELECT 1 FROM triage_items WHERE triage_items.call_log_id = call_log.id AND triage_items.reason_code = 'household_address_match' AND triage_items.status IN ('open', 'in_progress'))")
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
     // from_phone / to_phone / source: resolveCallContactPhone needs them to
@@ -915,8 +919,9 @@ async function stageOne(conn, call, now, boundary = null) {
     await claimMetadata(conn, call, { status: 'skipped', reason, staged_at });
     return 'skipped';
   }
-  // An OPEN household hold DEFERS the call instead of deciding it: no metadata is written, so the
-  // next sweep looks again. A dismissal ("really someone new") before the send window then restores
+  // (The candidate query already leaves an open hold out; this re-check covers a card filed between
+  // that read and now.) An OPEN household hold DEFERS the call instead of deciding it: no metadata is
+  // written, so the next sweep looks again. A dismissal ("really someone new") before the send window then restores
   // the follow-up for a genuine new lead; a resolved card stages normally; a card still open when
   // the lookback ends simply ages out. (Contrast the permanent skips above, which are final.)
   if (await householdHoldOpen(conn, call)) return 'deferred';

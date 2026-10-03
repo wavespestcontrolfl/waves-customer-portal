@@ -440,6 +440,15 @@ const SKIP = !process.env.DATABASE_URL;
     expect((await trx('call_log').where({ id: call.id }).first('review_status')).review_status).toBe('resolved');
     // a resolved card does not block a fresh filing if the hold stands again
     expect(await fileHouseholdHoldCard(trx, base)).toBe('open');
+    // a stalled pass that lost its claim cannot retire the NEW pass's hold; the owning pass can
+    await trx('call_log').where({ id: call.id }).update({ processing_token: 'tok-new' });
+    await trx('triage_items').where({ call_log_id: call.id }).del();
+    await fileHouseholdHoldCard(trx, { ...base, procToken: 'tok-new' });
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'n', procToken: 'tok-old' })).toBe(0);
+    expect((await trx('triage_items').where({ call_log_id: call.id }))[0].status).toBe('open');
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'n', procToken: 'tok-new' })).toBe(1);
+    await trx('triage_items').where({ call_log_id: call.id }).del();
+    await fileHouseholdHoldCard(trx, base);
     // a DISMISSED card (the office's waiver) is never touched by a retire
     await trx('triage_items').where({ call_log_id: call.id }).del();
     await fileHouseholdHoldCard(trx, base);
@@ -565,6 +574,7 @@ describe('wiring in processRecording (structural pin)', () => {
 
   test('a standing card is retired whenever this pass does not hold (no match, number now on file, address no longer exact, unlinked, gate off) and its review reason is dropped; a prelinked call is left to the sweep', () => {
     expect(step3).toContain('const householdPrelinked = !!customerId;');
+    expect(step3).toMatch(/retireHouseholdHoldCard\(db, \{\s+callLogId: call\.id,\s+procToken,/);
     expect(step3).toContain('if (!householdPrelinked && !(phone && !explicitUnlink)) await retireStandingHouseholdCard();');
     expect(step3).toContain('if (!householdHoldActive && !householdLinkedCustomerId && !householdPrelinked) await retireStandingHouseholdCard();');
     expect(step3).toContain("bridgeNeedsConfirmation.splice(at, 1)");

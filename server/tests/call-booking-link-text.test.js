@@ -721,6 +721,21 @@ describe('stage', () => {
     return { conn, wheres, whereNulls };
   }
 
+  test('the candidate query leaves a call under an OPEN household hold out BEFORE the batch limit (it carries no decision marker, so it could otherwise crowd newer leads out)', async () => {
+    const raws = [];
+    const conn = jest.fn(() => {
+      const chain = {};
+      ['where', 'orderBy', 'limit', 'select', 'modify', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.whereRaw = jest.fn((sql) => { raws.push(String(sql)); return chain; });
+      chain.first = jest.fn(async () => ({ value: '1970-01-01T00:00:00.000Z' }));
+      chain.then = (resolve) => resolve([]);
+      return chain;
+    });
+    await stage(conn, { now: new Date('2026-09-26T18:00:00Z') });
+    const hold = raws.find((sql) => sql.includes('household_address_match'));
+    expect(hold).toMatch(/NOT EXISTS .*triage_items\.status IN \('open', 'in_progress'\)/);
+  });
+
   test('excludes a call still being processed', async () => {
     const { conn, whereNulls } = spyingConn();
     await stage(conn, { now: new Date('2026-09-26T18:00:00Z') });

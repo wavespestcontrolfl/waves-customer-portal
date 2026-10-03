@@ -4080,12 +4080,19 @@ async function fileHouseholdHoldCard(conn, { callLogId, procToken = null, custom
 // open / claimed card under the per-call triage lock so the office is not left with a stale
 // "held" task for side effects that are now proceeding. Status `resolved` (never `dismissed`:
 // dismissed means the office waived the hold), a system resolution like the sweep's, and the
-// call's review_status re-synced in the same transaction. Returns how many cards were retired.
+// call's review_status re-synced in the same transaction. With `procToken` the retire only happens
+// while that pass still owns the call. Returns how many cards were retired.
 // The cheap unlocked read first keeps the common no-card call free of a transaction.
-async function retireHouseholdHoldCard(conn, { callLogId, note }) {
+async function retireHouseholdHoldCard(conn, { callLogId, note, procToken = null }) {
   if (!(await triageCardStillOpen(conn, callLogId, 'household_address_match'))) return 0;
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
+    // Ownership, like the filer: a stalled pass that resumes after another pass reclaimed the call
+    // must not resolve the NEW pass's hold. Judged under the call_log row lock (triage lock first).
+    if (procToken) {
+      const owner = await trx('call_log').where({ id: callLogId }).forUpdate().first('processing_token');
+      if (!owner || owner.processing_token !== procToken) return 0;
+    }
     const now = new Date();
     const retired = await trx('triage_items')
       .where({ call_log_id: callLogId, reason_code: 'household_address_match' })
@@ -12375,6 +12382,7 @@ const CallRecordingProcessor = {
     const retireStandingHouseholdCard = async (linkedNote = null) => {
       const retired = await retireHouseholdHoldCard(db, {
         callLogId: call.id,
+        procToken,
         note: linkedNote || (require('../config/feature-gates').callHouseholdHoldLive()
           ? 'Auto-resolved: the reprocessed call no longer matches one existing customer, so it is no longer held.'
           : 'Auto-resolved: the household hold is switched off, so this call is processed without it.'),
