@@ -455,13 +455,14 @@ function missedWindowStart(originalWindow) {
 //    place (new_date), moved off the missed slot, under way, completed, or performed
 //    (tracker complete or a service record). A move the office has not reviewed yet
 //    (a call-booked or voice-agent row, call-booking-source-actions) is not one.
-// 2. Only when the logged row is TERMINAL (dispatch "no show", skipped, cancelled,
-//    or gone — it can never be moved again): a REPLACEMENT the office booked (owner
+// 2. Only when the logged row is no longer a live visit (any status outside
+//    LIVE_OR_DONE — dispatch "no show", skipped, cancelled, the legacy reschedule
+//    flow's 'rescheduled', any later parking status — or the row is gone; Codex
+//    #5610 r6): a REPLACEMENT the office booked (owner
 //    10-02 r4) — same customer, same frozen property and catalog service, created
 //    after the miss was logged, on or after the missed day, live or done, NOT a
 //    generated series child (recurring_parent_id) and NOT an unreviewed call/voice
 //    booking. Any other booking never counts (series top-ups look just like one).
-const TERMINAL_STATUSES = ['no_show', 'skipped', 'cancelled'];
 async function noshowFollowedUp(conn, customerId, noshow) {
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
   const date = calendarDay(noshow.original_date);
@@ -473,7 +474,7 @@ async function noshowFollowedUp(conn, customerId, noshow) {
     };
   };
   const rowPresent = Boolean(noshow.scheduled_service_id && noshow.ss_status_present);
-  if (rowPresent && !TERMINAL_STATUSES.includes(noshow.status)) {
+  if (rowPresent && LIVE_OR_DONE.includes(noshow.status)) {
     if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
       && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
     const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
