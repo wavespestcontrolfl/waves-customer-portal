@@ -1551,7 +1551,11 @@ transaction on the locked row, after the eligibility checks, so a rejected
 accept changes nothing and a failed check fails the accept (retryable) rather
 than dropping the input. Customer resolution (phone match) runs on the
 pre-fill identity, so a submitted email never steers which profile the accept
-lands on; an authored proposal's `preparedFor` that matched the old name moves
+lands on (a lone phone hit is reused unless the estimate's stored email AND
+address are both present and both disagree with the profile's, in which case the
+accept mints a fresh profile and the accepter gets the normal card rules, so a
+mistyped or shared phone never binds a stranger to an existing customer's saved
+card); an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
 new customer is created with the supplied values; an EXISTING matched, linked
 or grouped-sibling profile is filled only when the estimate's own first name

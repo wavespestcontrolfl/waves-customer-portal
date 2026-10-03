@@ -491,31 +491,52 @@ function normalizeAddressForMatch(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+// estimate.address is the full address; address_line1 is the street line.
+// Require a meaningful street line so '' never matches, and a token boundary
+// so '12 oak' can't match '12 oakridge dr'.
+function acceptAddressMatchesCandidate(estAddr, candidate) {
+  const line1 = normalizeAddressForMatch(candidate.address_line1);
+  return line1.length >= 5 && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
+}
+
 // Multiple live profiles can legitimately share a phone (landlord + rental
 // property via quick-add). Only reuse one when the match is unambiguous: a
 // single phone hit, or — among several — a unique email or service-address
 // match. Otherwise return null so the accept creates a fresh profile;
 // attaching the tier/monthly_rate/schedules to a guessed profile splits the
 // real customer's history.
+//
+// A single phone hit is reused UNLESS the estimate contradicts it (B18): the
+// phone is staff-typed and can belong to someone else (typo, a landlord or
+// relative's line), and the reused profile decides whose saved card / Auto
+// Pay the accept relies on — the person accepting would never be asked for a
+// card and the plan would bill a stranger. Contradiction needs data on BOTH
+// sides: the estimate carries an email AND an address, the candidate has an
+// email AND a street line, and neither agrees. Agreeing on either one (an
+// existing customer adding a second property, or using a new email) keeps the
+// match; missing data on either side cannot contradict, so it stays reused.
 function pickAcceptCustomerMatch(candidates, estimate) {
   if (!candidates.length) return null;
-  if (candidates.length === 1) return candidates[0];
-  let pool = candidates;
   const email = String(estimate.customer_email || '').trim().toLowerCase();
+  const estAddr = normalizeAddressForMatch(estimate.address);
+  if (candidates.length === 1) {
+    const only = candidates[0];
+    const candEmail = String(only.email || '').trim().toLowerCase();
+    const candHasStreet = normalizeAddressForMatch(only.address_line1).length >= 5;
+    if (email && estAddr && candEmail && candHasStreet
+      && candEmail !== email && !acceptAddressMatchesCandidate(estAddr, only)) {
+      return null;
+    }
+    return only;
+  }
+  let pool = candidates;
   if (email) {
     const byEmail = pool.filter((c) => String(c.email || '').trim().toLowerCase() === email);
     if (byEmail.length === 1) return byEmail[0];
     if (byEmail.length > 1) pool = byEmail;
   }
-  const estAddr = normalizeAddressForMatch(estimate.address);
   if (estAddr) {
-    const byAddress = pool.filter((c) => {
-      const line1 = normalizeAddressForMatch(c.address_line1);
-      // estimate.address is the full address; address_line1 is the street
-      // line. Require a meaningful street line so '' never matches, and a
-      // token boundary so '12 oak' can't match '12 oakridge dr'.
-      return line1.length >= 5 && (estAddr === line1 || estAddr.startsWith(line1 + ' '));
-    });
+    const byAddress = pool.filter((c) => acceptAddressMatchesCandidate(estAddr, c));
     if (byAddress.length === 1) return byAddress[0];
   }
   return null;
