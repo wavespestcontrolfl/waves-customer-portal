@@ -676,6 +676,8 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
+      // GATE_CONTACT_REPORT_TEXT: the card says contacts also get the report text.
+      contactReportTexts: require('../config/feature-gates').contactReportTextLive(),
     };
   });
 }
@@ -735,6 +737,8 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
+        // GATE_CONTACT_REPORT_TEXT: the card says contacts also get the report text.
+        contactReportTexts: require('../config/feature-gates').contactReportTextLive(),
       })),
     });
   } catch (err) {

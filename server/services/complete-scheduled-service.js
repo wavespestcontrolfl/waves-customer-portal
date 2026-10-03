@@ -13964,6 +13964,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // above — only sync the in-memory snapshot here.
             record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            // On-location contacts get their plain report text with it
+            // (GATE_CONTACT_REPORT_TEXT; never throws, sends in the background).
+            if (reportToken && smsMetadata.report_url) {
+              await require('./contact-report-text').notifyContactsReportReady({
+                customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: smsMetadata.report_url,
+                scheduledServiceId: svc.id, notBefore: new Date(smsResult.nextAllowedAt),
+              });
+            }
           } else if (!smsResult.sent) {
             // A quiet-hours hold whose scheduled-SMS enqueue FAILED is not a
             // policy block even though the result still says blocked: the
@@ -14053,6 +14061,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
             const sentNotes = { ...sendingNotes, ...smsNotesDelta };
             await mergeRecordNotesKeys(record.id, smsNotesDelta);
+            // On-location contacts get their plain report text with it
+            // (GATE_CONTACT_REPORT_TEXT; never throws, sends in the background).
+            if (reportToken && smsMetadata.report_url) {
+              await require('./contact-report-text').notifyContactsReportReady({
+                customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: smsMetadata.report_url, scheduledServiceId: svc.id,
+              });
+            }
             await db('service_report_events').insert({
               service_record_id: record.id,
               customer_id: svc.customer_id,

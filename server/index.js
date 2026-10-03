@@ -1646,6 +1646,19 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
           }
         }, { timezone: 'America/New_York' });
 
+        // Report texts to on-location contacts (gated inside the service;
+        // no-op while GATE_CONTACT_REPORT_TEXT is off): sends pending rows a
+        // restart dropped or the send window held.
+        cron.schedule('*/5 * * * *', async () => {
+          try {
+            await runExclusive('contact-report-text-sweep', async () => {
+              await require('./services/contact-report-text').sweepContactReportTexts();
+            });
+          } catch (err) {
+            logger.error(`[cron] contact report text sweep failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {

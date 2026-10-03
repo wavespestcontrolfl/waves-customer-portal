@@ -4471,6 +4471,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
   const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
+  // What an on-location contact is told they get. The server says when the
+  // report text is on (GATE_CONTACT_REPORT_TEXT).
+  const contactTexts = propertyPrefs.some((p) => p.contactReportTexts === true)
+    ? 'appointment texts and a text with the service report link after each visit'
+    : 'appointment texts';
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5464,8 +5469,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     // One profile, several saved houses: contacts and texts are
                     // stored per PROFILE, so a tenant added here hears about
                     // every house — say so (codex #4207 r1c).
-                    ? 'Add anyone who should get appointment texts — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.'
-                    : 'Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.'}
+                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.`
+                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.`}
                 </div>
               </>
             )}
@@ -5649,7 +5654,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {contactTexts} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
