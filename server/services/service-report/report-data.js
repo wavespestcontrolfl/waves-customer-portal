@@ -6,6 +6,7 @@ const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
 const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
+const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2607,6 +2608,10 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
 function lawnReportPhotoSetLive() {
   return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
 }
+// "What the photos showed" needs its own gate AND the photo set's.
+function lawnReportPhotoFindingsLive() {
+  return lawnReportPhotoSetLive() && typeof featureGates.lawnReportPhotoFindingsLive === 'function' && featureGates.lawnReportPhotoFindingsLive();
+}
 
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
@@ -2821,6 +2826,17 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // case where the payload (and so the document) changes; a legacy visit keeps
   // its key. An unreadable marker means no stamp.
   if (lawnReportPhotoSetLive() && carriesShotListMarker(assessment?.photos)) irrigationStamp += ':photoset=1';
+  // "What the photos showed" (P23b) is built from this assessment's reviewed run,
+  // so the key follows the run's reviewed state, and only for a visit that would
+  // print the block (no block = no stamp, so such a visit keeps its key). The
+  // read fails closed: a throw reaches the caller's unique-token catch.
+  if (lawnReportPhotoFindingsLive() && carriesShotListMarker(assessment?.photos) && assessment?.id) {
+    const run = await knex('lawn_assessment_runs')
+      .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
+      .first('assessment_id', 'customer_id', 'photo_ids', 'reviewed_findings', 'reviewed_at');
+    const findingsState = photoFindingsSignatureState(run, assessment);
+    if (findingsState) irrigationStamp += `:pf=${findingsState}`;
+  }
   const lawnHistory = propertyHistoryEnabled
     ? await require('../lawn-assessment-history').historyForReport(service, { assessment }, knex)
     : null;
@@ -3314,7 +3330,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3388,6 +3404,30 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     : [];
   const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
   const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
+  // "What the photos showed" (P23b): the technician-reviewed findings of this
+  // assessment's run with the thumbnails they link to. Opt-in (only the /data and
+  // direct PDF renders read the run; /ask never does), and it exists only where a
+  // photo set exists. A failed run read omits the block and is counted as an
+  // image failure so no PDF of that view is cached; a cited photo that is not in
+  // the set just has no thumbnail, the same on every surface.
+  let photoFindingsList = [];
+  let photoFindingsUnresolved = 0;
+  if (photoFindings && photoSet.length && lawnReportPhotoFindingsLive()) {
+    try {
+      const run = await knex('lawn_assessment_runs')
+        .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
+        .first('assessment_id', 'customer_id', 'photo_ids', 'reviewed_findings', 'reviewed_at');
+      photoFindingsList = buildPhotoFindings({
+        run,
+        assessment,
+        photoRows: latestPhotos.map((photo, index) => ({ id: photo.id, zone: photo.zone, url: photos[index].url })),
+        photoSet,
+      });
+    // read-failure-exempt: counted into imageResolutionFailures through photoFindingsUnresolved
+    } catch {
+      photoFindingsUnresolved = 1;
+    }
+  }
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
   // the property-scoped history row selectPriorVisit chose; confidence is read
@@ -3833,6 +3873,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   };
   if (photoSetUnresolved) {
     Object.defineProperty(lawnAssessmentPayload, 'photoSetUnresolved', { value: photoSetUnresolved, enumerable: false });
+  }
+  // The unfiltered block rides the assessment object NON-ENUMERABLY: the report
+  // builder checks it against the page's own category cards before anything
+  // reaches the public payload (reportV2.photoFindings), so a finding a card
+  // contradicts is never exposed through lawnAssessment either.
+  if (photoFindingsList.length) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoFindings', { value: photoFindingsList, enumerable: false });
+  }
+  if (photoFindingsUnresolved) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoFindingsUnresolved', { value: photoFindingsUnresolved, enumerable: false });
   }
   return lawnAssessmentPayload;
 }
@@ -4421,11 +4471,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
     readFailures,
+    // Opt-in: only the renders that print the block read the run (never /ask).
+    photoFindings: opts.lawnPhotoFindings === true,
   });
   // A photo-set photo that would not sign (the set was withheld, all or nothing):
   // the document cannot see the photo it lost, so count it where the PDF store
   // paths already refuse to cache on image-resolution failures.
   imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
+  imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be
@@ -7403,6 +7456,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // document would print the fallback gallery under the set's cache key.
       + (Array.isArray(lawnAssessment?.photoSet) && lawnAssessment.photoSet.length
         && !(Array.isArray(reportV2?.photoSet) && reportV2.photoSet.length) ? 1 : 0)
+      + (Array.isArray(lawnAssessment?.photoFindings) && lawnAssessment.photoFindings.length
+        && !Array.isArray(reportV2?.photoFindings) ? 1 : 0)
       + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
         .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {

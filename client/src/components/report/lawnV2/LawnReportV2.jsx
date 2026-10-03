@@ -513,6 +513,56 @@ function LawnPhotoSetGrid({ set, print }) {
   );
 }
 
+// "What the photos showed" (P23b, GATE_LAWN_REPORT_PHOTO_SET): the technician-
+// reviewed findings with the thumbnail(s) each links to. Every word of a finding
+// is chosen by the server (an allowlisted condition label and, only where the
+// photos cannot settle a finding, one fixed "photo can confirm" sentence); this
+// component adds only the heading. A finding with no linked photo prints with no
+// thumbnail. A thumbnail opens full size on the web; print (PDF, ?mode=static and
+// the browser's own print of the live page) has no links.
+export function LawnPhotoFindings({ findings = [] }) {
+  const print = usePrint();
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
+  const rows = (Array.isArray(findings) ? findings : []).filter((f) => f && typeof f.label === 'string' && f.label);
+  if (!rows.length) return null;
+  return (
+    <Card>
+      <CardTitle>What the photos showed</CardTitle>
+      <div data-testid="lawn-photo-findings" style={{ display: 'grid', gap: 14 }}>
+        {rows.map((finding, i) => {
+          const pics = (Array.isArray(finding.photos) ? finding.photos : []).filter((p) => p && p.url);
+          return (
+            <div key={i} className="lawn-photo-finding">
+              <div style={{ fontSize: 16, fontWeight: 700, color: TEXT }}>{finding.label}</div>
+              {pics.length ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
+                  {pics.map((p, j) => {
+                    const img = (
+                      <img
+                        src={p.url}
+                        alt={p.label ? `${finding.label}: ${p.label}` : finding.label}
+                        style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 8, border: `1px solid ${BORDER}`, display: 'block' }}
+                      />
+                    );
+                    return (
+                      <figure key={j} style={{ margin: 0, width: 96 }}>
+                        {printOpen ? img : <a href={p.url} target="_blank" rel="noopener noreferrer" style={{ display: 'block' }}>{img}</a>}
+                        {p.label ? <figcaption style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>{p.label}</figcaption> : null}
+                      </figure>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {finding.confirm ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{finding.confirm}</p> : null}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false, photoSet = null }) {
   const print = usePrint();
   // The browser print pass (Report Tools "Print", Cmd+P) over the live page

@@ -439,6 +439,15 @@ export default function ServiceReportDocument({ data, token }) {
     .filter((photo) => photo && photo.url)
     .map((photo, i) => ({ id: `set-${i}`, url: photo.url, caption: photo.label || '', isMoment: true }));
   const hasPhotoSet = photoSetPhotos.length > 0;
+  // "What the photos showed": the reviewed findings with their thumbnails, only
+  // where a set renders. The thumbnails are photos of the set; a thumbnail that
+  // fails to load drops itself like any gallery photo (and is counted by the
+  // same failure counter).
+  const photoFindings = hasPhotoSet && Array.isArray(data.reportV2?.photoFindings)
+    ? data.reportV2.photoFindings
+      .filter((f) => f && typeof f.label === 'string' && f.label)
+      .map((f) => ({ ...f, photos: (Array.isArray(f.photos) ? f.photos : []).filter((p) => p && p.url && !failedImages.has(p.url)) }))
+    : [];
   const galleryPhotos = (data.photos || [])
     .filter((photo) => photo && photo.url)
     .filter((photo) => !(hasPhotoSet && String(photo.id || '').startsWith('lawn-')));
@@ -1674,6 +1683,33 @@ export default function ServiceReportDocument({ data, token }) {
                 </figure>
               ))}
             </div>
+          </div>
+        )}
+
+        {photoFindings.length > 0 && (
+          <div className="doc-keep" data-testid="doc-photo-findings">
+            <SectionHeader>What the photos showed</SectionHeader>
+            {photoFindings.map((finding, i) => (
+              <div key={i} style={{ margin: '0 0 8px' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: INK }}>{finding.label}</div>
+                {finding.photos.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                    {finding.photos.map((photo, j) => (
+                      <figure key={j} style={{ margin: 0, width: 90 }}>
+                        <img
+                          src={photo.url}
+                          alt={photo.label ? `${finding.label}: ${photo.label}` : finding.label}
+                          onError={() => markImageFailed(photo.url)}
+                          style={{ display: 'block', width: 90, height: 90, objectFit: 'cover', borderRadius: 8, border: `1px solid ${HAIR}` }}
+                        />
+                        {photo.label && <figcaption style={{ fontSize: 9.5, color: MUTED, lineHeight: 1.4, marginTop: 2 }}>{photo.label}</figcaption>}
+                      </figure>
+                    ))}
+                  </div>
+                )}
+                {finding.confirm && <p style={{ margin: '4px 0 0', fontSize: 11, lineHeight: 1.5, color: INK }}>{finding.confirm}</p>}
+              </div>
+            ))}
           </div>
         )}
 
