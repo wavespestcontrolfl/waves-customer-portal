@@ -7802,6 +7802,8 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
     expect(decisionOf(mock)).toMatchObject({ reason: 'ask_dropped_payment_hold', detail: { step: 1, hold: 'overdue_invoice' } });
+    // ... and the drop is kept for the review page (the next step overwrites the decision)
+    expect(mock.__state.rows.review_ask_drafts).toEqual([expect.objectContaining({ sequence_id: 'seq-hold', sequence_step: 1, outcome: 'held', reason: 'payment_hold_dropped' })]);
   });
 
   test('a step held past its window is dropped even when the bill was paid in between (it would go out late)', async () => {

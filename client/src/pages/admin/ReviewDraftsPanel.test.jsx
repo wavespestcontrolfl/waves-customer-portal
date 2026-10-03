@@ -17,6 +17,7 @@ describe("Tech-voice review texts panel", () => {
   it("shows each draft with the record lines behind it, held repeats, fallbacks and payment holds", async () => {
     const fetch = vi.fn(async () => response({
       days: 14,
+      truncated: true,
       drafts: [
         {
           id: 1, customerName: "Marta R", step: 0, channel: "sms", outcome: "drafted", reason: null,
@@ -33,6 +34,7 @@ describe("Tech-voice review texts panel", () => {
           sentences: [], repeat: { sentence: "How are the ants?", earlierQuote: "How are the ants doing", earlierStep: 0 },
           createdAt: "2026-10-02T16:00:00Z", sentAt: null,
         },
+        { id: 4, customerName: "Drop D", step: 2, channel: "email", outcome: "held", reason: "payment_hold_dropped", body: null, sentences: [], repeat: null, hold: { hold: "overdue_invoice", heldSince: "2026-10-01T14:00:00Z" }, createdAt: "2026-10-04T14:00:00Z", sentAt: null },
         { id: 3, customerName: "Ana P", step: 1, channel: "sms", outcome: "fallback", reason: "fact_check_unavailable", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T17:00:00Z" },
       ],
       paymentHolds: [
@@ -55,6 +57,11 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.getByText(/overdue bill since/)).toBeInTheDocument();
     expect(screen.getByText(/· email 3 ·/)).toBeInTheDocument();
     expect(screen.getByText(/· text 2 ·/)).toBeInTheDocument();
+    // a dropped payment hold stays listed with what it saw
+    expect(screen.getByText("Dropped: payment hold")).toBeInTheDocument();
+    expect(screen.getByText(/the payment hold \(overdue bill\) outlasted its 3-day window/)).toBeInTheDocument();
+    // more texts than are listed is said so
+    expect(screen.getByText(/Showing the newest 4 in this window/)).toBeInTheDocument();
   });
 
   it("says when nothing has been drafted yet", async () => {

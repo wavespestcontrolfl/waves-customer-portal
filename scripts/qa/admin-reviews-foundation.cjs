@@ -215,10 +215,11 @@ async function main() {
                 repeat: { sentence: "How are the ants doing since the visit?", earlierQuote: "How are the ants doing", earlierStep: 0 },
                 createdAt: "2026-09-14T15:00:00.000Z", sentAt: null,
               },
+              { id: 4, customerName: "Morgan Fixture", step: 2, channel: "email", outcome: "held", reason: "payment_hold_dropped", body: null, sentences: [], repeat: null, hold: { hold: "overdue_invoice", heldSince: "2026-09-11T14:00:00.000Z" }, createdAt: "2026-09-14T14:00:00.000Z", sentAt: null },
               { id: 3, customerName: "Casey Demo", step: 1, channel: "sms", outcome: "fallback", reason: "fact_check_unavailable", body: null, sentences: [], repeat: null, createdAt: "2026-09-14T16:00:00.000Z" },
             ],
             paymentHolds: [
-              { sequenceId: "seq-9", customerName: "Riley Test", step: 1, reason: "payment_hold", nextEvalAt: "2026-09-15T14:00:00.000Z", detail: { hold: "overdue_invoice", heldSince: "2026-09-14T14:00:00.000Z" } },
+              { sequenceId: "seq-9", customerName: "Riley Test", step: 1, channel: "sms", nextEvalAt: "2026-09-15T14:00:00.000Z", detail: { hold: "overdue_invoice", heldSince: "2026-09-14T14:00:00.000Z" } },
             ],
           };
         else if (url.pathname === "/api/admin/gbp/notifications")

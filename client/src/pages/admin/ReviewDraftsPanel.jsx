@@ -1,28 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge, Button, Card, Select as UiSelect } from "../../components/ui";
+import { adminFetch } from "../../utils/admin-fetch";
+import { formatETDateTime } from "../../lib/timezone";
 
 // Technician's-voice review texts (GATE_REVIEW_ASK_TECH_VOICE, build plan
 // PR 3): what the writer drafted, the record lines behind each sentence,
 // repeats it held, touches that fell back to the fixed text, and cadences the
 // payment hold is holding. Read-only spot-check for the owner.
-
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
-async function adminGet(path) {
-  const r = await fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
-  });
-  const text = await r.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(r.ok ? "Unexpected non-JSON response from server" : `HTTP ${r.status}`);
-  }
-  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-  return data;
-}
 
 const DAY_OPTIONS = [
   { value: "7", label: "Last 7 days" },
@@ -54,15 +39,7 @@ const HOLD_TEXT = {
 };
 
 const fmtET = (value) =>
-  value
-    ? new Date(value).toLocaleString("en-US", {
-        timeZone: "America/New_York",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      })
-    : "";
+  value ? formatETDateTime(value, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 
 // The link placeholder the sender fills, shown as words.
 const withLink = (text) => String(text || "").replace(/\{review_url\}/g, "[review link]");
@@ -70,8 +47,12 @@ const withLink = (text) => String(text || "").replace(/\{review_url\}/g, "[revie
 const stepLabel = (step, channel) =>
   `${channel === "email" ? "Email" : "Text"} ${Number(step) + 1}`;
 
+const PAYMENT_DROP = "payment_hold_dropped";
+const holdText = (hold) => HOLD_TEXT[hold] || String(hold || "payment hold").replace(/_/g, " ");
+
 function outcomeBadge(d) {
   if (d.outcome === "drafted") return <Badge tone="strong">Drafted</Badge>;
+  if (d.reason === PAYMENT_DROP) return <Badge tone="warn">Dropped: payment hold</Badge>;
   if (d.outcome === "held") return <Badge tone="warn">Held: repeat</Badge>;
   return <Badge tone="neutral">Fixed text</Badge>;
 }
@@ -99,6 +80,12 @@ function DraftCard({ d }) {
           No draft passed, so this step uses the fixed text: {FALLBACK_REASONS[d.reason] || String(d.reason || "no reason recorded").replace(/_/g, " ")}.
         </p>
       )}
+      {d.reason === PAYMENT_DROP && (
+        <p className="text-ui-body text-zinc-700">
+          Not sent: the payment hold ({holdText(d.hold?.hold)}) outlasted its 3-day window
+          {d.hold?.heldSince ? `, held since ${fmtET(d.hold.heldSince)}` : ""}.
+        </p>
+      )}
       {d.outcome === "held" && d.repeat && (
         <p className="text-ui-body text-zinc-700">
           Not sent: &ldquo;{withLink(d.repeat.sentence)}&rdquo; repeats text {Number(d.repeat.earlierStep) + 1}: &ldquo;{d.repeat.earlierQuote}&rdquo;
@@ -122,7 +109,7 @@ function DraftCard({ d }) {
         </ul>
       )}
       <p className="text-ui-caption text-zinc-500">
-        Drafted {fmtET(d.createdAt)}
+        {d.reason === PAYMENT_DROP ? "Dropped" : "Drafted"} {fmtET(d.createdAt)}
         {d.outcome === "held" ? " · not sent" : d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet"}
       </p>
     </Card>
@@ -139,7 +126,7 @@ export default function ReviewDraftsPanel() {
     const mine = ++gen.current;
     setLoading(true);
     setError(null);
-    return adminGet(`/admin/review-requests/tech-voice-drafts?days=${days}`)
+    return adminFetch(`/admin/review-requests/tech-voice-drafts?days=${days}`)
       .then((d) => { if (mine === gen.current) setData(d); })
       .catch((e) => { if (mine === gen.current) setError(e.message); })
       .finally(() => { if (mine === gen.current) setLoading(false); });
@@ -180,8 +167,8 @@ export default function ReviewDraftsPanel() {
               <li key={h.sequenceId}>
                 <span className="text-zinc-900">{h.customerName || "Customer"}</span>
                 {` · ${stepLabel(h.step, h.channel).toLowerCase()} · `}
-                {h.reason === "ask_dropped_payment_hold" ? "dropped after 3 days" : `waiting, next check ${fmtET(h.nextEvalAt)}`}
-                {h.detail?.hold ? ` · ${HOLD_TEXT[h.detail.hold] || String(h.detail.hold).replace(/_/g, " ")}` : ""}
+                {`waiting, next check ${fmtET(h.nextEvalAt)}`}
+                {h.detail?.hold ? ` · ${holdText(h.detail.hold)}` : ""}
                 {h.detail?.heldSince ? ` since ${fmtET(h.detail.heldSince)}` : ""}
               </li>
             ))}
@@ -189,6 +176,11 @@ export default function ReviewDraftsPanel() {
         </Card>
       )}
       {drafts.map((d) => <DraftCard key={d.id} d={d} />)}
+      {data?.truncated && (
+        <p className="text-ui-body text-zinc-600">
+          Showing the newest {drafts.length} in this window. Older ones are not listed; pick a shorter window to see every text in it.
+        </p>
+      )}
     </div>
   );
 }

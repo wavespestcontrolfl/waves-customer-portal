@@ -5727,7 +5727,12 @@ const ReviewService = {
    * (review-ask-holds.js), by kind. Called under review-send:<customer>.
    */
   _applyAskHold: {
-    drop(seq, held, skipStep) { return skipStep("ask_dropped_payment_hold", held.detail); },
+    async drop(seq, held, skipStep) {
+      // Kept in review_ask_drafts too: the sequence's decision is only its
+      // latest one, and the next step overwrites it.
+      await require("./review-ask-drafts").recordPaymentDrop(seq, held.detail);
+      return skipStep("ask_dropped_payment_hold", held.detail);
+    },
     async wait(seq, held) {
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         next_run_at: held.retryAt, payment_hold_step: seq.current_step, payment_hold_since: held.heldSince,
@@ -8043,5 +8048,8 @@ ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
+
+// The review page reads the same delivered-ask evidence the sender trusts.
+ReviewService.reviewAskDeliveryEvidence = reviewAskDeliveryEvidence;
 
 module.exports = ReviewService;
