@@ -56,41 +56,128 @@ function applyScope(trx, query, { customerId, scheduledServiceId, scheduledServi
   return query;
 }
 
-// The ownership rows taken in the packet path's order - customer, visit, then every payer row
-// the resolver can consult (all FOR SHARE) - so a payer assignment serializes behind the decision
-// instead of racing it. Returns the visit row.
-async function lockOwnershipRows(trx, invoice, visitId) {
-  await trx('customers').where({ id: invoice.customer_id }).forShare().first('id');
-  const visit = await trx('scheduled_services').where({ id: visitId }).forShare().first('id', 'payer_id', 'self_pay_override');
-  const customer = await trx('customers').where({ id: invoice.customer_id }).first('payer_id');
-  const payerIds = [...new Set([visit?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
-  if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
-  return visit && { ...visit, customer_payer_id: customer?.payer_id ?? null };
+// ONE answer to "who owns this invoice, before and after this Bill-To change?"
+//
+// The Bill-To resolver (payer.resolveForInvoice) reads, in order: the visit's own payer, else - unless
+// the visit is pinned self-pay - the customer's default payer; and a payer that is inactive (or gone)
+// is self-pay, with NO fall-through to the next level. ownerOf mirrors exactly that over a state read
+// from rows (and a pending write laid over it), and ownerTransitions applies it per invoice. Every
+// consumer below - the in-flight fence, the single-checkout invalidation (pay-combined), the
+// withdrawal and the release - reads the same result, and every writer's route runs them whenever an
+// invoice MOVED, never on whether a payer field was submitted:
+//
+//   mode 'pre'  (before the write): before = owner now; after = owner with `pending` laid over it.
+//               pending = { visitPatch: {visitIds, payer_id?, self_pay_override?},
+//                           customerPatch: {customerId, payer_id},
+//                           payerPatch: {id, active} }
+//               With no pending the new state is unknown and every candidate counts as moved.
+//               The before-owner is remembered per transaction (first write wins).
+//   mode 'post' (after the write, inside the same transaction): after = owner now, read under the
+//               ownership rows; before = the remembered pre-write owner, else the owner the invoice
+//               itself records (unstamped = self-pay, stamped = the payer named by the stamp).
+const plans = new WeakMap(); // transaction -> Map(invoiceId -> before owner)
+
+const idOrNull = (value) => (value == null || value === '' ? null : String(value));
+
+function ownerOf(state, activePayerIds) {
+  const candidate = idOrNull(state.visitPayerId) || (state.selfPay ? null : idOrNull(state.customerPayerId));
+  return candidate && activePayerIds.has(candidate) ? candidate : null;
 }
 
-// The same visit row without taking locks, for the read-only paths.
-async function visitForOwnerJudgement(database, invoice, visitId) {
-  const visit = await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+// The pending write laid over a state read from rows.
+function withPending(state, { visitId, customerId }, pending) {
+  const next = { ...state };
+  const visitPatch = pending?.visitPatch;
+  if (visitPatch && (visitPatch.visitIds || []).map(String).includes(String(visitId))) {
+    if ('payer_id' in visitPatch) next.visitPayerId = idOrNull(visitPatch.payer_id);
+    if ('self_pay_override' in visitPatch) next.selfPay = visitPatch.self_pay_override === true;
+  }
+  const customerPatch = pending?.customerPatch;
+  if (customerPatch && String(customerPatch.customerId) === String(customerId)) next.customerPayerId = idOrNull(customerPatch.payer_id);
+  return next;
+}
+
+// The rows the resolver reads, in the packet path's lock order when `lock` (customer, visit, then
+// every payer row FOR SHARE), so a payer assignment serializes behind the decision instead of racing it.
+async function readOwnerState(database, invoice, visitId, { lock, pending }) {
+  if (lock) await database('customers').where({ id: invoice.customer_id }).forShare().first('id');
+  const visitRow = await (lock ? database('scheduled_services').where({ id: visitId }).forShare() : database('scheduled_services').where({ id: visitId }))
+    .first('id', 'customer_id', 'payer_id', 'self_pay_override');
   const customer = await database('customers').where({ id: invoice.customer_id }).first('payer_id');
-  return visit && { ...visit, customer_payer_id: customer?.payer_id ?? null };
-}
-
-// The live Bill-To decision, made under those rows. null = self-pay.
-async function liveOwnerLocked(trx, invoice, visitId) {
-  await lockOwnershipRows(trx, invoice, visitId);
-  const resolved = await require('./payer').resolveForInvoice({
-    database: trx, customerId: invoice.customer_id, scheduledServiceId: visitId, throwOnError: true,
-  });
-  return resolved?.payerId || null;
+  // A visit of another customer is ignored by the resolver.
+  const visit = visitRow && String(visitRow.customer_id) === String(invoice.customer_id) ? visitRow : null;
+  const held = [...new Set([visitRow?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
+  if (lock && held.length) await database('payers').whereIn('id', held).orderBy('id').forShare().select('id');
+  const looked = [...new Set([...held, pending?.visitPatch?.payer_id, pending?.customerPatch?.payer_id, pending?.payerPatch?.id]
+    .filter(Boolean).map(String))];
+  const activeBefore = new Set(looked.length
+    ? (await database('payers').whereIn('id', looked).select('id', 'active')).filter((p) => p.active !== false).map((p) => String(p.id))
+    : []);
+  // The pending payer write applies to the AFTER view only.
+  const activeAfter = new Set(activeBefore);
+  if (pending?.payerPatch) {
+    const patched = String(pending.payerPatch.id);
+    if (pending.payerPatch.active === false) activeAfter.delete(patched);
+    else if (pending.payerPatch.active === true) activeAfter.add(patched);
+  }
+  return {
+    state: { visitPayerId: visit?.payer_id ?? null, selfPay: visit?.self_pay_override === true, customerPayerId: customer?.payer_id ?? null },
+    activeBefore,
+    activeAfter,
+  };
 }
 
 const linkedVisitOf = (invoice, trx) => require('./invoice').linkedScheduledServiceId(invoice, trx);
+const stampedPayerOf = (error) => /^payer_billed:([^:]+)/.exec(String(error || ''))?.[1] || null;
+
+async function ownerTransitions(database, scope = {}, { mode = 'post', pending = null, lock = false, stamped = 'unstamped', stampedForPayer = null } = {}) {
+  if (scopeIsEmpty(scope)) return [];
+  const query = applyScope(database, visitLinkedBase(database, TERMINAL), stamped === 'stamped' ? { ...scope, payerId: null } : scope);
+  if (stamped === 'stamped') {
+    query.where('scheduled_send_error', 'like', 'payer_billed:%');
+    if (stampedForPayer) {
+      query.where((q) => q.where('scheduled_send_error', `payer_billed:${stampedForPayer}`)
+        .orWhere('scheduled_send_error', 'like', `payer_billed:${stampedForPayer}:%`));
+    }
+  } else {
+    query.where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'));
+  }
+  const rows = await query.orderBy('id')
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
+  const plan = database.isTransaction === true ? (plans.get(database) || plans.set(database, new Map()).get(database)) : null;
+  const out = [];
+  for (const row of rows) {
+    const visitId = await linkedVisitOf(row, database);
+    if (!visitId) continue;
+    const { state, activeBefore, activeAfter } = await readOwnerState(database, row, visitId, { lock, pending: mode === 'pre' ? pending : null });
+    const ids = { visitId, customerId: row.customer_id };
+    let beforeOwner;
+    let afterOwner;
+    let moved;
+    if (mode === 'pre') {
+      beforeOwner = ownerOf(state, activeBefore);
+      afterOwner = pending ? ownerOf(withPending(state, ids, pending), activeAfter) : undefined;
+      moved = pending ? beforeOwner !== afterOwner : true;
+      if (plan && !plan.has(String(row.id))) plan.set(String(row.id), beforeOwner);
+    } else {
+      afterOwner = ownerOf(state, activeBefore);
+      beforeOwner = plan && plan.has(String(row.id)) ? plan.get(String(row.id)) : (stampedPayerOf(row.scheduled_send_error));
+      moved = beforeOwner !== afterOwner;
+    }
+    out.push({
+      invoiceId: row.id, customerId: row.customer_id, visitId, status: row.status,
+      stripePaymentIntentId: row.stripe_payment_intent_id, scheduledSendError: row.scheduled_send_error,
+      beforeOwner, afterOwner, moved,
+    });
+  }
+  return out;
+}
 
 // The visits the fence, withdrawal and release will lock for these customers: the visit every
 // non-terminal visit-linked invoice rides (processing and already-stamped ones included, since the
-// fence judges the first and the release re-judges the second). A caller that takes a payer row FOR UPDATE before the withdrawal
-// (payer activation) locks them FOR SHARE first, so it never waits on a visit a Bill-To editor
-// already holds while that editor waits on the payer row.
+// fence judges the first and the release re-judges the second). A caller that takes a payer row FOR
+// UPDATE before the withdrawal (payer activation) locks them FOR SHARE first, so it never waits on a
+// visit a Bill-To editor already holds while that editor waits on the payer row.
 async function linkedVisitIdsForCustomers(trx, customerIds) {
   if (!customerIds.length) return [];
   const base = () => visitLinkedBase(trx, TERMINAL).whereIn('customer_id', customerIds);
@@ -100,127 +187,79 @@ async function linkedVisitIdsForCustomers(trx, customerIds) {
   return [...new Set([...direct, ...viaRecord].map(String))];
 }
 
-// Withdraw every unpaid, still-collectible visit-linked invoice the scope's live owner now makes
-// payer-owned. Returns the ids withdrawn.
+// Withdraw every unpaid, still-collectible visit-linked invoice that MOVED to a payer. Returns the ids.
 async function withdrawLinkedInvoicesForOwner(trx, scope = {}) {
-  if (scopeIsEmpty(scope)) return [];
   const { withdrawInvoiceFromCustomer } = require('./visit-completion-packets');
-  const candidates = await applyScope(trx, visitLinkedBase(trx, NOT_WITHDRAWABLE), scope)
-    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .orderBy('id')
-    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id');
   const withdrawn = [];
-  for (const invoice of candidates) {
-    const visitId = await linkedVisitOf(invoice, trx);
-    if (!visitId) continue;
-    const owner = await liveOwnerLocked(trx, invoice, visitId);
-    if (!owner) continue;
+  for (const t of await ownerTransitions(trx, scope, { mode: 'post', lock: true, stamped: 'unstamped' })) {
+    if (NOT_WITHDRAWABLE.includes(t.status) || !t.moved || !t.afterOwner) continue;
     // Re-judged on the HELD invoice row: it may have settled, been claimed for a processing
     // payment or withdrawn since the candidate read.
-    const held = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status', 'payer_id', 'payer_statement_id', 'scheduled_send_error');
+    const held = await trx('invoices').where({ id: t.invoiceId }).forUpdate().first('status', 'payer_id', 'payer_statement_id', 'scheduled_send_error');
     if (!held || held.payer_id || held.payer_statement_id || NOT_WITHDRAWABLE.includes(held.status)
       || /^payer_billed:/.test(String(held.scheduled_send_error || ''))) continue;
-    if (await withdrawInvoiceFromCustomer(trx, { invoiceId: invoice.id, payerId: owner, markQueued: true })) withdrawn.push(invoice.id);
+    if (await withdrawInvoiceFromCustomer(trx, { invoiceId: t.invoiceId, payerId: t.afterOwner, markQueued: true })) withdrawn.push(t.invoiceId);
   }
   return withdrawn;
 }
 
 // The mirror, for ownership-REMOVING transitions (payer cleared, deactivated, self-pay pin set):
-// a stamped invoice whose live owner is nobody is released - the stamp clears, an invoice that
-// was waiting in the send queue goes back into it, the dunning the withdrawal paused resumes. A
-// stamp whose payer changed follows the payer that owns the visit now. Returns the released count.
+// a stamped invoice whose owner is now nobody is released - the stamp clears, an invoice that was
+// waiting in the send queue goes back into it, the dunning the withdrawal paused resumes. A stamp
+// whose payer changed follows the payer that owns the visit now. Returns the released count.
 async function reconcileLinkedInvoices(trx, scope = {}) {
-  if (scopeIsEmpty(scope)) return 0;
-  const { resumeDunningPausedByWithdrawal, INVOICE_TERMINAL_STATUSES } = require('./visit-completion-packets');
+  const { resumeDunningPausedByWithdrawal } = require('./visit-completion-packets');
   const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
-  const query = visitLinkedBase(trx, INVOICE_TERMINAL_STATUSES).where('scheduled_send_error', 'like', 'payer_billed:%');
-  if (scope.payerId) {
-    // Any flag combination for this payer; the visit/customer prefilter below does not apply.
-    query.where((q) => q.where('scheduled_send_error', `payer_billed:${scope.payerId}`)
-      .orWhere('scheduled_send_error', 'like', `payer_billed:${scope.payerId}:%`));
-  }
-  applyScope(trx, query, { ...scope, payerId: null });
-  const stamped = await query.orderBy('id')
-    .select('id', 'status', 'customer_id', 'scheduled_service_id', 'service_record_id', 'scheduled_send_error');
   let released = 0;
-  for (const invoice of stamped) {
-    const visitId = await linkedVisitOf(invoice, trx);
-    if (!visitId) continue;
-    const live = await liveOwnerLocked(trx, invoice, visitId);
+  for (const t of await ownerTransitions(trx, scope, { mode: 'post', lock: true, stamped: 'stamped', stampedForPayer: scope.payerId })) {
     // `payer_billed:<id>[:park][:queued][:at=<iso send time>][:m=<marker>]` - the marker is the
     // verbatim send-state marker the withdrawal replaced and may itself contain ':'.
-    const stamp = invoice.scheduled_send_error;
+    const stamp = t.scheduledSendError;
     const markerAt = stamp.indexOf(':m=');
     const priorMarker = markerAt >= 0 ? stamp.slice(markerAt + 3) : null;
     const withoutMarker = markerAt >= 0 ? stamp.slice(0, markerAt) : stamp;
     const sendAtAt = withoutMarker.indexOf(':at=');
     const priorSendAt = sendAtAt >= 0 ? new Date(withoutMarker.slice(sendAtAt + 4)) : null;
     const [, stampedPayer, ...flags] = (sendAtAt >= 0 ? withoutMarker.slice(0, sendAtAt) : withoutMarker).split(':');
-    if (live) {
-      if (String(live) !== stampedPayer) {
-        await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp })
-          .update({ scheduled_send_error: stamp.replace(/^payer_billed:[^:]+/, `payer_billed:${live}`), updated_at: trx.fn.now() });
+    if (t.afterOwner) {
+      if (t.afterOwner !== stampedPayer) {
+        await trx('invoices').where({ id: t.invoiceId, status: t.status, scheduled_send_error: stamp })
+          .update({ scheduled_send_error: stamp.replace(/^payer_billed:[^:]+/, `payer_billed:${t.afterOwner}`), updated_at: trx.fn.now() });
       }
       continue;
     }
     const parked = flags.includes('park');
-    const requeue = flags.includes('queued') && invoice.status === 'draft';
+    const requeue = flags.includes('queued') && t.status === 'draft';
     // The marker goes back exactly as it was, so a requeued invoice stays email-only.
     const restored = parked ? STALE_SEND_PARK_ERROR : priorMarker;
     const moved = await trx('invoices')
-      .where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp }).whereNull('payer_id')
+      .where({ id: t.invoiceId, status: t.status, scheduled_send_error: stamp }).whereNull('payer_id')
       .update(requeue
         // Back at the operator's own time; "now" only when that time has already passed.
         ? { status: 'scheduled', scheduled_send_at: priorSendAt && priorSendAt > new Date() ? priorSendAt : trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: restored, updated_at: trx.fn.now() }
         : { scheduled_send_error: restored, updated_at: trx.fn.now() });
     if (!moved) continue;
-    await resumeDunningPausedByWithdrawal(trx, invoice.id);
+    await resumeDunningPausedByWithdrawal(trx, t.invoiceId);
     released += 1;
   }
   return released;
 }
 
-// Can this Bill-To change move the invoice's effective owner? Decided from the visit row, since
-// the new payer is not written yet when the fence runs. A change to the visit's own Bill-To always
-// can; a change to the customer default cannot reach a visit that names its own payer or is pinned
-// self-pay; a payer activation reaches a visit that names that payer, or one inheriting a customer
-// default that IS that payer.
-function ownerCouldChange(scope, visit) {
-  if (scope.scheduledServiceId || (scope.scheduledServiceIds && scope.scheduledServiceIds.length) || scope.invoiceId) return true;
-  if (!visit) return false;
-  if (visit.payer_id) return Boolean(scope.payerId) && String(visit.payer_id) === String(scope.payerId);
-  if (visit.self_pay_override === true) return false;
-  // Inheriting the customer default: a payer activation reaches it only when that default IS the
-  // activating payer; a default-payer change always does.
-  if (scope.payerId) return visit.customer_payer_id != null && String(visit.customer_payer_id) === String(scope.payerId);
-  return true;
-}
-
 // The visit-linked invoices whose OWN checkout PaymentIntent this Bill-To change invalidates: the
-// owner can move (same rule as the fence) and the invoice is one the withdrawal will take. Their
-// client secrets must stop working, because a customer can confirm a pre-issued secret straight
-// with Stripe, past every pay-page check.
-async function linkedSessionInvoiceIds(database, scope = {}, ownerScope = scope) {
-  const ids = new Set();
-  if (scopeIsEmpty(scope)) return ids;
-  const candidates = await applyScope(database, visitLinkedBase(database, TERMINAL), scope)
-    .whereNotNull('stripe_payment_intent_id')
-    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id');
-  for (const candidate of candidates) {
-    const visitId = await linkedVisitOf(candidate, database);
-    if (!visitId) continue;
-    const visit = await visitForOwnerJudgement(database, candidate, visitId);
-    if (ownerCouldChange(ownerScope, visit)) ids.add(String(candidate.id));
-  }
-  return ids;
+// invoice moves to a payer. Their client secrets must stop working, because a customer can confirm a
+// pre-issued secret straight with Stripe, past every pay-page check.
+async function linkedSessionInvoiceIds(database, scope = {}, { pending = null } = {}) {
+  const transitions = await ownerTransitions(database, scope, { mode: 'pre', pending, stamped: 'unstamped' });
+  return new Set(transitions
+    .filter((t) => t.moved && t.stripePaymentIntentId && t.afterOwner !== null)
+    .map((t) => String(t.invoiceId)));
 }
 
-// The refusal fence, run BEFORE the writer's first Stripe cancel: a visit-linked invoice whose
-// owner this change would move and whose send claim is held, whose bank debit is captured, or whose
-// charge is unresolved (an in-flight or ambiguous saved-card attempt, an orphan charge) is money or
-// delivery in motion - the Bill-To change is refused (the caller's 409) instead of handing that debt
-// to AP underneath it. The charge fence is read-only here (nothing is released or promoted).
+// The refusal fence, run BEFORE the writer's first Stripe cancel: a visit-linked invoice this change
+// MOVES, whose send claim is held, whose bank debit is captured, or whose charge is unresolved (an
+// in-flight or ambiguous saved-card attempt, an orphan charge) is money or delivery in motion - the
+// Bill-To change is refused (the caller's 409) instead of handing that debt to AP underneath it. The
+// charge fence is read-only here (nothing is released or promoted).
 //
 // Inside a writer transaction the fence also LOCKS what it judges, in the packet path's order
 // (customer, visit, payer rows FOR SHARE, then the invoice FOR UPDATE) and holds it to commit: a queue
@@ -228,26 +267,17 @@ async function linkedSessionInvoiceIds(database, scope = {}, ownerScope = scope)
 // saved-card claim (stripe.js claimInvoiceSavedCardCharge) both write or lock the invoice row, so
 // neither can slip in between this check and the withdrawal; one that already committed is seen here
 // as status 'sending' or an unresolved attempt.
-async function linkedInvoiceChargeInFlight(database, scope = {}) {
-  if (scopeIsEmpty(scope)) return false;
+async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = null } = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
   const locking = database.isTransaction === true;
-  const candidates = await applyScope(database, visitLinkedBase(database, TERMINAL), scope)
-    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .orderBy('id')
-    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'status', 'stripe_payment_intent_id');
-  for (const candidate of candidates) {
-    const visitId = await linkedVisitOf(candidate, database);
-    if (!visitId) continue;
-    const visit = locking
-      ? await lockOwnershipRows(database, candidate, visitId)
-      : await visitForOwnerJudgement(database, candidate, visitId);
-    if (!ownerCouldChange(scope, visit)) continue;
+  const transitions = await ownerTransitions(database, scope, { mode: 'pre', pending, lock: locking, stamped: 'unstamped' });
+  for (const t of transitions) {
+    if (!t.moved) continue;
     // Re-read under the invoice row lock: this is the row the claims race for.
     const invoice = locking
-      ? await database('invoices').where({ id: candidate.id }).forUpdate()
+      ? await database('invoices').where({ id: t.invoiceId }).forUpdate()
         .first('id', 'status', 'payer_id', 'payer_statement_id', 'scheduled_send_error', 'stripe_payment_intent_id')
-      : candidate;
+      : { id: t.invoiceId, status: t.status, stripe_payment_intent_id: t.stripePaymentIntentId, scheduled_send_error: t.scheduledSendError };
     if (!invoice || invoice.payer_id || invoice.payer_statement_id || TERMINAL.includes(invoice.status)
       || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) continue;
     if (invoice.status === 'sending') return true;
@@ -262,4 +292,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}) {
   return false;
 }
 
-module.exports = { linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

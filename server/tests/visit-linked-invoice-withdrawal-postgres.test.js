@@ -195,16 +195,21 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
 
   test('the customer-default and payer-activation releases cancel single checkouts only where the owner would move', async () => {
     const PayCombined = require('../services/pay-combined');
-    const payerId = await payer();
+    const payerId = await payer(false);
     const unpinned = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_unpinned' } });
     const pinned = await fixture({ link: 'record', selfPayOverride: true, invoice: { stripe_payment_intent_id: 'pi_pinned' } });
     const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
     jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
 
-    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, pinned.customerId, { invalidateLinked: true })).toEqual({ released: 0, inFlight: 0 });
+    // A default payer assigned to the pinned visit's customer moves nothing.
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, pinned.customerId, {
+      invalidateLinked: true, pending: { customerPatch: { customerId: pinned.customerId, payer_id: (await payer()) } },
+    })).toEqual({ released: 0, inFlight: 0 });
     expect(await invoiceRow(pinned.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_pinned' });
 
-    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [unpinned.customerId], { invalidateLinked: true, payerId }))
+    // Activating the retained (inactive) default does.
+    const activation = { invalidateLinked: true, pending: { payerPatch: { id: payerId, active: true } } };
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [unpinned.customerId], activation))
       .toEqual({ released: 1, inFlight: 0 });
     expect(cancel).toHaveBeenCalledWith('pi_unpinned');
     expect(await invoiceRow(unpinned.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
@@ -213,22 +218,120 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     cancel.mockClear();
     expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, unpinned.customerId)).toEqual({ released: 0, inFlight: 0 });
     expect(cancel).not.toHaveBeenCalled();
+    // An UNCHANGED payer (the customer form resubmitting it) moves nothing, even when it is active.
+    await mockPg('payers').where({ id: payerId }).update({ active: true });
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, unpinned.customerId, {
+      invalidateLinked: true, pending: { customerPatch: { customerId: unpinned.customerId, payer_id: payerId } },
+    })).toEqual({ released: 0, inFlight: 0 });
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   test('payer activation cancels single checkouts only for visits that would really move to that payer', async () => {
     const PayCombined = require('../services/pay-combined');
-    const activating = await payer();
+    const activating = await payer(false);
     const otherDefault = await payer();
     // One customer whose default payer is somebody else; one visit names the activating payer, a sibling inherits the default.
     const named = await fixture({ link: 'record', visitPayerId: activating, customerPayerId: otherDefault, invoice: { stripe_payment_intent_id: 'pi_named' } });
     const sibling = await fixture({ link: 'record', customerPayerId: otherDefault, invoice: { stripe_payment_intent_id: 'pi_inherits_other' } });
     const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
     jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
-    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [named.customerId, sibling.customerId], { invalidateLinked: true, payerId: activating }))
-      .toEqual({ released: 1, inFlight: 0 });
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [named.customerId, sibling.customerId], {
+      invalidateLinked: true, pending: { payerPatch: { id: activating, active: true } },
+    })).toEqual({ released: 1, inFlight: 0 });
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledWith('pi_named');
     expect(await invoiceRow(sibling.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_inherits_other' });
+  });
+
+  // One answer to "who owns the invoice before and after this change?" - table-driven, and checked
+  // against the real resolver so the mirror cannot drift from payer.resolveForInvoice.
+  const A = 'A';
+  const B = 'B';
+  const D = 'D'; // inactive
+  const owners = [
+    // name, visit payer, pinned, customer default, pending, [before, after, moved]
+    ['visit payer set', null, false, null, { visit: { payer_id: A } }, [null, A, true]],
+    ['visit payer cleared', A, false, null, { visit: { payer_id: null } }, [A, null, true]],
+    ['visit payer changed', A, false, null, { visit: { payer_id: B } }, [A, B, true]],
+    ['visit payer unchanged', A, false, null, { visit: { payer_id: A } }, [A, A, false]],
+    ['visit payer cleared reveals the customer default (the inactive own payer did not fall through)', D, false, A, { visit: { payer_id: null } }, [null, A, true]],
+    ['visit payer assigned that is inactive', null, false, null, { visit: { payer_id: D } }, [null, null, false]],
+    ['self-pay pin on', null, false, A, { visit: { self_pay_override: true } }, [A, null, true]],
+    ['self-pay pin off', null, true, A, { visit: { self_pay_override: false } }, [null, A, true]],
+    ['customer default set', null, false, null, { customer: { payer_id: A } }, [null, A, true]],
+    ['customer default cleared', null, false, A, { customer: { payer_id: null } }, [A, null, true]],
+    ['customer default changed', null, false, A, { customer: { payer_id: B } }, [A, B, true]],
+    ['customer default unchanged (form resubmitted)', null, false, A, { customer: { payer_id: A } }, [A, A, false]],
+    ['customer default change behind a visit payer', B, false, A, { customer: { payer_id: A } }, [B, B, false]],
+    ['customer default change behind a self-pay pin', null, true, null, { customer: { payer_id: A } }, [null, null, false]],
+    ['payer activated', null, false, D, { payer: { id: D, active: true } }, [null, D, true]],
+    ['payer deactivated', null, false, A, { payer: { id: A, active: false } }, [A, null, true]],
+    ['inactive retained payer resubmitted', null, false, D, { customer: { payer_id: D } }, [null, null, false]],
+    ['payer activated behind a self-pay pin', null, true, D, { payer: { id: D, active: true } }, [null, null, false]],
+  ];
+  test.each(owners)('ownerTransitions: %s', async (_name, visitPayer, pinned, customerPayer, change, [before, after, moved]) => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const Payers = require('../services/payer');
+    const ids = { [A]: await payer(true), [B]: await payer(true), [D]: await payer(false) };
+    const pid = (name) => (name == null ? null : ids[name]);
+    const f = await fixture({ link: 'record', visitPayerId: pid(visitPayer), customerPayerId: pid(customerPayer), selfPayOverride: pinned });
+    const pending = {
+      ...(change.visit ? { visitPatch: { visitIds: [f.visitId], ...('payer_id' in change.visit ? { payer_id: pid(change.visit.payer_id) } : {}),
+        ...('self_pay_override' in change.visit ? { self_pay_override: change.visit.self_pay_override } : {}) } } : {}),
+      ...(change.customer ? { customerPatch: { customerId: f.customerId, payer_id: pid(change.customer.payer_id) } } : {}),
+      ...(change.payer ? { payerPatch: { id: pid(change.payer.id), active: change.payer.active } } : {}),
+    };
+    const [t] = await Linked.ownerTransitions(mockPg, { customerId: f.customerId }, { mode: 'pre', pending });
+    expect({ before: t.beforeOwner, after: t.afterOwner, moved: t.moved })
+      .toEqual({ before: before == null ? null : String(pid(before)), after: after == null ? null : String(pid(after)), moved });
+    // The mirror agrees with the real resolver on the current state, and - once the write is made -
+    // on the new one.
+    const resolved = async () => (await Payers.resolveForInvoice({ database: mockPg, customerId: f.customerId, scheduledServiceId: f.visitId, throwOnError: true })).payerId;
+    expect(String((await resolved()) ?? '')).toBe(String(t.beforeOwner ?? ''));
+    if (change.visit) await mockPg('scheduled_services').where({ id: f.visitId }).update(change.visit.payer_id !== undefined ? { payer_id: pid(change.visit.payer_id) } : change.visit);
+    if (change.customer) await mockPg('customers').where({ id: f.customerId }).update({ payer_id: pid(change.customer.payer_id) });
+    if (change.payer) await mockPg('payers').where({ id: pid(change.payer.id) }).update({ active: change.payer.active });
+    expect(String((await resolved()) ?? '')).toBe(String(t.afterOwner ?? ''));
+    const [post] = await Linked.ownerTransitions(mockPg, { customerId: f.customerId }, { mode: 'post' });
+    expect({ after: post.afterOwner, moved: post.moved }).toEqual({ after: t.afterOwner, moved });
+  });
+
+  test('a withdrawal skips an invoice whose owner did not move (a visit already on its own payer), leaving its checkout alone', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const own = await payer();
+    const newDefault = await payer();
+    const f = await fixture({ link: 'record', visitPayerId: own, invoice: { stripe_payment_intent_id: 'pi_unmoved' } });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const pending = { customerPatch: { customerId: f.customerId, payer_id: newDefault } };
+    // The customer-default change runs the whole pipeline in the route's order.
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: f.customerId }, mockPg, { pending })).toBe(false);
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, f.customerId, { invalidateLinked: true, pending })).toEqual({ released: 0, inFlight: 0 });
+    await mockPg('customers').where({ id: f.customerId }).update({ payer_id: newDefault });
+    expect(await Linked.withdrawLinkedInvoicesForOwner(mockPg, { customerId: f.customerId })).toEqual([]);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_unmoved', scheduled_send_error: null });
+  });
+
+  test('payer activation refuses when a linked visit appeared after the prelock (the visit set grew under the payer lock)', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const Payers = require('../services/payer');
+    const payerId = await payer(false);
+    const f = await fixture({ link: 'record', customerPayerId: payerId });
+    const extra = await fixture({ link: 'visit' });
+    const real = Linked.linkedVisitIdsForCustomers;
+    let calls = 0;
+    // First read (the prelock) sees the customer's one visit; the re-read under the payer lock sees a new one.
+    jest.spyOn(Linked, 'linkedVisitIdsForCustomers').mockImplementation(async (trx, ids) => {
+      calls += 1;
+      const set = await real(trx, ids);
+      return calls === 1 ? set : [...set, extra.visitId];
+    });
+    const result = await Payers.updatePayer(payerId, { active: true });
+    expect(result).toMatchObject({ conflict: true, code: 'payer_references_changed' });
+    expect((await mockPg('payers').where({ id: payerId }).first('active')).active).toBe(false);
+    expect(f.visitId).toBeTruthy();
   });
 
   test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
@@ -400,22 +503,21 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
   });
 
   test('the Bill-To fence only counts invoices whose effective owner the change would move', async () => {
-    const payerId = await payer();
+    const payerId = await payer(false);
     const open = await fixture({ link: 'record', status: 'sending' });
     const pinned = await fixture({ link: 'record', status: 'sending', selfPayOverride: true });
     const ownPayer = await fixture({ link: 'record', status: 'sending', visitPayerId: await payer() });
+    const customerDefault = (customerId) => ({ pending: { customerPatch: { customerId, payer_id: payerId } } });
     // A customer default payer change reaches an unpinned visit only.
-    expect(await Packets.packetInvoiceSendInFlight({ customerId: open.customerId }, mockPg)).toBe(true);
-    expect(await Packets.packetInvoiceSendInFlight({ customerId: pinned.customerId }, mockPg)).toBe(false);
-    expect(await Packets.packetInvoiceSendInFlight({ customerId: ownPayer.customerId }, mockPg)).toBe(false);
-    // …a payer activation reaches a visit that names that payer, and no other.
-    await mockPg('scheduled_services').where({ id: ownPayer.visitId }).update({ payer_id: payerId });
-    expect(await Packets.packetInvoiceSendInFlight({ payerId }, mockPg)).toBe(true);
-    await mockPg('scheduled_services').where({ id: ownPayer.visitId }).update({ payer_id: await payer() });
-    await mockPg('customers').where({ id: ownPayer.customerId }).update({ payer_id: payerId });
-    expect(await Packets.packetInvoiceSendInFlight({ payerId }, mockPg)).toBe(false);
-    // The visit's own Bill-To change always counts.
-    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: pinned.visitId }, mockPg)).toBe(true);
+    await mockPg('payers').where({ id: payerId }).update({ active: true });
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: open.customerId }, mockPg, customerDefault(open.customerId))).toBe(true);
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: pinned.customerId }, mockPg, customerDefault(pinned.customerId))).toBe(false);
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: ownPayer.customerId }, mockPg, customerDefault(ownPayer.customerId))).toBe(false);
+    // The visit's own Bill-To change always counts when it changes the owner.
+    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: pinned.visitId }, mockPg, { pending: { visitPatch: { visitIds: [pinned.visitId], payer_id: payerId } } })).toBe(true);
+    // …and an inactive payer moves nothing, however it is assigned.
+    await mockPg('payers').where({ id: payerId }).update({ active: false });
+    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: open.visitId }, mockPg, { pending: { visitPatch: { visitIds: [open.visitId], payer_id: payerId } } })).toBe(false);
   });
 
   test('inside a writer transaction the fence holds the candidate invoice and ownership rows to commit (committed fixture, second connection)', async () => {
@@ -522,8 +624,9 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     const a = await fixture({ link: 'visit' });
     const b = await fixture({ link: 'record' });
     const payerId = await payer();
+    const pending = { visitPatch: { visitIds: [a.visitId, b.visitId], payer_id: payerId } };
+    expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { scheduledServiceIds: [a.visitId, b.visitId] }, { pending })).toBe(false);
     await mockPg('scheduled_services').whereIn('id', [a.visitId, b.visitId]).update({ payer_id: payerId });
-    expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { scheduledServiceIds: [a.visitId, b.visitId] })).toBe(false);
     expect((await Linked.withdrawLinkedInvoicesForOwner(mockPg, { scheduledServiceIds: [a.visitId, b.visitId] })).sort()).toEqual([a.invoiceId, b.invoiceId].sort());
     await mockPg('scheduled_services').whereIn('id', [a.visitId, b.visitId]).update({ payer_id: null });
     expect(await Linked.reconcileLinkedInvoices(mockPg, { scheduledServiceIds: [a.visitId, b.visitId] })).toBe(2);

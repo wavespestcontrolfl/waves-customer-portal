@@ -1000,7 +1000,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
 // processing — for its customer and for the payer that customer names.
 // The renewal test is an EXISTS on annual_prepay_terms' unique
 // prepay_invoice_id index.
-async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null, payerId = null } = {}, database = db) {
+async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null, payerId = null } = {}, database = db, { pending = null } = {}) {
   if (!customerId && !scheduledServiceId && !payerId) return false;
   // A send claim ('sending'), or the coordinator's automatic collection
   // claim (the visit_payment effect held within its lease) — a saved-card
@@ -1038,7 +1038,7 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   if (await query.first('id')) return true;
   // Invoices with no packet that ride a visit (a service-record or direct visit link) are the
   // same window: the shared Bill-To transition would hand a debt to AP under a send or charge.
-  return require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId });
+  return require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });
 }
 
 /**

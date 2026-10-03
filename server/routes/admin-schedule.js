@@ -14392,41 +14392,59 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // and a Stripe cancel does not roll back with this transaction — so an
         // edit rejected for an in-flight send must not already have destroyed
         // the customer's live pay-page session.
-        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+        const payerFieldsTouched = updates.payer_id !== undefined || updates.self_pay_override !== undefined;
+        // The children this edit's Bill-To propagation rewrites (pending / confirmed only), and the
+        // write itself, so every visit-linked invoice's owner BEFORE and AFTER is judged once
+        // (ownerTransitions) and every step below acts on the invoices that actually MOVE - whether
+        // the edit assigns a payer, or clears one and so reveals the next level's.
+        let rewrittenChildIds = [];
+        let ownerPending = null;
+        if (payerFieldsTouched) {
+          try {
+            rewrittenChildIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id })
+              .whereIn('status', ['pending', 'confirmed']).pluck('id');
+          } catch { /* no children / column absent */ }
+          ownerPending = {
+            visitPatch: {
+              visitIds: [req.params.id, ...rewrittenChildIds],
+              ...(updates.payer_id !== undefined ? { payer_id: updates.payer_id } : {}),
+              ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
+            },
+          };
           // The combined advisory lock for this customer was taken above,
           // before any ownership row — both Bill-To writers share that order.
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
-          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
             throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
+          // The children's visit-linked invoices change hands with the payer propagation below,
+          // so a send or charge in flight on one that MOVES is refused here, before the first Stripe cancel.
+          if (rewrittenChildIds.length
+            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: rewrittenChildIds }, { pending: ownerPending })) {
+            throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
               statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
             });
           }
         }
         const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
           || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
-        if (activatesPayer) {
-          const fencedVisitIds = [req.params.id];
-          try {
-            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
-            fencedVisitIds.push(...childIds);
-          } catch { /* no children / column absent */ }
-          // The children's visit-linked invoices change hands with the payer propagation below,
-          // so a send or charge in flight on one is refused here, before the first Stripe cancel.
-          // Only the children the propagation below actually rewrites (pending / confirmed): a send
-          // or charge on a completed or cancelled child's invoice does not move with this edit.
-          const rewrittenChildIds = fencedVisitIds.length > 1
-            ? await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).whereIn('status', ['pending', 'confirmed']).pluck('id')
-            : [];
-          if (rewrittenChildIds.length
-            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: rewrittenChildIds })) {
-            throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
-              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
-            });
+        if (payerFieldsTouched) {
+          const fencedVisitIds = [req.params.id, ...rewrittenChildIds];
+          if (activatesPayer) {
+            // Combined pay-page sessions are fenced on every child, rewritten or not.
+            try {
+              const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
+              for (const childId of childIds) if (!fencedVisitIds.includes(childId)) fencedVisitIds.push(childId);
+            } catch { /* no children / column absent */ }
           }
           const visitRelease = await require('../services/pay-combined')
             .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds, {
-              // Only the visit being edited and the children the Bill-To propagation rewrites.
               invalidateVisitIds: [req.params.id, ...rewrittenChildIds],
+              pending: ownerPending,
+              // An edit that does not assign a payer only loses the checkouts of invoices it moves.
+              linkedOnly: !activatesPayer,
             });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
@@ -14582,6 +14600,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // cleared) withdraws the self-pay combined-visit invoice this job
           // now owes to AP, including one already with the homeowner.
           if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
+          // An edit that clears a payer can reveal the next level's: whatever moved to a payer is
+          // withdrawn (the assigning case above already ran it).
+          else await require('../services/visit-linked-invoice-withdrawal').withdrawLinkedInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
         }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
@@ -14662,7 +14683,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (childVisitIds.length) {
                 const Linked = require('../services/visit-linked-invoice-withdrawal');
                 await Linked.reconcileLinkedInvoices(trx, { scheduledServiceIds: childVisitIds });
-                if (activatesPayer) await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });
+                await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });
               }
             }
           }

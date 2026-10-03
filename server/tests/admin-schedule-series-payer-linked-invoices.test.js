@@ -104,13 +104,14 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-function setup() {
+function setup(parentPayerId = null) {
+  const parentRow = { ...parent, payer_id: parentPayerId };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
-  db.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...parent } : undefined));
+  db.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...parentRow } : undefined));
   const trx = jest.fn((table) => {
     if (table === 'technicians') return chain({ id: 'any-tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true });
-    const c = chain(table === 'scheduled_services' ? { ...parent } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+    const c = chain(table === 'scheduled_services' ? { ...parentRow } : (table === 'customers' ? { id: 'cust-1' } : undefined));
     if (table === 'scheduled_services') {
       // Children of the series: one still pending, one already completed.
       c.pluck = jest.fn(async (col) => {
@@ -129,13 +130,14 @@ function setup() {
 }
 
 beforeEach(() => { jest.clearAllMocks(); setup(); });
+const PayCombined = require('../services/pay-combined');
 
 test('series Bill-To change fences, and withdraws for, only the children it rewrites (pending / confirmed), not completed ones', async () => {
   const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
   });
   expect(res.status).toBe(200);
-  expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] });
+  expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] }, expect.anything());
   expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] });
 });
 
@@ -147,4 +149,22 @@ test('a send in flight on a rewritten child refuses the series Bill-To change wi
   expect(res.status).toBe(409);
   expect((await res.json()).code).toBe('invoice_send_in_flight');
   expect(Linked.withdrawLinkedInvoicesForOwner).not.toHaveBeenCalled();
+});
+
+test('clearing a series payer that reveals the customer default still fences, invalidates and withdraws for the invoices that move (no truthy payer id needed)', async () => {
+  setup(7); // the parent names payer 7 today; the edit clears it
+  const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: null }),
+  });
+  expect(res.status).toBe(200);
+  const pending = { visitPatch: { visitIds: ['svc-1', 'child-pending'], payer_id: null } };
+  // Fenced and checkout-invalidated on the pending write, not on a submitted payer id.
+  expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] }, { pending });
+  expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).toHaveBeenCalledWith(
+    expect.anything(), expect.arrayContaining(['svc-1', 'child-pending']),
+    expect.objectContaining({ linkedOnly: true, pending, invalidateVisitIds: ['svc-1', 'child-pending'] }),
+  );
+  // Withdrawn after the write: the visit itself and the rewritten children.
+  expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceId: 'svc-1' });
+  expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] });
 });

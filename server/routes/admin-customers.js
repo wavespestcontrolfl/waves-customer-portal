@@ -4274,8 +4274,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // pre-transaction read: a payer cleared by another edit and
           // restored by this stale request is still a change while a
           // self-pay send is in flight.
+          // The write this route is about to make, for the visit-linked invoices' before/after owner
+          // (an unchanged payer, even resubmitted by the full form, moves nothing).
+          const customerPayerPending = updates.payer_id !== undefined
+            ? { customerPatch: { customerId: req.params.id, payer_id: updates.payer_id || null } } : null;
           if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(lockedBefore.payer_id ?? '')) {
-            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx)) {
+            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx, { pending: customerPayerPending })) {
               throw Object.assign(new Error('A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.'), {
                 statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
               });
@@ -4289,7 +4293,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
