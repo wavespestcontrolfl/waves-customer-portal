@@ -3047,9 +3047,12 @@ const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
 // no live miss needs it.
 const UNIT_HEURISTIC_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
 const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${UNIT_HEURISTIC_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
-const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
-const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
-const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');
+// One direction vocabulary for every suffix helper: the terminal canonicalizer
+// accepts diagonals ("EXAMPLE LK NW"), so stripping/extraction must too.
+const POST_DIRECTION_ALT = '(?:NE|NW|SE|SW|[NSEW])';
+const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+${POST_DIRECTION_ALT})?$`, 'i');
+const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+${POST_DIRECTION_ALT})?$`, 'i');
+const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+(${POST_DIRECTION_ALT})\\b`, 'i');
 
 // A line that is only a number and/or a direction once the suffix is gone
 // ("100 N LK" — a street NAMED Lake) keeps its suffix: stripping it would leave
@@ -3260,7 +3263,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // different streets. A roll row that omits the direction still matches
     // (formatting variance), a DIFFERENT direction never does.
     const typedDirection = extractPostSuffixDirection(streetLabel);
-    const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : '[NSEW]';
+    const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : POST_DIRECTION_ALT;
     // Route rows put the direction straight after the number with no suffix
     // between ("9155 SR 70 E" typed as "9155 FL-70": formatting variance,
     // not a different street), may carry a pre-direction ("N US 41") or a

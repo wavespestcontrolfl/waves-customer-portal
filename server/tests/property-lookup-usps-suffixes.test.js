@@ -188,3 +188,20 @@ describe('county search candidates and the audit with USPS suffixes', () => {
     expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
   });
 });
+
+describe('diagonal post-directions through the suffix helpers', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  test('typed "Example Lake NW" finds a roll spelled "EXAMPLE LAKE NW" (query strips the suffix)', async () => {
+    const { auditAddressHouseNumber } = require('../services/property-lookup/ai-property-lookup');
+    const wheres = [];
+    global.fetch = jest.fn().mockImplementation(async (url) => {
+      wheres.push(new URL(url).searchParams.get('where'));
+      return { ok: true, json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '100 EXAMPLE LAKE NW', SITUS_POSTAL_ZIP: '34202' } }] }) };
+    });
+    const audit = await auditAddressHouseNumber('100 Example Lake NW, Bradenton, FL 34202');
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+    expect(wheres[0]).toContain("'%EXAMPLE%'");
+    expect(wheres[0]).not.toContain('LK NW');
+  });
+});
