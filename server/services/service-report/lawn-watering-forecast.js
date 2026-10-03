@@ -15,8 +15,12 @@
 //      Waves read `lines` and so stay exactly as written. Only the live banner
 //      (banner.forecastLine) shows it, and stripLiveOnlyScheduleFields drops it
 //      from every non-live render. Replays read the stored sentence verbatim.
+//      The sentence points at a CHECKPOINT six hours before the deadline (so a
+//      full cycle still fits if the rain did not come) and is only written when
+//      the forecast TO THE CHECKPOINT reaches the label amount.
 //   2. LIVE, on the web view only: radar-measured (MRMS) rain that reached the
-//      water-in amount INSIDE the window closes the banner (banner.observedRain).
+//      water-in amount INSIDE the window adds a qualified note under the
+//      instruction (banner.observedRain); the instruction itself stays.
 //      Forecast never closes anything. MRMS here is a DAILY rollup, so only
 //      whole Eastern days that lie inside the window (with a one-hour margin at
 //      each edge for the day-boundary convention of the source) are counted; a
@@ -25,6 +29,9 @@
 // Copy rules: inches only, never a probability or a percent; fixed sentences
 // chosen by code from facts; no model; no re-entry or "keep off" wording.
 
+// The checkpoint label uses the same day/time formatter as waterInByLabel.
+const { _private: { formatWhen } } = require('./lawn-watering-instruction');
+
 const HOUR_MS = 3600000;
 // Whole-day MRMS totals are labelled by calendar day; an hour of slack at each
 // edge keeps a day whose source boundary differs from Eastern midnight from
@@ -32,6 +39,12 @@ const HOUR_MS = 3600000;
 const DAY_EDGE_MARGIN_MS = HOUR_MS;
 const FORECAST_TIMEOUT_MS = 3000;
 const CLOSE_OUT_DEADLINE_MS = 2500;
+// The forecast sentence asks the customer to look at the rain by a CHECKPOINT
+// this long before the water-in deadline, so a multi-zone cycle still fits
+// inside the label window if the rain did not come. It is emitted only when
+// completion to checkpoint is itself at least this long.
+const CHECKPOINT_HOURS_BEFORE_DEADLINE = 6;
+const MIN_CHECKPOINT_WINDOW_HOURS = 6;
 
 function finitePositive(value) {
   if (value == null || value === '') return null;
@@ -56,17 +69,22 @@ function formatInches(value) {
 }
 
 // The fixed sentences. Every number is in inches; none is a probability.
-function forecastSentence({ forecastInches, waterInInches, byLabel }) {
+function forecastSentence({ forecastInches, waterInInches, checkpointLabel }) {
   const forecast = formatInches(forecastInches);
   const amount = formatInches(waterInInches);
-  if (!forecast || !amount || !byLabel) return null;
-  return `About ${forecast} of rain is forecast by ${byLabel}. If at least ${amount} actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.`;
+  if (!forecast || !amount || !checkpointLabel) return null;
+  return `About ${forecast} of rain is forecast by ${checkpointLabel}. If at least ${amount} has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.`;
 }
 
+// Qualified like the existing rain-since-visit copy (email-division
+// payload-builders.js: "of rain near your address since the visit; local
+// totals may vary"): a ~1 km radar cell is not the customer's lawn, so the
+// note never replaces the instruction and tells the customer what to do if
+// their own lawn stayed dry.
 function closeOutSentence({ measuredInches }) {
   const measured = formatInches(measuredInches);
   if (!measured) return null;
-  return `Done: radar measured at least ${measured} of rain at your home since your visit, which counts as watering in today’s treatment. There is no need to run your sprinklers for it.`;
+  return `Radar measured about ${measured} of rain near your address since your visit. If your lawn got that rain, it counts as watering in today’s treatment. Local totals may vary, so run the watering above if your lawn stayed dry.`;
 }
 
 // Copy that must never reach a customer from this module.
@@ -100,21 +118,27 @@ async function resolveWaterInForecast({ instruction, latitude, longitude, fetchF
     if (!isPlainWaterIn(instruction) || typeof fetchForecast !== 'function') return null;
     const amount = finitePositive(instruction.waterInInches);
     const fromMs = toMs(instruction.completedAt);
-    const toMsValue = toMs(instruction.waterInBy);
-    if (amount == null || !Number.isFinite(fromMs) || !Number.isFinite(toMsValue) || toMsValue <= fromMs) return null;
-    if (typeof instruction.waterInByLabel !== 'string' || !instruction.waterInByLabel) return null;
+    const deadlineMs = toMs(instruction.waterInBy);
+    if (amount == null || !Number.isFinite(fromMs) || !Number.isFinite(deadlineMs) || deadlineMs <= fromMs) return null;
+    // The customer is asked to look at the rain by the checkpoint, not the
+    // deadline: no sentence unless there are at least 6 hours to the checkpoint.
+    const checkpointMs = deadlineMs - CHECKPOINT_HOURS_BEFORE_DEADLINE * HOUR_MS;
+    if (checkpointMs - fromMs < MIN_CHECKPOINT_WINDOW_HOURS * HOUR_MS) return null;
+    const checkpointLabel = formatWhen(new Date(checkpointMs), new Date(fromMs));
+    if (typeof checkpointLabel !== 'string' || !checkpointLabel) return null;
 
     const result = await fetchForecast({
-      latitude, longitude, from: new Date(fromMs), to: new Date(toMsValue), timeoutMs: FORECAST_TIMEOUT_MS,
+      latitude, longitude, from: new Date(fromMs), to: new Date(checkpointMs), timeoutMs: FORECAST_TIMEOUT_MS,
     });
     if (!result || result.status !== 'ok') return null;
     const total = result.precipitationInTotal;
     // null = a needed hour had no reading (or no whole hour in the window):
     // never read as zero, never as rain.
     if (typeof total !== 'number' || !Number.isFinite(total)) return null;
-    // The sentence only exists when the forecast reaches the label amount.
+    // The sentence only exists when the forecast TO THE CHECKPOINT reaches the
+    // label amount; rain forecast only after it would leave the customer waiting.
     if (total < amount) return null;
-    const line = forecastSentence({ forecastInches: total, waterInInches: amount, byLabel: instruction.waterInByLabel });
+    const line = forecastSentence({ forecastInches: total, waterInInches: amount, checkpointLabel });
     if (!copyIsClean(line)) return null;
     return {
       line,
@@ -122,7 +146,9 @@ async function resolveWaterInForecast({ instruction, latitude, longitude, fetchF
       source: 'open_meteo',
       fetchedAt: typeof result.fetchedAt === 'string' ? result.fetchedAt : null,
       windowFrom: new Date(fromMs).toISOString(),
-      windowTo: new Date(toMsValue).toISOString(),
+      windowTo: new Date(checkpointMs).toISOString(),
+      checkpointAt: new Date(checkpointMs).toISOString(),
+      checkpointLabel,
     };
   } catch {
     return null;
@@ -230,10 +256,17 @@ async function attachLiveCloseOut(data, deps = {}) {
     const lat = Number(deps.latitude);
     const lon = Number(deps.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) return data;
+    // The deadline wins the race AND cancels the radar request, so a slow
+    // lookup does not keep running after the page has moved on.
+    const controller = new AbortController();
     let timer;
-    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(null), CLOSE_OUT_DEADLINE_MS); });
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => { controller.abort(); resolve(null); }, deps.deadlineMs ?? CLOSE_OUT_DEADLINE_MS);
+    });
     const mrms = await Promise.race([
-      Promise.resolve(deps.fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: inside[0], end: inside[inside.length - 1] })).catch(() => null),
+      Promise.resolve(deps.fetchMrmsDailyRain({
+        latitude: lat, longitude: lon, start: inside[0], end: inside[inside.length - 1], signal: controller.signal,
+      })).catch(() => null),
       deadline,
     ]).finally(() => clearTimeout(timer));
     const closeOut = observedCloseOut(instruction, mrms?.days, inside);

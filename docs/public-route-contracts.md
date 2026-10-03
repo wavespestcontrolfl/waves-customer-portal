@@ -2163,27 +2163,36 @@ by single spaces, at most once per visit
 off leaves the payload unchanged, key for key) adds two LIVE-VIEW-ONLY optional keys
 to `reportV2.banner` of a plain `water_in` banner (never `hold`, `hold_then_water_in`
 or `none`), both finished customer sentences in inches, never a probability or a
-percent, chosen by code with no model. `forecastLine` (string): a sentence frozen
-at completion beside the instruction (`structured_notes.lawnWateringFreeze
+percent, chosen by code with no model. Neither replaces or alters the instruction
+(`lines`), which stays visible. `forecastLine` (string): a sentence frozen at
+completion beside the instruction (`structured_notes.lawnWateringFreeze
 .wateringInstruction.forecast`, first writer wins with the rest of the freeze,
-replayed verbatim) when the property's hourly forecast for the water-in window
-reached the label amount ("About 0.4 inch of rain is forecast by Thu 2 PM. If at
-least ¼ inch actually falls by then, it counts as watering in today's treatment.
-If it does not, run the watering above."); absent when the forecast was
-unavailable, incomplete or below the amount, and it is never part of `lines`.
-`observedRain` (`{ inches, line, source: 'mrms', days }`): computed per live
-`/api/reports/:token/data` request from radar-measured (MRMS daily) rain on whole
-Eastern days that lie inside the frozen water-in window (a one-hour margin at each
-edge), only once those days have ended, only while the banner has not expired, and
-only when the measured total reaches the water-in amount ("Done: radar measured at
-least 0.5 inch of rain at your home since your visit, which counts as watering in
-today's treatment. There is no need to run your sprinklers for it."); the client
-shows it in place of the instruction. A forecast never produces it, and a radar
-miss or timeout leaves the banner as it was. Both keys are deleted from every
-non-live render (`stripLiveOnlyScheduleFields`: PDF, static, sms_preview), so the
-printed record, the lawn PDF cache key, the completion email, the watering text
-(`lines` only), the hero task and Ask Waves are unchanged. No new route, query
-parameter or customer message.
+replayed verbatim) asking the customer to check the rain by a CHECKPOINT six hours
+before the water-in deadline, so a full cycle still fits in the label window if the
+rain did not come ("About 0.4 inch of rain is forecast by Wed 8 AM. If at least ¼
+inch has fallen by then, it counts as watering in today's treatment. If it has not,
+run the watering above right away."). It exists only when completion to checkpoint
+is at least six hours and the hourly forecast total for completion to the
+CHECKPOINT (not the deadline) is known and reaches the label amount; the frozen
+block also records `checkpointAt` / `checkpointLabel`. Otherwise the key is absent
+and the instruction is today's. `observedRain` (`{ inches, line, source: 'mrms',
+days }`): computed per live `/api/reports/:token/data` request from radar-measured
+(MRMS daily) rain on whole Eastern days that lie inside the frozen water-in window
+(a one-hour margin at each edge), only once those days have ended, only while the
+banner has not expired, and only when the measured total reaches the water-in amount.
+The line is qualified like the existing rain-since-visit copy because a radar cell
+is not the customer's lawn: "Radar measured about 0.5 inch of rain near your address
+since your visit. If your lawn got that rain, it counts as watering in today's
+treatment. Local totals may vary, so run the watering above if your lawn stayed
+dry." The client shows it as a note under the instruction, and it supersedes
+`forecastLine` once present. The radar request carries the page's own 2.5 s deadline
+and is aborted when that deadline wins; a miss leaves the banner as it was. Both
+keys are deleted from every non-live render (`stripLiveOnlyScheduleFields`: PDF,
+static, sms_preview), so the printed record, the lawn PDF cache key, the completion
+email, the watering text (`lines` only), the hero task and Ask Waves are unchanged.
+When present on a live payload the displayed one (the note, else the forecast
+sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
+route, query parameter or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to

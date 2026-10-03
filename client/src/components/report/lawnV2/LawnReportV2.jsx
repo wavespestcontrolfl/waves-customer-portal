@@ -826,7 +826,11 @@ export function LawnWateringBanner({ banner, style = null }) {
   const mowAsBody = watering && mowLine;
   // GATE_LAWN_WATERING_FORECAST. Both lines are LIVE-VIEW additions the server
   // only sends to the live payload (never for a hold); the client also keeps
-  // them off anything printed, and off a banner whose note has ended.
+  // them off anything printed, off a banner whose note has ended, and off a
+  // hold. The measured-rain note sits UNDER the instruction (never replaces
+  // it: the customer may still need it) and, once it exists, supersedes the
+  // forecast sentence. lawn-report-lead.js leadWords() counts exactly one of
+  // the two with this same rule.
   const live = watering && !ended && !(print || printing) && !hold;
   const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
   const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
@@ -842,11 +846,13 @@ export function LawnWateringBanner({ banner, style = null }) {
           </div>
         ) : (
           <>
-            {/* A measured close-out replaces the instruction: the water-in is done. */}
-            <h2 data-testid="lawn-watering-banner-heading" style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.25, color: TEXT, margin: 0 }}>{observedLine || heading}</h2>
-            {!observedLine && rest.map((line) => (
+            <h2 data-testid="lawn-watering-banner-heading" style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.25, color: TEXT, margin: 0 }}>{heading}</h2>
+            {rest.map((line) => (
               <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{line}</p>
             ))}
+            {observedLine && (
+              <p data-testid="lawn-watering-banner-observed" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{observedLine}</p>
+            )}
             {forecastLine && (
               <p data-testid="lawn-watering-banner-forecast" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{forecastLine}</p>
             )}

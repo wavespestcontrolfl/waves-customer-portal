@@ -469,8 +469,8 @@ describe('LawnWateringBanner', () => {
   });
 
   // GATE_LAWN_WATERING_FORECAST: live-view additions the server only sends on the live payload.
-  const FORECAST_LINE = 'About 0.4 inch of rain is forecast by Thu 2 PM. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.';
-  const CLOSE_OUT = { inches: 0.5, source: 'mrms', days: ['2026-10-07'], line: 'Done: radar measured at least 0.5 inch of rain at your home since your visit, which counts as watering in today’s treatment. There is no need to run your sprinklers for it.' };
+  const FORECAST_LINE = 'About 0.4 inch of rain is forecast by Thu 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.';
+  const CLOSE_OUT = { inches: 0.5, source: 'mrms', days: ['2026-10-07'], line: 'Radar measured about 0.5 inch of rain near your address since your visit. If your lawn got that rain, it counts as watering in today’s treatment. Local totals may vary, so run the watering above if your lawn stayed dry.' };
 
   it('forecast sentence: shown after the unchanged lines on the live view, in inches', () => {
     renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE });
@@ -495,17 +495,25 @@ describe('LawnWateringBanner', () => {
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold_then_water_in.lines[0]);
   });
 
-  it('measured close-out: replaces the instruction with the measured inches, wins over the forecast sentence', () => {
+  it('measured-rain note: sits under the unchanged instruction (which stays visible) and supersedes the forecast sentence', () => {
     renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE, observedRain: CLOSE_OUT });
-    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(CLOSE_OUT.line);
+    expect(screen.getByTestId('lawn-watering-banner-observed')).toHaveTextContent(CLOSE_OUT.line);
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.water_in.lines[0]);
+    expect(screen.getByTestId('lawn-watering-banner')).toHaveTextContent(BANNERS.water_in.lines[1]);
     expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
-    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent('Run each zone');
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent(/Done|no need/i);
+    // After the instruction lines, as a note.
+    const banner = screen.getByTestId('lawn-watering-banner');
+    expect(banner.textContent.indexOf(BANNERS.water_in.lines[2])).toBeLessThan(banner.textContent.indexOf('Radar measured'));
   });
 
-  it('measured close-out: printed copy keeps the instruction as written', () => {
+  it('measured-rain note: printed copy and an ended note carry nothing of it', () => {
     renderBanner({ ...BANNERS.water_in, observedRain: CLOSE_OUT }, { print: true });
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.water_in.lines[0]);
-    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent('radar');
+    expect(screen.queryByTestId('lawn-watering-banner-observed')).toBeNull();
+    cleanup();
+    renderBanner({ ...BANNERS.water_in, expiresAt: PAST, observedRain: CLOSE_OUT });
+    expect(screen.queryByTestId('lawn-watering-banner-observed')).toBeNull();
   });
 
   it('no forecast / close-out fields: the banner is exactly today\'s', () => {

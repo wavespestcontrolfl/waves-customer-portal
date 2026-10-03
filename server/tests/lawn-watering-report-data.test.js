@@ -620,7 +620,7 @@ describe('GATE_LAWN_WATERING_FORECAST on the report payload', () => {
     }
   });
   const FORECAST = {
-    line: 'About 0.4 inch of rain is forecast by Thu 2 PM. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.',
+    line: 'About 0.4 inch of rain is forecast by Thu 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.',
     inches: 0.4, source: 'open_meteo', fetchedAt: '2026-09-30T18:41:00.000Z', windowFrom: '2026-09-30T18:40:00.000Z', windowTo: '2026-10-01T18:00:00.000Z',
   };
   async function frozenRender(rule, withForecast) {
@@ -671,7 +671,7 @@ describe('GATE_LAWN_WATERING_FORECAST on the report payload', () => {
     const frozen = await frozenRender(WATER_IN, true);
     process.env.GATE_LAWN_WATERING_FORECAST = 'true';
     const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
-    data.reportV2.banner.observedRain = { inches: 0.5, line: 'Done: radar measured at least 0.5 inch of rain.', source: 'mrms', days: [] };
+    data.reportV2.banner.observedRain = { inches: 0.5, line: 'Radar measured about 0.5 inch of rain near your address since your visit.', source: 'mrms', days: [] };
     const before = { ...data.reportV2.banner };
     stripLiveOnlyScheduleFields(data);
     expect(data.reportV2.banner).not.toHaveProperty('forecastLine');
@@ -707,7 +707,7 @@ describe('GATE_LAWN_WATERING_FORECAST on the report payload', () => {
       await attachLawnWateringCloseOut(data, frozen);
       expect(data.reportV2.banner.state).toBe('water_in');
       expect(data.reportV2.banner.observedRain).toMatchObject({ inches: 0.5, source: 'mrms' });
-      expect(spy).toHaveBeenCalledWith({ latitude: 27.5, longitude: -82.5, start: '2026-10-01', end: '2026-10-02' });
+      expect(spy).toHaveBeenCalledWith({ latitude: 27.5, longitude: -82.5, start: '2026-10-01', end: '2026-10-02', signal: expect.any(AbortSignal) });
 
       // Unfrozen visit: no window to measure.
       spy.mockClear();

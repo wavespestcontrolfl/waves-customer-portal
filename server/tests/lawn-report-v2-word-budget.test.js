@@ -113,7 +113,7 @@ const fullSinceLast = (bannerPresent) => buildSinceLastCopy({
   bannerPresent,
 });
 
-function build(caseName, weekPlan, bannerKind, { long = false, sinceLast = false } = {}) {
+function build(caseName, weekPlan, bannerKind, { long = false, sinceLast = false, liveExtras = null } = {}) {
   const base = CASES[caseName];
   const rules = BANNER_RULES[bannerKind];
   const instruction = rules ? buildWateringInstruction({ rules, completedAt: COMPLETED }) : null;
@@ -126,6 +126,7 @@ function build(caseName, weekPlan, bannerKind, { long = false, sinceLast = false
     const banner = buildWateringBanner(instruction, weekPlan);
     if (banner) reportV2.banner = banner;
   }
+  if (liveExtras && reportV2.banner) Object.assign(reportV2.banner, liveExtras);
   if (long) reportV2.snapshot = { ...reportV2.snapshot, rootCause: LONG_WHY, treatmentSummary: LONG_APPLIED };
   if (sinceLast) {
     const copy = fullSinceLast(Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0);
@@ -241,6 +242,45 @@ describe('lawn report lead word budget', () => {
       }
     },
   );
+
+  // GATE_LAWN_WATERING_FORECAST: the live-view forecast sentence and measured-rain
+  // note print inside the budgeted region, so the lead counts the one displayed.
+  describe('live watering additions (GATE_LAWN_WATERING_FORECAST)', () => {
+    const FORECAST_LINE = 'About 0.4 inch of rain is forecast by Tue 8 PM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.';
+    const OBSERVED_LINE = 'Radar measured about 0.5 inch of rain near your address since your visit. If your lawn got that rain, it counts as watering in today’s treatment. Local totals may vary, so run the watering above if your lawn stayed dry.';
+    const words = (t) => t.trim().split(/\s+/).length;
+    const waterIn = (opts = {}) => build('healthy', RUN_PLAN, 'water_in', opts);
+
+    test.each(Object.keys(CASES))('%s: the lead stays within the budget with either line on the banner, long fields and since-last included', (caseName) => {
+      for (const liveExtras of [{ forecastLine: FORECAST_LINE }, { observedRain: { inches: 0.5, source: 'mrms', days: [], line: OBSERVED_LINE } }]) {
+        for (const long of [false, true]) {
+          const v2 = build(caseName, RUN_PLAN, 'water_in', { long, sinceLast: true, liveExtras });
+          expect(leadWords(v2)).toBeLessThanOrEqual(WORD_BUDGET);
+          expect(v2.lead.sinceLast.lines.length).toBeGreaterThanOrEqual(1);
+        }
+      }
+    });
+
+    test('the displayed line is counted: the forecast sentence, or the note when both exist, and nothing on a hold', () => {
+      const base = leadWords(waterIn());
+      const forecastOnly = waterIn({ liveExtras: { forecastLine: FORECAST_LINE } });
+      // Same lead either way here, so the difference is exactly the banner line.
+      expect(leadWords(forecastOnly) - leadWords({ ...forecastOnly, banner: { ...forecastOnly.banner, forecastLine: undefined } })).toBe(words(FORECAST_LINE));
+      const both = waterIn({ liveExtras: { forecastLine: FORECAST_LINE, observedRain: { line: OBSERVED_LINE } } });
+      expect(leadWords(both) - leadWords({ ...both, banner: { ...both.banner, forecastLine: undefined, observedRain: undefined } })).toBe(words(OBSERVED_LINE));
+      expect(base).toBeLessThanOrEqual(WORD_BUDGET);
+      const hold = build('healthy', RUN_PLAN, 'hold', { liveExtras: { forecastLine: FORECAST_LINE } });
+      expect(leadWords(hold) - leadWords({ ...hold, banner: { ...hold.banner, forecastLine: undefined } })).toBe(0);
+    });
+
+    test('a lead that would overflow with the line counted drops lower-priority fields, not the ceiling', () => {
+      const withLine = build('healthy', RUN_PLAN, 'water_in', { long: true, sinceLast: true, liveExtras: { observedRain: { line: OBSERVED_LINE } } });
+      const without = build('healthy', RUN_PLAN, 'water_in', { long: true, sinceLast: true });
+      expect(leadWords(withLine)).toBeLessThanOrEqual(WORD_BUDGET);
+      const kept = (v2) => Object.keys(v2.lead).filter((k) => v2.lead[k] != null && !(Array.isArray(v2.lead[k]) && !v2.lead[k].length)).length;
+      expect(kept(withLine)).toBeLessThanOrEqual(kept(without));
+    });
+  });
 
   test('without the hand-off the lead has no sinceLast key (gate off is the same lead as before)', () => {
     const v2 = build('healthy', null, 'absent');

@@ -53,16 +53,17 @@ describe('copy', () => {
 
   test('the two sentences: fixed, in inches, no probability and no percent', () => {
     const sentences = [
-      forecastSentence({ forecastInches: 0.4, waterInInches: 0.25, byLabel: 'Wed 2 PM' }),
-      forecastSentence({ forecastInches: 1.25, waterInInches: 0.5, byLabel: '8 PM tonight' }),
+      forecastSentence({ forecastInches: 0.4, waterInInches: 0.25, checkpointLabel: 'Wed 8 AM' }),
+      forecastSentence({ forecastInches: 1.25, waterInInches: 0.5, checkpointLabel: '8 PM tonight' }),
       closeOutSentence({ measuredInches: 0.6 }),
       closeOutSentence({ measuredInches: 0.25 }),
     ];
-    expect(sentences[0]).toBe('About 0.4 inch of rain is forecast by Wed 2 PM. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.');
-    expect(sentences[2]).toBe('Done: radar measured at least 0.6 inch of rain at your home since your visit, which counts as watering in today’s treatment. There is no need to run your sprinklers for it.');
+    expect(sentences[0]).toBe('About 0.4 inch of rain is forecast by Wed 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.');
+    expect(sentences[2]).toBe('Radar measured about 0.6 inch of rain near your address since your visit. If your lawn got that rain, it counts as watering in today’s treatment. Local totals may vary, so run the watering above if your lawn stayed dry.');
     for (const sentence of sentences) {
       expect(sentence).not.toMatch(/%|percent|chance|probab|likel|odds/i);
-      expect(sentence).not.toMatch(/keep\s+off|stay\s+off|re-?entry|\bwait\b|\bdry\b|\bdried\b/i);
+      expect(sentence).not.toMatch(/keep\s+off|stay\s+off|re-?entry|\bwait\b|\bdried\b|\d\s*(hours?|minutes?)\b/i);
+      expect(sentence).not.toMatch(/\b(done|no need)\b/i);
       expect(sentence).toMatch(/\binch(es)?\b/);
       expect(copyIsClean(sentence)).toBe(true);
     }
@@ -78,11 +79,15 @@ describe('resolveWaterInForecast (frozen at completion)', () => {
     const instruction = waterIn();
     const fetchForecast = jest.fn(async () => ok(0.4));
     const forecast = await resolveWaterInForecast({ instruction, latitude: 27.5, longitude: -82.5, fetchForecast });
-    expect(forecast).toMatchObject({ inches: 0.4, source: 'open_meteo', windowFrom: instruction.completedAt, windowTo: instruction.waterInBy });
-    expect(forecast.line).toBe(`About 0.4 inch of rain is forecast by ${instruction.waterInByLabel}. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.`);
+    // Tue 2:40 PM ET completion, Wed 2 PM deadline: checkpoint 6 hours earlier, Wed 8 AM.
+    const checkpointAt = new Date(Date.parse(instruction.waterInBy) - 6 * 3600000).toISOString();
+    expect(forecast).toMatchObject({ inches: 0.4, source: 'open_meteo', windowFrom: instruction.completedAt, windowTo: checkpointAt, checkpointAt, checkpointLabel: 'Wed 8 AM' });
+    expect(forecast.line).toBe('About 0.4 inch of rain is forecast by Wed 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.');
+    // The forecast is read to the CHECKPOINT, never the deadline; the deadline is not in the sentence.
     const args = fetchForecast.mock.calls[0][0];
     expect(args.from.toISOString()).toBe(instruction.completedAt);
-    expect(args.to.toISOString()).toBe(instruction.waterInBy);
+    expect(args.to.toISOString()).toBe(checkpointAt);
+    expect(forecast.line).not.toContain(instruction.waterInByLabel);
   });
 
   test.each([
@@ -98,6 +103,39 @@ describe('resolveWaterInForecast (frozen at completion)', () => {
 
   test('a thrown fetch fails open', async () => {
     expect(await resolveWaterInForecast({ instruction: waterIn(), latitude: 27.5, longitude: -82.5, fetchForecast: async () => { throw new Error('boom'); } })).toBeNull();
+  });
+
+  test('rain forecast only AFTER the checkpoint (the deadline is the only hour that reaches the amount): no sentence', async () => {
+    const instruction = waterIn();
+    // Hours up to the checkpoint are dry; the fetch is asked for the checkpoint window only.
+    const fetchForecast = jest.fn(async ({ to }) => (Date.parse(to) < Date.parse(instruction.waterInBy) ? ok(0.05) : ok(0.6)));
+    expect(await resolveWaterInForecast({ instruction, latitude: 27.5, longitude: -82.5, fetchForecast })).toBeNull();
+    expect(fetchForecast).toHaveBeenCalledTimes(1);
+  });
+
+  test('completion to checkpoint must be at least 6 hours (12 hours to the deadline): shorter windows get no sentence and no forecast read', async () => {
+    const at = '2026-10-06T18:00:00Z'; // Tue 2 PM ET, on the hour
+    const exact = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [{ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 12, source: 'label' }], completedAt: at })));
+    const short = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [{ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 11, source: 'label' }], completedAt: at })));
+    const fetchForecast = jest.fn(async () => ok(0.6));
+    expect((await resolveWaterInForecast({ instruction: exact, latitude: 27.5, longitude: -82.5, fetchForecast })).checkpointLabel).toBe('8 PM tonight');
+    fetchForecast.mockClear();
+    expect(await resolveWaterInForecast({ instruction: short, latitude: 27.5, longitude: -82.5, fetchForecast })).toBeNull();
+    expect(fetchForecast).not.toHaveBeenCalled();
+    // The shipped default completion (2:40 PM, floored deadline) just short of 12 hours total.
+    const tooShort = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [{ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 12, source: 'label' }], completedAt: COMPLETED })));
+    expect(await resolveWaterInForecast({ instruction: tooShort, latitude: 27.5, longitude: -82.5, fetchForecast })).toBeNull();
+  });
+
+  test.each([
+    ['same evening', '2026-10-06T12:00:00Z', 18, '8 PM tonight'], // 8 AM ET -> deadline 2 AM Wed, checkpoint 8 PM Tue
+    ['across midnight', '2026-10-06T14:00:00Z', 24, 'Wed 4 AM'], // 10 AM ET Tue -> deadline 10 AM Wed, checkpoint 4 AM Wed
+    ['late evening visit', '2026-10-07T01:00:00Z', 30, 'Wed 9 PM'], // 9 PM ET Tue -> deadline 3 AM Thu, checkpoint 9 PM Wed
+  ])('checkpoint label, %s', async (_name, completedAt, byHours, expected) => {
+    const instruction = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [{ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: byHours, source: 'label' }], completedAt })));
+    const forecast = await resolveWaterInForecast({ instruction, latitude: 27.5, longitude: -82.5, fetchForecast: async () => ok(0.4) });
+    expect(forecast.checkpointLabel).toBe(expected);
+    expect(forecast.line).toContain(`forecast by ${expected}.`);
   });
 
   test('a hold, a hold-then-water-in and a no-claim never get a sentence and never reach the forecast', async () => {
@@ -119,7 +157,7 @@ describe('resolveWaterInForecast (frozen at completion)', () => {
 
   test('frozenForecastLine: shape-checked, water-in only, clean copy only', () => {
     const base = waterIn();
-    const line = 'About ½ inch of rain is forecast by Wed 2 PM. If at least ¼ inch actually falls by then, it counts as watering in today’s treatment. If it does not, run the watering above.';
+    const line = 'About ½ inch of rain is forecast by Wed 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.';
     expect(frozenForecastLine({ ...base, forecast: { line, inches: 0.5 } })).toBe(line);
     expect(frozenForecastLine(base)).toBeNull();
     expect(frozenForecastLine({ ...base, forecast: { line, inches: 'x' } })).toBeNull();
@@ -170,7 +208,7 @@ describe('the write gate freezes the sentence (first writer wins, replays identi
     const frozen = state.notes.lawnWateringFreeze.wateringInstruction;
     expect(frozen.lines).toEqual(instruction.lines);
     expect(frozen.forecast.inches).toBe(0.4);
-    expect(frozen.forecast.line).toMatch(/^About 0\.4 inch of rain is forecast by /);
+    expect(frozen.forecast.line).toMatch(/^About 0\.4 inch of rain is forecast by Wed 8 AM\./);
     expect(result.wateringFreeze.wateringInstruction.forecast).toEqual(frozen.forecast);
     // The property's own coordinates, never a fixed point.
     expect(fetchPropertyForecast).toHaveBeenCalledWith(expect.objectContaining({ latitude: 27.5, longitude: -82.5 }));
@@ -274,7 +312,7 @@ describe('live close-out (radar-measured rain only)', () => {
     ], inside);
     expect(closed).toEqual({
       inches: 0.3, source: 'mrms', days: ['2026-10-07', '2026-10-08'],
-      line: 'Done: radar measured at least 0.3 inch of rain at your home since your visit, which counts as watering in today’s treatment. There is no need to run your sprinklers for it.',
+      line: 'Radar measured about 0.3 inch of rain near your address since your visit. If your lawn got that rain, it counts as watering in today’s treatment. Local totals may vary, so run the watering above if your lawn stayed dry.',
     });
     // Exactly the amount counts.
     expect(observedCloseOut(instruction, [{ date: '2026-10-07', inches: 0.25 }], inside)).not.toBeNull();
@@ -300,9 +338,32 @@ describe('live close-out (radar-measured rain only)', () => {
     const fetchMrmsDailyRain = jest.fn(async () => ({ days: [{ date: '2026-10-07', inches: 0.2 }, { date: '2026-10-08', inches: 0.3 }], complete: true }));
     const data = { reportV2: { banner: { state: 'water_in', expiresAt: instruction.waterInBy, lines: instruction.lines } } };
     await attachLiveCloseOut(data, deps({ instruction, latitude: 27.5, longitude: -82.5, now: NOW, fetchMrmsDailyRain }));
-    expect(fetchMrmsDailyRain).toHaveBeenCalledWith({ latitude: 27.5, longitude: -82.5, start: '2026-10-07', end: '2026-10-08' });
+    expect(fetchMrmsDailyRain).toHaveBeenCalledWith({ latitude: 27.5, longitude: -82.5, start: '2026-10-07', end: '2026-10-08', signal: expect.any(AbortSignal) });
     expect(data.reportV2.banner.observedRain).toMatchObject({ inches: 0.5, source: 'mrms' });
     expect(data.reportV2.banner.lines).toEqual(instruction.lines);
+  });
+
+  test('the 2.5 s deadline wins the race AND aborts the radar request', async () => {
+    const instruction = longWindow();
+    let seen;
+    const fetchMrmsDailyRain = jest.fn(({ signal }) => new Promise((resolve) => {
+      seen = signal;
+      signal.addEventListener('abort', () => resolve(null));
+    }));
+    const data = { reportV2: { banner: { state: 'water_in', expiresAt: instruction.waterInBy } } };
+    await attachLiveCloseOut(data, deps({ instruction, latitude: 27.5, longitude: -82.5, now: NOW, fetchMrmsDailyRain, deadlineMs: 20 }));
+    expect(seen.aborted).toBe(true);
+    expect(data.reportV2.banner).not.toHaveProperty('observedRain');
+  });
+
+  test('a lookup that answers in time is not aborted', async () => {
+    const instruction = longWindow();
+    let seen;
+    const fetchMrmsDailyRain = jest.fn(async ({ signal }) => { seen = signal; return { days: [{ date: '2026-10-07', inches: 0.4 }] }; });
+    const data = { reportV2: { banner: { state: 'water_in', expiresAt: instruction.waterInBy } } };
+    await attachLiveCloseOut(data, deps({ instruction, latitude: 27.5, longitude: -82.5, now: NOW, fetchMrmsDailyRain, deadlineMs: 500 }));
+    expect(seen.aborted).toBe(false);
+    expect(data.reportV2.banner.observedRain.inches).toBe(0.4);
   });
 
   test('fail open: radar down, slow, no coordinates, expired banner, or a hold banner leave the banner alone', async () => {
