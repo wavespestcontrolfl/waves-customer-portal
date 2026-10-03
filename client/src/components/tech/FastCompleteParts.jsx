@@ -287,6 +287,7 @@ export function RecoveredCompletion({ submission }) {
             {String(submission.prompt.message || '').split('\n').filter(Boolean).map((line) => (
               <p key={line} className="tech-visit-muted">{line}</p>
             ))}
+            {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
             <div className="tech-visit-tile-grid">
               <Chip label="Go back" disabled={submission.submitting} onClick={submission.dismissPrompt} />
               <Chip label="Send as is" disabled={submission.submitting} onClick={submission.confirm} />
