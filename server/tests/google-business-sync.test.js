@@ -2566,34 +2566,25 @@ describe('Google Business review sync', () => {
   });
 });
 
-describe('bad-review bell hooks (GATE_REVIEW_ALERT): both insert paths hand the new review to the helper', () => {
+describe('bad-review bell (GATE_REVIEW_ALERT): one pass after every review sync', () => {
   let db;
   let service;
-  let notifyLowRatingReview;
+  let syncLowRatingReviewAlerts;
 
   beforeEach(() => {
     jest.resetModules();
     process.env.GOOGLE_MAPS_API_KEY = 'maps-key';
     db = createDbMock();
     jest.doMock('../models/db', () => db);
-    notifyLowRatingReview = jest.fn(async () => ({ rang: true }));
-    jest.doMock('../services/review-low-rating-alert', () => ({ notifyLowRatingReview }));
+    syncLowRatingReviewAlerts = jest.fn(async () => ({ raised: 1, failed: 0, closed: 0 }));
+    jest.doMock('../services/review-low-rating-alert', () => ({ syncLowRatingReviewAlerts }));
     service = require('../services/google-business');
     service._clients = {};
     service._getHeaders = jest.fn(async () => ({ Authorization: 'Bearer test' }));
   });
   afterEach(() => { delete global.fetch; delete process.env.GOOGLE_MAPS_API_KEY; });
 
-  test('GBP path: a fresh insert is handed over with its stars, reviewer, customer and written date; a re-sync is not', async () => {
-    const row = { customer_id: null, star_rating: 2, reviewer_name: 'Pat Example', review_created_at: '2026-10-01T12:00:00Z', location_id: 'bradenton' };
-    await service._applyPostWriteSideEffects({ result: { id: 'rev-row-1', inserted: true }, row, normalized: { gbp_review_name: 'n' }, existing: null, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
-    expect(notifyLowRatingReview).toHaveBeenCalledWith({ reviewId: 'rev-row-1', starRating: 2, reviewerName: 'Pat Example', customerId: null, reviewCreatedAt: '2026-10-01T12:00:00Z' });
-    notifyLowRatingReview.mockClear();
-    await service._applyPostWriteSideEffects({ result: { id: 'rev-row-1', inserted: false }, row, normalized: { gbp_review_name: 'n' }, existing: { customer_id: null }, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
-    expect(notifyLowRatingReview).not.toHaveBeenCalled();
-  });
-
-  test('Places fallback: the inserted row is handed over with its new id and the sample\'s stars and time', async () => {
+  test('runs once, after the reviews are stored (Places fallback path)', async () => {
     service._getClient = jest.fn(async () => null);
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
@@ -2601,9 +2592,10 @@ describe('bad-review bell hooks (GATE_REVIEW_ALERT): both insert paths hand the 
       }
       return { json: async () => ({ status: 'OK', result: { rating: 4, user_ratings_total: 31 } }) };
     });
+    let storedWhenCalled = null;
+    syncLowRatingReviewAlerts.mockImplementation(async () => { storedWhenCalled = db.__state.rows.google_reviews.some((r) => r.reviewer_name === 'New Person'); return {}; });
     await service.syncAllReviews();
-    const inserted = db.__state.rows.google_reviews.find((r) => r.reviewer_name === 'New Person');
-    expect(notifyLowRatingReview).toHaveBeenCalledTimes(1);
-    expect(notifyLowRatingReview.mock.calls[0][0]).toMatchObject({ reviewId: inserted.id, starRating: 1, reviewerName: 'New Person', reviewCreatedAt: new Date(1779307900 * 1000).toISOString() });
+    expect(syncLowRatingReviewAlerts).toHaveBeenCalledTimes(1);
+    expect(storedWhenCalled).toBe(true);
   });
 });

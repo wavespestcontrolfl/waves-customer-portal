@@ -117,8 +117,6 @@ function refsFromRow(row) {
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
     promiseIds: arr(meta.promise_ids).map(uuidOrNull).filter(Boolean),
-    // The review a bad-review bell is about (review-low-rating-alert.js).
-    reviewId: String(meta.dedupeKey || '').startsWith(LOW_RATING_REVIEW_PREFIX) ? uuidOrNull(meta.reviewId) : null,
   };
 }
 
@@ -140,7 +138,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map(), consents: new Map(), reviews: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map(), consents: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -153,10 +151,6 @@ async function loadSubjects(rows, conn = db) {
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   const promiseIds = ids((r) => r.promiseIds);
-  const reviewIds = ids((r) => (r.reviewId ? [r.reviewId] : []));
-  if (reviewIds.length) {
-    data.reviews = byId(await conn('google_reviews').whereIn('id', reviewIds).select('id', 'review_reply', 'dismissed', 'missing_since'));
-  }
   if (promiseIds.length) {
     data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'reviewed_at'));
   }
@@ -232,8 +226,6 @@ function subjectFor(row, data, todayET) {
     visitOf: (id) => data.visits.get(id),
     // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
     promiseOf: (id) => data.promises.get(id),
-    // The review a bad-review bell names; loaded ids only, so a miss is a review gone.
-    review: resolved.refs.reviewId ? data.reviews.get(resolved.refs.reviewId) : undefined,
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
     leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
     // The latest consent the bell's customer recorded at the current text
@@ -343,25 +335,6 @@ function promiseMarksSettled(s) {
   return settled ? 'Every promise it named is settled' : null;
 }
 
-// A bad-review bell (review-low-rating-alert.js, one per review, raised only
-// when the review is first stored) is done when the review is answered:
-// a published reply on it (ours or one posted on Google, which the sync
-// stores the same way; an unpublished '[DRAFT] …' reply does not count), a person dismissed it on the Reviews page, it left Google
-// (missing_since), or the row is gone. A bell naming no review is never judged.
-const LOW_RATING_REVIEW_PREFIX = 'review-low-rating:';
-function lowRatingReviewSettled(s) {
-  if (!s.refs.reviewId) return null;
-  const review = s.review;
-  if (!review) return 'The review is gone';
-  // A '[DRAFT] …' reply is ours, unpublished: the review still needs an answer.
-  const { hasRealReply } = require('./review-reply/draft-prefix');
-  const reply = String(review.review_reply || '').trim();
-  if (reply && hasRealReply(reply)) return 'The review has a reply';
-  if (review.dismissed === true) return 'The review was dismissed';
-  if (review.missing_since) return 'The review left Google';
-  return null;
-}
-
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -383,9 +356,6 @@ const CLASSES = [
   { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
     // raised again (same key) only while a mark is still unsaved.
     key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
-  },
-  { // review-low-rating-alert.js — one bell per review, raised once at insert.
-    key: 'review_low_rating', categories: ['review_low_rating'], prefix: LOW_RATING_REVIEW_PREFIX, rule: lowRatingReviewSettled,
   },
 ];
 
