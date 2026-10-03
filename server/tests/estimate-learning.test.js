@@ -238,10 +238,12 @@ describe('computeEditSummary', () => {
     expect(same('123 Main St, Bradenton, FL', '123 Main Street, Bradenton, FL 34205, USA')).toBeUndefined();
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St Bradenton FL 34205')).toBeUndefined();
     expect(same('123 East Oak St, Bradenton, FL', '123 E Oak Street Bradenton Florida 34205')).toBeUndefined();
-    // Detail dropped from the end is the same address too.
-    expect(same('123 Main St, Bradenton, FL 34205', '123 main st')).toBeUndefined();
+    // A state or ZIP on one side only is formatting.
+    expect(same('123 Main St, Bradenton', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();
+    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St Bradenton')).toBeUndefined();
     expect(same(null, null)).toBeUndefined();
-    // Another house, street, direction, unit, city or ZIP is a real change.
+    // Another house, street, direction, unit, city or ZIP is a real change,
+    // and so is one added or dropped at the end.
     expect(same('123 Main St, Bradenton, FL', '125 Main St, Bradenton, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL', '123 Oak St, Bradenton, FL')).toBe(true);
     expect(same('123 East Oak St, Bradenton, FL', '123 East Pine St, Bradenton, FL 34205')).toBe(true);
@@ -250,8 +252,12 @@ describe('computeEditSummary', () => {
     expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBe(true);
     expect(same('123 Main St, Bradenton, FL', '123 Main St, Sarasota, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34219')).toBe(true);
+    expect(same('123 Main St', '123 Main St E')).toBe(true);
+    expect(same('123 Main St', '123 Main St Apt 4')).toBe(true);
+    expect(same('123 Main St Apt 4', '123 Main St')).toBe(true);
+    expect(same('123 Main St', '123 Main St, Bradenton')).toBe(true);
     // Too little to match on, or one side missing.
-    expect(same('123 Main', '123 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main', '123 Main 34205')).toBe(true);
     expect(same(null, '123 Main St')).toBe(true);
   });
 

@@ -127,15 +127,16 @@ function serviceKeysFrom(data) {
   return null;
 }
 
-// The same address with detail only ADDED at the end is not an edit. The
-// engine draft holds the address as the caller gave it; the builder's save
-// replaces it with the autocomplete form (suffix spelled out, ZIP and
-// country appended, commas dropped). Two addresses are the same only when,
-// word for word after punctuation is dropped and suffix and direction words
-// are abbreviated, one is the START of the other. Anything else is a
-// change: another house number, street word, direction, unit, city or ZIP,
-// or a word inserted in the middle. No address part is guessed at, so the
-// rule can only over-count an edit, never hide one.
+// The same address in another FORMAT is not an edit. The engine draft
+// holds the address as the caller gave it; the builder's save replaces it
+// with the autocomplete form (suffix spelled out, country appended, commas
+// dropped). Two addresses are the same only when they are equal word for
+// word after punctuation is dropped, suffix and direction words are
+// abbreviated and a trailing country is removed; the one ending allowed to
+// differ is a state or ZIP present on one side only. Anything else is a
+// change: another house number, street word, direction, unit or city, a
+// different ZIP, or a word added anywhere. No address part is guessed at,
+// so the rule can over-count an edit and never hide one.
 const STREET_WORDS = Object.freeze({
   street: 'st', avenue: 'ave', av: 'ave', road: 'rd', drive: 'dr', boulevard: 'blvd', lane: 'ln',
   court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter', terr: 'ter', trail: 'trl', parkway: 'pkwy',
@@ -156,14 +157,17 @@ function addressTokens(value) {
   return tokens;
 }
 
+const isStateOrZip = (t) => t === 'fl' || /^\d{5}$/.test(t) || /^\d{4}$/.test(t);
+
 function sameProperty(a, b) {
   const x = addressTokens(a);
   const y = addressTokens(b);
-  if (!x.length || !y.length) return x.length === y.length;
   const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-  // A bare house number or street word is not enough to call two addresses one.
-  if (short.length < long.length && short.length < 3) return false;
-  return short.every((t, i) => long[i] === t);
+  if (!short.every((t, i) => long[i] === t)) return false;
+  if (short.length === long.length) return true;
+  // A house number, a street word and one more word at least, before a
+  // missing state or ZIP is read as formatting.
+  return short.length >= 3 && long.slice(short.length).every(isStateOrZip);
 }
 
 // The WaveGuard setup fee is not an edit either. The builder's save folds
