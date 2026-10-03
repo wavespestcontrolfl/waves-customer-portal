@@ -74,8 +74,9 @@ describe('lead-webhook uses the internal alert caller ID for the ring to Adam', 
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'lead-webhook.js'), 'utf8');
     expect(src).toMatch(/const fromNumber = TWILIO_NUMBERS\.internalAlertCallerId\(\);/);
-    // The customer-facing bridge leg intentionally stays on the main line.
-    expect(src).toMatch(/const bridgeCallerId = TWILIO_NUMBERS\.mainLine\.number;/);
+    // The customer-facing bridge leg presents the lead's home line (main line
+    // when the gate is off or no office is known) — home-line PR 2.
+    expect(src).toMatch(/const bridgeCallerId = require\('\.\.\/services\/home-line'\)\.homeLineCallerId\(customer\);/);
     // Nothing else in the lead alert path dials from the main line directly.
     const alertFromMain = src.match(/const fromNumber = TWILIO_NUMBERS\.mainLine\.number;/g) || [];
     expect(alertFromMain).toHaveLength(0);

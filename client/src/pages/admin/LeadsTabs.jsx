@@ -2640,6 +2640,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             callViaBridge(
                                               lead.phone,
                                               `${lead.first_name || ""} ${lead.last_name || ""}`.trim(),
+                                              undefined,
+                                              lead.customer_id,
                                             )
                                           }
                                         >

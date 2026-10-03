@@ -1254,7 +1254,9 @@ const visitPrepUpload = multer({
 // differs: this one via the page's own visitServicesFor, the locked recheck
 // via reloadEligibleVisitPrepRow below (openMembers on the write's own
 // transaction).
-async function deriveVisitPrepEligibility(svc) {
+// `opts.reserviceCallback` is passed only by reservice-public.js, after it
+// proved the row is the token customer's re-service callback.
+async function deriveVisitPrepEligibility(svc, opts = {}) {
   const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
   const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
   return visitPrep.visitPrepEligibility({
@@ -1262,6 +1264,7 @@ async function deriveVisitPrepEligibility(svc) {
     state,
     visitUnknown: visitInfoRaw.visitUnknown,
     dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+    reserviceCallback: opts.reserviceCallback === true,
   });
 }
 
@@ -1298,7 +1301,7 @@ async function deriveVisitPrepEligibility(svc) {
 // its own copy — schedule.js requires this module directly (never the
 // reverse), so there is no cycle the way there would be pulling this logic
 // into visit-prep.js (which this route already requires).
-async function reloadEligibleVisitPrepRowCore(svc, trx) {
+async function reloadEligibleVisitPrepRowCore(svc, trx, opts = {}) {
   if (!svc) return null;
   let visitUnknown = false;
   let visitInfo = {};
@@ -1316,7 +1319,11 @@ async function reloadEligibleVisitPrepRowCore(svc, trx) {
   }
   const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
   const eligibility = visitPrep.visitPrepEligibility({
-    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+    svc,
+    state,
+    visitUnknown,
+    dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+    reserviceCallback: opts.reserviceCallback === true,
   });
   return eligibility.eligible ? svc : null;
 }

@@ -172,15 +172,44 @@ export function deleteVisitCompletionDraft(visitId, operatorScope) {
   return deleteCompletionDraft(visitId, visitDraftScope(operatorScope));
 }
 
+// Recap clips (TechRecapCapture) a technician captured but has not finished
+// uploading: the clip File itself, its tag and how far its upload got, with
+// the message shown beside it. Same draft database, retention sweep and
+// per-operator scoping as visit closeout forms, under their own namespace,
+// so a clip survives the app being closed or the phone restarting in a dead
+// zone and comes back with its Retry button.
+function recapDraftScope(operatorScope) {
+  return `recap:${operatorScope ? String(operatorScope) : "anonymous"}`;
+}
+
+export function putRecapClipDraft(serviceId, record, operatorScope, now = Date.now()) {
+  return putCompletionDraft(serviceId, record, recapDraftScope(operatorScope), now);
+}
+
+export function getRecapClipDraft(serviceId, operatorScope) {
+  return getCompletionDraft(serviceId, recapDraftScope(operatorScope));
+}
+
+export function deleteRecapClipDraft(serviceId, operatorScope) {
+  return deleteCompletionDraft(serviceId, recapDraftScope(operatorScope));
+}
+
+// The retention sweep for recap clips only, run by the tech home page: a
+// tech who never opens the admin schedule (whose completion panel runs the
+// full sweep) must not keep abandoned clips — videos included — forever.
+export function pruneRecapClipDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+  return pruneCompletionDrafts(now, maxAgeMs, "recap:");
+}
+
 // Deletes every draft row older than `maxAgeMs` across all scopes and
 // resolves the [{ serviceId, scope }] it removed so the caller can drop the
 // matching localStorage metadata. Each row's age check and delete are
 // ordered behind that draft's in-flight writes, so a panel refreshing an
 // old draft right now is re-read after its refresh and kept.
-export function pruneCompletionDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+export function pruneCompletionDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS, keyPrefix = "") {
   return withStore(DRAFT_DB_NAME, "readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
-      (Array.isArray(keys) ? keys : []).map((key) => withDraftKey(String(key), (k) => (
+      (Array.isArray(keys) ? keys : []).filter((key) => String(key).startsWith(keyPrefix)).map((key) => withDraftKey(String(key), (k) => (
         withStore(DRAFT_DB_NAME, "readonly", null, (store) => store.get(k)).then((row) => {
           if (!row || now - Number(row.storedAt || 0) < maxAgeMs) return null;
           return withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(k))

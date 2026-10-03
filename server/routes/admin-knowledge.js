@@ -105,7 +105,8 @@ router.post('/query', async (req, res, next) => {
 });
 
 // GET /api/admin/knowledge/queries — recent queries
-router.get('/queries', async (req, res, next) => {
+// Query LOG (everyone's raw questions and answers) — admin-only (codex #5568 r4 P2).
+router.get('/queries', requireAdmin, async (req, res, next) => {
   try {
     const queries = await withoutSavedGaps(db('knowledge_queries'))
       .orderBy('created_at', 'desc')

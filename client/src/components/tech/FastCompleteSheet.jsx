@@ -80,13 +80,19 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  BlogPostSection, EMPTY_LANE_RECORD, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, TechNoteBoxPhotos, TraceSection, laneRecordNeedsAction,
+  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter,
+  TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
+  typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
   useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
 import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
+import {
+  completionAreasForTypedFindings, parseApplicationAreas, trapSetupConflicts, typedActivityScoreConflict, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
+} from '../../lib/typed-findings-rules';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
@@ -183,6 +189,18 @@ function serviceChangedSinceSchedule(visit, service) {
 // The lane a report-flow visit was routed as (GATE_LANE_VOICE_FILL): the
 // lane the live visit must still read as, and whose record the sheet reads.
 const routedLaneOf = (service) => (service?.reportFlow === true && service.laneFlow === true ? service.laneKey || null : null);
+// The typed form a report-flow visit was routed as (GATE_TYPED_VOICE_FILL):
+// the form the live visit must still read as, and whose record the sheet
+// reads.
+const routedTypedOf = (service) => (service?.reportFlow === true && service.typedFlow === true ? service.typedType || null : null);
+
+// Whether the live visit is still one this sheet takes as it was routed: a
+// lane visit its lane, a typed visit its form, any other one the short form.
+function routeStillHolds(context, service) {
+  if (service?.typedFlow) return context?.typedType === service.typedType;
+  if (service?.laneFlow) return context?.lane === service.laneKey;
+  return context?.eligible === true;
+}
 
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
@@ -192,9 +210,9 @@ function blockedReasonFor(context, service) {
   if (!service?.reportFlow && visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   // A lane visit (GATE_LANE_VOICE_FILL) must still read as the lane the
-  // schedule routed it for; any other visit must still be one the short
-  // form takes.
-  if (service?.laneFlow ? context?.lane !== service.laneKey : context?.eligible !== true) return 'This visit needs the full form.';
+  // schedule routed it for, a typed visit (GATE_TYPED_VOICE_FILL) as its
+  // form; any other visit must still be one the short form takes.
+  if (!routeStillHolds(context, service)) return 'This visit needs the full form.';
   return '';
 }
 
@@ -351,10 +369,10 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
 // The report flow takes visits the house mix is not for (an initial
 // cleanout), so it seeds only where the recap modal and the full form would;
 // a re-service sheet always starts with it.
-function seedsHouseMix(visit, { serviceType, reportFlow, laneKey }) {
+function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
   // A lane visit (bed bug, fire ant, tick, …) is never the pest house mix,
   // a callback included.
-  if (laneKey) return false;
+  if (laneKey || typedType) return false;
   return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
 }
 
@@ -373,6 +391,7 @@ function sheetVisitIdentity(visit, reportFlow) {
 function useFastCompleteContext({
   base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow,
   laneKey = null,
+  typedType = null,
 }) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null,
@@ -398,12 +417,15 @@ function useFastCompleteContext({
         const commonProducts = Array.isArray(data?.commonProducts)
           ? data.commonProducts.filter((common) => common && common.productId != null)
           : [];
+        // A typed visit keeps its own activity (the completion ignores the
+        // 1 to 5 rating on a typed form), so it asks for none.
+        const rates = ratingContract?.allowed === true && !typedType;
         setCtx({
           loading: false,
           loadError: '',
           blockedReason: blockedReasonFor(data, {
             routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow, routedServiceType, routedServiceKey,
-            laneFlow: !!laneKey, laneKey,
+            laneFlow: !!laneKey, laneKey, typedFlow: !!typedType, typedType,
           }),
           visit,
           products,
@@ -411,19 +433,21 @@ function useFastCompleteContext({
           // The house totals are in the unit the resolver gives (4 fl oz), so
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
-          rows: seedsHouseMix(visit, { serviceType, reportFlow, laneKey })
+          rows: seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType })
             ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
           visitIdentity: sheetVisitIdentity(visit, reportFlow),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
           traceOnReport: data?.traceOnReport !== false,
+          // Step 3 "after sending": book the follow-up a completion suggests.
+          followupBooking: data?.followupBooking === true,
           rating: {
-            allowed: ratingContract?.allowed === true,
+            allowed: rates,
             scaleLabels: ratingContract?.scaleLabels || null,
             // The report flow opens a first visit's tracker at 5 (owner
             // ruling 2026-09-24, the full form's prefill).
-            firstVisit: ratingContract?.allowed === true && ratingContract?.firstVisit === true,
+            firstVisit: rates && ratingContract?.firstVisit === true,
           },
         });
       } catch (err) {
@@ -431,7 +455,7 @@ function useFastCompleteContext({
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow, laneKey]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow, laneKey, typedType]);
   // The stock on hand the server has now, for a product restocked while the
   // sheet is open; nothing else is re-read. Resolves to the fresh catalog
   // rows by id.
@@ -494,6 +518,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedServiceKey: service?.routedServiceKey,
     reportFlow,
     laneKey: routedLaneOf(service),
+    typedType: routedTypedOf(service),
   });
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
@@ -768,10 +793,10 @@ function reportServiceDate(day) {
 // marks and the photos the writer reads. The tip prints as its own card on
 // the report (the writer never repeats it), so it is not part of it. Nor is
 // the trace: it only gives a perimeter spray its length.
-function writerSignature(form, rows, promiseMarks, photos, laneRecord = null) {
+function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
   return JSON.stringify({
-    // A lane visit's record (its places and findings) is what the report says.
-    ...(laneRecord ? { lane: [laneRecord.areas, laneRecord.values] } : {}),
+    // A lane or typed visit's record is what the report says.
+    ...(recordPart || {}),
     note: form.note.trim(),
     products: rows.filter((row) => row.active)
       .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
@@ -793,9 +818,26 @@ function writerSignature(form, rows, promiseMarks, photos, laneRecord = null) {
 // own record (GATE_LANE_VOICE_FILL), its places standing where the note's
 // heard places stand and its findings as the observations the full form
 // sends; else what the note was heard to say.
-function recordInputs(laneRecord, facts) {
-  if (!laneRecord) return { heard: facts, observations: null };
-  return { heard: { areas: laneRecord.areas }, observations: Object.values(laneRecord.values) };
+// A typed visit's record (GATE_TYPED_VOICE_FILL) is its typed form's own
+// values, sent as the full form sends them (structuredFindings), with the
+// activity score when it is the tech's to set; its places are its form's own
+// area field, as the full form sends them (the sheet has no other places).
+function recordInputs(mode, record, facts, typedSchema = null) {
+  if (mode === 'lane' && record) {
+    const observations = Object.values(record.values);
+    return { heard: { areas: record.areas }, writerExtras: { observations }, completionExtras: { structuredObservations: observations } };
+  }
+  if (mode === 'typed' && record) {
+    const structuredFindings = { type: typedSchema.type, values: record.values };
+    const score = typedScoreIsTechs(typedSchema) && Number.isInteger(record.score) ? record.score : null;
+    const areaKey = typedTreatmentAreaField(typedSchema)?.key || null;
+    return {
+      heard: { areas: completionAreasForTypedFindings({ typedAreaKey: areaKey, findingsValues: record.values, genericAreas: [] }) },
+      writerExtras: { structuredFindings, typedActivityScore: score },
+      completionExtras: { structuredFindings, ...(score != null ? { activityScore: score, activityScoreSource: 'technician' } : {}) },
+    };
+  }
+  return { heard: facts, writerExtras: {}, completionExtras: {} };
 }
 
 function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photos, promiseMarks }) {
@@ -831,12 +873,12 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
 // the full form's customer text, pay link and review ask; a re-service never
 // gets a pay link or a review ask.
 function reportCompletionBody({
-  form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks, laneRecord = null,
+  form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks, recordFields = null,
 }) {
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
-  // A lane visit records its own places and findings, as the report was
-  // written from them.
-  const { heard, observations } = recordInputs(laneRecord, draft.facts);
+  // A lane or typed visit records its own record, as the report was written
+  // from it.
+  const { heard, completionExtras } = recordFields || recordInputs(null, null, draft.facts);
   return {
     visitOutcome: 'completed',
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
@@ -856,7 +898,7 @@ function reportCompletionBody({
       };
     }),
     areasServiced: heard?.areas || [],
-    ...(observations ? { structuredObservations: observations } : {}),
+    ...completionExtras,
     customerInteraction: form.customerHome,
     ...(ratingSent ? { clientPestRating: form.rating } : {}),
     // The untouched first-visit 5: the server re-checks it is still the
@@ -875,27 +917,39 @@ function reportCompletionBody({
   };
 }
 
+// What an empty product list says, per record mode. A lane visit's work
+// without a product (heat, steam, nest removal, an inspection) is recorded by
+// its protocol action, which carries its re-entry wait or inspection-only
+// standing on the report; the sheet records none, so that work goes on the
+// full form. A typed form records its work in its own fields (treatments,
+// inspections), so it needs no product (null: no hold).
+// The send holds per record mode: a lane visit's, a typed visit's, else the
+// pest visit's.
+const sendHoldsFor = (mode) => ({ lane: laneSendHolds, typed: typedSendHolds })[mode] || sendHolds;
+
+const NO_PRODUCT_HOLDS = {
+  lane: 'Add the product you applied. Work done without one (heat, steam, nest removal, an inspection) goes on the Full form.',
+  typed: null,
+};
+
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, lane, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
+  const noProduct = mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.';
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
     [!photosLoaded, 'Loading photos…'],
     [photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
-    // A lane visit's work without a product (heat, steam, nest removal, an
-    // inspection) is recorded by its protocol action, which carries its
-    // re-entry wait or inspection-only standing on the report; the sheet
-    // records none, so that work goes on the full form.
-    [!active.length, lane ? 'Add the product you applied. Work done without one (heat, steam, nest removal, an inspection) goes on the Full form.' : 'Select at least one product.'],
+    [!active.length && noProduct, noProduct],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
-    ...(stage === 'complete' ? (lane ? laneSendHolds : sendHolds)({ active, lane, ...sendInputs }) : []),
+    ...(stage === 'complete' ? sendHoldsFor(mode)({ active, ...sendInputs }) : []),
   ].find(([missing]) => missing) || [];
   return { reason, stockRow, fix };
 }
@@ -939,7 +993,7 @@ const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv'
 // confirm. A product picked as a perimeter spray needs a traced length, and
 // a saved trace shows on the customer's report only with such a spray to
 // back it (as on a pest visit).
-function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane, laneRecord, traceOnReport = true }) {
+function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane, record: laneRecord, traceOnReport = true }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const laneAreas = laneRecord.areas;
   const perimeterRow = perimeterSprayRow(active, draft);
@@ -977,6 +1031,70 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
       ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
       : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
     [interiorUnbacked, 'Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.', null, 'remove_trace'],
+  ];
+}
+
+// A typed visit (GATE_TYPED_VOICE_FILL): its record must answer every field
+// the completion requires now (typed_findings_required/invalid), the
+// activity score when it is the tech's, and a score that agrees with the
+// findings (activity_score_inconsistent). A record whose nothing-found state
+// keeps the report's standard wording (the full form holds Generate there)
+// goes on the full form. No trace step here: a perimeter spray needs its
+// traced length, and a saved trace the report would show goes on the full
+// form too.
+// The ways a product goes down that are not a spray (the office form's spray
+// evidence leaves them out).
+const PLACED_METHODS = new Set(['bait_placement', 'station_check', 'trunk_injection']);
+
+// The activity score a typed record carries: the tech's own where they set
+// it, else the one its findings derive (deriveScores), or none.
+function typedScoreOf(schema, record) {
+  const activity = schema?.activity;
+  if (!activity) return null;
+  if (!activity.deriveField) return Number.isInteger(record.score) ? record.score : null;
+  const derived = activity.deriveScores?.[String(record.values[activity.deriveField] ?? '')];
+  return Number.isInteger(derived) ? derived : null;
+}
+
+function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true }) {
+  const ready = reportReadyHolds({ draft, writing, traceRead });
+  const values = record.values;
+  const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
+  const typedIn = missing && (missing.type === 'text' || missing.type === 'count');
+  // An initial setup's own rules (its trap count; no work on traps already
+  // out), as the office form holds them before submit.
+  const [setupConflict] = trapSetupConflicts(typedSchema.type, values);
+  const scoreMissing = typedScoreIsTechs(typedSchema) && !Number.isInteger(record.score);
+  // The score the completion keeps: the tech's own, or the one its findings
+  // derive (a bait visit's consumption), as the office form judges it.
+  const score = typedScoreOf(typedSchema, record);
+  const scoreConflict = typedActivityScoreConflict(typedSchema.type, values, score);
+  const standardWording = typedZeroStateRefusesBody(typedSchema.type, values, score);
+  const perimeterRow = perimeterSprayRow(active, draft);
+  const untraced = !perimeterFeet && perimeterRow;
+  const shownTrace = draft && traceOnReport && traceRead.zone;
+  // A product's place is the visit's treated side on the report (as on a
+  // lane visit): the form's own area field, or, for a form whose places the
+  // full form picks (pest inspection, wildlife, a bait station visit where
+  // something went down other than bait), the full form.
+  const areaField = typedTreatmentAreaField(typedSchema);
+  const sprayed = active.some((row) => !PLACED_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
+  const placesMissing = active.length > 0 && (areaField
+    ? !parseApplicationAreas(values[areaField.key]).length
+    : typedFormTakesPlaces(typedSchema.type, { sprayed }));
+  return [
+    ...ready.report,
+    [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
+    [setupConflict, setupConflict],
+    [placesMissing, areaField
+      ? `Pick where you treated: tap Change beside ${areaField.label}.`
+      : 'Where you applied the product is picked on the Full form. Use the Full form.'],
+    [scoreMissing, `Pick the ${String(typedSchema.activity?.label || 'activity').toLowerCase()} score, 0 to 5.`],
+    [scoreConflict, scoreConflict],
+    [standardWording, 'Nothing was found on this record, so the customer’s report uses its standard wording, not this one. Use the Full form.'],
+    ...ready.trace,
+    [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
+    [shownTrace, 'This visit has a saved trace the customer’s report would show, and this sheet doesn’t check it. Remove the trace, or use the Full form.', null, 'remove_trace'],
   ];
 }
 
@@ -1067,29 +1185,70 @@ function laneFactsOf(heard) {
 // went down; a lane visit's own record), then writes the report from exactly
 // those facts, so the report and the record agree. Only the latest request
 // may land.
-function useReportDraft({ request, base, lane = null }) {
+// The note's pest facts (where product went down, the pests named, how the
+// sprays went down); anything else is a read that failed.
+function pestFactsOf(heard) {
+  const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
+  return heard?.available === true
+    ? {
+      status: heard.status,
+      areas: listOf(heard.areas),
+      unclearAreas: listOf(heard.unclearAreas),
+      pests: listOf(heard.pests),
+      unclearPests: listOf(heard.unclearPests),
+      spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
+      unclearSpray: heard.unclearSpray === true,
+      noSpray: heard.noSpray === true,
+    }
+    : { status: 'failed', areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false };
+}
+
+// A typed visit's reader answer (GATE_TYPED_VOICE_FILL) as the record merges
+// it: the form's own values, the words each stood on, the fields left
+// unclear. A record that already holds every field the note could fill is
+// answered without a read (nothing new, nothing failed). Anything else is a
+// read that failed: nothing fills.
+function typedFactsOf(heard) {
+  if (heard?.available === true && heard.status === 'nothing_to_fill') {
+    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
+  }
+  if (heard?.available !== true || heard.status !== 'read') {
+    return { status: 'failed', values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
+  }
+  return {
+    status: 'read',
+    type: heard.type,
+    values: Object.fromEntries(Object.entries(heard.values || {}).filter(([, value]) => typeof value === 'string' && value)),
+    heard: heard.heard && typeof heard.heard === 'object' ? heard.heard : {},
+    unclearFields: Array.isArray(heard.unclearFields) ? heard.unclearFields.filter((key) => typeof key === 'string') : [],
+    // The technician's own rating (step 4), on a form whose score they set.
+    score: Number.isInteger(heard.score?.value) && typeof heard.score.quote === 'string' ? { value: heard.score.value, quote: heard.score.quote } : null,
+    scoreUnclear: heard.scoreUnclear === true,
+  };
+}
+
+// Each record mode's reader and the facts it answers.
+const READS = {
+  lane: { endpoint: 'lane-facts', factsOf: laneFactsOf },
+  typed: { endpoint: 'typed-facts', factsOf: typedFactsOf },
+};
+const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
+
+function useReportDraft({ request, base, mode = null }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, signature, fresh }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
-    const heard = await request(`${base}/${lane ? 'lane-facts' : 'voice-facts'}`, { method: 'POST', body: JSON.stringify({ note }) }).catch(() => null);
-    const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
-    const facts = lane ? laneFactsOf(heard) : heard?.available === true
-      ? {
-        status: heard.status,
-        areas: listOf(heard.areas),
-        unclearAreas: listOf(heard.unclearAreas),
-        pests: listOf(heard.pests),
-        unclearPests: listOf(heard.unclearPests),
-        spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
-        unclearSpray: heard.unclearSpray === true,
-        noSpray: heard.noSpray === true,
-      }
-      : { status: 'failed', areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false };
+    const read = READS[mode] || PEST_READ;
+    // A typed read is judged beside the record's present values (never
+    // stored on the server).
+    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true } : { note };
+    const heard = await request(`${base}/${read.endpoint}`, { method: 'POST', body: JSON.stringify(body) }).catch(() => null);
+    const facts = read.factsOf(heard);
     if (sequence !== sequenceRef.current) return;
     // The signature of what the report is written from, read included (a
     // lane visit's record fills from the read).
@@ -1110,7 +1269,7 @@ function useReportDraft({ request, base, lane = null }) {
       return;
     }
     setDraft({ text, base: text, signature: draftSignature, deterministic: written.deterministic === true, facts });
-  }, [request, base, lane]);
+  }, [request, base, mode]);
   const editText = useCallback((text) => setDraft((prev) => ({ ...prev, text })), []);
   return { draft, writing, writeError, write, editText };
 }
@@ -1129,7 +1288,11 @@ function useLaneRecord(service) {
   const recordFor = (facts) => (lane ? mergeLaneRecord(ref.current, facts, preset) : null);
   return {
     lane,
+    mode: lane ? 'lane' : null,
     record: lane ? laneRecord : null,
+    // What the report is written from, for its stale check.
+    signaturePart: (record) => (record ? { lane: [record.areas, record.values] } : null),
+    inputs: (record, facts) => recordInputs(lane ? 'lane' : null, record, facts),
     recordFor,
     // Lands a read on the record and answers the filled record.
     settle: (facts) => {
@@ -1154,6 +1317,83 @@ function useLaneRecord(service) {
   };
 }
 
+// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
+// visit's own record (its typed form's values and, when the tech sets it,
+// the activity score) in place of the pest facts. With no typed form every
+// part answers as absent.
+function useTypedRecord(service) {
+  const typed = routedTypedOf(service);
+  const schema = typed && service.typedSchema?.type === typed ? service.typedSchema : null;
+  const [typedRecord, setTypedRecord] = useState(EMPTY_TYPED_RECORD);
+  const ref = useRef(typedRecord);
+  ref.current = typedRecord;
+  // A typed inspection's credit toward booked service (the office form's
+  // toggle), on unless the tech turns it off; sent only where it is offered.
+  const creditOffered = !!schema && service.inspectionCredit === true;
+  const [offerCredit, setOfferCredit] = useState(true);
+  // The record a read lands on: only fields still empty that nobody picked,
+  // and only from an answer for this form.
+  const recordFor = (facts) => {
+    if (!schema) return null;
+    return facts?.type === schema.type ? mergeTypedRecord(ref.current, facts) : ref.current;
+  };
+  return {
+    lane: null,
+    mode: schema ? 'typed' : null,
+    schema,
+    record: schema ? typedRecord : null,
+    // What the read is judged beside (the server never fills over it), and
+    // whether the tech's rating is already set.
+    current: typedRecord.values,
+    scoreSet: typedRecord.score != null,
+    signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
+    inputs: (record, facts) => {
+      const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
+      return creditOffered ? { ...fields, completionExtras: { ...fields.completionExtras, offerInspectionCredit: offerCredit } } : fields;
+    },
+    recordFor,
+    settle: (facts) => {
+      const filled = recordFor(facts);
+      if (filled) {
+        ref.current = filled;
+        setTypedRecord(filled);
+      }
+      return filled;
+    },
+    card: ({ draft, locked, writing }) => (schema ? (
+      <>
+        <TypedRecordCard
+          schema={schema}
+          record={typedRecord}
+          unclear={draft?.facts?.unclearFields || []}
+          scoreUnclear={draft?.facts?.scoreUnclear === true}
+          readFailed={draft?.facts?.status === 'failed'}
+          locked={locked || writing}
+          onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
+          onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
+        />
+        {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
+      </>
+    ) : null),
+  };
+}
+
+// The record a report-flow visit keeps: a lane visit's, a typed visit's, or
+// none (a pest visit, whose facts the note gives).
+function useVisitRecord(service) {
+  const laneState = useLaneRecord(service);
+  const typedState = useTypedRecord(service);
+  return laneState.lane ? laneState : typedState;
+}
+
+// The line a lane or typed visit's products resolve on: the lane's own, or
+// a typed form's (a mosquito event's mist; otherwise the pest line).
+function productLaneOf(service) {
+  const typed = routedTypedOf(service);
+  if (typed) return typed === 'mosquito_event' ? 'mosquito' : 'typed';
+  return routedLaneOf(service);
+}
+
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
   onPhotoBusy, onCompleted, onFullForm, isMobile,
@@ -1161,7 +1401,7 @@ function ReportFlowForm({
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
   const base = `/admin/dispatch/${service.id}`;
-  const products = useProductRows(ctx, service.serviceType, routedLaneOf(service));
+  const products = useProductRows(ctx, service.serviceType, productLaneOf(service));
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
@@ -1190,9 +1430,10 @@ function ReportFlowForm({
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
-  const laneState = useLaneRecord(service);
-  const { lane, record } = laneState;
-  const report = useReportDraft({ request, base, lane });
+  // A lane or typed visit's own record (or none: a pest visit).
+  const recordState = useVisitRecord(service);
+  const { lane, mode, record } = recordState;
+  const report = useReportDraft({ request, base, mode });
   const { draft, writing } = report;
   const [step, setStep] = useState('visit');
 
@@ -1202,16 +1443,16 @@ function ReportFlowForm({
   // if the office has moved the visit to another one since.
   const loadedPropertyId = ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined;
   const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
-  const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos, record);
+  const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(record));
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
-    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, lane,
+    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
   };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
-    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, laneRecord: record, traceOnReport: ctx.traceOnReport,
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
   });
 
   // "Update inventory or remove it": once the stock is updated, the tech
@@ -1233,21 +1474,26 @@ function ReportFlowForm({
   const write = (fresh) => {
     if (writing || generateMissing.reason) return;
     setStep('report');
-    // A lane read first fills the record (only what is empty and unpicked),
-    // and the report is written from the filled record.
+    // A lane or typed read first fills the record (only what is empty and
+    // unpicked), and the report is written from the filled record.
     report.write({
       buildPayload: (facts) => {
-        const { heard, observations } = recordInputs(laneState.settle(facts), facts);
+        const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
         const payload = writerPayload({ service, visit: ctx.visit, form, rows, facts: heard, ratingAllowed, photos: visitPhotos.photos, promiseMarks });
-        return observations ? { ...payload, observations } : payload;
+        return { ...payload, ...writerExtras };
       },
       note: form.note,
-      signature: (facts) => writerSignature(form, rows, promiseMarks, visitPhotos.photos, laneState.recordFor(facts)),
+      // A typed read is judged beside the record's present values.
+      current: recordState.current,
+      scoreSet: recordState.scoreSet,
+      signature: (facts) => writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
       fresh,
     });
   };
   const summary = () => {
-    const areas = record ? record.areas : (draft?.facts?.areas || []);
+    // A typed visit's places live in its form, so its record names the form.
+    const where = { lane: () => record.areas, typed: () => [recordState.schema.label] }[mode];
+    const areas = where ? where() : (draft?.facts?.areas || []);
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
   const submit = () => {
@@ -1255,7 +1501,7 @@ function ReportFlowForm({
     submission.submit(
       () => reportCompletionBody({
         form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
-        laneRecord: record,
+        recordFields: recordState.inputs(record, draft?.facts),
       }),
       summary(),
     );
@@ -1300,7 +1546,7 @@ function ReportFlowForm({
     }));
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
-        <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} />
+        <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
     );
@@ -1318,12 +1564,12 @@ function ReportFlowForm({
         completeMissing={completeMissing}
         stockButton={stockButton}
         // Only a perimeter spray is traced: a spot visit has no trace step
-        // (nor has a lane visit: the schedule routes it untraced, and a trace
-        // saved on the full form goes on its report as it is).
+        // (nor has a lane or typed visit: the schedule routes it untraced,
+        // and a trace saved on the full form goes on its report as it is).
         trace={stepTrace}
-        traced={!!(lane ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
-        pestHeard={!lane}
-        laneCard={laneState.card({ draft, locked, writing })}
+        traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
+        pestHeard={!mode}
+        laneCard={recordState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}

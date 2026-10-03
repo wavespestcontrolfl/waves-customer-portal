@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const logger = require('./logger');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
 const config = require('../config');
@@ -418,6 +419,19 @@ async function invalidateVisualMomentReportPdfCache(jobId, knex = db) {
   }
 }
 
+// Removes an object uploadVisualMomentMedia stored when the note it was for is
+// refused after the upload (e.g. the visit was reassigned meanwhile): no row
+// references it, so nothing else could ever find and clean it up (codex
+// #5568 r17 P2). Best effort; a failure is logged, never thrown.
+async function deleteVisualMomentMedia(key) {
+  if (!key || !config.s3?.bucket) return;
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+  } catch (err) {
+    logger.warn(`[visual-service-notes] refused upload delete failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   VISUAL_SERVICE_NOTES_FLAG,
   VISUAL_SERVICE_NOTES_REQUIRED_FLAG,
@@ -436,6 +450,7 @@ module.exports = {
   canCreateVisualServiceMoment,
   normalizeMomentInsert,
   uploadVisualMomentMedia,
+  deleteVisualMomentMedia,
   signedVisualMomentMediaUrl,
   formatVisualMoment,
   customerCaptionForMoment,
