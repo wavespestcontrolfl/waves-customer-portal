@@ -72,10 +72,10 @@ async function terminalAuthenticate(req, res, next) {
     if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
       return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
     }
-    // A regular staff login token follows the two-step rule (GATE_ADMIN_MFA).
-    // A terminal-scoped token is minted only by /validate-handoff from a
-    // handoff a full staff session created, so it already passed that rule.
-    const mfaBlock = decoded.scope === 'terminal' ? null : sessionMfaBlock(decoded, tech);
+    // Every token here follows the two-step rule (GATE_ADMIN_MFA), judged
+    // now: a terminal-scoped token carries the minting session's proof
+    // through the handoff (staff_mfa -> mfa).
+    const mfaBlock = sessionMfaBlock(decoded, tech);
     if (mfaBlock) return res.status(mfaBlock.status).json({ error: mfaBlock.error, code: mfaBlock.code });
     req.technician = tech;
     req.technicianId = tech.id;
@@ -409,6 +409,9 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         amount_cents,
         tech_user_id: req.technicianId,
         staff_token_version: req.staffToken.tokenVersion,
+        // Two-step proof of the minting session (GATE_ADMIN_MFA), carried
+        // into the terminal token so the current policy is applied to it.
+        staff_mfa: req.staffToken.mfa === true,
         jti: mintedJti,
       },
       secret,
@@ -646,7 +649,7 @@ router.post('/validate-handoff', async (req, res) => {
         code: 'technician_not_active',
       });
     }
-    if (!handoffStaffSessionMatches(claims, tech)) {
+    if (!handoffStaffSessionMatches(claims, tech) || sessionMfaBlock({ mfa: claims.staff_mfa === true }, tech)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
@@ -689,6 +692,7 @@ router.post('/validate-handoff', async (req, res) => {
         scope: 'terminal',
         type: 'access',
         tokenVersion: Number(tech.auth_token_version),
+        ...(claims.staff_mfa === true ? { mfa: true } : {}),
       },
       config.jwt.secret,
       { expiresIn: '15m' },
@@ -1246,6 +1250,7 @@ router.post('/capture', adminAuthenticate, requireAdmin, async (req, res) => {
 module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
+  terminalAuthenticate,
   technicianMayCollectInvoice,
   technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,

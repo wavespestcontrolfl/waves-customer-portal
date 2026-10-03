@@ -140,6 +140,26 @@ describe('AdminTwoStepPage', () => {
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer after-off-jwt');
   });
 
+  it('another tab signing out ends this page at once', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 9 })));
+    renderPage();
+    expect(await screen.findByText('Two-step sign-in is on')).toBeInTheDocument();
+    store.delete('waves_admin_token');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token' }));
+    expect(await screen.findByText('Sign in page')).toBeInTheDocument();
+  });
+
+  it('cancelling a first setup from the QR step keeps a way back to Settings', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 })));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('link', { name: 'Back to Settings' })).toBeInTheDocument();
+  });
+
   it('a revoked session goes back to sign in', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(401, { error: 'Two-step sign-in required. Sign in again.', code: 'MFA_REQUIRED' })));
     renderPage();

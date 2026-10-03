@@ -443,3 +443,28 @@ describe('adminAuthenticate and verifyStaffBearer', () => {
     expect(setup.res.body.code).toBe('PASSWORD_CHANGE_REQUIRED');
   });
 });
+
+describe('terminal tokens carry the minting session\'s two-step proof', () => {
+  const { terminalAuthenticate } = require('../routes/stripe-terminal')._test;
+  async function runTerminal(tech, claims) {
+    db.mockImplementation(() => builder({ first: tech }));
+    const token = jwt.sign({ technicianId: tech.id, type: 'access', tokenVersion: tech.auth_token_version, scope: 'terminal', ...claims }, SECRET);
+    const res = response();
+    const next = jest.fn();
+    await terminalAuthenticate({ headers: { authorization: `Bearer ${token}` } }, res, next);
+    return { res, next };
+  }
+
+  test('gate on: a terminal token without the proof is refused for an enrolled account; with it, accepted', async () => {
+    process.env.GATE_ADMIN_MFA = 'true';
+    const enrolled = staffRow({ mfa_enabled_at: new Date() });
+    const without = await runTerminal(enrolled, {});
+    expect(without.next).not.toHaveBeenCalled();
+    expect(without.res.body.code).toBe('MFA_REQUIRED');
+    expect((await runTerminal(enrolled, { mfa: true })).next).toHaveBeenCalled();
+  });
+
+  test('gate off: unchanged', async () => {
+    expect((await runTerminal(staffRow({ mfa_enabled_at: new Date() }), {})).next).toHaveBeenCalled();
+  });
+});

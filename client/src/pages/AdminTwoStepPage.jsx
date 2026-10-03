@@ -334,6 +334,20 @@ export default function AdminTwoStepPage() {
     if (token) loadStatus();
   }, []);
 
+  // Another tab signing out, or in as someone (or something) else, ends this
+  // page's session at once, like the staff shell's storage listener: the
+  // controls here never act on a session the device no longer holds.
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== 'waves_admin_token') return;
+      const stored = localStorage.getItem('waves_admin_token');
+      if (stored === token) return;
+      navigate(stored ? '/admin' : '/admin/login', { replace: true });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [token, navigate]);
+
   if (!token) return <Navigate to="/admin/login" replace />;
 
   // One submit path for every form: busy state, and the error kept with the
@@ -510,7 +524,7 @@ export default function AdminTwoStepPage() {
         {renderBody()}
         <div style={{ textAlign: 'center' }}>
           {held && <button type="button" onClick={signOut} style={{ ...linkButton, color: D.muted }}>Sign out</button>}
-          {!held && view === 'overview' && <Link to="/admin/settings" style={{ display: 'inline-block', minHeight: 44, lineHeight: '44px', fontSize: 14, color: D.teal, textDecoration: 'none' }}>Back to Settings</Link>}
+          {!held && view !== 'codes' && <Link to="/admin/settings" style={{ display: 'inline-block', minHeight: 44, lineHeight: '44px', fontSize: 14, color: D.teal, textDecoration: 'none' }}>Back to Settings</Link>}
         </div>
       </div>
     </main>
