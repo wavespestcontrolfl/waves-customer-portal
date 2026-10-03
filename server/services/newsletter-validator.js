@@ -134,8 +134,8 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
 /**
  * Email-division fact register: hard-block a small set of known-false or
  * overreaching claim shapes (e.g. a storm-triggered "second" termite swarm
- * — the September 2026 Pest Insider draft's actual error) that no UF/IFAS
- * source in the register supports. Scans the same segments as the
+ * — the September 2026 Pest Insider draft's actual error) that no fact in
+ * the register supports. Scans the same segments as the
  * hallucinated-claim check, deduped by rule so one draft never reports the
  * same claim twice.
  */

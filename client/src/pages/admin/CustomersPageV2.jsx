@@ -1131,7 +1131,8 @@ function CustomerDirectoryView({
             onOpen={onOpenCustomerProfile}
             onEdit={startEdit}
             onDelete={handleDeleteCustomer}
-            onCall={callCustomer}
+            // The call bridge is owner-only: no "Call via Waves" menu item for a technician.
+            onCall={isAdmin ? callCustomer : undefined}
             canEdit={isAdmin}
             sortBy={sortBy}
             sortDir={sortDir}
@@ -1178,7 +1179,7 @@ function CustomerDirectoryView({
                             <div className="text-ui-caption text-ink-tertiary">—</div>
                           )}
                         </div>
-                        {c.phone && (
+                        {isAdmin && c.phone && (
                           <button data-ui-text-action
                             type="button"
                             onClick={(e) => {
@@ -1265,7 +1266,7 @@ function CustomerDirectoryView({
                       )}
                     </div>{" "}
                     <div className="flex gap-1 justify-end">
-                      {c.phone && (
+                      {isAdmin && c.phone && (
                         <button data-ui-text-action
                           type="button"
                           onClick={(e) => {

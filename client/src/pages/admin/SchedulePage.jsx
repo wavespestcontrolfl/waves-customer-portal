@@ -6884,7 +6884,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
 // (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
 const fmtAmount = formatMeasuredAmount;
 
-function JobCardOrderButton({ productId, name, order, D, compact = false }) {
+export function JobCardOrderButton({ productId, name, order, D, compact = false }) {
   const [state, setState] = useState("idle");
   const [msg, setMsg] = useState("");
   const submit = async () => {
