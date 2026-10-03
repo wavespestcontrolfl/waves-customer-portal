@@ -27,7 +27,11 @@ const REPLY_LOOKBACK = "INTERVAL '24 hours'";
 // phone rings), so none of them proves the customer picked up. The proof is
 // the customer leg's own answering-machine detection, metadata.amd, written
 // by /outbound-amd: only 'human' counts, and a row without it fails closed.
-// The duration floor drops a pickup that ended before anything was said.
+// duration_seconds also covers the prompt and the ringing, so talk time is
+// measured from that detection stamp (amd.at) to the end of the staff leg; the
+// floor drops a pickup that ended before anything was said. created_at is the
+// row's insert at 'initiated', at or before the staff leg starts, so this
+// can only undercount.
 const MIN_SPOKEN_OUTBOUND_SECONDS = 30;
 
 // Shared source for the Messages needs-response badge, filtered inbox, and
@@ -56,6 +60,11 @@ async function loadPendingSmsConversations({
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
+  // The pattern has no "?" and no ":word": db.raw reads either as a binding.
+  const outboundTalkSeconds = `EXTRACT(EPOCH FROM (
+    spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0))
+    - CASE WHEN spoken.metadata->'amd'->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+        THEN CAST(spoken.metadata->'amd'->>'at' AS timestamptz) END))`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -226,7 +235,7 @@ async function loadPendingSmsConversations({
           OR (spoken.direction = 'outbound'
             AND spoken.metadata->'amd'->>'answered_by' = 'human'
             AND COALESCE(spoken.answered_by, '') NOT IN ('voicemail', 'ai_agent')
-            AND COALESCE(spoken.duration_seconds, 0) >= ${MIN_SPOKEN_OUTBOUND_SECONDS}))
+            AND ${outboundTalkSeconds} >= ${MIN_SPOKEN_OUTBOUND_SECONDS}))
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
