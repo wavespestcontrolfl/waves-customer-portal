@@ -223,3 +223,48 @@ describe('unknown alert type', () => {
     expect(screen.getByText('bar')).toBeTruthy();
   });
 });
+
+// "Visit not closed out" (services/not-closed-out.js, owner 2026-10-03): the card
+// says only what is known, and is settled by a decision — never a bare Resolve.
+describe('visit not closed out card', () => {
+  const card = (payload = {}) => ({
+    id: 'alert-1', type: 'visit_not_closed_out', severity: 'warn', job_id: 'visit-1', created_at: new Date().toISOString(),
+    customer_first_name: 'Sample', customer_last_name: 'Customer',
+    payload: { source: 'missed_appointment_check', log_id: 'log-1', scheduled_date: '2026-09-29', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control', ...payload },
+  });
+
+  it('states the visit was still open, never that it was missed, and offers both decisions', () => {
+    const { container } = render(<AlertCard alert={card()} onResolve={vi.fn()} onOpenJob={vi.fn()} onDecide={vi.fn()} />);
+    expect(screen.getByText('Visit not closed out')).toBeTruthy();
+    expect(screen.getByText('Sample C. · Pest Control')).toBeTruthy();
+    expect(container.textContent).toContain('Sample C. · Pest Control (Tue, Sep 29, 09:00–10:00) was still open at 6 PM.');
+    expect(container.textContent).not.toMatch(/missed|no-show/i);
+    expect(screen.getByRole('button', { name: 'This was a miss' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Not a miss' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open job' })).toBeTruthy();
+    // a bare Resolve would close the card and record nothing
+    expect(screen.queryByRole('button', { name: 'Resolve' })).toBeNull();
+  });
+
+  it('posts the dispatcher\'s decision with the card', () => {
+    const onDecide = vi.fn(() => new Promise(() => {}));
+    const alert = card();
+    render(<AlertCard alert={alert} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Not a miss' }));
+    expect(onDecide).toHaveBeenCalledWith(alert, 'dismiss');
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeTruthy();
+  });
+
+  it('a confirmed miss no longer offers "This was a miss" and tells the dispatcher to rebook', () => {
+    render(<AlertCard alert={card({ miss_confirmed: true })} onDecide={vi.fn()} onOpenJob={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'This was a miss' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Not a miss' })).toBeTruthy();
+    expect(screen.getByText('Marked as a miss. Open the job to rebook it.')).toBeTruthy();
+  });
+
+  it('other card types keep their Resolve button', () => {
+    render(<AlertCard alert={{ id: 'a2', type: 'missed_photo', severity: 'info', created_at: new Date().toISOString(), payload: {} }} onResolve={vi.fn()} onDecide={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Resolve' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Not a miss' })).toBeNull();
+  });
+});

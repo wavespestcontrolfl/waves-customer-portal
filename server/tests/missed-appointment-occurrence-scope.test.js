@@ -2,6 +2,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
+const mockRaiseCard = jest.fn(async () => ({ raised: true }));
+jest.mock('../services/not-closed-out', () => ({ raiseCard: (...a) => mockRaiseCard(...a) }));
+
 const MissedAppointment = require('../services/workflows/missed-appointment');
 
 function fakeConn(service) {
@@ -15,7 +18,11 @@ function fakeConn(service) {
         if (table === 'customers') return { id: 'c1', first_name: 'Sam' };
         return { count: '0' };
       },
-      insert: async (row) => { inserts.push({ table, row }); },
+      insert: (row) => {
+        inserts.push({ table, row });
+        const done = Promise.resolve([{ id: 'log-new' }]);
+        return { returning: () => done, then: (res, rej) => done.then(res, rej) };
+      },
     };
     return chain;
   };
@@ -59,5 +66,27 @@ test('a caller snapshot (dispatch no-show) wins over a later edit of the live ro
   expect(log).toMatchObject({
     customer_id: 'c1', original_window: '09:00:00-10:00:00',
     occurrence_service_type: 'Pest Control', occurrence_service_id: 'svc-pest', occurrence_property_id: 'prop-1',
+  });
+});
+
+describe('the office card for a flagged visit (not-closed-out.js)', () => {
+  const visit = { id: 'visit-4', customer_id: 'c1', scheduled_date: '2026-09-29', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control', service_id: 'svc-pest', property_id: 'prop-1' };
+  beforeEach(() => mockRaiseCard.mockClear());
+
+  test('the nightly check raises an unconfirmed card: it only knows the visit was still open', async () => {
+    const { conn, inserts } = fakeConn(visit);
+    jest.spyOn(MissedAppointment, 'evaluateThreshold').mockResolvedValueOnce(null);
+    await MissedAppointment.onSkip('visit-4', 'no_show', conn);
+    expect(inserts.find((i) => i.table === 'reschedule_log').row.miss_confirmed_at).toBeUndefined();
+    expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ logId: 'log-new', confirmed: false, service: expect.objectContaining({ id: 'visit-4' }) }));
+  });
+
+  test('a person marking the no-show in dispatch is a confirmed miss from the start', async () => {
+    const { conn, inserts } = fakeConn(visit);
+    jest.spyOn(MissedAppointment, 'evaluateThreshold').mockResolvedValueOnce(null);
+    await MissedAppointment.onSkip('visit-4', 'manual_no_show', conn);
+    expect(inserts.find((i) => i.table === 'reschedule_log').row).toMatchObject({ miss_confirmed_by: 'dispatch' });
+    expect(inserts.find((i) => i.table === 'reschedule_log').row.miss_confirmed_at).toBeInstanceOf(Date);
+    expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ confirmed: true }));
   });
 });

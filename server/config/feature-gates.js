@@ -3075,6 +3075,13 @@ const gates = {
   // sitting in an open status (pending/confirmed/en_route/on_site).
   // Detection-only: never mutates the rows, no customer contact.
   staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+  // "Visit not closed out" Action Queue cards (owner 2026-10-03): the 6 PM
+  // missed-appointment check logs every visit still open at that hour; with
+  // this on, each one also raises a dispatch card where a person rebooks it,
+  // closes it out, dismisses it, or confirms it was a miss
+  // (services/not-closed-out.js). Admin-only; no customer contact. Off: the
+  // check logs as before and raises no card.
+  notClosedOutQueue: isProd ? process.env.GATE_NOT_CLOSED_OUT_QUEUE === 'true' : true,
   // Daily 6:55 ET lead-to-cash invariants sweep (services/lead-to-cash-
   // invariants.js): a read-only registry over existing detectors (churned
   // accounts with live plan state, WaveGuard field drift, recurring-schedule

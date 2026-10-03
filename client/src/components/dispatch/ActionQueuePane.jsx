@@ -19,7 +19,7 @@ import AlertCard from './AlertCard';
 import { Button } from '../ui';
 
 export default function ActionQueuePane({ onOpenJob }) {
-  const { alerts, loading, error, resolveAlert, clearAlerts } = useDispatchAlerts();
+  const { alerts, loading, error, resolveAlert, clearAlerts, decideNotClosedOut } = useDispatchAlerts();
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState(null);
 
@@ -80,7 +80,7 @@ export default function ActionQueuePane({ onOpenJob }) {
               </div>
             )}
             {alerts.map((a) => (
-              <AlertCard key={a.id} alert={a} onResolve={resolveAlert} onOpenJob={onOpenJob} />
+              <AlertCard key={a.id} alert={a} onResolve={resolveAlert} onOpenJob={onOpenJob} onDecide={decideNotClosedOut} />
             ))}
           </>
         )}

@@ -43,11 +43,15 @@ class MissedAppointment {
     // no-show rebooks it in place — possibly later the SAME day), so dedupe
     // checks and the 90-day count discriminate by (service, slot date, slot
     // window), never by service row alone (codex r1+r2 on #3110).
-    await conn('reschedule_log').insert({
+    // A person marking the no-show in dispatch is a confirmed miss from the start;
+    // the nightly check only knows the visit was still open (not-closed-out.js).
+    const personMarked = reason === 'manual_no_show';
+    const inserted = await conn('reschedule_log').insert({
       customer_id: customerId,
       scheduled_service_id: scheduledServiceId,
       reason_code: 'customer_noshow',
       initiated_by: 'system',
+      ...(personMarked ? { miss_confirmed_at: new Date(), miss_confirmed_by: 'dispatch' } : {}),
       original_date: service.scheduled_date || null,
       original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
       // what was missed and where, frozen now: the row's own fields can change later
@@ -55,7 +59,14 @@ class MissedAppointment {
       occurrence_service_id: service.service_id || null,
       occurrence_property_id: service.property_id || null,
       notes: reason || 'skip',
-    });
+    }).returning('id');
+    // The office's card for this flagged visit (gated; never blocks the log).
+    const logId = Array.isArray(inserted) && inserted[0] ? (inserted[0].id || inserted[0]) : null;
+    if (logId) {
+      await require('../not-closed-out').raiseCard({
+        logId, service: { ...service, id: scheduledServiceId }, confirmed: personMarked, trx: conn === db ? null : conn,
+      });
+    }
 
     return this.evaluateThreshold(customerId, reason, conn);
   }

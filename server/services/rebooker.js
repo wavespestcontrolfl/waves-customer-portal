@@ -2175,6 +2175,13 @@ class SmartRebooker {
         occurrence_service_id: service.service_id || null,
         occurrence_property_id: service.property_id || null,
       });
+      // A flagged ("not closed out") visit that is moved to a new time is rebooked:
+      // settle its open flagged rows — the one just written included, when this move
+      // is itself a no-show Quick Move — and close its card. Savepoint-confined and
+      // best-effort inside the helper; never blocks the move.
+      await require('./not-closed-out').resolveForService({
+        serviceId, resolution: 'rebooked', resolvedBy: initiatedBy, trx,
+      });
     });
 
     // Tech-facing notice (tech-visit-notifications.js), post-commit,
@@ -4104,6 +4111,12 @@ class SmartRebooker {
           new_window: row.after.window_start ? `${row.after.window_start}-${row.after.window_end}` : null,
           series_move_id: seriesMoveId,
           ...scopeOf(row.scope),
+        });
+      }
+      // the anchor (and each carried partner) moved: any flagged row of theirs is rebooked
+      for (const id of [serviceId, ...partnerLogRows.map((r) => r.id)]) {
+        await require('./not-closed-out').resolveForService({
+          serviceId: id, resolution: 'rebooked', resolvedBy: initiatedBy, trx,
         });
       }
 

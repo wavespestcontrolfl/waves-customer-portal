@@ -342,7 +342,46 @@ function TechOutOverflowBody({ alert }) {
   );
 }
 
+// 'visit_not_closed_out' — a visit the 6 PM check found still open
+// (services/not-closed-out.js). The card states only what is known: the visit
+// was not closed out. Whether it was a miss is the dispatcher's call (the two
+// decision buttons in the footer); rebooking or closing it out goes through
+// Open job. The slot shown is the one that was flagged (payload), not wherever
+// the visit sits now.
+function formatRawDate(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd || ''));
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function NotClosedOutBody({ alert }) {
+  const payload = alert.payload || {};
+  const customer = customerLine(alert);
+  const serviceType = payload.service_type || alert.service_type;
+  const dateLabel = formatRawDate(payload.scheduled_date || alert.scheduled_date);
+  const windowLabel = formatRawWindow(payload.window_start, payload.window_end);
+  const what = [customer, serviceType].filter(Boolean).join(' · ') || 'A visit';
+  const when = [dateLabel, windowLabel].filter(Boolean).join(', ');
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      <div>
+        <span className="font-medium">{what}</span>
+        {when ? ` (${when})` : ''} was still open at 6 PM.
+      </div>
+      <p className="text-ink-secondary">
+        {payload.miss_confirmed
+          ? 'Marked as a miss. Open the job to rebook it.'
+          : 'Open the job to rebook it or close it out, or say whether it was a miss.'}
+      </p>
+    </div>
+  );
+}
+
+const NOT_CLOSED_OUT_TYPE = 'visit_not_closed_out';
+
 const TYPE_RENDERERS = {
+  [NOT_CLOSED_OUT_TYPE]: NotClosedOutBody,
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
   missed_photo: MissedPhotoBody,
@@ -354,16 +393,35 @@ const TYPE_RENDERERS = {
 // Header label for types that get a plain-English sentence instead of the
 // default uppercase type-slug treatment (text-14, not text-11 label case).
 const PRETTY_HEADER_LABEL = {
+  [NOT_CLOSED_OUT_TYPE]: 'Visit not closed out',
   schedule_route_quality: 'Route needs review',
   tech_out_overflow: 'Needs a decision',
 };
 
-export default function AlertCard({ alert, onResolve, onOpenJob }) {
+export default function AlertCard({ alert, onResolve, onOpenJob, onDecide }) {
   const tracking = alert.payload?.source === 'no_show_detector';
   const Body = tracking ? TrackingBody : (TYPE_RENDERERS[alert.type] || GenericBody);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
   const showOpenJob = !!(alert.job_id && onOpenJob);
+  // A not-closed-out card is settled by a decision, never a bare Resolve (which
+  // would close the card and record nothing): `onDecide(alert, 'confirm_miss' |
+  // 'dismiss')` posts the dispatcher's call; the card drops when it lands.
+  const isNotClosedOut = alert.type === NOT_CLOSED_OUT_TYPE;
+  const canDecide = isNotClosedOut && !!onDecide && !!alert.payload?.log_id;
+  const [deciding, setDeciding] = useState(null);
+
+  async function handleDecide(action) {
+    if (!canDecide || deciding) return;
+    setDeciding(action);
+    setResolveError(null);
+    try {
+      await onDecide(alert, action);
+    } catch (err) {
+      setDeciding(null);
+      setResolveError(err?.message || 'That did not save. Try again.');
+    }
+  }
 
   async function handleResolve() {
     if (!onResolve || resolving) return;
@@ -406,8 +464,8 @@ export default function AlertCard({ alert, onResolve, onOpenJob }) {
         </span>
       </div>
       <Body alert={alert} />
-      {(onResolve || showOpenJob) && (
-        <div className="mt-2 flex items-center justify-end gap-2">
+      {(onResolve || showOpenJob || canDecide) && (
+        <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
           {resolveError && (
             <span className="text-11 text-alert-fg">{resolveError}</span>
           )}
@@ -420,7 +478,27 @@ export default function AlertCard({ alert, onResolve, onOpenJob }) {
               Open job
             </Button>
           )}
-          {onResolve && (
+          {canDecide && !alert.payload?.miss_confirmed && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => handleDecide('confirm_miss')}
+              disabled={!!deciding}
+            >
+              {deciding === 'confirm_miss' ? 'Saving…' : 'This was a miss'}
+            </Button>
+          )}
+          {canDecide && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => handleDecide('dismiss')}
+              disabled={!!deciding}
+            >
+              {deciding === 'dismiss' ? 'Saving…' : 'Not a miss'}
+            </Button>
+          )}
+          {onResolve && !isNotClosedOut && (
             <Button
               size="sm"
               variant="secondary"

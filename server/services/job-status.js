@@ -556,6 +556,14 @@ async function transitionJobStatus({
       jobId, resolvedBy: transitionedBy, trx: t, toStatus,
     });
 
+    // A flagged ("not closed out") visit that is now completed, cancelled or
+    // skipped is settled: stamp its reschedule_log rows and close its card.
+    // Savepoint-confined and best-effort inside the helper — never blocks the
+    // transition. No-op for every other status.
+    await require('./not-closed-out').resolveOnTransition({
+      jobId, toStatus, resolvedBy: transitionedBy, trx: t,
+    });
+
     // Durable cancellation-notice obligation (codex #3233 r4): for
     // hook-owned cancel paths the claim commits WITH the transition — a
     // crash after commit can no longer lose the notice (the 15-minute
