@@ -230,6 +230,19 @@ describe('lawn re-service, voice fill on', () => {
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
   });
 
+  test('saying it again another way (an edited note) brings a turned-off product back', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    typeNote();
+    await fill(request);
+    fireEvent.click(tile('Celsius WG'));
+    typeNote('Actually I used a full ounce of Celsius out back.');
+    request.fill = read([{ ...CELSIUS_HALF, amount: 1, heard: 'a full ounce of Celsius' }]);
+    await fill(request, 2);
+    expect(tile('Celsius WG').getAttribute('aria-pressed')).toBe('true');
+    expect(within(confirmList()).getByText(/Celsius WG — 1 oz/)).toBeTruthy();
+  });
+
   test.each([
     ['the read fails', () => ({ enabled: true, available: true, status: 'failed', reason: 'model_failed', products: [], unclear: [] })],
     ['the read is down', () => Object.assign(new Error('down'), { status: 502 })],
