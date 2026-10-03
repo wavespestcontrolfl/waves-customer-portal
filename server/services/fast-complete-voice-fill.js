@@ -885,36 +885,57 @@ function negatedPositions(tokens, breaks) {
 
 const AUXILIARY_WORDS = new Set(['i', 'we', 'all', 'was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
 const POST_NEGATION_WINDOW = 4;
-function isNegatedMention(mention, world) {
-  let from = mention.start;
-  while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
-  for (let j = from; j < mention.start; j += 1) if (isNegationAt(world.tokens, j)) return true;
-  // "Last time I used four ounces of Taurus", "Last time, I used...": another
-  // visit's, anywhere earlier in the sentence (a comma does not end it).
-  // A current-visit word after the marker ("..., but today I used Talstar") ends it.
-  let clause = from;
-  while (clause > 0 && !world.stops[clause]) clause -= 1;
-  let other = false;
-  for (let j = clause; j < mention.start; j += 1) {
-    if (isOtherVisitAt(world.tokens, j)) other = true;
-    else if (isCurrentVisitAt(world.tokens, j)) other = false;
-  }
-  if (other) return true;
-  // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
-  // a negation after the name, past auxiliary words, in the same clause.
-  // (a relative clause about the product crosses its comma: "Taurus, which I did not use")
-  const relative = world.breaks[mention.end] && ['which', 'that'].includes(world.tokens[mention.end]);
-  const after = relative ? mention.end + 1 : mention.end;
-  for (let j = after; j < world.tokens.length && j - after < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
-    const token = world.tokens[j];
-    // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
-    if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
-      || token === 'ran' && world.tokens[j + 1] === 'out') return true;
-    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || (world.tokens[j + 1] !== 'wait' && !isCorrectingNo(world.tokens, j));
-    if (!AUXILIARY_WORDS.has(token)) return false;
+// The three ways a mention is not a use on this visit, one rule each.
+
+// A negation word shortly before the name, in the same clause.
+function negatedBefore(mention, world) {
+  for (let j = mention.start - 1; j >= 0 && mention.start - j <= NEGATION_WINDOW; j -= 1) {
+    if (isNegationAt(world.tokens, j)) return true;
+    if (world.breaks[j]) return false;
   }
   return false;
 }
+
+// "Last time I used four ounces of Taurus", "Last time, I used...": another
+// visit's, anywhere earlier in the sentence (a comma does not end it). A
+// current-visit word after the marker ("..., but today I used Talstar") ends it.
+function fromAnotherVisit(mention, world) {
+  let start = mention.start;
+  while (start > 0 && !world.stops[start]) start -= 1;
+  let other = false;
+  for (let j = start; j < mention.start; j += 1) {
+    if (isOtherVisitAt(world.tokens, j)) other = true;
+    else if (isCurrentVisitAt(world.tokens, j)) other = false;
+  }
+  return other;
+}
+
+// What one word after the name says: 'negated', 'continue' (an auxiliary, keep
+// reading) or 'used'. "Taurus was out of stock", "Taurus ran out", "Taurus was
+// all out", "Taurus was not used".
+function wordAfterName(tokens, j, firstAfter) {
+  const token = tokens[j];
+  const outOf = token === 'out' && (tokens[j + 1] === 'of' || tokens[j - 1] === 'ran' || tokens[j - 1] === 'all' || j === firstAfter + 1);
+  if (outOf || (token === 'ran' && tokens[j + 1] === 'out')) return 'negated';
+  if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) {
+    return token === 'no' && (tokens[j + 1] === 'wait' || isCorrectingNo(tokens, j)) ? 'used' : 'negated';
+  }
+  return AUXILIARY_WORDS.has(token) ? 'continue' : 'used';
+}
+
+// A negation after the name, past auxiliary words, in the same clause; a relative
+// clause about the product crosses its comma ("Taurus, which I did not use").
+function negatedAfter(mention, world) {
+  const relative = world.breaks[mention.end] && ['which', 'that'].includes(world.tokens[mention.end]);
+  const after = relative ? mention.end + 1 : mention.end;
+  for (let j = after; j < world.tokens.length && j - after < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
+    const verdict = wordAfterName(world.tokens, j, mention.end);
+    if (verdict !== 'continue') return verdict === 'negated';
+  }
+  return false;
+}
+
+const isNegatedMention = (mention, world) => negatedBefore(mention, world) || fromAnotherVisit(mention, world) || negatedAfter(mention, world);
 
 // The mentions of this product that the quote points at: those overlapped by ANY
 // piece of the (possibly stitched) quote where that piece was said, negated ones
@@ -1140,8 +1161,12 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // (the standard ways and every catalog way the sheet offers)
   const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
   const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
+  // ...and unless the sentence names more than one way: then each way is some
+  // product's own, and none is shared.
   const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
-  if (ownOther || !methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
+  const waysSaid = ways.filter((method) => methodLexicon(method)?.test(sentences));
+  const shared = waysSaid.length === 1 && waysSaid[0] === raw.method;
+  if (ownOther || !shared) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
 
@@ -1157,6 +1182,21 @@ function mentionSentenceWords(mention, world, { contrast = false } = {}) {
   return world.tokens.slice(from, to).join(' ');
 }
 
+// The words that GOVERN a mention in a sentence naming several products: the
+// lead-in before the first name ("Same mix as last time, Taurus, Talstar and the
+// surfactant" covers the list) plus the mention's own clause, up to the next
+// name. Another product's clause ("... and Talstar was same as last time") is not
+// this one's.
+function governingWords(mention, world) {
+  const { from, to } = sentenceSpan(mention, world);
+  const inSentence = world.mentions.filter((m) => m.start >= from && m.end <= to);
+  const firstName = Math.min(...inSentence.map((m) => m.start));
+  const next = Math.min(to, ...inSentence.filter((m) => m.start > mention.start).map((m) => m.start));
+  const own = world.tokens.slice(mention.start, next);
+  const cut = own.findIndex((token) => CONTRAST_WORDS.has(token));
+  return [...world.tokens.slice(from, firstName), '.', ...(cut === -1 ? own : own.slice(0, cut))].join(' ');
+}
+
 function productSameAsLast(raw, amount, heard, transcript, unclear, product, world) {
   // a spoken number wins over the flag
   if (raw.sameAsLast !== true || amount !== null) return false;
@@ -1169,7 +1209,7 @@ function productSameAsLast(raw, amount, heard, transcript, unclear, product, wor
   const quoted = quotedMentions(product, heard, world);
   const quotesANegation = quoted.length > 0 && quoted.every((m) => isNegatedMention(m, world));
   const mentions = productMentions(product, heard, world);
-  const ok = !quotesANegation && mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(mentionSentenceWords(m, world, { contrast: true }))
+  const ok = !quotesANegation && mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(governingWords(m, world))
     && !NOT_SAME_AS_LAST_RE.test(mentionSentenceWords(m, world)));
   if (ok) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');

@@ -1850,3 +1850,29 @@ test('"per meter squared" is a rate; "no weight" with no replacement number corr
   const kept = 'Taurus four ounces, no weight limit on the truck.';
   expect(validateFill(answer({ products: [row(4, 'Taurus four ounces')] }), ctx, kept).products[0].amount).toBe(4);
 });
+
+describe('Codex #5698 round 8', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('same-as-last governs only the product whose clause it is in', () => {
+    const t = 'Used Taurus today and Talstar was same as last time.';
+    const taurus = validateFill(answer({ products: [row('p-taurus', 'Used Taurus today', { sameAsLast: true })] }), ctx, t);
+    expect(taurus.products[0].sameAsLast).toBe(false);
+    const talstar = validateFill(answer({ products: [row('p-talak', 'Talstar was same as last time', { sameAsLast: true })] }), ctx, t);
+    expect(talstar.products[0].sameAsLast).toBe(true);
+  });
+
+  test('a lead-in before the list still covers every product in it', () => {
+    const t = 'Same mix as last time, Taurus, Talstar and the surfactant.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Same mix as last time, Taurus', { sameAsLast: true }), row('p-surf', 'Same mix as last time, the surfactant', { sameAsLast: true })] }), ctx, t);
+    expect(out.products.map((p) => p.sameAsLast)).toEqual([true, true]);
+  });
+
+  test('a sentence naming two ways shares neither: the unsupported method is a Check', () => {
+    const withDom = { ...ctx, products: [...ctx.products, { id: 'p-dom', name: 'Dominion 2L', fullName: 'Dominion 2L', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+    const t = 'Used Taurus and Talstar was spot treated, while Dominion was sprayed around the perimeter.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Used Taurus', { method: 'perimeter_spray' })] }), withDom, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});
