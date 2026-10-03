@@ -1263,6 +1263,22 @@ describe('customer surfaces', () => {
       expect(snapshots()[0].status).toBe('approved');
     });
 
+    test('prepaid: the staged increase is cleared even after the renewal reminder went out (the reminder does not quote it)', async () => {
+      const prepay = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+      });
+      const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+      b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+      await sendEmailOnly(b);
+      Object.assign(notices()[0], { applied_at: NOW });
+      Object.assign(mockDb.store.annual_prepay_terms[0], { next_term_prepay_amount: '484.00', notice_30_sent_at: new Date().toISOString() });
+      await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+      expect(meta().prepay_unstaged).toBe(true);
+    });
+
     test('a rate already written (non-prepaid) cannot be un-written: recorded and flagged for a hand check, not re-sent', async () => {
       await sendEmailOnly();
       Object.assign(notices()[0], { applied_at: NOW });
