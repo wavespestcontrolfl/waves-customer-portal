@@ -409,6 +409,17 @@ it('after a move that reassigned the stop, moving again with the original techni
   expect(JSON.parse(writes()[2][1].body)).toMatchObject({ newDate: '2035-01-04', technicianId: 'tech-1' });
 });
 
+it('a stop with one live service left (the other cancelled) is an ordinary visit: no choice, one ordinary save', async () => {
+  fetch.mockImplementation(async (url) => okJson(url));
+  render(<EditServiceModal service={{ ...combo, visit: { ...combo.visit, memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 1 } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(writeUrls()).toEqual(['PUT /admin/schedule/fixture-visit/update-details']);
+});
+
 it('an unchanged technician is not sent on the whole-stop move', async () => {
   const dialog = openCombo();
   fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });

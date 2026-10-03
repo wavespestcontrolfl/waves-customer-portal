@@ -2174,7 +2174,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // before the rest of the edit (owner ruling 2026-10-03: a combo can be
   // moved together or separated from this form). No `visit` on the payload
   // = not known to be a combo = today's behavior, server guard included.
-  const comboVisit = service.visit && service.visit.id && Number(service.visit.serviceCount) > 1 ? service.visit : null;
+  // Counted by LIVE services: a stop whose other service is cancelled or
+  // done is an ordinary single visit (the server moves it as one row).
+  const comboCount = Number(service.visit?.liveCount ?? service.visit?.serviceCount);
+  const comboVisit = service.visit && service.visit.id && comboCount > 1 ? service.visit : null;
   const [comboMove, setComboMove] = useState("together");
   // What this modal already did, so a retried save never moves or splits twice.
   const comboDoneRef = useRef({ moved: false, separated: false });
@@ -2182,7 +2185,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // a text that did not send). The move is never repeated, so they are kept
   // until a save goes through and shown on every failure in between.
   const comboWarningsRef = useRef([]);
-  const comboAllServices = comboVisit && Number(comboVisit.serviceCount) > 2 ? `All ${Number(comboVisit.serviceCount)} services` : "Both services";
+  const comboAllServices = comboCount > 2 ? `All ${comboCount} services` : "Both services";
   // Where the stop IS: the slot the form opened on, then the slot of each
   // whole-stop move this modal committed. Every comparison is against this,
   // so after a move whose follow-up edit failed, going back to the original
@@ -5996,8 +5999,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   style={{ marginTop: -2, marginBottom: 14, padding: "10px 12px", borderRadius: 6, background: "#F4F4F5", color: "#18181B", fontSize: 14, lineHeight: 1.5 }}
                 >
                   <div style={{ fontWeight: 600 }}>
-                    This stop has {comboVisit.serviceCount} services
-                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
+                    This stop has {comboCount} services
+                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length === comboCount ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
                   </div>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
                     <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} disabled={saving} />
