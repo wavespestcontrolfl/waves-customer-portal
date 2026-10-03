@@ -135,7 +135,13 @@ describe('listRecent', () => {
     const many = Array.from({ length: Drafts.MAX_ROWS + 1 }, (_, i) => draftRow({ id: i, outcome: 'fallback', reason: 'x', sequence_id: `s-${i}` }));
     const out = await listWith(many, []);
     expect(out.truncated).toBe(true);
+    expect(out.holdsTruncated).toBe(false);
     expect(out.drafts).toHaveLength(Drafts.MAX_ROWS);
+    // the same for the cadences held for payment
+    const held = Array.from({ length: Drafts.MAX_ROWS + 1 }, (_, i) => ({ id: `s-${i}`, customer_id: 'c', current_step: 1, plan: [], decision: { reason: 'payment_hold' }, updated_at: new Date() }));
+    const holds = await listWith([], [], held);
+    expect(holds).toMatchObject({ truncated: false, holdsTruncated: true });
+    expect(holds.paymentHolds).toHaveLength(Drafts.MAX_ROWS);
   });
 });
 

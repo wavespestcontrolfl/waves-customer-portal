@@ -18,6 +18,7 @@ describe("Tech-voice review texts panel", () => {
     const fetch = vi.fn(async () => response({
       days: 14,
       truncated: true,
+      holdsTruncated: true,
       drafts: [
         {
           id: 1, customerName: "Marta R", step: 0, channel: "sms", outcome: "drafted", reason: null,
@@ -62,6 +63,10 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.getByText(/the payment hold \(overdue bill\) outlasted its 3-day window/)).toBeInTheDocument();
     // more texts than are listed is said so
     expect(screen.getByText(/Showing the newest 4 in this window/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing the newest 2 held for payment\. More are held and not listed/)).toBeInTheDocument();
+    // a fallback has no draft: its time is when the fixed text was chosen, never "Drafted"
+    expect(screen.getByText(/Fixed text chosen .* · not sent yet/)).toBeInTheDocument();
+    expect(screen.getAllByText(/^Drafted /)).toHaveLength(2);
   });
 
   it("a draft that went out as the fixed text (full link too long) says so on both cards", async () => {

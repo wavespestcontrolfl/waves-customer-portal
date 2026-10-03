@@ -151,9 +151,10 @@ async function sentAtOf(candidates) {
 }
 
 /**
- * { days, truncated, drafts: [...], paymentHolds: [...] } for the last `days`
- * days (1–60). `truncated`: the window holds more outcomes than are returned
- * (the newest MAX_ROWS are). paymentHolds are the cadences waiting on a
+ * { days, truncated, holdsTruncated, drafts: [...], paymentHolds: [...] } for
+ * the last `days` days (1–60). `truncated` / `holdsTruncated`: the window
+ * holds more outcomes / payment holds than are returned (the newest MAX_ROWS
+ * of each are). paymentHolds are the cadences waiting on a
  * payment hold now; a dropped one is a draft row (reason payment_hold_dropped).
  */
 async function listRecent({ days = 14, database = db } = {}) {
@@ -179,7 +180,7 @@ async function listRecent({ days = 14, database = db } = {}) {
     .where('s.updated_at', '>', since)
     .whereRaw("s.decision->>'reason' = ?", ['payment_hold'])
     .orderBy('s.updated_at', 'desc')
-    .limit(MAX_ROWS)
+    .limit(MAX_ROWS + 1)
     .select('s.id', 's.customer_id', 's.current_step', 's.plan', 's.decision', 's.updated_at', 'c.first_name', 'c.last_name');
   const drafts = [];
   for (const r of rows) {
@@ -212,8 +213,9 @@ async function listRecent({ days = 14, database = db } = {}) {
   return {
     days: span,
     truncated: found.length > MAX_ROWS,
+    holdsTruncated: holds.length > MAX_ROWS,
     drafts,
-    paymentHolds: holds.map((h) => {
+    paymentHolds: holds.slice(0, MAX_ROWS).map((h) => {
       const decision = parseJson(h.decision) || {};
       // The step the hold recorded; its channel is the plan's (an email step
       // is held like a text).

@@ -58,6 +58,14 @@ function outcomeBadge(d) {
   return <Badge tone="neutral">Fixed text</Badge>;
 }
 
+// What the card's time is the time of: only a draft (sent or held as a
+// repeat) was drafted; a fallback has no draft.
+function whenLabel(d) {
+  if (d.reason === PAYMENT_DROP) return "Dropped";
+  if (d.outcome === "fallback") return "Fixed text chosen";
+  return "Drafted";
+}
+
 function DraftCard({ d }) {
   return (
     <Card className="p-4 space-y-3">
@@ -115,7 +123,7 @@ function DraftCard({ d }) {
         </ul>
       )}
       <p className="text-ui-caption text-zinc-500">
-        {d.reason === PAYMENT_DROP ? "Dropped" : "Drafted"} {fmtET(d.createdAt)}
+        {whenLabel(d)} {fmtET(d.createdAt)}
         {d.outcome === "held"
           ? " · not sent"
           : d.replacedByFixedText
@@ -185,6 +193,11 @@ export default function ReviewDraftsPanel() {
               </li>
             ))}
           </ul>
+          {data?.holdsTruncated && (
+            <p className="text-ui-body text-zinc-600">
+              Showing the newest {holds.length} held for payment. More are held and not listed.
+            </p>
+          )}
         </Card>
       )}
       {drafts.map((d) => <DraftCard key={d.id} d={d} />)}
