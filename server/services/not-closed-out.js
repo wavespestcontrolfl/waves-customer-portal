@@ -177,6 +177,20 @@ async function lockLog(t, logId) {
     .first('id', 'scheduled_service_id', 'resolved_at', 'miss_confirmed_at', 'original_date', 'original_window');
 }
 
+// Every decision takes the VISIT's row lock before the log row's — the order a
+// status change, a move and the nightly check take them (visit lock, then the
+// visit's flagged rows). The other order deadlocks against them: a replacement
+// card's job_id foreign key needs a share lock on the visit while they wait on
+// the log row.
+async function lockVisitThenLog(t, logId) {
+  const ref = await t('reschedule_log').where({ id: logId, reason_code: 'customer_noshow' }).first('scheduled_service_id');
+  if (!ref) return { visit: null, log: null };
+  const visit = ref.scheduled_service_id
+    ? await t('scheduled_services').where({ id: ref.scheduled_service_id }).forUpdate().first('id', 'status', 'scheduled_date', 'window_start', 'window_end')
+    : null;
+  return { visit: visit || null, log: await lockLog(t, logId) };
+}
+
 // The slot a flagged row recorded as missed ("HH:MM:SS-HH:MM:SS"), for its card.
 function loggedSlot(log) {
   const [start, end] = String((log && log.original_window) || '').split('-');
@@ -201,16 +215,7 @@ function loggedSlot(log) {
 async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
-    // reopen locks the visit BEFORE the log row — the order a status change or a
-    // move takes them (visit lock, then its flagged rows)
-    let visit = null;
-    if (reopen) {
-      const ref = await t('reschedule_log').where({ id: logId, reason_code: 'customer_noshow' }).first('scheduled_service_id');
-      if (ref && ref.scheduled_service_id) {
-        visit = await t('scheduled_services').where({ id: ref.scheduled_service_id }).forUpdate().first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
-      }
-    }
-    const log = await lockLog(t, logId);
+    const { visit, log } = await lockVisitThenLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
@@ -255,7 +260,7 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
 async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
-    const log = await lockLog(t, logId);
+    const { log } = await lockVisitThenLog(t, logId);
     if (!log || log.resolved_at) return { ok: false, reason: 'not_found' };
     const by = dismissedBy ? String(dismissedBy).slice(0, 80) : null;
     const reason = String(note || '').trim().slice(0, 200);

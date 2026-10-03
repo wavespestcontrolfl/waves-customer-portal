@@ -171,7 +171,8 @@ describe('the dispatcher\'s two decisions', () => {
   test('both decisions read the row under a lock, so a settle that landed first wins', async () => {
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF });
-    expect(mockLocks.filter((tbl) => tbl === 'reschedule_log')).toHaveLength(2);
+    // visit first, then the log row: the order a status change or a move locks them
+    expect(mockLocks).toEqual(['scheduled_services', 'reschedule_log', 'scheduled_services', 'reschedule_log']);
   });
 
   test('a dispatch no-show on an already-flagged visit confirms the existing row, reopening one settled earlier', async () => {
