@@ -288,6 +288,14 @@ app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredT
 // <img> loads need no CORS headers, so this route sets none.
 app.use('/api/public/map-image', require('./routes/public-map-image'));
 
+// Typed-decision labeler token (X-Labeler-Token): privacy headers and the
+// generic 404 for a wrong token / path / method / dark gate must land ABOVE the
+// global cors() (an allowed-origin OPTIONS would answer 204), the global `/api/`
+// limiter and the /api/admin parsers (Codex #5677 r1–r2); a valid token rides
+// its own limiter and the global one skips it. Requests without the header pass
+// straight through. See docs/public-route-contracts.md "Typed-decision labeler token".
+app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions').labelerPreGuard);
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -489,11 +497,6 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
-// Typed-decision labeler token (X-Labeler-Token): privacy headers and the
-// generic 404 for a wrong token / path / dark gate must land BEFORE the global
-// limiter and the /api/admin parsers; a valid token rides its own limiter.
-// See docs/public-route-contracts.md "Typed-decision labeler token".
-app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions').labelerPreGuard);
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

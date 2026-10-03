@@ -400,10 +400,11 @@ describe('machine labeler token (X-Labeler-Token)', () => {
 });
 
 describe('labelerPreGuard wiring (server/index.js)', () => {
-  test('is mounted ahead of the global /api/ limiter and the /api/admin parsers, and the global limiter skips a verified token', () => {
+  test('is mounted ahead of the global cors(), the /api/ limiter and the /api/admin parsers, and the global limiter skips a verified token', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
     const guard = src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions').labelerPreGuard)");
     expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(src.indexOf('app.use(cors('));
     expect(guard).toBeLessThan(src.indexOf("app.use('/api/', limiter)"));
     expect(guard).toBeLessThan(src.indexOf('requireStaffTokenForLargeBody, express.json'));
     expect(src).toMatch(/\|\| req\.machineLabeler === true,/);

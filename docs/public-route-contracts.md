@@ -5987,6 +5987,7 @@ other than `/reviews/<uuid>/label` (a structured UUID, not any 36 hex/hyphen cha
 same `404 { error: 'Not found' }`. **Gate:** `GATE_TYPED_DECISIONS` (dark gate:
 the limiter is skipped while it is off, so a probe never sees a revealing 429).
 **Order:** `labelerPreGuard` is mounted in `server/index.js` AHEAD of the
+global `cors()` (an allowed-origin OPTIONS would otherwise answer 204), the
 global `/api/` limiter and the `/api/admin` body parsers (and runs again inside
 the router, idempotently), so a request carrying the header gets its privacy
 headers and, when anything is wrong, the generic 404 before any global
