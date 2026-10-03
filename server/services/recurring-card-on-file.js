@@ -2131,17 +2131,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       let fallbackSettled = false;
       let fallbackCreditCovered = false;
       try {
-        // A deferred year whose bill is now above what the customer approved
-        // (the charge's pre-credit cap refused it) goes out WITHOUT the
-        // sender's automatic credit apply, so customer credit never settles an
-        // amount nobody approved (pre-push audit P0).
-        let fallbackOptions = null;
-        if (deferredToFirstVisit && Number.isInteger(job.authorized_invoice_total_cents)) {
-          const capRow = await db('invoices').where({ id: job.invoice_id }).first('total');
-          if (Math.round(Number(capRow?.total || 0) * 100) > job.authorized_invoice_total_cents) {
-            fallbackOptions = { skipAccountCreditAutoApply: true };
-          }
-        }
+        // A deferred year's fallback pay link never auto-applies account
+        // credit: the bill may have been raised above what the customer
+        // approved, and a preflight read of it would race the edit (GitHub
+        // Codex #5656 r1). The credit stays on the account; the customer pays
+        // the bill as sent.
+        const fallbackOptions = deferredToFirstVisit ? { skipAccountCreditAutoApply: true } : null;
         const fencedDelivery = fallbackOptions
           ? await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id, fallbackOptions))
           : await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));

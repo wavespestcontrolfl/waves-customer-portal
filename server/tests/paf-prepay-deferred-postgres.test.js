@@ -571,13 +571,22 @@ postgres('annual prepay charged after the first visit', () => {
       closeSpy.mockRestore();
     });
 
+    it('a refunded year cancelled with no end-at-term decision is dead and reaches the office (GitHub Codex #5656 r1)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'refunded' });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
     it('a paid year cancelled to end at term is settled, never office work (pre-push audit)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
       await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
-      await release();
-      expect((await jobOf(f)).status).not.toBe('cancelled_after_visit');
+      expect(await release()).toMatchObject({ released: 1 });
+      expect((await jobOf(f)).status).toBe('pending');
     });
 
     it('a year cancelled after the first visit was performed rings the office to bill that visit', async () => {
@@ -980,7 +989,7 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
       expect(await jobOf(f)).toMatchObject({ status: 'delivered_fallback', charge_returned: true });
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'invoice', id: f.invoiceId } }),
@@ -1174,7 +1183,7 @@ postgres('annual prepay charged after the first visit', () => {
       const StripeService = require('../services/stripe');
       StripeService.chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
       await sweep();
-      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
       expect((await jobOf(f)).status).toBe('delivered_fallback');
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({
