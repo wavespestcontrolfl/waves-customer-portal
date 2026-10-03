@@ -786,7 +786,7 @@ router.post('/sms', async (req, res, next) => {
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
     }
 
-    if (translationClaim === 'claimed') return res.status(409).json({ error: 'A teammate is already sending this suggested reply. Refresh the thread before replying.' });
+    if (translationClaim === 'claimed') return res.status(409).json({ error: 'This suggested reply was already sent or is being sent. Clear the message box and refresh the thread before replying.' });
     if (translationClaim && translationClaim !== 'ok') {
       return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
     }

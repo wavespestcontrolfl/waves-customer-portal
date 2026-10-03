@@ -418,7 +418,7 @@ describe('admin communications SMS route', () => {
   // under the thread lock, and refused rather than sent stale or twice.
   test.each([
     ['stale', /out of date/],
-    ['claimed', /teammate is already sending/],
+    ['claimed', /already sent or is being sent/],
   ])('a suggested reply whose claim reads %s is refused with 409 and nothing is sent', async (claim, words) => {
     mockTranslationClaim.mockResolvedValueOnce(claim);
     await withServer(async (baseUrl) => {

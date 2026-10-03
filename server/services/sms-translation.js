@@ -963,23 +963,23 @@ const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 
-const SEND_CLAIM_MS = 2 * 60 * 1000;
-
 /**
  * Send boundary for a Use Reply text. The suggested reply is sendable only while the card that offered it would
  * still offer it (same trial, still the customer's latest text, unanswered, not expired, same number), and only
- * by ONE sender: a single guarded UPDATE stamps checks.send_claimed_at, so of two staff pressing Send together
- * the second is refused. The stamp lapses after two minutes (a send that failed can be tried again); a send
- * that went through makes the text answered, which the first check refuses from then on.
+ * ONCE: a single guarded UPDATE stamps checks.send_claimed_at, and the stamp is never lifted. A send whose
+ * outcome is uncertain (the provider accepted, the request timed out) therefore can never be repeated from the
+ * card; after a definite failure staff write the reply themselves.
  * Returns 'ok' | 'stale' | 'claimed'. Fails closed: any doubt reads as stale.
  */
 async function claimTranslationReplyForSend({ trialId, customerId, to, now = new Date() }) {
   try {
     if (!trialId || !customerId) return 'stale';
     const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null);
-    if (!(assist && !assist.pending && assist.replyTranslated && String(assist.trialId) === String(trialId))) return 'stale';
+    if (!assist || assist.pending || String(assist.trialId) !== String(trialId)) return 'stale';
+    if (assist.replyUsed) return 'claimed';
+    if (!assist.replyTranslated) return 'stale';
     const claimed = await db(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
-      .whereRaw("COALESCE((checks->>'send_claimed_at')::timestamptz, 'epoch'::timestamptz) < ?", [new Date(now.getTime() - SEND_CLAIM_MS)])
+      .whereRaw("checks->>'send_claimed_at' IS NULL")
       .update({ checks: db.raw("jsonb_set(COALESCE(checks, '{}'::jsonb), '{send_claimed_at}', to_jsonb(?::text))", [now.toISOString()]) });
     return claimed === 1 ? 'ok' : 'claimed';
   } catch (err) {
@@ -1047,12 +1047,15 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     // A row stored before the action types were recorded reads as unknown, which is withheld too.
     const storedChecks = typeof row.checks === 'string' ? (() => { try { return JSON.parse(row.checks); } catch { return {}; } })() : (row.checks || {});
     const needsAction = fresh && !require('./sms-auto-send').autoSendActionsSafe(storedChecks.intended_actions);
-    const ready = fresh && !quotesEta && !needsAction;
+    // Nor one already taken to the send boundary once (claimTranslationReplyForSend): its outcome may be unknown.
+    const replyUsed = fresh && Boolean(storedChecks.send_claimed_at);
+    const ready = fresh && !quotesEta && !needsAction && !replyUsed;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
     const staleWords = quotesEta ? 'The reply quotes a live arrival time, so it needs a person.'
       : needsAction ? 'The reply promises a follow-up (a link, a booking or a hand-off), so it needs a person.'
-        : 'The suggested reply is more than a day old.';
+        : replyUsed ? 'The suggested reply was already used once.'
+          : 'The suggested reply is more than a day old.';
     return {
       trialId: row.id,
       smsLogId: row.sms_log_id,
@@ -1063,6 +1066,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
       replyTranslated: ready ? row.reply_translated : null,
       heldReason: ready ? null : (held || (row.verdict === 'ready' ? staleWords : null)),
       customerId,
+      replyUsed,
       // the composer drops the reply at this moment without asking again
       replyExpiresAt: ready ? new Date(new Date(row.created_at).getTime() + INBOX_REPLY_MAX_AGE_MS).toISOString() : null,
       createdAt: row.created_at,

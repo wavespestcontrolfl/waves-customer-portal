@@ -72,9 +72,16 @@ describe('inboxAssistFor', () => {
     const claim = (over = {}) => claimTranslationReplyForSend({ trialId: 7, customerId: 'c1', to: '+19415550100', now: NOW, ...over });
     expect(await claim()).toBe('ok');
     expect(mockClaim).toHaveBeenCalledTimes(1);
-    // the guarded UPDATE matched no row: a teammate stamped it inside the last two minutes
+    // the guarded UPDATE matched no row: a teammate stamped it a moment ago
     mockClaim.mockResolvedValue(0);
     expect(await claim()).toBe('claimed');
+    // a stamp is never lifted: the card stops offering the reply, and a second send is refused without an UPDATE
+    mockClaim.mockClear();
+    mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [], send_claimed_at: '2026-10-03T14:10:00.000Z' } });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, replyUsed: true, heldReason: 'The suggested reply was already used once.' });
+    expect(await claim()).toBe('claimed');
+    expect(mockClaim).not.toHaveBeenCalled();
+    mockTrial.mockResolvedValue(READY);
     mockClaim.mockClear(); mockClaim.mockResolvedValue(1);
     expect(await claim({ trialId: 6 })).toBe('stale'); // another text's trial
     expect(await claim({ to: '+19415550177' })).toBe('stale'); // another number
