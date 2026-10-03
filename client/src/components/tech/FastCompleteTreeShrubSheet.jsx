@@ -581,6 +581,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               list={ctx.watchList}
               flagged={flaggedWatchKeys(ctx.watchList, previewCurrent ? photos.preview.result : null)}
               analyzed={previewCurrent}
+              readComplete={previewCurrent && photos.preview.result?.watchSignalsComplete === true}
               choices={watchChoices}
               onChoices={setWatchChoices}
               locked={locked || dictationPending}
@@ -840,7 +841,7 @@ function flaggedWatchKeys(list, result) {
 
 // The seasonal watch list: what the read flagged (Seen / Not seen), anything
 // else the tech adds as seen, and an optional extent on a seen item.
-function WatchListSection({ list, flagged, analyzed, choices, onChoices, locked }) {
+function WatchListSection({ list, flagged, analyzed, readComplete, choices, onChoices, locked }) {
   const [adding, setAdding] = useState(false);
   const flaggedItems = list.filter((item) => flagged.has(item.key));
   const added = list.filter((item) => !flagged.has(item.key) && choices[item.key]?.state === 'seen');
@@ -866,8 +867,11 @@ function WatchListSection({ list, flagged, analyzed, choices, onChoices, locked 
         <h3 className="tech-visit-section-title">{WATCH_TITLE}</h3>
         <span className="tech-visit-muted">Optional</span>
       </div>
-      {analyzed && flaggedItems.length === 0 && (
+      {analyzed && readComplete && flaggedItems.length === 0 && (
         <p className="tech-visit-muted" role="status">The photo read flagged nothing on this list.</p>
+      )}
+      {analyzed && !readComplete && (
+        <p className="tech-visit-muted" role="status">The photo read did not check this list. Add anything you saw.</p>
       )}
       <div className="tech-ts-findings">
         {flaggedItems.map((item) => (

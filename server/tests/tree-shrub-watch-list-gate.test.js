@@ -197,14 +197,14 @@ describe('analyzePhoto: gate on with a valid month', () => {
     expect(result.watchSignals).toEqual(['scale', 'whitefly', 'trunk_conk_base']);
   });
 
-  test('a missing or malformed watch field is [] and the main read is unchanged', async () => {
+  test('a missing or malformed watch field is no read (null), junk entries are dropped, and the main read is unchanged', async () => {
     serve();
     const clean = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
     expect(clean.watchSignals).toEqual([]);
     for (const bad of ['scale', 5, { 0: 'scale' }, [null, {}, []], true, null]) {
       serve({ watch: { watch_signals: bad } });
       const result = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
-      expect(result.watchSignals).toEqual([]);
+      expect(result.watchSignals).toEqual(Array.isArray(bad) ? [] : null);
       expect(result.composite).toEqual(clean.composite);
     }
   });
@@ -214,13 +214,13 @@ describe('analyzePhoto: gate on with a valid month', () => {
     ['garbage JSON', () => geminiResponse('this is not json')],
     ['empty answer', () => ({ ok: true, status: 200, json: async () => ({ candidates: [] }) })],
     ['a thrown fetch', new Error('network down')],
-  ])('watch call failure (%s): watchSignals [] and the main read unchanged, warned', async (_name, watch) => {
+  ])('watch call failure (%s): no watch read (null) and the main read unchanged, warned', async (_name, watch) => {
     serve();
     const reference = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
     serve({ watch });
     const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
     expect(result).not.toBeNull();
-    expect(result.watchSignals).toEqual([]);
+    expect(result.watchSignals).toBeNull();
     expect(result.composite).toEqual(reference.composite);
     expect(result.gemini).toEqual(reference.gemini);
     expect(result.claude).toBeNull();
@@ -228,7 +228,7 @@ describe('analyzePhoto: gate on with a valid month', () => {
     if (_name !== 'empty answer') expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('a stalled watch call aborts at its deadline: the main read still answers, watchSignals []', async () => {
+  test('a stalled watch call aborts at its deadline: the main read still answers, no watch read', async () => {
     process.env.GATE_TS_WATCH_LIST = 'true';
     const realTimeout = AbortSignal.timeout;
     AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
@@ -243,14 +243,14 @@ describe('analyzePhoto: gate on with a valid month', () => {
         });
       });
       const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
-      expect(result.watchSignals).toEqual([]);
+      expect(result.watchSignals).toBeNull();
       expect(result.gemini).toMatchObject({ foliage_fullness: SCORES.foliage_fullness });
     } finally {
       AbortSignal.timeout = realTimeout;
     }
   });
 
-  test('no Gemini key: the watch read is [] without a call (the main read is unaffected)', async () => {
+  test('no Gemini key: there is no watch read and no call (the main read is unaffected)', async () => {
     jest.resetModules();
     const key = process.env.GEMINI_API_KEY;
     const googleKey = process.env.GOOGLE_API_KEY;
@@ -263,7 +263,7 @@ describe('analyzePhoto: gate on with a valid month', () => {
       mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(SCORES) }] });
       const result = await fresh.analyzePhoto('b64', 'image/jpeg', { month: 10 });
       expect(global.fetch).not.toHaveBeenCalled();
-      expect(result.watchSignals).toEqual([]);
+      expect(result.watchSignals).toBeNull();
       expect(result.composite.observations).toBe(SCORES.observations);
     } finally {
       process.env.GEMINI_API_KEY = key;
@@ -350,9 +350,17 @@ describe('previewTreeShrubAssessment', () => {
     const off = await previewTreeShrubAssessment({ photos, loadImage, analyze: analyzeWith([[], [], []]), month: 10 });
     process.env.GATE_TS_WATCH_LIST = 'true';
     const on = await previewTreeShrubAssessment({ photos, loadImage, analyze: analyzeWith([['scale'], ['scale'], ['scale']]), month: 10 });
-    const { watchSignals, ...rest } = on;
+    const { watchSignals, watchSignalsComplete, ...rest } = on;
     expect(watchSignals).toEqual(['scale']);
+    expect(watchSignalsComplete).toBe(true);
     expect(rest).toEqual(off);
+  });
+
+  test('gate on: one failed watch read marks the result incomplete, never a clean []', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    const result = await previewTreeShrubAssessment({ photos, loadImage, analyze: analyzeWith([['scale'], null, []]), month: 10 });
+    expect(result.watchSignals).toEqual(['scale']);
+    expect(result.watchSignalsComplete).toBe(false);
   });
 
   test('gate on, no or bad month: no signals key and the two-argument call', async () => {

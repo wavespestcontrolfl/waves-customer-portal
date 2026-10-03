@@ -180,11 +180,19 @@ describe('what the read flagged: Seen / Not seen', () => {
     expect(screen.queryByText('Possible potassium deficiency')).toBeNull();
   });
 
-  test('a read that flagged nothing on the list says so', async () => {
-    await openSheet(makeRequest({ preview: { ...PREVIEW, watchSignals: [] } }));
+  test('a complete read that flagged nothing on the list says so', async () => {
+    await openSheet(makeRequest({ preview: { ...PREVIEW, watchSignals: [], watchSignalsComplete: true } }));
     await addBothPhotos();
     await analyze();
     expect(screen.getByText('The photo read flagged nothing on this list.')).toBeTruthy();
+  });
+
+  test('a watch read that did not finish is never shown as a clean result', async () => {
+    await openSheet(makeRequest({ preview: { ...PREVIEW, watchSignals: [], watchSignalsComplete: false } }));
+    await addBothPhotos();
+    await analyze();
+    expect(screen.queryByText('The photo read flagged nothing on this list.')).toBeNull();
+    expect(screen.getByText('The photo read did not check this list. Add anything you saw.')).toBeTruthy();
   });
 });
 

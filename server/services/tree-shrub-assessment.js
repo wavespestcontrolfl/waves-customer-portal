@@ -453,15 +453,17 @@ async function callGeminiVision(base64Image, mimeType) {
 // GATE_TS_WATCH_LIST: the watch-signal read. A SEPARATE, small Gemini call with
 // its own prompt, so the list can never steer the main read's scores or the
 // observations that reach customer copy. It asks for the keys and nothing else
-// (no scores, no prose). Gemini only, no Claude fallback. Any failure is [] and a
-// warn: it can never fail the main read. Known keys on the month's list only.
+// (no scores, no prose). Gemini only, no Claude fallback. Any failure is null
+// ("no read", never a clean []): it can never fail the main read, and the sheet
+// must not show an unavailable read as "nothing flagged". Known keys on the
+// month's list only.
 const WATCH_READ_MAX_OUTPUT_TOKENS = 512; // a short key list plus Gemini 3.x thinking spend
 // The watch read is optional, so it never holds a finished main read for long:
 // the request aborts at this deadline and the answer is [].
 const WATCH_READ_MAX_MS = 20 * 1000;
 async function readWatchSignals(base64Image, mimeType, month) {
   try {
-    if (!GEMINI_KEY) return [];
+    if (!GEMINI_KEY) return null;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -474,15 +476,17 @@ async function readWatchSignals(base64Image, mimeType, month) {
     });
     if (!response.ok) {
       logger.warn(`Tree-shrub watch-signal read Gemini API ${response.status} (${GEMINI_VISION_MODEL})`);
-      return [];
+      return null;
     }
     const text = geminiText(await response.json());
-    if (!text) return [];
+    if (!text) return null;
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    return normalizeWatchSignals(parsed && parsed.watch_signals, month);
+    // An answer without the array is not a read: null, never a clean [].
+    if (!parsed || !Array.isArray(parsed.watch_signals)) return null;
+    return normalizeWatchSignals(parsed.watch_signals, month);
   } catch (err) {
     logger.warn(`Tree-shrub watch-signal read failed: ${err.message}`);
-    return [];
+    return null;
   }
 }
 
@@ -981,7 +985,12 @@ async function previewTreeShrubAssessment({
     ...buildTreeShrubTechFindings({ scores, observations: mergedRaw.observations }),
     // GATE_TS_WATCH_LIST: the signals any photo showed, in list order. Carried
     // for the sheet only; no score reads it.
-    ...(watchMonth ? { watchSignals: normalizeWatchSignals(reads.flatMap((read) => read.watchSignals || []), watchMonth) } : {}),
+    ...(watchMonth ? {
+      watchSignals: normalizeWatchSignals(reads.flatMap((read) => read.watchSignals || []), watchMonth),
+      // True only when every scored photo's watch read answered: the sheet
+      // says "flagged nothing" on a complete read alone.
+      watchSignalsComplete: reads.every((read) => Array.isArray(read.watchSignals)),
+    } : {}),
   };
 }
 
