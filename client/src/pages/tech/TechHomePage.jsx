@@ -57,7 +57,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
-import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
+import { pruneFastCompletionAttempts, pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -568,7 +568,10 @@ export default function TechHomePage({ section = 'today' }) {
   // Recap clips kept on this device past the draft retention window are
   // abandoned (the visit left the route): sweep them here, since a tech who
   // stays in this page never runs the admin schedule's full sweep.
-  useEffect(() => { pruneRecapClipDrafts().catch(() => {}); }, []);
+  useEffect(() => {
+    pruneRecapClipDrafts().catch(() => {});
+    pruneFastCompletionAttempts().catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchSchedule();
@@ -1440,6 +1443,7 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setFastCompleteService(null);
             // A sheet blocked on a stale row asks for a refresh, so reopening
@@ -1479,6 +1483,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1511,6 +1516,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setLawnReserviceFastService(null);
             if (options?.refresh) fetchSchedule();

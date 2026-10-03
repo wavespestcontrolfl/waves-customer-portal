@@ -940,7 +940,7 @@ describe('complete and send', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [first, retried, fresh] = request.bodies('/complete');
     expect(retried.idempotencyKey).toBe(first.idempotencyKey);
@@ -953,7 +953,7 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
     expect(request.bodies('/complete')).toHaveLength(1);
   });
 });

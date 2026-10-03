@@ -94,7 +94,7 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, SavedView,
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
@@ -498,7 +498,7 @@ function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
-export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -522,8 +522,8 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   });
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
-  const submission = useFastCompleteSubmit({ base, request, confirmable: reportFlow });
-  const { submitting, done } = submission;
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow });
+  const { recovering, submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray
   // tracer), the way the photo manager opens: the sheet goes inert under it.
@@ -545,16 +545,16 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // is unknown or refused (it may have saved), so reopening routes from the
   // live schedule rather than the same old row.
   const close = useCallback(() => {
-    if (submitting) return;
+    if (recovering || submitting) return;
     if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [recovering, submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
   // so it is offered only before one may have reached the server.
   // A confirmable prompt (report flow) holds the sheet until it is answered.
-  const locked = submitting || submission.failure !== null || !!submission.prompt;
+  const locked = recovering || submitting || submission.failure !== null || !!submission.prompt;
 
   return (
     <FastCompleteFrame
@@ -584,6 +584,8 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
       </SavedView>
     );
   }
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
