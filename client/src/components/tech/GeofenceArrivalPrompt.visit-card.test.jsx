@@ -165,4 +165,15 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(screen.queryByTestId('visit-notice')).not.toBeInTheDocument();
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/n-visit_assigned/dismiss'))).toBe(true);
   });
+
+  it('on the admin Today page (inlineScheduleChanges) schedule changes stay in the page, never float; other prompts still do', async () => {
+    const prompt = notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt');
+    stubFeed([ASSIGNED, MOVED, OFF, GONE, prompt].map((n) => ({ ...n, created_at: new Date().toISOString() })));
+    render(<GeofenceArrivalPrompt inlineScheduleChanges />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(await screen.findByText(/Okafor/)).toBeInTheDocument();
+    expect(screen.queryByTestId('visit-notice')).not.toBeInTheDocument();
+    expect(screen.queryByText(/more notice/)).not.toBeInTheDocument();
+  });
 });

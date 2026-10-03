@@ -127,7 +127,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview }) {
+export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -179,6 +179,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     const otherCards = [];
     const visitCards = [];
     for (const n of active) {
+      // Shown in the page instead (TechScheduleChanges), not floated here.
+      if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
@@ -211,7 +213,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsRanked.length - shownVisits.length,
     };
-  }, [active]);
+  }, [active, inlineScheduleChanges]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so

@@ -12,8 +12,8 @@ it('counts grouped stops without labeling skipped members completed and opens th
   const stops = groupServicesIntoStops([row('one', 'completed', { id: 'group' }), row('two', 'skipped', { id: 'group' }), row('three', 'en_route')]);
   const onOpen = vi.fn();
   render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={onOpen} />);
-  expect(screen.getByText('0 of 2 stops complete')).toBeInTheDocument();
-  expect(screen.getByText('3 services')).toBeInTheDocument();
+  // One subtitle line under Today (approved admin mockup 2026-10-03).
+  expect(screen.getByText(/0 of 2 stops complete · 3 services/)).toBeInTheDocument();
   expect(screen.getByText('Current visit')).toBeInTheDocument();
   expect(stopStatusLabel(stops[0])).toBe('mixed');
   fireEvent.click(screen.getByRole('button', { name: 'Open visit' }));

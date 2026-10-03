@@ -43,7 +43,31 @@ async function request(path, options = {}) {
   return data;
 }
 
-function actionStyle(color, disabled) {
+// The admin Today page (field workspace) draws the card in the admin look:
+// neutral surfaces, monochrome secondary buttons, red only for an error.
+const FIELD = {
+  card: 'var(--surface-primary, #ffffff)', border: 'var(--border-default, #e7e5e4)', text: 'var(--text-primary, #1c1917)',
+  muted: 'var(--text-secondary, #57534e)', green: 'var(--text-primary, #1c1917)', teal: 'var(--text-primary, #1c1917)',
+  amber: '#854D0E', red: '#A32D2D', bg: 'var(--surface-hover, #f5f5f4)',
+};
+
+function actionStyle(color, disabled, field = false) {
+  if (field) {
+    return {
+      flex: 1,
+      minHeight: 40,
+      padding: '6px 12px',
+      borderRadius: 4,
+      border: '0.5px solid var(--border-strong, #d6d3d1)',
+      background: 'transparent',
+      color: disabled ? 'var(--text-quaternary, #a8a29e)' : FIELD.text,
+      fontSize: 11,
+      fontWeight: 500,
+      letterSpacing: '0.06em',
+      textTransform: 'uppercase',
+      cursor: disabled ? 'not-allowed' : 'pointer',
+    };
+  }
   return {
     flex: 1,
     minHeight: 48,
@@ -62,7 +86,16 @@ function customerLabel(service) {
   return service?.customerName || service?.customer_name || 'next stop';
 }
 
-export default function TechTimeTrackingCard({ nextStop }) {
+// variant="field": the admin Today page's look; the default keeps the legacy dark card.
+export default function TechTimeTrackingCard({ nextStop, variant = 'legacy' }) {  const field = variant === 'field';
+  const P = field ? FIELD : D;
+  const sectionStyle = field
+    ? { background: P.card, border: `0.5px solid ${P.border}`, borderRadius: 6, padding: '12px 14px', marginBottom: 12 }
+    : { background: P.card, border: `1px solid ${P.border}`, borderRadius: 12, padding: 14, marginBottom: 16 };
+  const titleStyle = field
+    ? { color: P.text, fontSize: 14, fontWeight: 500 }
+    : { color: P.text, fontSize: 14, fontWeight: 800, fontFamily: "'Montserrat', sans-serif" };
+
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
@@ -100,12 +133,12 @@ export default function TechTimeTrackingCard({ nextStop }) {
   if (loading) return null;
   if (!status) {
     return (
-      <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, marginBottom: 16 }}>
-        <div style={{ color: D.text, fontSize: 14, fontWeight: 800, fontFamily: "'Montserrat', sans-serif" }}>Time Clock</div>
-        <div role="alert" style={{ color: D.red, fontSize: 14, marginTop: 8 }}>
+      <section style={sectionStyle}>
+        <div style={titleStyle}>Time Clock</div>
+        <div role="alert" style={{ color: P.red, fontSize: 14, marginTop: 8 }}>
           {feedback?.text || 'Time clock status is unavailable.'}
         </div>
-        <button type="button" onClick={load} style={{ ...actionStyle(D.teal, false), marginTop: 10, width: '100%' }}>
+        <button type="button" onClick={load} style={{ ...actionStyle(P.teal, false, field), marginTop: 10, width: '100%' }}>
           Retry
         </button>
       </section>
@@ -119,15 +152,15 @@ export default function TechTimeTrackingCard({ nextStop }) {
     && String(currentJob.jobId) === String(nextStop.id);
 
   return (
-    <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, marginBottom: 16 }}>
+    <section style={sectionStyle}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
         <div>
-          <div style={{ color: D.text, fontSize: 14, fontWeight: 800, fontFamily: "'Montserrat', sans-serif" }}>Time Clock</div>
-          <div style={{ color: clockedIn ? D.green : D.muted, fontSize: 14, marginTop: 2 }}>
+          <div style={titleStyle}>Time Clock</div>
+          <div style={{ color: clockedIn ? P.green : P.muted, fontSize: 14, marginTop: 2 }}>
             {clockedIn ? (onBreak ? 'Clocked in · on break' : currentJob ? 'Clocked in · job running' : 'Clocked in') : 'Clocked out'}
           </div>
         </div>
-        <div style={{ color: D.muted, fontSize: 14, textAlign: 'right' }}>
+        <div style={{ color: P.muted, fontSize: 14, textAlign: 'right' }}>
           {Math.round(Number(status?.todaySummary?.shiftMinutes || 0))} shift min<br />
           {status?.todaySummary?.jobCount || 0} jobs
         </div>
@@ -135,20 +168,20 @@ export default function TechTimeTrackingCard({ nextStop }) {
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         {!clockedIn ? (
-          <button type="button" disabled={!!busy} onClick={() => act('Clock in', '/clock-in', { location: true })} style={actionStyle(D.green, !!busy)}>
+          <button type="button" disabled={!!busy} onClick={() => act('Clock in', '/clock-in', { location: true })} style={actionStyle(P.green, !!busy, field)}>
             {busy === 'Clock in' ? 'Clocking in…' : 'Clock in'}
           </button>
         ) : (
-          <button type="button" disabled={!!busy} onClick={() => act('Clock out', '/clock-out', { location: true })} style={actionStyle(D.red, !!busy)}>
+          <button type="button" disabled={!!busy} onClick={() => act('Clock out', '/clock-out', { location: true })} style={actionStyle(P.red, !!busy, field)}>
             {busy === 'Clock out' ? 'Clocking out…' : 'Clock out'}
           </button>
         )}
         {clockedIn && (onBreak ? (
-          <button type="button" disabled={!!busy} onClick={() => act('Break ended', '/end-break')} style={actionStyle(D.green, !!busy)}>
+          <button type="button" disabled={!!busy} onClick={() => act('Break ended', '/end-break')} style={actionStyle(P.green, !!busy, field)}>
             End break
           </button>
         ) : (
-          <button type="button" disabled={!!busy || !!currentJob} onClick={() => act('Break started', '/start-break')} style={actionStyle(D.amber, !!busy || !!currentJob)}>
+          <button type="button" disabled={!!busy || !!currentJob} onClick={() => act('Break started', '/start-break')} style={actionStyle(P.amber, !!busy || !!currentJob, field)}>
             Start break
           </button>
         ))}
@@ -157,7 +190,7 @@ export default function TechTimeTrackingCard({ nextStop }) {
       {clockedIn && !onBreak && (
         <div style={{ display: 'flex', gap: 8 }}>
           {currentJob ? (
-            <button type="button" disabled={!!busy} onClick={() => act('Job ended', '/end-job', { location: true })} style={actionStyle(D.teal, !!busy)}>
+            <button type="button" disabled={!!busy} onClick={() => act('Job ended', '/end-job', { location: true })} style={actionStyle(P.teal, !!busy, field)}>
               End {nextStopIsCurrent ? customerLabel(nextStop) : 'current job'}
             </button>
           ) : (
@@ -165,7 +198,7 @@ export default function TechTimeTrackingCard({ nextStop }) {
               type="button"
               disabled={!!busy || !nextStop?.id || !nextStopIsOnSite}
               onClick={() => act('Job started', `/start-job/${encodeURIComponent(nextStop.id)}`, { location: true })}
-              style={actionStyle(D.teal, !!busy || !nextStop?.id || !nextStopIsOnSite)}
+              style={actionStyle(P.teal, !!busy || !nextStop?.id || !nextStopIsOnSite, field)}
             >
               {!nextStop?.id
                 ? 'No open job to start'
@@ -178,12 +211,12 @@ export default function TechTimeTrackingCard({ nextStop }) {
       )}
 
       {currentJob && !nextStopIsCurrent && (
-        <div style={{ color: D.amber, fontSize: 14, marginTop: 8 }}>
+        <div style={{ color: P.amber, fontSize: 14, marginTop: 8 }}>
           A different job timer is running. End it before starting the next stop.
         </div>
       )}
       {feedback && (
-        <div role={feedback.isError ? 'alert' : 'status'} style={{ color: feedback.isError ? D.red : D.green, fontSize: 14, marginTop: 8 }}>
+        <div role={feedback.isError ? 'alert' : 'status'} style={{ color: feedback.isError ? P.red : P.green, fontSize: 14, marginTop: 8 }}>
           {feedback.text}
         </div>
       )}

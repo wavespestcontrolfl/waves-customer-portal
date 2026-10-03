@@ -46,6 +46,7 @@ import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import TechFieldHome from './TechFieldHome';
+import TechScheduleChanges from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
@@ -397,7 +398,7 @@ export default function TechHomePage({ section = 'today' }) {
   const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
   const base = useTechBasePath();
-  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null, techRole = null } = useOutletContext() || {};
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
@@ -950,6 +951,9 @@ export default function TechHomePage({ section = 'today' }) {
   return (
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
+        // The field workspace's Today page shows schedule changes in the page
+        // (TechScheduleChanges), not as floating cards over it.
+        inlineScheduleChanges={fieldWorkspace}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
@@ -970,8 +974,10 @@ export default function TechHomePage({ section = 'today' }) {
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
+          scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} />}
+          timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           timekeeping={<>
-            <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
+            <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
             {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}

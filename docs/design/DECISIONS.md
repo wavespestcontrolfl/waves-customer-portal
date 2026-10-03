@@ -3146,3 +3146,17 @@ entry) are left as written: read them as pointing at the paragraph of the
 same name in `docs/gates-and-env.md`. The catalogue covers documented
 variables only; a variable with no entry may still exist in
 `server/config/feature-gates.js`.
+
+## 2026-10-03 — The field workspace (`/admin/today`) takes the Waves Admin look
+
+Owner-approved mockup (2026-10-03, "approve the look"): the field workspace
+behind the `tech-field-workspace` flag drops its navy/Montserrat palette for
+the admin one: the admin shell's theme tokens, Roboto, weights 400/500,
+UPPERCASE 11px button and section labels, hairline borders, 4px/6px radii,
+one dark primary button per view. `tech-field.css` carries it; the legacy
+dark forms inside `.tf-existing` keep their palette until their own slice.
+Schedule changes (`visit_*` cards) render inside the Today page instead of
+floating over it: a change touching today or tomorrow keeps its own card,
+the rest fold into one summary with Review and Clear all (owner ruling the
+same day). The time clock moves from More to Today (`TechTimeTrackingCard
+variant="field"`). The flag-off legacy page is unchanged.
