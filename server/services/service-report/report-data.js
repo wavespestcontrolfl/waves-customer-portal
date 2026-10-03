@@ -3334,12 +3334,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // payload photo gains its customer-facing zoneLabel. Off = the 5-photo limit
   // and the payload shape this report has always had.
   const shotListLive = featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST');
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list (the
+  // stored marker) can hold up to eight photos, so the set reads with the
+  // eight-photo cap whenever the set gate is live, even if the capture gate
+  // (GATE_LAWN_SHOT_LIST) is off or was rolled back. Any other visit keeps the
+  // limit it always had.
+  const photoSetEligible = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos);
   const latestPhotos = await knex('lawn_assessment_photos')
     .where({ assessment_id: assessment.id, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
-    .limit(shotListLive ? LAWN_SHOT_LIST_CAP : 5)
+    .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
     .catch(() => []);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
@@ -3365,7 +3371,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // shows its photos as a labeled set in shot order. Built from the same
   // signed URLs as `photos` above, so it is minted fresh on every view and
   // never stored. No gate, no marker or no resolvable photo = no key at all.
-  const photoSet = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos)
+  const photoSet = photoSetEligible
     ? buildLawnPhotoSet(latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order })))
     : [];
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed

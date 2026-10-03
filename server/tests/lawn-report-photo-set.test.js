@@ -225,6 +225,39 @@ describe('GATE_LAWN_REPORT_PHOTO_SET on the lawn report payload', () => {
     expect(data.reportV2.photoSet.map((p) => p.shot)).toEqual(['back', 'close_up', 'blade_crown', 'trouble', 'trouble']);
   });
 
+  describe('with the capture gate (GATE_LAWN_SHOT_LIST) off or rolled back', () => {
+    const EIGHT = ['front', 'back', 'side', 'close_up', 'blade_crown', 'hot_edge', 'shade', 'trouble'];
+    const eightRows = () => EIGHT.map((zone, i) => ({
+      id: `ph-${i}`, assessment_id: 'la-cur', customer_visible: true, zone, photo_type: 'general',
+      is_best_photo: i === 0, quality_score: 90 - i, photo_order: i, s3_key: `lawn/ph-${i}.jpg`,
+    }));
+    const renderEight = async () => buildReportV1Data(service(), 'token-p23', makeKnex(fixtures(cur, eightRows())), {});
+    beforeEach(() => { delete process.env.GATE_LAWN_SHOT_LIST; });
+
+    test('set gate on, marked visit: all eight photos reach the set', async () => {
+      process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+      const data = await renderEight();
+      expect(data.reportV2.photoSet.map((p) => p.shot)).toEqual(EIGHT);
+      expect(data.reportV2.photoSet).toHaveLength(8);
+    });
+
+    test('set gate on, visit with no marker: the old five-photo limit and the old payload', async () => {
+      cur = curRow(LEGACY_META);
+      const off = await renderEight();
+      process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+      const on = await renderEight();
+      expect(on.lawnAssessment.photos).toHaveLength(5);
+      expect(snapshotOf(on)).toBe(snapshotOf(off));
+    });
+
+    test('set gate off, marked visit: still the five-photo limit, no photoSet', async () => {
+      const data = await renderEight();
+      expect(data.lawnAssessment.photos).toHaveLength(5);
+      expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'photoSet')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(data.lawnAssessment.photos[0], 'zoneLabel')).toBe(false);
+    });
+  });
+
   test('the PDF cache key moves only while the gate is live, for any visit', async () => {
     const sig = async () => (await resolveCanonicalLawnRender(
       { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' },
