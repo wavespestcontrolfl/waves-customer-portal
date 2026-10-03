@@ -2220,7 +2220,8 @@ async function resolveContactLinkedCustomer(database, body = {}) {
       || evidence.tierKeys.length > 0 || evidence.setupWaiverKeys.length > 0;
     return { customer, changesPrice };
   } catch (err) {
-    logger.warn(`[admin-estimate] contact link check skipped: ${err.message}`);
+    // Never err.message: a failed query's message carries its bindings (the phone).
+    logger.warn(`[admin-estimate] contact link check skipped (${err.code || err.name || 'error'})`);
     return null;
   }
 }
@@ -2248,7 +2249,7 @@ async function confirmContactLink(trx, contactLink, { body, linkedLeadId }) {
       return again.customer.id;
     });
   } catch (err) {
-    logger.warn(`[admin-estimate] contact link skipped at insert: ${err.message}`);
+    logger.warn(`[admin-estimate] contact link skipped at insert (${err.code || err.name || 'error'})`);
     return null;
   }
 }
