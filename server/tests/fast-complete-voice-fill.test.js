@@ -1839,3 +1839,11 @@ describe('voice test findings (real recordings, 2026-10-03)', () => {
     expect(validateFill(answer({ products: [row(4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
   });
 });
+
+test('"per meter squared" is a rate; "no weight" with no replacement number corrects nothing', () => {
+  const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+  const rate = 'Taurus four ounces per meter squared.';
+  expect(validateFill(answer({ products: [row(4, rate.replace(/\.$/, ''))] }), ctx, rate).products[0].amount).toBeNull();
+  const kept = 'Taurus four ounces, no weight limit on the truck.';
+  expect(validateFill(answer({ products: [row(4, 'Taurus four ounces')] }), ctx, kept).products[0].amount).toBe(4);
+});

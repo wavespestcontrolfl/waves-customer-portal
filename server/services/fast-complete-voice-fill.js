@@ -577,12 +577,13 @@ function isCarrierVolume(tokens, start, end, unit, stops = []) {
 // corrected just after it ("four ounces, no wait, five").
 const RETRACT_BEFORE = 3;
 const CORRECTION_AFTER = 3;
-// ("no weight" is how a transcriber often writes "no wait")
-const CORRECTION_CUES = [['no', 'wait'], ['no', 'weight'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
+// ("no weight" is how a transcriber often writes "no wait": a correction only when a
+// replacement number follows it, see isCorrectingNo)
+const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
 // A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
 // first and is not a negation of the second.
 // ("no, it was five", "no, make it five", "no, actually five": a short filler may sit between)
-const CORRECTION_FILLERS = new Set(['it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
+const CORRECTION_FILLERS = new Set(['wait', 'weight', 'it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
 function isCorrectingNo(tokens, j) {
   if (tokens[j] !== 'no') return false;
   let k = j + 1;
@@ -612,7 +613,9 @@ const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square
 // Any "per" after a number is a rate, with one narrow exception: a transcriber
 // hears "ounces, perimeter" as "ounces per meter" / "per minute", and neither is
 // a dose denominator on this sheet.
-const perRate = (tokens, end) => tokens[end] === 'per' && !['meter', 'meters', 'minute', 'minutes'].includes(tokens[end + 1]);
+// ("per meter squared" / "per square meter" is an area rate and stays one)
+const perRate = (tokens, end) => tokens[end] === 'per'
+  && !(['meter', 'meters', 'minute', 'minutes'].includes(tokens[end + 1]) && !['squared', 'square', 'sq'].includes(tokens[end + 2]));
 const isRate = (tokens, end) => perRate(tokens, end)
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
   || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))
@@ -866,7 +869,7 @@ const isCurrentVisitAt = (tokens, j) => tokens[j] === 'today' || tokens[j] === '
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
-  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && (tokens[j + 1] === 'wait' || tokens[j + 1] === 'weight'));
+  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && (tokens[j + 1] === 'wait' || isCorrectingNo(tokens, j)));
 }
 // Token positions a negation word governs: up to NEGATED_SPAN words after it, never
 // past a clause break ("Activity was not heavy, just light": only "heavy"; "Did not
@@ -908,7 +911,7 @@ function isNegatedMention(mention, world) {
     // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
     if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
       || token === 'ran' && world.tokens[j + 1] === 'out') return true;
-    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || (world.tokens[j + 1] !== 'wait' && world.tokens[j + 1] !== 'weight');
+    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || (world.tokens[j + 1] !== 'wait' && !isCorrectingNo(world.tokens, j));
     if (!AUXILIARY_WORDS.has(token)) return false;
   }
   return false;
