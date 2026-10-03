@@ -204,14 +204,35 @@ describe('the completion re-checks the trace the report was judged against (Code
   });
 
   test('the record freezes the trace it was judged against, and the report shows only that trace', () => {
-    expect(block).toContain('...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),');
+    expect(block).toContain('...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),');
     const report = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
     expect(report).toMatch(/if \(tracedRow\?\.snapshot_s3_key && PhotoService\s*\n\s*&& require\('\.\.\/treatment-zone-maps'\)\.traceJudgedAllows\(structured, tracedRow\)\) \{/);
   });
 
   test('the completion counts only the trace it judged as exterior evidence (Codex #5538)', () => {
-    expect(block).toContain("const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};");
+    expect(block).toContain("const judged = traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {};");
     expect(block).toContain("return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);");
+  });
+
+  test('a lane or typed Fast Complete is refused on a visit with a linked project, under the visit lock, before any record write', () => {
+    const lock = block.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const check = block.indexOf('if (traceSeen !== undefined && lockedSvcRow && (structuredObservations || structuredFindings)) {');
+    expect(check).toBeGreaterThan(lock);
+    expect(check).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    const body = block.slice(check, check + 400);
+    expect(body).toContain("trx('projects').where({ scheduled_service_id: svc.id }).first('id')");
+    expect(body).toContain("code: 'linked_project'");
+    expect(block).toMatch(/err\.code === 'linked_project'[\s\S]{0,260}status: 409/);
+  });
+
+  test('a trace the sheet judged as hidden is frozen as no trace, while its stamp still feeds the changed check (Codex P2 on #5633)', () => {
+    expect(block).toContain('const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);');
+    // The concurrency check reads the raw stamp, never the frozen value.
+    expect(block).toContain('if (stamp(traceSeen) !== stamp(traceNow?.updated_at)) {');
+    const { traceJudgedAllows } = jest.requireActual('../services/treatment-zone-maps');
+    const row = { updated_at: '2026-10-02T14:00:00Z' };
+    expect(traceJudgedAllows({ traceJudged: { seen: row.updated_at } }, row)).toBe(true);
+    expect(traceJudgedAllows({ traceJudged: { seen: null } }, row)).toBe(false);
   });
 
   test('a changed trace answers 409 trace_changed and marks the attempt failed', () => {

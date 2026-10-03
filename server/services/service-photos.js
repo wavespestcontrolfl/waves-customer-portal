@@ -497,6 +497,17 @@ async function deleteStagedServicePhoto({ scheduledServiceId, photoId, actor, kn
     const locked = await lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, actor });
     if (locked.error) return locked;
     await trx('scheduled_service_photo_staging').where({ id: photoId }).del();
+    // Treated-point marks are keyed by the photo's file, with no link to its
+    // row, so they go with it here: left behind they stay in the visit's
+    // marks for good (Codex P2 on #5624). In a savepoint, so an environment
+    // without the marks table still deletes the photo.
+    if (locked.photo.s3_key) {
+      await trx.transaction((sp) => sp('service_photo_marks')
+        .where({ scheduled_service_id: scheduledServiceId, s3_key: locked.photo.s3_key })
+        .del()).catch((err) => {
+        if (err?.code !== '42P01' && err?.code !== '42703') throw err;
+      });
+    }
     return { photo: locked.photo };
   });
   // The file goes once its row is gone for good: a failed delete leaves an

@@ -2720,7 +2720,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // against: its updated_at, or null for none — OPTIONAL. Undefined (every
       // other caller) skips the check. Re-checked under the visit row lock.
       traceSeen,
+      // false when the sheet judged a saved trace as one its report never
+      // shows (a typed visit that is not a spray visit, a lane the tracer is
+      // hidden for) — OPTIONAL. traceSeen still carries that trace's stamp
+      // for the changed-during-completion check; the record then freezes
+      // "no trace judged", so the trace neither shows on the report nor
+      // counts as an outside treatment zone (Codex P2 on #5633).
+      traceShown,
     } = completionInput.body;
+    const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
     // The rejection itself is deferred to the fresh-execution block below:
@@ -5755,6 +5763,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // A lane or typed Fast Complete (the report flow, with its own
+          // record) files a completion record of its own, so it never runs on
+          // a visit that completes through a project. The sheet checks this
+          // when it opens; a project the office linked while it was open, or
+          // a schedule cached before the link, is caught here under the visit
+          // lock (Codex P1 on #5629 and #5633). Any other caller is untouched.
+          if (traceSeen !== undefined && lockedSvcRow && (structuredObservations || structuredFindings)) {
+            const linkedProject = await trx('projects').where({ scheduled_service_id: svc.id }).first('id');
+            if (linkedProject) {
+              throw Object.assign(new Error('visit completes through its linked project'), { code: 'linked_project' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6147,7 +6167,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
-            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6993,7 +7013,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // A report-flow completion counts only the trace it judged
               // (traceSeen): one it never saw drives no exterior timer
               // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
-              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {};
               tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
                 const row = await sp('treatment_zone_maps')
                   .where({ scheduled_service_id: svc.id })
@@ -7933,6 +7953,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
             code: 'trace_changed',
+          } });
+        }
+        if (err && err.code === 'linked_project') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit has a project report. Close this sheet and finish the visit from its project.',
+            code: 'linked_project',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
