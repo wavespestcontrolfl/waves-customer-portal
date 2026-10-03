@@ -473,3 +473,29 @@ describe('terminal tokens carry the minting session\'s two-step proof', () => {
     expect((await runTerminal(staffRow({ mfa_enabled_at: new Date() }), {})).next).toHaveBeenCalled();
   });
 });
+
+describe('Tap to Pay handoff: the row, not the claim, carries the two-step proof', () => {
+  const HANDOFF_SECRET = 'h'.repeat(40);
+  const router = require('../routes/stripe-terminal');
+  const validate = router.stack.find((l) => l.route?.path === '/validate-handoff').route.stack.at(-1).handle;
+
+  test('a claim saying the code passed, against a row that says it did not, is refused', async () => {
+    const saved = process.env.TERMINAL_HANDOFF_SECRET;
+    process.env.TERMINAL_HANDOFF_SECRET = HANDOFF_SECRET;
+    try {
+      const burn = builder({ returning: [{ jti: 'j1', tech_user_id: 'tech-1', invoice_id: 'inv-1', amount_cents: 1000, staff_mfa: false }] });
+      db.mockImplementation(() => burn);
+      const token = jwt.sign(
+        { invoice_id: 'inv-1', amount_cents: 1000, tech_user_id: 'tech-1', staff_token_version: 3, staff_mfa: true, jti: 'j1' },
+        HANDOFF_SECRET,
+        { algorithm: 'HS256', issuer: 'waves-portal', audience: 'waves-pay-ios', expiresIn: 60 },
+      );
+      const res = response();
+      await validate({ body: { token }, headers: {} }, res);
+      expect(res.statusCode).toBe(401);
+      expect(res.body.code).toBe('signature_invalid');
+    } finally {
+      if (saved === undefined) delete process.env.TERMINAL_HANDOFF_SECRET; else process.env.TERMINAL_HANDOFF_SECRET = saved;
+    }
+  });
+});

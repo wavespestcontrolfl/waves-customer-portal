@@ -143,4 +143,24 @@ describe('AdminResetPasswordPage', () => {
     expect(store.has('waves_admin_token')).toBe(false);
     expect(store.has('waves_tech_offline_pass')).toBe(false);
   });
+  it('a newer sign-in made in another tab while the reset ran is left alone', async () => {
+    store.set('waves_admin_token', 'old-revoked-jwt');
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      store.set('waves_admin_token', 'newer-tab-jwt');
+      return { ok: true, json: async () => ({ passwordReset: true, signInRequired: true }) };
+    }));
+    render(
+      <MemoryRouter initialEntries={['/admin/reset-password']}>
+        <Routes>
+          <Route path="/admin/reset-password" element={<AdminResetPasswordPage />} />
+          <Route path="/admin/login" element={<div>Staff sign in</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: 'Brand-new-Password-42' } });
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: 'Brand-new-Password-42' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }));
+    expect(await screen.findByText('Staff sign in')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('newer-tab-jwt');
+  });
 });
