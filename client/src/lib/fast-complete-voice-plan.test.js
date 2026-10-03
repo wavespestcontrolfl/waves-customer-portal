@@ -311,3 +311,13 @@ test('a product said as the current How still holds when the fill changes How', 
   expect(result.formPatch.method).toBe('perimeter_spray');
   expect(texts(result)).toContain('Heard “spot treated with a” — Product a went down a different way from the How row.');
 });
+
+test('a product\'s standard way the tech picked themselves is kept; the difference is a Check', () => {
+  const picked = [row('b', { catalogMethod: 'bait_placement', methodInput: null, methodPicked: true })];
+  const result = plan({ rows: picked, products: [product('b', { method: 'granular_broadcast' })] });
+  expect(result.patches).toEqual({});
+  expect(texts(result)).toEqual(['You picked bait placement; heard granular broadcast for Product b.']);
+  // untouched, the same fill sets it
+  const untouched = plan({ rows: [row('b', { catalogMethod: 'bait_placement' })], products: [product('b', { method: 'granular_broadcast' })] });
+  expect(untouched.patches.b).toMatchObject({ methodInput: 'granular_broadcast' });
+});

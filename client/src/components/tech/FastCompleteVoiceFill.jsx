@@ -214,16 +214,21 @@ function HeardLine({ children }) {
 
 // The three places the sheet shows voice fill; each shows nothing with it off.
 
-// At the top: the mic, then what the fill could not settle.
-// `reviewLocked` also holds while the mic is live: a tap on a ✓ would end the
-// speech session and drop its words.
-export function VoiceFillTop({ voice, serviceId, locked, reviewLocked = locked, onPendingChange }) {
+// The mic sits OUTSIDE the sheet's form block: while it is live that whole block
+// is disabled (any other tap or keystroke ends the browser's speech session and
+// drops the words in flight), and the mic must stay tappable to stop.
+export function VoiceFillMicBar({ voice, serviceId, locked, onPendingChange }) {
+  if (!voice.micEnabled) return null;
+  return <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />;
+}
+
+// Inside the form block: what the fill set (to confirm) and could not settle.
+export function VoiceFillReview({ voice, locked }) {
   if (!voice.enabled) return null;
   return (
     <>
-      {voice.micEnabled && <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />}
-      <ConfirmSection confirms={voice.confirms} locked={reviewLocked} onConfirm={voice.confirm} />
-      <ChecksSection checks={voice.checks} locked={reviewLocked} onDismiss={voice.dismiss} />
+      <ConfirmSection confirms={voice.confirms} locked={locked} onConfirm={voice.confirm} />
+      <ChecksSection checks={voice.checks} locked={locked} onDismiss={voice.dismiss} />
     </>
   );
 }

@@ -197,8 +197,9 @@ function applyProductMethod(plan, key, p) {
     addCheck(plan, `Heard ${quoted(p.heard)} — ${row.name} has no way to set that; check how it went down.`);
     return;
   }
-  if (row.methodInput && row.methodInput !== p.method) {
-    addCheck(plan, `You picked ${words(row.methodInput)}; heard ${words(p.method)} for ${row.name}.`, `rowMethod:${key}`);
+  // the tech's own pick, including the row's standard way (methodPicked)
+  if (row.methodInput || row.methodPicked) {
+    addCheck(plan, `You picked ${words(ops.rowMethod(row, plan.form.method))}; heard ${words(p.method)} for ${row.name}.`, `rowMethod:${key}`);
     return;
   }
   const standard = ops.sprayMethods.has(row.catalogMethod) ? plan.form.method : row.catalogMethod;

@@ -99,7 +99,7 @@ import {
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import {
-  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillTop, useVoiceFillSheet,
+  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillMicBar, VoiceFillReview, useVoiceFillSheet,
 } from './FastCompleteVoiceFill';
 import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
@@ -757,8 +757,11 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
-        <fieldset className="tech-visit-form" disabled={locked}>
-          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} reviewLocked={formLocked} onPendingChange={setVoiceMicPending} />
+        <VoiceFillMicBar voice={voice} serviceId={service?.id} locked={locked} onPendingChange={setVoiceMicPending} />
+        {/* Disabled as one block while the voice mic is live, so no control inside
+            (now or added later) can end the speech session early. */}
+        <fieldset className="tech-visit-form" disabled={formLocked}>
+          <VoiceFillReview voice={voice} locked={formLocked} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={formLocked} />
           <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
@@ -811,7 +814,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         coverProps={picker.coverProps}
       >
         {stockRow && !locked && (
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} disabled={voiceMicPending} onClick={checkStock}>Check stock</Button>
         )}
       </CompleteFooter>
       {picker.sheet}
@@ -2084,6 +2087,8 @@ function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
   const ownMethod = row.catalogMethod && !ways.some((choice) => choice.value === row.catalogMethod);
   const choices = ownMethod ? [...ways, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ways;
   const pick = (value) => onChange({
+    // the tech's own pick, even when it is the row's standard way (voice fill never replaces it)
+    methodPicked: true,
     methodInput: !sticky && value === standard ? null : value,
     // A rate typed for one method doesn't carry to another.
     ...(value !== current ? { rateInput: null } : {}),

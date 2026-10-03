@@ -447,7 +447,14 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.getByRole('button', { name: 'Ants' }).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Outside' }).disabled).toBe(true);
     expect(screen.getByLabelText('Tell me about the visit').disabled).toBe(true);
-    expect(screen.getByRole('button', { name: 'Tap when you are done' }).disabled).toBe(false);
+    // the whole form block is one disabled fieldset, so nothing inside is missed
+    const fieldset = screen.getByRole('button', { name: 'Ants' }).closest('fieldset');
+    expect(fieldset.disabled).toBe(true);
+    for (const control of fieldset.querySelectorAll('button, input, textarea, select')) expect(control.matches(':disabled')).toBe(true);
+    // the mic sits outside it and stays tappable
+    const mic = screen.getByRole('button', { name: 'Tap when you are done' });
+    expect(mic.closest('fieldset')).toBeNull();
+    expect(mic.disabled).toBe(false);
     React.act(() => {
       dictation.perSlot[0] = { listening: false };
       dictation.slots.forEach((slot) => slot?.rerender());
