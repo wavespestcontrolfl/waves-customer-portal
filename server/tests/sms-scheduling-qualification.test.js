@@ -9,6 +9,40 @@ const source = {
   source: { kind: 'independent_manual_review', reviewedBy: 'staff-reviewer-id', reviewedAt: '2026-10-02T12:00:00Z', reference: 'private-review-batch-1' },
 };
 
+const VALID_EXPECTED_PAIRS = [
+  ['accept_slot', 'move'], ['accept_slot', 'book'], ['accept_slot', 'confirm_only'], ['accept_slot', 'staff'],
+  ['decline', 'no_action'], ['asks_other_time', 'no_action'], ['unclear', 'no_action'], ['unsupported', 'unsupported'],
+];
+const VALID_MODEL_PAIRS = [
+  ['accept_slot', 'would_move'], ['accept_slot', 'would_book'], ['accept_slot', 'confirm_only'], ['accept_slot', 'staff'],
+  ['decline', 'no_action'], ['asks_other_time', 'no_action'], ['unclear', 'no_action'], ['unsupported', 'unsupported'],
+];
+const VALID_COMBINED_CASES = [
+  ['accepted move', { action: 'accept_slot', outcome: 'would_move', expectedAction: 'accept_slot', expectedOutcome: 'move' }],
+  ['accepted booking', { kind: 'book_new', action: 'accept_slot', outcome: 'would_book', expectedAction: 'accept_slot', expectedOutcome: 'book' }],
+  ['accepted confirmation', { action: 'accept_slot', outcome: 'confirm_only', expectedAction: 'accept_slot', expectedOutcome: 'confirm_only' }],
+  ['accepted staff handling', { action: 'accept_slot', outcome: 'staff', expectedAction: 'accept_slot', expectedOutcome: 'staff' }],
+  ['decline', { action: 'decline', outcome: 'no_action', expectedAction: 'decline', expectedOutcome: 'no_action' }],
+  ['other-time request', { action: 'asks_other_time', outcome: 'no_action', expectedAction: 'asks_other_time', expectedOutcome: 'no_action' }],
+  ['unclear reply', { action: 'unclear', outcome: 'no_action', expectedAction: 'unclear', expectedOutcome: 'no_action' }],
+  ['unsupported reply', { action: 'unsupported', outcome: 'unsupported', expectedAction: 'unsupported', expectedOutcome: 'unsupported' }],
+];
+const invalidPairs = (actions, outcomes, valid) => {
+  const keys = new Set(valid.map(([action, outcome]) => `${action}/${outcome}`));
+  return actions.flatMap((action) => outcomes.map((outcome) => [action, outcome]))
+    .filter(([action, outcome]) => !keys.has(`${action}/${outcome}`));
+};
+const INVALID_EXPECTED_PAIRS = invalidPairs(
+  ['accept_slot', 'decline', 'asks_other_time', 'unclear', 'unsupported'],
+  ['move', 'book', 'confirm_only', 'staff', 'no_action', 'unsupported'],
+  VALID_EXPECTED_PAIRS,
+);
+const INVALID_MODEL_PAIRS = invalidPairs(
+  ['accept_slot', 'decline', 'asks_other_time', 'unclear', 'unsupported'],
+  ['would_move', 'would_book', 'confirm_only', 'staff', 'no_action', 'unsupported'],
+  VALID_MODEL_PAIRS,
+);
+
 function cohort(overrides = new Map(), size = 41) {
   const rows = [];
   const adjudications = [];
@@ -229,26 +263,135 @@ test('adjudications without matching decisions make the whole cohort inconclusiv
   });
 });
 
-test.each(['no_action', 'unsupported'])(
-  'an accepted-slot review cannot use the non-operational %s outcome',
-  (outcome) => {
-    const c = cohort();
-    c.adjudications[0].expected = {
-      action: 'accept_slot', outcome, offerId: 'offer-0', slotNumber: 1,
-    };
+test.each(VALID_COMBINED_CASES)('declared %s action/outcome evidence is accepted', (_label, configured) => {
+  const c = cohort(new Map([[1, configured]]));
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies).epochs[0])
+    .toMatchObject({ reviewed: 41, invalidOrConflictingReviews: 0, incompleteEvidence: 0 });
+});
+
+test.each(INVALID_EXPECTED_PAIRS)('review action/outcome pairing %s/%s is invalid', (action, outcome) => {
+  const c = cohort();
+  c.adjudications[1].expected = action === 'accept_slot'
+    ? { action, outcome, offerId: 'offer-1', slotNumber: 1 } : { action, outcome };
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
+});
+
+test.each([
+  ['missing offer id', (expected) => { delete expected.offerId; }],
+  ['wrong offer id', (expected) => { expected.offerId = 'different-offer'; }],
+  ['zero slot number', (expected) => { expected.slotNumber = 0; }],
+  ['missing numbered slot', (expected) => { expected.slotNumber = 2; }],
+  ['missing move verdict', (expected) => { delete expected.move; }],
+  ['wrong scheduled service', (expected) => { expected.move.scheduledServiceId = 'different-visit'; }],
+  ['wrong move date', (expected) => { expected.move.date = '2026-10-07'; }],
+  ['wrong move start', (expected) => { expected.move.start = '11:00'; }],
+  ['wrong move end', (expected) => { expected.move.arrivalEnd = '13:00'; }],
+])('accepted review evidence rejects a %s', (_label, mutate) => {
+  const c = cohort();
+  mutate(c.adjudications[0].expected);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
+});
+
+test.each([
+  ['offer id', (expected) => { expected.offerId = 'offer-1'; }],
+  ['slot number', (expected) => { expected.slotNumber = 1; }],
+  ['move verdict', (expected) => { expected.move = { scheduledServiceId: 'visit-1' }; }],
+])('non-accept review evidence rejects an extraneous %s', (_label, mutate) => {
+  const c = cohort();
+  mutate(c.adjudications[1].expected);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
+});
+
+test.each([
+  ['non-date/time strings', { date: 'x', start: 'x', end: 'x' }],
+  ['impossible calendar date', { date: '2026-02-30', start: '10:00', end: '12:00' }],
+  ['non-leap February 29', { date: '2026-02-29', start: '10:00', end: '12:00' }],
+  ['year zero', { date: '0000-10-06', start: '10:00', end: '12:00' }],
+  ['out-of-range start', { date: '2026-10-06', start: '24:00', end: '12:00' }],
+  ['out-of-range end', { date: '2026-10-06', start: '10:00', end: '10:60' }],
+  ['non-forward window', { date: '2026-10-06', start: '12:00', end: '10:00' }],
+])('a move offer with %s is not a scored actionable offer', (_label, slot) => {
+  const c = cohort();
+  c.rows[1].decision_evidence.offers[0].slots = [slot];
+  reseal(c, 1);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ distinctOffersScored: 39 }] });
+});
+
+test('a real leap-day move slot remains actionable', () => {
+  const c = cohort();
+  c.rows[1].decision_evidence.offers[0].slots = [{ date: '2028-02-29', start: '10:00', end: '12:00' }];
+  reseal(c, 1);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies).epochs[0])
+    .toMatchObject({ distinctOffersScored: 40 });
+});
+
+test.each(INVALID_MODEL_PAIRS)(
+  'model decision action/outcome pairing %s/%s is incomplete evidence',
+  (action, outcome) => {
+    const c = cohort(new Map([[1, { action, outcome }]]));
     expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
-      .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
+      .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
   },
 );
 
 test.each([
   ['future_action', 'no_action'],
   ['decline', 'future_outcome'],
-  ['decline', 'would_move'],
-])('unknown or invalid model decision pairing %s/%s is incomplete evidence', (action, outcome) => {
+])('unknown model decision pairing %s/%s is incomplete evidence', (action, outcome) => {
   const c = cohort(new Map([[1, { action, outcome }]]));
   expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test.each([
+  ['accepted decision without a slot number', 0, null],
+  ['non-accept decision with a slot number', 1, 1],
+  ['non-accept decision without explicit null', 1, undefined],
+])('%s is incomplete model evidence', (_label, index, slotNumber) => {
+  const c = cohort();
+  c.rows[index].slot_number = slotNumber;
+  c.rows[index].decision_evidence.decision.slotNumber = slotNumber;
+  reseal(c, index);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test.each([null, 'plan', 1, []])('an accepted decision plan must be a record, not %p', (plan) => {
+  const c = cohort();
+  c.rows[0].would_have = plan;
+  c.rows[0].decision_evidence.decision.wouldHave = plan;
+  reseal(c, 0);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test.each([
+  ['before visit date', 1, 'before', 'date', '2026-02-30'],
+  ['before visit time', 1, 'before', 'start', '25:00'],
+  ['before visit window ordering', 1, 'before', 'end', '07:00'],
+  ['after visit date', 0, 'after', 'date', '2026-02-30'],
+  ['after visit time', 0, 'after', 'end', '25:00'],
+])('a malformed %s is incomplete operational evidence', (_label, index, phase, field, value) => {
+  const c = cohort();
+  c.rows[index].decision_evidence[phase].visit[field] = value;
+  reseal(c, index);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('duplicate decision ids cannot reuse or ambiguously bind review evidence', () => {
+  const c = cohort();
+  c.rows[1].id = c.rows[0].id;
+  c.adjudications[1].decisionId = c.adjudications[0].decisionId;
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({
+      status: 'inconclusive', cohort: { conflicts: 1 },
+      epochs: [{ invalidOrConflictingReviews: 2 }],
+    });
 });
 
 test('qualification compares exact recall counts instead of the rounded report value', () => {

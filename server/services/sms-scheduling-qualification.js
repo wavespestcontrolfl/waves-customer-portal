@@ -15,9 +15,14 @@
 const crypto = require('node:crypto');
 
 const REVIEW_KIND = 'independent_manual_review';
-const EXPECTED_ACTIONS = new Set(['accept_slot', 'decline', 'asks_other_time', 'unclear', 'unsupported']);
-const EXPECTED_OUTCOMES = new Set(['move', 'book', 'confirm_only', 'staff', 'no_action', 'unsupported']);
 const ACCEPTED_SLOT_OUTCOMES = new Set(['move', 'book', 'confirm_only', 'staff']);
+const EXPECTED_OUTCOMES_BY_ACTION = new Map([
+  ['accept_slot', ACCEPTED_SLOT_OUTCOMES],
+  ['decline', new Set(['no_action'])],
+  ['asks_other_time', new Set(['no_action'])],
+  ['unclear', new Set(['no_action'])],
+  ['unsupported', new Set(['unsupported'])],
+]);
 const PLANNED_DECISION_OUTCOMES = new Set(['would_move', 'would_book', 'confirm_only', 'staff']);
 const DECISION_OUTCOMES_BY_ACTION = new Map([
   ['accept_slot', PLANNED_DECISION_OUTCOMES],
@@ -28,6 +33,8 @@ const DECISION_OUTCOMES_BY_ACTION = new Map([
 ]);
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OFFSET_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const CALENDAR_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -70,6 +77,28 @@ function validOffsetDate(value) {
     && Number.isFinite(Date.parse(value));
 }
 
+function validCalendarDate(value) {
+  if (!isNonblankString(value)) return false;
+  const parts = CALENDAR_DATE_RE.exec(value);
+  if (!parts) return false;
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
+}
+
+function validTimeRange(start, end) {
+  if (!TIME_RE.test(start) || !TIME_RE.test(end)) return false;
+  const minutes = (value) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  return minutes(end) > minutes(start);
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function sourceVerdict(input) {
   const source = input?.source;
   const valid = input?.schemaVersion === 1 && source?.kind === REVIEW_KIND
@@ -98,13 +127,13 @@ function decisionMatchesRow(decision, row) {
   if (!permittedOutcomes?.has(decision.outcome)) return false;
   if (decision.action === 'accept_slot') {
     if (!Number.isInteger(decision.slotNumber) || decision.slotNumber < 1) return false;
-  } else if (decision.slotNumber != null) return false;
+  } else if (decision.slotNumber !== null) return false;
   if (decision.action !== row.action || decision.slotNumber !== row.slot_number || decision.outcome !== row.outcome) return false;
   const persistedWouldHave = parsePersisted(row.would_have);
   if (!persistedWouldHave.ok) return false;
   if (fingerprintEvidence(decision.wouldHave) !== fingerprintEvidence(persistedWouldHave.value)) return false;
   const shouldHavePlan = decision.action === 'accept_slot' && PLANNED_DECISION_OUTCOMES.has(decision.outcome);
-  return shouldHavePlan ? decision.wouldHave != null : decision.wouldHave == null;
+  return shouldHavePlan ? isRecord(decision.wouldHave) : decision.wouldHave === null;
 }
 
 function linkedOffers(evidence, row, smsBodiesById) {
@@ -121,8 +150,8 @@ function linkedOffers(evidence, row, smsBodiesById) {
 }
 
 function completeVisit(visit) {
-  return visit && typeof visit === 'object' && !Array.isArray(visit)
-    && ['date', 'start', 'end', 'status'].every((field) => isNonblankString(visit[field]));
+  return isRecord(visit) && validCalendarDate(visit.date) && validTimeRange(visit.start, visit.end)
+    && isNonblankString(visit.status);
 }
 
 function validSnapshot(snapshot) {
@@ -182,14 +211,11 @@ function expectedVerdict(adjudication, found) {
   const expected = adjudication?.expected;
   if (!adjudication || !isNonblankString(adjudication.decisionId)) return null;
   if (!HASH_RE.test(String(adjudication.evidenceFingerprint || ''))) return null;
-  if (!expected || !EXPECTED_ACTIONS.has(expected.action)) return null;
-  if (!EXPECTED_OUTCOMES.has(expected.outcome)) return null;
+  if (!expected || !EXPECTED_OUTCOMES_BY_ACTION.get(expected.action)?.has(expected.outcome)) return null;
   if (expected.action !== 'accept_slot') {
     if (expected.offerId != null || expected.slotNumber != null || expected.move != null) return null;
-    if (['move', 'book', 'confirm_only'].includes(expected.outcome)) return null;
     return { action: expected.action, outcome: expected.outcome, offer: null, slot: null, move: null };
   }
-  if (!ACCEPTED_SLOT_OUTCOMES.has(expected.outcome)) return null;
   const pick = numberedPick(expected, found.offers);
   if (!pick) return null;
   if (expected.outcome !== 'move') return nonMoveExpectedVerdict(expected, pick);
@@ -239,9 +265,13 @@ function finishEpoch(epoch, state) {
 }
 
 function indexAdjudications(decisions, supplied) {
-  const rows = new Map(decisions.map((row) => [String(row.id), row]));
+  const rows = new Map();
   const labels = new Map();
   const conflicts = new Set();
+  for (const row of decisions) {
+    const id = String(row?.id || '');
+    if (!id || rows.has(id)) conflicts.add(id); else rows.set(id, row);
+  }
   let extras = 0;
   for (const item of supplied) {
     const id = String(item?.decisionId || '');
@@ -297,7 +327,7 @@ function acceptIsCorrect(row, expected, found) {
 }
 
 function completeSlot(slot) {
-  return ['date', 'start', 'end'].every((field) => isNonblankString(slot?.[field]));
+  return validCalendarDate(slot?.date) && validTimeRange(slot?.start, slot?.end);
 }
 
 function actionableMoveOffer(offer, expected) {
