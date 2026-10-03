@@ -1768,9 +1768,23 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
   const visit = await acquireScheduledMintLockChain(conn, {
     scheduledServiceId,
     customerId,
-    visitColumns: ["id", "estimated_price", "primary_line_price", "is_callback", "scheduled_date"],
+    visitColumns: ["id", "customer_id", "estimated_price", "primary_line_price", "is_callback", "scheduled_date"],
     customerLock: "share",
   });
+  // The visit's owner is re-read under its row lock: a customer merge that
+  // committed after the caller read the service record repoints the visit to the
+  // surviving customer, and this helper would otherwise lock and stamp the
+  // merged-away customer's month. Refused before any month lock or coverage
+  // decision, retryably (the completion re-decides on fresh data). The other dues
+  // mint entry point, mintScheduledServiceInvoiceWithDeposit, makes the same
+  // check on its own locked row before it calls this.
+  if (visit && String(visit.customer_id) !== String(customerId)) {
+    const e = new Error("Scheduled service changed owner while minting — retry to bill the current customer");
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "SCHEDULED_BILLING_SOURCE_MOVED";
+    throw e;
+  }
   // FOR SHARE, held through the insert (same transaction): an UPDATE of the
   // billing terms (monthly_rate / billing_mode / waveguard_tier) waits for this
   // mint to commit, and a mint that waited on one reads the NEW terms here, so
@@ -2018,6 +2032,27 @@ async function lockMembershipDuesMonthOfInvoice(trx, invoiceRow) {
   if (!month || !source.customer_id) return null;
   await acquireMembershipDuesMonthLock(trx, source.customer_id, month);
   return { customerId: String(source.customer_id), month };
+}
+
+// A coverage-removing writer (a void) must not commit while a COLLECTOR (the
+// monthly cron, its retry sweep, charge-now) is mid-collection for this
+// customer: a collector reads "a live stamped invoice bills this month" under
+// the customer collection claim and then skips, so a void committing right after
+// would leave the month neither collected nor billed. Called right after the
+// month lock (month -> claim, the order the mint and un-void take them in): a
+// TRY, never a wait (a collector holds it across a Stripe charge). While this
+// transaction holds the claim a collector's own try refuses and retries, so it
+// either finishes before the void or sees the committed void and charges.
+async function claimCustomerCollectionForDuesRelease(trx, locked) {
+  if (!locked) return;
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(trx, locked.customerId))) {
+    const e = new Error(`Membership dues for ${locked.month} may be mid-collection by the billing run — try voiding again in a moment`);
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "MEMBERSHIP_DUES_COLLECTION_IN_PROGRESS";
+    throw e;
+  }
 }
 
 // After the writer's status-conditional update: the invoice still belongs to
@@ -10399,6 +10434,7 @@ const InvoiceService = {
       // A stamped dues invoice's void removes the month's coverage: commit
       // under the dues-month lock (first lock of this transaction).
       const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, current);
+      await claimCustomerCollectionForDuesRelease(trx, lockedDues);
       // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
       // ('prepaid') termite annual invoice restores its account credit and
       // COMMITS here, before the term sync below ever runs. A renewal charge
@@ -12778,6 +12814,7 @@ const InvoiceService = {
             // A cancelled visit's void of a stamped dues invoice removes the
             // month's coverage: dues-month lock first.
             const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, candidate);
+            await claimCustomerCollectionForDuesRelease(trx, lockedDues);
             // Codex #4971 pre-push P0 (lock order): this void can take a
             // credit-settled ('prepaid') invoice and restore its credit, so
             // a termite renewal parent-decision gate tied to it is this

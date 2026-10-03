@@ -132,8 +132,9 @@ describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
     scheduled_service_id: 'visit-1',
     line_items: lineItems,
   });
-  function trxWithCommit(row) {
+  function trxWithCommit(row, { monthLockFree = true } = {}) {
     const trx = makeTrx(row);
+    trx.raw = jest.fn(async () => ({ rows: [{ acquired: monthLockFree }] }));
     let settle;
     trx.executionPromise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
     trx.executionPromise.catch(() => {});
@@ -160,6 +161,36 @@ describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
     trx.settle.reject(new Error('rolled back'));
     await flush();
     expect(mockDuesAlert).not.toHaveBeenCalled();
+  });
+
+  it('takes the dues-month lock as a TRY (never a wait) for the stamped invoice\'s customer and month, before writing anything', async () => {
+    const trx = trxWithCommit(stamped());
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
+    expect(trx.raw).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = trx.raw.mock.calls[0];
+    expect(sql).toMatch(/pg_try_advisory_xact_lock/);
+    expect(sql).not.toMatch(/pg_advisory_xact_lock\(/);
+    expect(bindings).toEqual(['membership.dues_month', 'cust-1:2026-09']);
+  });
+
+  it('a busy month lock (a completion is relying on the invoice) refuses the transition retryably BEFORE any write, restore or alert', async () => {
+    const trx = trxWithCommit(stamped(), { monthLockFree: false });
+    await expect(returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx))
+      .rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_MONTH_BUSY', statusCode: 503, isOperational: true });
+    expect(trx.updates).toHaveLength(0);
+    expect(mockRestoreDepositCredit).not.toHaveBeenCalled();
+    trx.settle.resolve();
+    await flush();
+    expect(mockDuesAlert).not.toHaveBeenCalled();
+  });
+
+  it('an unstamped invoice never touches the month lock, and a replay of an already-refunded stamped invoice does not either', async () => {
+    const plain = trxWithCommit(invoice({ status: 'paid' }));
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, plain);
+    expect(plain.raw).not.toHaveBeenCalled();
+    const replay = trxWithCommit({ ...stamped(), status: 'refunded' }, { monthLockFree: false });
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, replay);
+    expect(replay.raw).not.toHaveBeenCalled();
   });
 
   it('reads the stamp from a JSON string too', async () => {

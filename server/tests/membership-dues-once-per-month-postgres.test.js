@@ -1455,6 +1455,64 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
     } finally { await cleanup(f); }
   });
 
+  // ── Round 7: owner re-read, refund vs completion, void vs collector ──
+  test('the stamp refuses a visit whose owner changed after the caller read the service record (a merge): retryable, nothing locked for the old customer', async () => {
+    const f = await seedMember();
+    const g = await seedMember();
+    let visit;
+    try {
+      visit = await seedVisit(f, { label: 'Lawn Care' });
+      await mockPg('scheduled_services').where({ id: visit }).update({ customer_id: g.customerId });
+      const lines = [{ client_id: `scheduled_${visit}_primary`, description: 'Lawn', quantity: 1, unit_price: 49, amount: 49 }];
+      await expect(mockPg.transaction((trx) => InvoiceSvc.stampMembershipDuesUnderLock(trx, {
+        customerId: f.customerId, scheduledServiceId: visit, month: monthOf(etDateString()), lineItems: lines, derivedAmount: 49,
+      }))).rejects.toMatchObject({ code: 'SCHEDULED_BILLING_SOURCE_MOVED' });
+    } finally {
+      if (visit) await mockPg('scheduled_services').where({ id: visit }).update({ customer_id: f.customerId }).catch(() => {});
+      await cleanup(g);
+      await cleanup(f);
+    }
+  });
+
+  test('a full refund of a stamped dues invoice while a covered completion holds the month lock is refused retryably (invoice stays paid); once released it goes through', async () => {
+    const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+    const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+      const completion = await mockPg.transaction(); // plays a completion that confirmed coverage and has not committed
+      try {
+        await acquireMembershipDuesMonthLock(completion, f.customerId, monthOf(etDateString()));
+        await expect(mockPg.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: a.invoice.id }, trx)))
+          .rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_MONTH_BUSY' });
+        expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).toBe('paid');
+        await completion.commit();
+      } finally { await completion.rollback().catch(() => {}); }
+      await mockPg.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: a.invoice.id }, trx));
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).toBe('refunded');
+    } finally { await cleanup(f); }
+  });
+
+  test('a void (and the cancelled-visit void) while a collector holds the customer collection claim is refused retryably: the invoice stays live; after the collector finishes the void goes through', async () => {
+    const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      let voidError = null;
+      let cancelResult = null;
+      await withCustomerBillingLock(f.customerId, async () => {
+        voidError = await InvoiceSvc.voidInvoice(a.invoice.id).then(() => null, (e) => e);
+        cancelResult = await InvoiceSvc.voidOpenInvoicesForCancelledService(a.visit);
+      });
+      expect(voidError).toMatchObject({ code: 'MEMBERSHIP_DUES_COLLECTION_IN_PROGRESS' });
+      expect(cancelResult).toEqual([]);
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).not.toBe('void');
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).toBe('void');
+    } finally { await cleanup(f); }
+  });
+
   // ── Finding 2: a full refund releases coverage like a void ──
   test('a fully refunded stamped dues invoice raises the rebill alert for the visits it covered, once the refund transaction commits', async () => {
     const { returnAppliedCreditOnRefund } = require('../services/customer-credit');

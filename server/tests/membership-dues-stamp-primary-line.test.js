@@ -9,6 +9,12 @@ jest.mock('../models/db', () => jest.fn());
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../services/logger', () => mockLogger);
 
+const mockChain = jest.fn();
+jest.mock('../services/scheduled-invoice-mint', () => ({
+  ...jest.requireActual('../services/scheduled-invoice-mint'),
+  acquireScheduledMintLockChain: (...args) => mockChain(...args),
+}));
+
 const InvoiceService = require('../services/invoice');
 
 describe('stampMembershipDuesUnderLock — no primary line, no stamp', () => {
@@ -35,5 +41,22 @@ describe('stampMembershipDuesUnderLock — no primary line, no stamp', () => {
   test('no positive line at all returns the lines as they are', async () => {
     const lines = [{ client_id: 'scheduled_visit-1_primary', quantity: 1, unit_price: 0, amount: 0 }];
     expect(await stamp(lines)).toBe(lines);
+  });
+});
+
+// The locked visit's OWNER is re-read: a customer merge that repointed the visit
+// after the caller read the service record must not be stamped (or month-locked)
+// under the merged-away customer.
+describe('stampMembershipDuesUnderLock — the locked visit must still belong to the caller\'s customer', () => {
+  const primary = { client_id: 'scheduled_visit-1_primary', description: 'Lawn', quantity: 1, unit_price: 49, amount: 49 };
+  const stamp = (customerId = 'cust-1') => InvoiceService.stampMembershipDuesUnderLock({}, {
+    customerId, scheduledServiceId: 'visit-1', month: '2026-09', lineItems: [primary], derivedAmount: 49,
+  });
+
+  test('a visit now owned by another customer is refused retryably before any month lock or coverage read', async () => {
+    mockChain.mockResolvedValueOnce({ id: 'visit-1', customer_id: 'cust-survivor', estimated_price: null, is_callback: false, scheduled_date: '2026-09-15' });
+    await expect(stamp('cust-merged-away')).rejects.toMatchObject({ code: 'SCHEDULED_BILLING_SOURCE_MOVED', status: 409 });
+    // the chain was asked to select the owner
+    expect(mockChain.mock.calls.at(-1)[1].visitColumns).toContain('customer_id');
   });
 });

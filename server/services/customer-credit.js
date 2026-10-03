@@ -558,6 +558,27 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
   // only already-terminal statuses so a replayed event is a no-op and a prior
   // void/cancel isn't clobbered. (Both callers invoke this for FULL refunds only.)
   const alreadyTerminal = ['refunded', 'void', 'canceled', 'cancelled'].includes(String(inv.status || '').toLowerCase());
+  // A refund that ENDS a stamped membership-dues invoice's coverage serializes
+  // with covered completions through the dues-month lock (a completion holds it
+  // from its coverage confirmation to its commit). This transaction already
+  // holds the invoice row and the caller's other locks, so by THE LOCK RULE
+  // (billing-lane.js) it only TRIES the lock: busy means a completion is
+  // relying on this invoice right now, and the refund transition is refused
+  // retryably BEFORE anything is written (the webhook answers 5xx and Stripe
+  // redelivers; the admin refund path logs the failed restore and the
+  // charge.refunded webhook repeats it, both idempotent). Either the completion
+  // commits first (the post-commit alert then sees its visit) or this
+  // transition does (the completion's commit-time check then sees the refund).
+  if (!alreadyTerminal) {
+    const duesMonth = require('./invoice').membershipDuesStampMonth(inv.line_items);
+    if (duesMonth && inv.customer_id
+      && !(await require('./billing-lane').tryAcquireMembershipDuesMonthLock(trx, inv.customer_id, duesMonth))) {
+      throw Object.assign(
+        new Error(`Membership dues for ${duesMonth} are being completed against invoice ${inv.invoice_number || invoiceId} right now — the refund transition is retried`),
+        { statusCode: 503, code: 'MEMBERSHIP_DUES_MONTH_BUSY', isOperational: true },
+      );
+    }
+  }
   const updates = { updated_at: trx.fn.now() };
   if (!alreadyTerminal) updates.status = 'refunded';
   if (restore > 0) updates.credit_applied = 0;
