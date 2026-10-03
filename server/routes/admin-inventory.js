@@ -79,6 +79,8 @@ const { rateGateOn } = require('../services/product-label-rates');
 router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE'), rates: rateGateOn() }));
 // One handler set per kind of label evidence; the service holds the shared
 // flow. Paths stay literal below so the staff route census can read them.
+// The use() guards are inline so the public-route scanner can prove they are
+// not routers.
 function labelReviewHandlers(kind, enabled) {
   return {
     guard: (req, res, next) => {
@@ -109,13 +111,13 @@ function labelReviewHandlers(kind, enabled) {
   };
 }
 const weatherReview = labelReviewHandlers('weather', () => gateEnvValue('GATE_LABEL_PIPELINE'));
-router.use('/:id/label-review', weatherReview.guard);
+router.use('/:id/label-review', (req, res, next) => weatherReview.guard(req, res, next));
 router.get('/:id/label-review', weatherReview.get);
 router.post('/:id/label-review/extract', labelExtractLimiter, weatherReview.extract);
 router.post('/:id/label-review/decision', weatherReview.decision);
 router.post('/:id/label-review/revoke', weatherReview.revoke);
 const rateReview = labelReviewHandlers('rates', rateGateOn);
-router.use('/:id/label-rate-review', rateReview.guard);
+router.use('/:id/label-rate-review', (req, res, next) => rateReview.guard(req, res, next));
 router.get('/:id/label-rate-review', rateReview.get);
 router.post('/:id/label-rate-review/extract', labelExtractLimiter, rateReview.extract);
 router.post('/:id/label-rate-review/decision', rateReview.decision);

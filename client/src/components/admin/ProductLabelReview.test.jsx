@@ -56,8 +56,8 @@ describe('ProductLabelReview rates', () => {
     id: 'rate-candidate-1',
     source: { productName: 'Synthetic product', registration: 'TEST-100', url: 'https://example.test/label.pdf' },
     facts: { directions: [
-      { status: 'rate', useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', basis: 'per_gallon', low: 0.2, high: 0.8, unit: 'fl_oz', maxApplicationsPerYear: 2, minIntervalDays: 21, quote: 'Synthetic label: 0.2 to 0.8 fl oz per gallon.', page: 4, note: '' },
-      { status: 'conditional', useSite: 'Turf', targets: 'Listed pests', method: '', basis: 'other', low: null, high: null, unit: 'other', maxApplicationsPerYear: null, minIntervalDays: null, quote: 'Synthetic label: see rate table.', page: 7, note: 'Rate table by pest.' },
+      { status: 'rate', useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', low: 0.2, high: 0.8, unit: 'fl_oz', perAmount: 10, perUnit: 'gal', maxApplicationsPerYear: 2, minIntervalDays: 21, quote: 'Synthetic label: 0.2 to 0.8 fl oz per 10 gallons.', page: 4, note: '' },
+      { status: 'conditional', useSite: 'Turf', targets: 'Listed pests', method: '', low: null, high: null, unit: 'other', perAmount: null, perUnit: 'other', maxApplicationsPerYear: null, minIntervalDays: null, quote: 'Synthetic label: see rate table.', page: 7, note: 'Rate table by pest.' },
     ] },
   };
   beforeEach(() => {
@@ -67,7 +67,7 @@ describe('ProductLabelReview rates', () => {
 
   it('shows each label line with its amount, limits and source page, and no amount for a conditional line', async () => {
     mountRates();
-    expect(await screen.findByText('0.2–0.8 fl oz per gallon')).toBeInTheDocument();
+    expect(await screen.findByText('0.2–0.8 fl oz per 10 gallons')).toBeInTheDocument();
     expect(screen.getByText('Ants, spiders · Coarse spray · Max 2 applications per year · At least 21 days apart')).toBeInTheDocument();
     expect(screen.getByText('CONDITIONAL')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Source page 4' })).toHaveAttribute('href', 'https://example.test/label.pdf#page=4');

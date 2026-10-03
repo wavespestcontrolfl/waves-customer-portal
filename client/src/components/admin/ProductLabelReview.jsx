@@ -53,14 +53,25 @@ const KINDS = {
   },
 };
 
-const BASIS_LABELS = {
-  per_gallon: "per gallon",
-  per_100_gallons: "per 100 gallons",
-  per_1000_sqft: "per 1,000 sq ft",
-  per_acre: "per acre",
-  percent_dilution: "dilution",
-  per_placement: "per placement",
+// [singular, plural] for the label's own denominator unit.
+const PER_UNIT_LABELS = {
+  gal: ["gallon", "gallons"],
+  sq_ft: ["sq ft", "sq ft"],
+  acre: ["acre", "acres"],
+  linear_ft: ["linear ft", "linear ft"],
+  cu_ft: ["cu ft", "cu ft"],
+  placement: ["placement", "placements"],
 };
+
+// The denominator exactly as approved: "per gallon", "per 10 gallons".
+function rateBasis(direction) {
+  if (direction.perUnit === "dilution") return "dilution";
+  const labels = PER_UNIT_LABELS[direction.perUnit];
+  if (!labels || direction.perAmount == null) return "";
+  return direction.perAmount === 1
+    ? `per ${labels[0]}`
+    : `per ${Number(direction.perAmount).toLocaleString("en-US")} ${labels[1]}`;
+}
 
 function rateAmount(direction) {
   if (direction.status !== "rate") return "CONDITIONAL";
@@ -69,7 +80,7 @@ function rateAmount(direction) {
     direction.high != null && direction.high !== direction.low
       ? `${direction.low}–${direction.high}`
       : `${direction.low}`;
-  return `${range}${unit} ${BASIS_LABELS[direction.basis] || ""}`.trim();
+  return `${range}${unit} ${rateBasis(direction)}`.trim();
 }
 
 async function request(productId, path, action = "", body) {
