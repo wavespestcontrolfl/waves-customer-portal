@@ -1541,6 +1541,32 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   });
 });
 
+// Owner pick B (2026-10-03): on phones Ask Waves starts as the slim ask row
+// and opens to the full card on first tap; the tools keep their full names
+// as accessible names while phones show the short labels.
+describe('ReportViewPage — phone first screen (pick B)', () => {
+  it('Ask Waves starts slim and stays open after the first tap', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    const card = input.closest('.waves-ask-card');
+    expect(card).toHaveAttribute('data-report-ask-slim');
+    fireEvent.focus(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+    fireEvent.blur(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+  });
+
+  it('report tools keep their full names for screen readers', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const tools = await screen.findByRole('region', { name: 'Report tools' });
+    // The fixture has no PDF yet, so Download PDF is the disabled button.
+    expect(within(tools).queryByRole('link', { name: 'Download PDF' })
+      || within(tools).getByRole('button', { name: 'Download PDF' })).toBeInTheDocument();
+    expect(within(tools).getByRole('link', { name: 'Portal Login' })).toBeInTheDocument();
+    expect(within(tools).getByText('PDF')).toHaveAttribute('aria-hidden', 'true');
+  });
+});
+
 describe('ReportViewPage — expiring signed map links', () => {
   const withMapUrl = (url) => ({
     ...legacyLawnReport,
