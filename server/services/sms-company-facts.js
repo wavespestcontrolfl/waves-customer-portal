@@ -33,9 +33,11 @@ const COMPANY_FACTS = Object.freeze([
   // recurring card rail only (invoice / commercial / one-time differ); 6x lawn plans
   // still exist for older customers; only qualifying services count toward a tier.
   'A standalone cockroach treatment (one that is not part of a recurring plan) is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
-  'WaveGuard members get one free termite inspection a year. A WDO inspection for a real-estate sale is a separate paid service.',
-  // "guarantee" is a banned customer-copy word (hasBannedCustomerCopy), so the no-guarantee ruling is worded without it.
-  'Termite work: never promise results or how long a treatment lasts. A termite bond or pre-slab warranty is a separate purchase.',
+  // Two termite lines the owner also approved are NOT here yet (Codex #5723 r3): the
+  // member's free annual termite inspection is not bookable (termite_inspection is
+  // inactive in the catalog, 20260928190000) and "free inspection" trips the
+  // re-service guard; and a pre-slab treatment includes a basic one-year warranty,
+  // so "a warranty is a separate purchase" would deny an included benefit.
   'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
   'New residential lawn plans run 9 or 12 applications a year.',
   'Arrival windows are two hours and start on the hour.',
