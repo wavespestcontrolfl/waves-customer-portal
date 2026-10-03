@@ -9,6 +9,9 @@ const path = require('path');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: () => '+19415550000' }));
+jest.mock('../utils/customer-comms-lock', () => ({
+  withSmsConsentLock: jest.fn(async (dbh, _keys, fn) => fn(dbh)),
+}));
 jest.mock('../services/recipient-optin', () => ({
   optinHeldPhoneKeys: jest.fn(async () => new Map()),
   resolveServiceContactSmsRecipient: jest.fn(),
@@ -61,9 +64,11 @@ const ARGS = { customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'http
 const queue = (table, ...values) => { db.mockState.queue[table] = [...(db.mockState.queue[table] || []), ...values]; };
 const opsFor = (table) => db.mockState.calls.filter((c) => c.table === table);
 const inserts = () => opsFor('sms_log').map((c) => c.ops.find((o) => o[0] === 'insert')).filter(Boolean).map((o) => o[1]);
-// The reads a queue makes for two confirmed contacts with no earlier rows.
+// The reads a queue makes for two confirmed contacts with no earlier rows:
+// the profile and the visit address (for the body, before the transaction),
+// then the profile again under its row lock.
 const queueReads = (customer = CUSTOMER) => {
-  queue('customers', customer);
+  queue('customers', customer, customer);
   queue('scheduled_services', { service_address_line1: '12 Example Way' });
 };
 
@@ -119,14 +124,32 @@ describe('queueContactReportTexts', () => {
     expect(meta.refresh_customer_phone).toBeUndefined();
     expect(meta.useCustomerChannel).toBeUndefined();
     expect(renderSmsTemplate).toHaveBeenCalledWith('contact_report_ready',
-      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object), { throwOnError: true });
+      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object),
+      { throwOnError: true, requiredVars: ['report_url'] });
+    // A worker that predates the registry entry refuses the row.
+    expect(meta.requires_registered_dispatch).toBe(true);
+  });
+
+  test('the body is rendered before the transaction opens (the template read uses the root pool)', async () => {
+    queueReads();
+    renderSmsTemplate.mockImplementation(async () => { expect(db.transaction).not.toHaveBeenCalled(); return BODY; });
+    await ContactReportText.queueContactReportTexts(ARGS);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('an edited template that lost the report link queues nothing', async () => {
+    queueReads();
+    renderSmsTemplate.mockResolvedValue('Waves Pest Control: The service report for 12 Example Way is ready.');
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(0);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('runs under the customer row lock, the lock a contact save takes', async () => {
     queueReads();
     await ContactReportText.queueContactReportTexts(ARGS);
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(opsFor('customers')[0].ops).toContainEqual(['forUpdate']);
+    expect(opsFor('customers')[0].ops).not.toContainEqual(['forUpdate']);
+    expect(opsFor('customers')[1].ops).toContainEqual(['forUpdate']);
   });
 
   test('a contact that already has a row for this report is not queued again', async () => {
@@ -182,7 +205,7 @@ describe('queueContactReportTexts', () => {
   });
 
   test('the visit has no address of its own: the profile street', async () => {
-    queue('customers', CUSTOMER);
+    queue('customers', CUSTOMER, CUSTOMER);
     queue('scheduled_services', { service_address_line1: null });
     await ContactReportText.queueContactReportTexts(ARGS);
     expect(renderSmsTemplate.mock.calls[0][1].street_address).toBe('99 Profile Rd');
@@ -190,7 +213,7 @@ describe('queueContactReportTexts', () => {
 
   test.each([
     ['the visit address read', () => { queue('customers', CUSTOMER); queue('scheduled_services', new Error('connection reset')); }],
-    ['the opt-in read', () => { queue('customers', CUSTOMER); optinHeldPhoneKeys.mockRejectedValue(new Error('connection reset')); }],
+    ['the opt-in read', () => { queueReads(); optinHeldPhoneKeys.mockRejectedValue(new Error('connection reset')); }],
     ['the template read', () => { queueReads(); renderSmsTemplate.mockRejectedValue(new Error('connection reset')); }],
   ])('%s failing throws (never a wrong street, a dropped contact or "template off")', async (_name, arrange) => {
     arrange();
@@ -285,14 +308,39 @@ describe('registry entry contact_report_ready_deferred', () => {
     expect(logger.warn.mock.calls.map((c) => c[0]).join(' ')).not.toMatch(/9415550123/);
   });
 
-  test('the same check runs at the provider boundary: a contact removed during the send is refused', async () => {
-    const check = registry.deferredProviderPreSendCheck('contact_report_ready_deferred', META);
-    queue('customers', CUSTOMER);
-    expect(await check({})).toEqual({ ok: true });
-    queue('customers', { ...CUSTOMER, service_contact_phone: null });
-    expect(await check({})).toEqual({ ok: false, code: 'CONTACT_REPORT_STALE_AT_BOUNDARY', reason: 'contact-removed' });
-    queue('customers', new Error('connection reset'));
-    expect(await check({})).toEqual({ ok: false, code: 'CONTACT_REPORT_CHECK_FAILED_AT_BOUNDARY', reason: 'recheck-failed', retryable: true });
+  test('the send runs under the contact-save lock: the customer row is held and the check repeats before the provider', async () => {
+    const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+    const handoff = registry.deferredSmsHandoff('contact_report_ready_deferred', META);
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    // The row lock read, then the recheck's customer read.
+    queue('customers', { id: 'cust-1' }, CUSTOMER);
+    expect(await handoff(dispatch)).toEqual({ sent: true });
+    expect(withSmsConsentLock).toHaveBeenCalledWith(db, { phone: '(941) 555-0123', customerId: 'cust-1' }, expect.any(Function));
+    expect(opsFor('customers')[0].ops).toContainEqual(['forUpdate']);
+    expect(dispatch).toHaveBeenCalledWith(db);
+  });
+
+  test('a contact removed before the lock is refused: the provider is never called', async () => {
+    const handoff = registry.deferredSmsHandoff('contact_report_ready_deferred', META);
+    const dispatch = jest.fn();
+    queue('customers', { id: 'cust-1' }, { ...CUSTOMER, service_contact_phone: null });
+    expect(await handoff(dispatch)).toEqual({ ok: false, code: 'CONTACT_REPORT_STALE_AT_HANDOFF', reason: 'contact-removed' });
+    queue('customers', { id: 'cust-1' }, new Error('connection reset'));
+    expect(await handoff(dispatch)).toEqual({ ok: false, code: 'CONTACT_REPORT_CHECK_FAILED_AT_HANDOFF', reason: 'recheck-failed', retryable: true });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('a worker without this entry refuses the row; this one sends the frozen body', async () => {
+    const send = jest.fn(async () => ({ sent: true }));
+    expect(await registry.dispatchDeferredReplay('contact_report_ready_deferred', { requires_registered_dispatch: true }, send)).toEqual({ sent: true });
+    const refused = await registry.dispatchDeferredReplay('an_entry_this_worker_does_not_know', { requires_registered_dispatch: true }, send);
+    expect(refused).toMatchObject({ sent: false, blocked: true, code: 'DEFERRED_DISPATCH_UNAVAILABLE', retryable: true });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('the sender allows the locked handoff for this text only on the scheduled replay', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services/messaging/send-customer-message.js'), 'utf8');
+    expect(source).toMatch(/input\.metadata\?\.original_message_type === 'contact_report_ready'\s+&& input\.entryPoint === 'scheduled_sms_cron'\)/);
   });
 });
 
@@ -354,9 +402,9 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
 });
 
 describe('the portal card promises the report text only when it can go out', () => {
-  test('gate on AND the account\'s own visit-complete text is on', () => {
+  test('gate on AND the profile has a phone AND its own visit-complete text is on', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes/notifications.js'), 'utf8');
-    expect(source).toMatch(/contactReportTextLive\(\)\s+&& !!prefs && prefs\.sms_enabled !== false && prefs\.service_completed !== false;/);
+    expect(source).toMatch(/contactReportTextLive\(\)\s+&& !!String\(profile\?\.phone \|\| ''\)\.trim\(\)\s+&& !!prefs && prefs\.sms_enabled !== false && prefs\.service_completed !== false;/);
     expect(source.match(/contactReportTexts: contactReportTextsOn\(/g)).toHaveLength(2);
   });
 });

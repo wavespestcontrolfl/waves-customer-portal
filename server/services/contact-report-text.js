@@ -19,8 +19,8 @@
 // scheduled-SMS executor sends it: claims, retries, the send window and an
 // unknown delivery are its rules, not this module's. The registry entry
 // contact_report_ready_deferred (messaging/deferred-replay-registry.js) runs
-// recheckContactReportText before the send and again at the provider
-// boundary.
+// recheckContactReportText before the send, and again under the customer row
+// lock held through the provider request (its smsHandoff).
 //
 // One text per contact per report: the queue runs under the customer row
 // lock and skips a contact_report_key that already has a row.
@@ -94,7 +94,20 @@ async function streetAddress(conn, scheduledServiceId, customer) {
 // { visitId, summaryTokenHash } for a combined-stop summary.
 async function queueContactReportTexts({ customerId, sourceKey, reportUrl, scheduledServiceId = null, notBefore = null, excludePhone = null, source = {} }) {
   if (!enabled() || !customerId || !sourceKey || !reportUrl) return 0;
+  // The body is rendered BEFORE the transaction: the template read uses the
+  // root pool, and a held transaction must never wait on a second connection.
+  // The street comes from the visit and the profile row, which a contact save
+  // does not change.
+  const profile = await loadCustomer(customerId);
+  if (!profile || !slotContacts(profile).length) return 0;
   const { renderSmsTemplate } = require('./sms-template-renderer');
+  // A template read that fails throws; a missing or inactive row, or an
+  // edited body that lost {report_url}, is "off" (the link is the message).
+  const body = await renderSmsTemplate(TEMPLATE_KEY, {
+    street_address: await streetAddress(db, scheduledServiceId, profile),
+    report_url: reportUrl,
+  }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true, requiredVars: ['report_url'] });
+  if (!body || !body.includes(reportUrl)) return 0;
   return db.transaction(async (trx) => {
     // The contact-save lock (routes/notifications.js): the contact list
     // cannot change between this read and the queue rows.
@@ -103,12 +116,6 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
     const contacts = (await confirmedContacts(customer, trx))
       .filter((c) => phoneKey(c.phone) && phoneKey(c.phone) !== phoneKey(excludePhone));
     if (!contacts.length) return 0;
-    // A template read that fails throws; a missing or inactive row is "off".
-    const body = await renderSmsTemplate(TEMPLATE_KEY, {
-      street_address: await streetAddress(trx, scheduledServiceId, customer),
-      report_url: reportUrl,
-    }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true });
-    if (!body) return 0;
     const fromPhone = require('../config/twilio-numbers').getOutboundNumber();
     let queued = 0;
     for (const contact of contacts) {
@@ -133,6 +140,9 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
         message_type: MESSAGE_TYPE,
         metadata: JSON.stringify({
           entry_point: ENTRY_POINT,
+          // A worker that does not know this entry refuses the row
+          // (dispatchDeferredReplay) instead of sending it unchecked.
+          requires_registered_dispatch: true,
           contact_report_key: reportKey,
           contact_report_source: String(sourceKey),
           contact_report_queued_at: new Date().toISOString(),

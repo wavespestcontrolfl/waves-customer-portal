@@ -1621,10 +1621,14 @@ const REGISTRY = {
   // held contact notice above: the row belongs to the contact's phone, and
   // the recheck proves that phone is still a confirmed contact, the gate is
   // on, the report is recent and a combined-stop summary is not revoked. The
-  // same check runs again at the true provider boundary, so a contact
-  // removed or replaced during the executor's own awaits does not get the
-  // bearer link. A failed read holds the row for a bounded retry (ids and an
-  // error code in the log: a query error can carry the phone and the link).
+  // send itself runs inside smsHandoff: the same check under the customer row
+  // lock a contact save takes, held through the provider request, so a
+  // contact removed or replaced either commits first (refused) or waits
+  // until the provider has the request. A failed read holds the row for a
+  // bounded retry (ids and an error code in the log: a query error can carry
+  // the phone and the link). Rows carry requires_registered_dispatch, so a
+  // worker that predates this entry refuses them instead of sending the
+  // frozen body with none of these checks.
   contact_report_ready_deferred: {
     async recheck(meta, { conn } = {}) {
       try {
@@ -1634,19 +1638,26 @@ const REGISTRY = {
         return { eligible: false, reason: 'recheck-failed', retryable: true };
       }
     },
-    providerPreSendCheck(meta) {
-      return async ({ dbi } = {}) => {
-        const again = await REGISTRY.contact_report_ready_deferred.recheck(meta, { conn: dbi || db });
-        if (again && again.eligible !== false) return { ok: true };
+    // Comms lock, phone lock, then the customer row: the established order
+    // (utils/customer-comms-lock.js withSmsConsentLock; lead-auto-reply.js).
+    smsHandoff(meta, dispatch) {
+      const { withSmsConsentLock } = require('../../utils/customer-comms-lock');
+      return withSmsConsentLock(db, { phone: meta.to_phone, customerId: meta.customer_id }, async (trx) => {
+        await trx('customers').where({ id: meta.customer_id }).forUpdate().first('id');
+        const again = await REGISTRY.contact_report_ready_deferred.recheck(meta, { conn: trx });
+        if (again && again.eligible !== false) return dispatch(trx);
         const retryable = again?.retryable === true;
         return {
           ok: false,
-          code: retryable ? 'CONTACT_REPORT_CHECK_FAILED_AT_BOUNDARY' : 'CONTACT_REPORT_STALE_AT_BOUNDARY',
+          code: retryable ? 'CONTACT_REPORT_CHECK_FAILED_AT_HANDOFF' : 'CONTACT_REPORT_STALE_AT_HANDOFF',
           reason: (again && again.reason) || 'ineligible',
           ...(retryable ? { retryable: true } : {}),
         };
-      };
+      });
     },
+    // The frozen body is the send; registering a dispatch is what lets the
+    // rows demand a worker that knows this entry.
+    dispatch: (_meta, defaultDispatch) => defaultDispatch(),
   },
 
   appointment_tagger_prep_deferred: {

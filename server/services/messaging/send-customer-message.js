@@ -577,6 +577,13 @@ async function sendCustomerMessageCore(input) {
     || (input.audience === 'customer' && input.purpose === 'service_completion'
       && input.metadata?.original_message_type === 'visit_summary'
       && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint))
+    // The report text to an on-location contact (contact-report-text.js): a
+    // bearer link to a third party, whose contact slot a portal save can
+    // remove between the recheck and the request. Its queued replay holds the
+    // customer row through the handoff (registry contact_report_ready_deferred).
+    || (input.audience === 'customer' && input.purpose === 'service_completion'
+      && input.metadata?.original_message_type === 'contact_report_ready'
+      && input.entryPoint === 'scheduled_sms_cron')
     // A review ask that follows a combined-visit summary shares that
     // summary's packet row through the request.
     || (input.audience === 'customer' && input.purpose === 'review_request'

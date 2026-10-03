@@ -56,9 +56,10 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
 
 // Whether the contact card may say contacts also get the report text: the
 // gate is on AND this profile's own visit-complete text can go out (the
-// report text follows it; texts off or Service Complete off = none).
-function contactReportTextsOn(prefs) {
+// report text follows it; no phone, texts off or Service Complete off = none).
+function contactReportTextsOn(prefs, profile) {
   return require('../config/feature-gates').contactReportTextLive()
+    && !!String(profile?.phone || '').trim()
     && !!prefs && prefs.sms_enabled !== false && prefs.service_completed !== false;
 }
 
@@ -637,7 +638,7 @@ async function savedPropertyPreferences(req) {
   const { properties: entries } = await accountSavedProperties(req);
   if (!entries.some((e) => e.propertyId)) return null; // profile-shaped: today's list
   const profileIds = [...new Set(entries.map((e) => String(e.customerId)))];
-  const profiles = await db('customers').whereIn('id', profileIds).select('id', ...SERVICE_CONTACT_COLUMNS);
+  const profiles = await db('customers').whereIn('id', profileIds).select('id', 'phone', ...SERVICE_CONTACT_COLUMNS);
   const profileById = new Map(profiles.map((p) => [String(p.id), p]));
   const prefsRows = await db('notification_prefs').whereIn('customer_id', profileIds).select('customer_id', ...PREF_SELECT);
   const prefsByProfile = new Map(prefsRows.map((row) => [String(row.customer_id), row]));
@@ -684,7 +685,7 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
-      contactReportTexts: contactReportTextsOn(customerPrefs),
+      contactReportTexts: contactReportTextsOn(customerPrefs, profile),
     };
   });
 }
@@ -710,7 +711,7 @@ router.get('/property-preferences', async (req, res, next) => {
     const properties = await db('customers')
       .whereIn('id', ids)
       .select(
-        'id', 'profile_label', 'address_line1', 'city', 'state', 'zip', 'is_primary_profile',
+        'id', 'phone', 'profile_label', 'address_line1', 'city', 'state', 'zip', 'is_primary_profile',
         ...SERVICE_CONTACT_COLUMNS
       )
       .orderBy('is_primary_profile', 'desc')
@@ -744,7 +745,7 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
-        contactReportTexts: contactReportTextsOn(byCustomerId.get(String(p.id))),
+        contactReportTexts: contactReportTextsOn(byCustomerId.get(String(p.id)), p),
       })),
     });
   } catch (err) {
