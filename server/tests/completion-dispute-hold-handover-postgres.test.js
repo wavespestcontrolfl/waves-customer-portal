@@ -145,6 +145,22 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
   const payLinkIn = (text, inv) => /^Invoice:/im.test(text) || text.includes(inv.token) || /\/pay\//.test(text);
   const sentInvoiceIds = () => sendSpy.mock.calls.map((c) => c[0]);
 
+  test('returns and persists the locked visit snapshot for completion-photo recovery', async () => {
+    const f = await seedVisit();
+    try {
+      const scheduled = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      const expected = require('../services/service-photos').servicePhotoVisitSnapshot(scheduled);
+      const out = await complete(f, { sendCompletionSms: false });
+      expect(out).toMatchObject({
+        status: 200,
+        body: { serviceRecordId: expect.any(String), servicePhotoVisit: expected },
+      });
+      const record = await recordFor(f);
+      expect(record.structured_notes.servicePhotoVisit).toEqual(expected);
+      expect(out.body.servicePhotoVisit).toEqual(record.structured_notes.servicePhotoVisit);
+    } finally { await cleanup(f); }
+  });
+
   test('a hold queues the invoice onto the sender and the completion text is report-only', async () => {
     const f = await seedVisit();
     try {

@@ -188,7 +188,11 @@ describe('completion photos in an unsubmitted draft', () => {
 
   it('retains failed uploads across reloads and retries only photos, with one request per double tap', async () => {
     await seed();
-    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const servicePhotoVisit = {
+      customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
+      scheduledDate: service.scheduledDate, status: 'on_site', revision: 'completion-visit-revision',
+    };
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', servicePhotoVisit, completionPhotoUpload: { failed: 1 } });
     const first = await mount(completion);
     fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
     await act(async () => fireEvent.click(submitButton()));
@@ -196,7 +200,8 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(completionResumeOwed(service.id)).toBe(true);
     first.unmount();
     expect(await getCompletionDraft(service.id)).toMatchObject({
-      pendingPhotoCompletion: { serviceRecordId: 'record-1' }, servicePhotos: [{ data: photos[0].data }],
+      pendingPhotoCompletion: { serviceRecordId: 'record-1', servicePhotoVisit },
+      servicePhotos: [{ data: photos[0].data }],
     });
 
     const originalFetch = fetch.getMockImplementation();
@@ -228,6 +233,8 @@ describe('completion photos in an unsubmitted draft', () => {
     await act(async () => { fireEvent.click(retry); fireEvent.click(retry); });
     expect(uploads).toHaveLength(2);
     expect(uploads[1].body.get('caption')).toBe(photos[0].caption);
+    expect(JSON.parse(uploads[0].body.get('expectedVisit'))).toEqual(servicePhotoVisit);
+    expect(JSON.parse(uploads[1].body.get('expectedVisit'))).toEqual(servicePhotoVisit);
     expect(uploads[1].headers['Content-Type']).toBeUndefined();
     expect(resubmit).not.toHaveBeenCalled();
     expect(completion).toHaveBeenCalledTimes(1);
@@ -277,6 +284,9 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads).toHaveLength(1);
     expect(uploads[0].body.get('caption')).toBe(photos[0].caption);
     expect(uploads[0].body.get('sortOrder')).toBe('0');
+    // Drafts persisted before the receipt field shipped retain the deployed
+    // optional API shape instead of inventing identity from today's row.
+    expect(uploads[0].body.get('expectedVisit')).toBeNull();
   });
 
   it('a server-side reconcileOwed with every photo attached keeps recovery open and finishes with one reconcile, no uploads', async () => {

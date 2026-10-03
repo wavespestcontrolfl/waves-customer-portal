@@ -49,6 +49,10 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [pendingPhoto, setPendingPhoto] = useState(null);
   const uploadInFlight = useRef(false);
   const loadSequence = useRef(0);
+  // Pin the visit identity when the file is selected. A successful refresh
+  // may legitimately load a newer visit identity for the next photo, but it
+  // must never retarget bytes that are already selected or being retried.
+  const visitSnapshotRef = useRef({ serviceId: null, visit: null });
   // Treated-point marking (GATE_PHOTO_MARKS, dark). The probe 404s when the
   // gate is off, which leaves marksSupported false and the affordance absent —
   // no separate client-side flag to keep in sync.
@@ -82,7 +86,10 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      if (sequence === loadSequence.current) setPhotos(data.photos || []);
+      if (sequence === loadSequence.current) {
+        setPhotos(data.photos || []);
+        visitSnapshotRef.current = { serviceId, visit: data.visit || null };
+      }
     } catch (err) {
       if (sequence === loadSequence.current) setLoadError(err.message || 'Failed to load photos');
     }
@@ -132,6 +139,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       fd.append('photoType', photo.photoType);
       fd.append('capturedAt', photo.capturedAt);
       if (photo.caption) fd.append('caption', photo.caption);
+      if (photo.expectedVisit) fd.append('expectedVisit', JSON.stringify(photo.expectedVisit));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
         method: 'POST',
@@ -158,7 +166,16 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const handleFileSelected = (event) => {
     const file = event.target.files?.[0];
     if (!file || uploadInFlight.current || pendingPhoto) return;
-    const photo = { file, photoType, caption: caption.trim(), capturedAt: new Date(file.lastModified || Date.now()).toISOString() };
+    const expectedVisit = visitSnapshotRef.current.serviceId === serviceId
+      ? visitSnapshotRef.current.visit
+      : null;
+    const photo = {
+      file,
+      photoType,
+      caption: caption.trim(),
+      capturedAt: new Date(file.lastModified || Date.now()).toISOString(),
+      expectedVisit,
+    };
     setPendingPhoto(photo);
     void uploadPhoto(photo);
   };
@@ -204,7 +221,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
               <Input className="tech-visit-control" value={caption} onChange={(event) => setCaption(event.target.value)}
                 placeholder="e.g., Front yard before treatment" disabled={locked} />
             </Field>
-            <Button className="tech-visit-action tech-visit-primary tech-visit-wide" onClick={handlePickFile} loading={uploading} disabled={!!pendingPhoto}>📷 Add Photo</Button>
+            <Button className="tech-visit-action tech-visit-primary tech-visit-wide" onClick={handlePickFile} loading={uploading} disabled={!!pendingPhoto || loading || !!loadError}>📷 Add Photo</Button>
             <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelected} className="tech-visit-file-input" aria-label="Choose service photo" />
           </div>
           {pendingPhoto && <div className="tech-visit-card">

@@ -1426,7 +1426,7 @@ export function completionAutoCloseDelay(completion, photosOwed, recapEligible) 
 // from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
 // panel's shape, not the completion body's: derive the body fields the same
 // way.
-export function buildPhotoRetryFormBody(photo, index) {
+export function buildPhotoRetryFormBody(photo, index, expectedVisit = null) {
   const [header, encoded] = photo.data.split(",");
   const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const form = new FormData();
@@ -1436,6 +1436,10 @@ export function buildPhotoRetryFormBody(photo, index) {
   if (photo.caption) form.append("caption", photo.caption);
   const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
   if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  // New completion receipts carry the visit identity frozen under the
+  // completion lock. Older persisted drafts predate that receipt; omission
+  // deliberately retains the optional deployed API contract for them.
+  if (expectedVisit) form.append("expectedVisit", JSON.stringify(expectedVisit));
   return form;
 }
 
@@ -17763,7 +17767,11 @@ export function CompletionPanel({
     try {
       for (const [index, photo] of (draft.servicePhotos || []).entries()) {
         try {
-          const form = buildPhotoRetryFormBody(photo, index);
+          const form = buildPhotoRetryFormBody(
+            photo,
+            index,
+            draft.pendingPhotoCompletion?.servicePhotoVisit,
+          );
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {

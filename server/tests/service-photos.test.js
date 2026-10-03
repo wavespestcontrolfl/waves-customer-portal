@@ -130,7 +130,7 @@ describe('service photo uploads', () => {
     mockS3Send.mockResolvedValue({});
   });
 
-  test('visit snapshots reject meaningful drift but allow the same visit to complete', () => {
+  test('visit snapshots reject meaningful drift but allow the same visit to progress normally', () => {
     const {
       parseExpectedServicePhotoVisit,
       servicePhotoVisitChanged,
@@ -143,8 +143,12 @@ describe('service photo uploads', () => {
     const expected = servicePhotoVisitSnapshot(visit);
     expect(parseExpectedServicePhotoVisit(JSON.stringify(expected))).toEqual(expected);
     expect(servicePhotoVisitChanged(expected, visit)).toBe(false);
-    expect(servicePhotoVisitChanged(expected, { ...visit, status: 'completed' })).toBe(false);
-    expect(servicePhotoVisitChanged(expected, { ...visit, status: 'cancelled' })).toBe(true);
+    for (const status of ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed']) {
+      expect(servicePhotoVisitChanged(expected, { ...visit, status })).toBe(false);
+    }
+    for (const status of ['cancelled', 'skipped', 'unknown_terminal']) {
+      expect(servicePhotoVisitChanged(expected, { ...visit, status })).toBe(true);
+    }
     expect(servicePhotoVisitChanged(expected, { ...visit, property_id: 'property-2' })).toBe(true);
     expect(() => parseExpectedServicePhotoVisit('{"customerId":"partial"}')).toThrow('complete visit snapshot');
     // Old clients omit expectedVisit entirely and retain the deployed API.

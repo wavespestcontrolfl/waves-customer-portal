@@ -61,6 +61,10 @@ it('allows closing after upload succeeds while the photo refresh is still pendin
 
 it('retries the same failed photo with its original caption and type, and protects it while pending', async () => {
   const writes = [], close = vi.fn();
+  const visit = {
+    customerId: 'customer-a', propertyId: 'property-a', technicianId: 'tech-a',
+    scheduledDate: '2026-10-02', status: 'on_site', revision: 'visit-revision-a',
+  };
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
@@ -69,7 +73,7 @@ it('retries the same failed photo with its original caption and type, and protec
       if (writes.length === 1) { await pending; return { ok: false, json: async () => ({ error: 'Example upload failed.' }) }; }
       return { ok: true, json: async () => ({ photo: { id: 'photo-a', staged: true } }) };
     }
-    return { ok: true, json: async () => url.endsWith('photo-marks') ? { supported: false } : { photos: [] } };
+    return { ok: true, json: async () => url.endsWith('photo-marks') ? { supported: false } : { photos: [], visit } };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" customerName="Avery Example" onClose={close} />);
   await screen.findByText('No photos yet.');
@@ -89,7 +93,37 @@ it('retries the same failed photo with its original caption and type, and protec
     expect(body.get('caption')).toBe('Example caption');
     expect(body.get('photoType')).toBe('before');
     expect(body.get('capturedAt')).toBe(new Date(1234567890).toISOString());
+    expect(JSON.parse(body.get('expectedVisit'))).toEqual(visit);
   }
+});
+
+it('pins the snapshot to selected bytes and uses a refreshed visit for the next photo', async () => {
+  const visits = [
+    { customerId: 'customer-a', propertyId: 'property-a', technicianId: 'tech-a', scheduledDate: '2026-10-02', status: 'on_site', revision: 'revision-a' },
+    { customerId: 'customer-a', propertyId: 'property-b', technicianId: 'tech-a', scheduledDate: '2026-10-03', status: 'confirmed', revision: 'revision-b' },
+  ];
+  const writes = [];
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') {
+      writes.push(options.body);
+      return { ok: true, json: async () => ({ photo: { id: `photo-${writes.length}` } }) };
+    }
+    const visit = visits[Math.min(reads, visits.length - 1)];
+    reads += 1;
+    return { ok: true, json: async () => ({ photos: [], visit }) };
+  }));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('No photos yet.');
+  const input = screen.getByLabelText('Choose service photo');
+  fireEvent.change(input, { target: { files: [new File(['one'], 'one.png', { type: 'image/png' })] } });
+  await waitFor(() => expect(reads).toBe(2));
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.change(input, { target: { files: [new File(['two'], 'two.png', { type: 'image/png' })] } });
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(JSON.parse(writes[0].get('expectedVisit'))).toEqual(visits[0]);
+  expect(JSON.parse(writes[1].get('expectedVisit'))).toEqual(visits[1]);
 });
 
 it('does not report an empty photo list after a load failure and can retry the read', async () => {

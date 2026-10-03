@@ -118,6 +118,9 @@ function parseExpectedServicePhotoVisit(value) {
 }
 
 const sameVisitValue = (left, right) => String(left ?? '') === String(right ?? '');
+const SERVICE_PHOTO_LIVE_STATUSES = new Set([
+  'pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed',
+]);
 function servicePhotoVisitChanged(expected, visit) {
   if (!expected) return false;
   const live = servicePhotoVisitSnapshot(visit);
@@ -126,9 +129,10 @@ function servicePhotoVisitChanged(expected, visit) {
     || !sameVisitValue(expected.technicianId, live.technicianId)
     || visitDate(expected.scheduledDate) !== live.scheduledDate
     || expected.revision !== live.revision) return true;
-  // Completion is the one allowed lifecycle advance: the bytes still belong
-  // to this visit and the caller can reconcile report artifacts afterwards.
-  return !sameVisitValue(expected.status, live.status) && live.status !== 'completed';
+  // Lifecycle can advance while a selected file is waiting or retrying. The
+  // identity fields above still bind the bytes to the same visit; only a
+  // cancelled/skipped or otherwise unknown terminal state closes uploads.
+  return !SERVICE_PHOTO_LIVE_STATUSES.has(String(live.status || ''));
 }
 
 function safePhotoName(value, fallback = 'service-photo.jpg') {
