@@ -96,6 +96,9 @@ describe('AUDIT r1-races-1: concurrent charge-now must be serialized per custome
       // The sibling-unresolved-outcome check (retry-collectibility.js)
       // reads this table too — no fixtures here, so it always clears.
       if (table === 'stripe_orphan_charges') return makeQB({ first: null });
+      // B08: the live stamped membership-dues invoice lookup (billing-lane
+      // findLiveStampedDuesInvoice) — none here.
+      if (table === 'invoices') return makeQB({ first: null });
       throw new Error(`unexpected table ${table}`);
     });
   });

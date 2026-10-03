@@ -487,17 +487,25 @@ postgres('completion dues mint vs the monthly collectors (B08)', () => {
     } finally { await cleanup(f); }
   });
 
-  test('stamped dues invoice OPEN → the retry is resolved too (no payment id: the sweep self-supersedes); VOID → collectible again', async () => {
+  test('stamped dues invoice OPEN → the retry only defers (stays armed); then PAID → resolved; VOID → collectible again', async () => {
     const f = await seedMember({ autopay: true });
     try {
       const row = await armedMonthlyRow(f);
       const invoiceId = await duesInvoice(f, 'sent');
       expect(await classify(f, row)).toMatchObject({
-        reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
-        collectedByPaymentId: null, collectedByInvoiceId: invoiceId,
+        collectible: false, reason: REASONS.DUES_INVOICE_OPEN, disposition: DISPOSITIONS.SKIP_ARMED, collectedByInvoiceId: invoiceId,
       });
-      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void' });
-      expect(await classify(f, row)).toMatchObject({ collectible: true, disposition: DISPOSITIONS.CHARGE });
+      // Still open on the next sweep: still deferred, the row unchanged (never superseded).
+      expect(await classify(f, row)).toMatchObject({ reason: REASONS.DUES_INVOICE_OPEN, disposition: DISPOSITIONS.SKIP_ARMED });
+      expect(await mockPg('payments').where({ id: row.id }).first()).toMatchObject({ superseded_by_payment_id: null, retry_count: 1 });
+      // Paid → resolved as already collected.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+      expect(await classify(f, row)).toMatchObject({ reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR });
+      // Voided or refunded → the invoice stops matching and the row is collectible again.
+      for (const status of ['void', 'refunded']) {
+        await mockPg('invoices').where({ id: invoiceId }).update({ status });
+        expect(await classify(f, row)).toMatchObject({ collectible: true, disposition: DISPOSITIONS.CHARGE });
+      }
     } finally { await cleanup(f); }
   });
 });
@@ -1071,6 +1079,143 @@ postgres('membership dues — stale rate or lane at the mint, and Charge now (B0
       const minted = await mintOrReuseScheduledServiceInvoice(await loadSvc(priced));
       expect(Number(minted.invoice.total)).toBe(85);
       expect(stampedOf(await mockPg('invoices').where({ id: minted.invoice.id }).first())).toBeUndefined();
+    } finally { await cleanup(f); }
+  });
+});
+
+// Round 4: customer billing terms locked through the mint; the covered-skip
+// verdict committed under the dues-month lock; a void alerts the office.
+postgres('membership dues — locked terms, covered-skip commit, void alert (B08 round 4)', () => {
+  const InvoiceSvc = require('../services/invoice');
+  const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const holds = [];
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 10 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    while (holds.length) await holds.pop().rollback().catch(() => {});
+  });
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+  const reload = (id) => mockPg('invoices').where({ id }).first();
+
+  async function mintDues(f, label) {
+    const visit = await seedVisit(f, { label });
+    expect(await complete(f, visit)).toMatchObject({ status: 200 });
+    const rows = await invoicesFor(f);
+    return { visit, invoice: rows.find((r) => r.scheduled_service_id === visit) };
+  }
+
+  // Run `fn` just before the completion's service_record INSERT (inside its
+  // transaction, ahead of the status flip and commit), once.
+  function beforeRecordInsert(fn) {
+    const driver = Object.getPrototypeOf(mockPg.client);
+    const originalQuery = driver._query;
+    let armed = true;
+    driver._query = function patched(connection, obj) {
+      if (armed && /insert into "service_records"/i.test(String(obj?.sql || ''))) {
+        armed = false;
+        return Promise.resolve(fn()).then(() => originalQuery.call(this, connection, obj));
+      }
+      return originalQuery.call(this, connection, obj);
+    };
+    return () => { driver._query = originalQuery; };
+  }
+
+  // ── Finding 1 ────────────────────────────────────────────────────────────
+  test('a concurrent change of the customer\'s billing terms cannot slip between the mint\'s read and its insert: the mint waits on it, sees the new rate and refuses', async () => {
+    const InvoiceService = InvoiceSvc;
+    const original = InvoiceService.createFromService;
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      jest.spyOn(InvoiceService, 'createFromService').mockImplementation(async (...args) => {
+        // An UPDATE of the rate, uncommitted, is in flight when the mint starts; it commits shortly after.
+        const trx = await mockPg.transaction();
+        await trx('customers').where({ id: f.customerId }).update({ monthly_rate: 59 });
+        setTimeout(() => trx.commit().catch(() => {}), 500);
+        return original.apply(InvoiceService, args);
+      });
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      jest.restoreAllMocks();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(59);
+    } finally { await cleanup(f); }
+  });
+
+  // ── Finding 2 ────────────────────────────────────────────────────────────
+  test('the covered-skip verdict is committed under the dues-month lock: a lock held by a remover at the commit refuses the closeout to retry, committing nothing', async () => {
+    const f = await seedMember();
+    let restore;
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      restore = beforeRecordInsert(async () => {
+        const trx = await mockPg.transaction();
+        holds.push(trx);
+        await acquireMembershipDuesMonthLock(trx, f.customerId, monthOf(etDateString()));
+      });
+      await expect(complete(f, pest)).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_COVERAGE_CHANGED', statusCode: 409, isOperational: true });
+      restore(); restore = null;
+      expect((await mockPg('scheduled_services').where({ id: pest }).first()).status).not.toBe('completed');
+      expect(await mockPg('service_records').where({ scheduled_service_id: pest })).toHaveLength(0);
+      while (holds.length) await holds.pop().rollback();
+      // The retry, nothing held, is still covered by A and mints nothing.
+      expect(await complete(f, pest)).toMatchObject({ status: 200 });
+      expect((await liveInvoicesFor(f)).map((r) => r.id)).toEqual([a.invoice.id]);
+    } finally { if (restore) restore(); await cleanup(f); }
+  });
+
+  test('the covering invoice voided before the closeout commits: the closeout is refused, and its retry mints the month (one stamped live bill)', async () => {
+    const f = await seedMember();
+    let restore;
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      restore = beforeRecordInsert(() => InvoiceSvc.voidInvoice(a.invoice.id));
+      await expect(complete(f, pest)).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_COVERAGE_CHANGED', statusCode: 409 });
+      restore(); restore = null;
+      expect(await complete(f, pest)).toMatchObject({ status: 200 });
+      const stamped = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
+      expect(stamped).toHaveLength(1);
+      expect(stamped[0].scheduled_service_id).toBe(pest);
+    } finally { if (restore) restore(); await cleanup(f); }
+  });
+
+  async function dueAlertRows(invoiceId) {
+    return mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_coverage_released:${invoiceId}%`]);
+  }
+
+  test('voiding the dues invoice after a visit was completed as covered by it raises ONE office alert; nothing is billed automatically', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await mintDues(f, 'Pest Control'); // covered: completed with no invoice of its own
+      expect(await invoicesFor(f)).toHaveLength(1);
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      const alerts = await dueAlertRows(a.invoice.id);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].title || alerts[0].body).toMatch(/rebill|dues/i);
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('no alert when nothing was unbilled by the void: no other covered visit, or the month is still covered by another stamped invoice', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      expect(await dueAlertRows(a.invoice.id)).toHaveLength(0);
+      const b = await mintDues(f, 'Pest Control'); // bills the month again on B
+      const c = await seedVisit(f, { label: 'Mosquito' });
+      expect(await complete(f, c)).toMatchObject({ status: 200 }); // covered by B
+      await InvoiceSvc.voidInvoice(b.invoice.id);
+      // B voided: the month is uncovered and visit c relied on it → one alert for B.
+      expect(await dueAlertRows(b.invoice.id)).toHaveLength(1);
     } finally { await cleanup(f); }
   });
 });

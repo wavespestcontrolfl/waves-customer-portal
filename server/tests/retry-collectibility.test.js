@@ -127,11 +127,17 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     });
   });
 
-  test('an OPEN stamped dues invoice (no payment row) → same resolution, no payment id (the sweep self-supersedes)', async () => {
+  test('an OPEN stamped dues invoice only DEFERS: the row stays armed (SKIP_ARMED), nothing resolves it', async () => {
     mockDuesInvoiceRow = { id: 'inv-dues', status: 'sent' };
     expect(await classify(monthlyRow())).toMatchObject({
-      reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
-      collectedByPaymentId: null, collectedByInvoiceId: 'inv-dues',
+      collectible: false, reason: REASONS.DUES_INVOICE_OPEN, disposition: DISPOSITIONS.SKIP_ARMED, collectedByInvoiceId: 'inv-dues',
+    });
+  });
+
+  test('a PAID stamped dues invoice with no payment row resolves (null payment id: the sweep self-supersedes)', async () => {
+    mockDuesInvoiceRow = { id: 'inv-dues', status: 'paid' };
+    expect(await classify(monthlyRow())).toMatchObject({
+      reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, collectedByPaymentId: null,
     });
   });
 

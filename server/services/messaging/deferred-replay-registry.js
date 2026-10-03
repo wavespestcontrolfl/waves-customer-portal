@@ -939,7 +939,7 @@ const REGISTRY = {
         if (Number(payment.retry_count || 0) !== Number(meta.retry_count)) return { eligible: false, reason: 'retry-superseded' };
         const customer = await db('customers').where({ id: meta.customer_id }).first();
         if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
-        const { loadRetryContext, classifyFailedPaymentRetry, DISPOSITIONS } = require('../retry-collectibility');
+        const { loadRetryContext, classifyFailedPaymentRetry, DISPOSITIONS, REASONS } = require('../retry-collectibility');
         const ctx = loadRetryContext();
         const resolution = await classifyFailedPaymentRetry({ payment, customer, ctx });
         if (ctx.lookupWarnings.length) throw new Error('Payment resolution lookup unavailable');
@@ -947,6 +947,12 @@ const REGISTRY = {
         // obligation. Reuse the billing sweep's resolution rules. Disabled or
         // paused Auto Pay still needs this notice; those are not settlements.
         if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
+          return { eligible: false, reason: resolution.reason };
+        }
+        // An OPEN stamped dues invoice bills the obligation month (the retry
+        // sweep leaves the row armed but does not charge it): a failed-payment
+        // notice would ask for the same month twice.
+        if (resolution.reason === REASONS.DUES_INVOICE_OPEN) {
           return { eligible: false, reason: resolution.reason };
         }
         // The failure notice carries the pay link: wait out a dispute hold.

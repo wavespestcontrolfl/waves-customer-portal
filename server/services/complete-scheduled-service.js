@@ -4692,16 +4692,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
       }
-      // A "covered, skip the mint" verdict is confirmed under the same
-      // customer + month lock that every writer removing coverage (a stripping
-      // edit, a void) and the mint itself take, so the skip and a removal are
-      // never interleaved: if the coverage went away before the lock, this
-      // visit mints. A short transaction — a lock and one read, never across
-      // Stripe. An unreadable confirmation keeps the pre-lock verdict (the
-      // mint, if it happens, re-reads coverage under the lock and fails closed).
-      // (A packet member runs on the outer closeout transaction: a nested lock
-      // there would be held until that whole transaction ends, so it keeps the
-      // pre-lock verdict.)
+      // An EARLY, short confirmation of a "covered, skip the mint" verdict under
+      // the customer + month lock: if a removal committed meanwhile this visit
+      // mints now instead of being refused at the commit below. It does NOT make
+      // the skip safe on its own (this transaction ends, and the lock with it,
+      // before the verdict is consumed): the authoritative confirmation is the
+      // one inside the completion transaction, just before the status flip. A
+      // short transaction, a lock and one read, never across Stripe. An
+      // unreadable confirmation keeps the pre-lock verdict. (A packet member
+      // runs on the packet's outer transaction and goes straight to that
+      // commit-time confirmation.)
       if (duesCollectedThisMonth && !db.isTransaction) {
         try {
           const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
@@ -7801,6 +7801,55 @@ async function completeScheduledService(completionInput, packetContext = null) {
           await trx('scheduled_services').where({ id: svc.id }).update({
             internal_notes: trx.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`[Office note ${etDateString(completionEndedAt ? new Date(completionEndedAt) : new Date())}] ${officeNoteText}`]),
           });
+        }
+
+        // The "this visit mints no dues because the month is covered" verdict is
+        // CONFIRMED here, right before the status flip, under the dues-month
+        // advisory lock. It is a transaction-scoped lock (pg_try_advisory_xact_lock):
+        // it is held until THIS transaction commits or rolls back, so the skip and
+        // the commit are one step. Every writer that removes a month's coverage
+        // (a void, the cancelled-visit void, a stripping edit of the stamped line)
+        // takes the same lock before it commits: it either commits first (this re-read then sees no coverage and
+        // the closeout is refused to retry, which mints) or waits until this
+        // completion has committed (the visit is then completed and unbilled, and
+        // the void's post-commit alert, alertIfMembershipDuesCoverageReleased,
+        // names it for the office). A refund of a PAID dues invoice is the one
+        // coverage removal that does not take this lock: a refund is a payment
+        // reversal the webhook applies, not an office edit, and the invoice was
+        // already collected.
+        // A TRY, never a wait: this transaction holds visit / customer / invoice
+        // locks, so a blocking take could cycle; a busy lock is the same
+        // retryable refusal (the failed attempt keeps its idempotency key and the
+        // same-key resubmit re-runs the closeout). The lock is taken only here,
+        // after the photo uploads and the other slow work, so it is held across
+        // the status flip and commit only. A packet member runs on the packet's
+        // outer transaction (photo uploads are already done by then), so the lock
+        // is held to the packet's commit and a refusal rolls the packet back like
+        // any other member refusal; re-taking it for a second member of the same
+        // customer and month in the same transaction is a no-op.
+        // Only a visit that actually relies on the month's coverage (the dues
+        // verdict is what makes membershipDuesCoverVisit true) is checked.
+        if (duesCollectedThisMonth && autopayCoversVisit) {
+          const dueMonth = serviceDateOnly(svc.scheduled_date).slice(0, 7);
+          const { tryAcquireMembershipDuesMonthLock } = require('../services/billing-lane');
+          let confirmed = false;
+          try {
+            const liveVisit = await trx('scheduled_services').where({ id: svc.id }).first('scheduled_date');
+            confirmed = !!liveVisit
+              && serviceDateOnly(liveVisit.scheduled_date).slice(0, 7) === dueMonth
+              && await tryAcquireMembershipDuesMonthLock(trx, svc.customer_id, dueMonth)
+              && await savepointRead(trx, (k) => monthlyDuesCollected(
+                k, svc.customer_id, new Date(`${dueMonth}-15T12:00:00Z`), { excludeScheduledServiceId: svc.id },
+              ));
+          } catch (e) {
+            logger.warn(`[dispatch] locked dues-coverage commit check failed for service ${svc.id}: ${e.message}`);
+          }
+          if (!confirmed) {
+            throw Object.assign(
+              new Error('This month\'s membership dues coverage changed while completing — complete the visit again so its dues are billed.'),
+              { statusCode: 409, code: 'MEMBERSHIP_DUES_COVERAGE_CHANGED', isOperational: true },
+            );
+          }
         }
 
         // 5. Status flip via the canonical sole-writer.

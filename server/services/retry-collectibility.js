@@ -39,6 +39,7 @@ const REASONS = Object.freeze({
   PENDING_PREPAY_HOLD: 'pending_prepay_hold',
   AMBIGUOUS_OUTCOME_PARKED: 'ambiguous_outcome_parked',
   SIBLING_ORPHAN_UNRESOLVED: 'sibling_orphan_unresolved',
+  DUES_INVOICE_OPEN: 'dues_invoice_open',
 });
 
 /**
@@ -389,8 +390,16 @@ async function classifyFailedPaymentRetry({
     // month (paid, processing or still open) IS that month's bill — same
     // resolution, one shared lookup with completion and the monthly cron. A
     // paid one names its payment row when there is one; an open one has none
-    // (collectedByPaymentId null: the sweep resolves the row against itself).
+    // (collectedByPaymentId null when the paid invoice left no payment row: the
+    // sweep resolves the row against itself).
     const duesInvoice = await findLiveStampedDuesInvoice(conn, payment.customer_id, obligationMonth);
+    // An OPEN (unpaid) stamped invoice only defers: the row stays armed and is
+    // re-read each sweep (SKIP_ARMED: no charge, no write, no retry_count or
+    // ladder movement). Paid → resolved below as already collected; voided or
+    // refunded → the invoice stops matching and the row is collectible again.
+    if (duesInvoice && !['paid', 'prepaid', 'processing'].includes(String(duesInvoice.status))) {
+      return verdict(REASONS.DUES_INVOICE_OPEN, DISPOSITIONS.SKIP_ARMED, { collectedByInvoiceId: duesInvoice.id });
+    }
     if (duesInvoice) {
       const duesPayment = await conn('payments')
         .where({ customer_id: payment.customer_id })

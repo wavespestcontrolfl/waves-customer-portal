@@ -145,16 +145,22 @@ async function assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId, pac
 //   replay/reuse re-check so ordering holds for adoption too.
 async function acquireScheduledMintLockChain(trx, {
   scheduledServiceId, customerId = null, assertEligibleInTrx = null, visitColumns = ['id'],
+  // 'share' (a membership-dues mint): FOR SHARE instead of FOR KEY SHARE on the
+  // customer row, taken at the SAME point of the order (customer before visit),
+  // so a concurrent UPDATE of the billing terms (monthly_rate / billing_mode /
+  // waveguard_tier) cannot commit between the mint's read of them and its insert.
+  customerLock = 'key_share',
 }) {
   await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+  const lockClause = customerLock === 'share' ? 'FOR SHARE' : 'FOR KEY SHARE';
   if (customerId != null) {
     await trx.raw(
-      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE',
+      `SELECT id FROM customers WHERE id = ? ${lockClause}`,
       [customerId],
     );
   } else {
     await trx.raw(
-      'SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) FOR KEY SHARE',
+      `SELECT id FROM customers WHERE id = (SELECT customer_id FROM scheduled_services WHERE id = ?) ${lockClause}`,
       [scheduledServiceId],
     );
   }
@@ -301,6 +307,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
+          customerLock: membershipDues ? 'share' : 'key_share',
           visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price', 'scheduled_date'],
         });
         if (!lockedSvc) {

@@ -381,6 +381,9 @@ describe('completion route wires dues-collected coverage', () => {
     expect(source).toMatch(/invErr\?\.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' \|\| invErr\?\.code === 'SCHEDULED_BILLING_SOURCE_MOVED'\) && !invoice\?\.id\) \{[\s\S]{0,900}releaseCompletionAttemptForResume\(completionAttempt, invErr\)[\s\S]{0,900}code: 'membership_dues_coverage_unverified'/);
     // A covered-skip verdict is confirmed under the dues-month lock before it is trusted.
     expect(source).toMatch(/if \(duesCollectedThisMonth && !db\.isTransaction\) \{[\s\S]{0,400}acquireMembershipDuesMonthLock\(trx, svc\.customer_id, dueMonth\)/);
+    // The authoritative confirmation is inside the completion transaction, under a
+    // transaction-scoped TRY lock, before the status flip; packets are not exempt.
+    expect(source).toMatch(/if \(duesCollectedThisMonth && autopayCoversVisit\) \{[\s\S]{0,500}tryAcquireMembershipDuesMonthLock\(trx, svc\.customer_id, dueMonth\)[\s\S]{0,900}MEMBERSHIP_DUES_COVERAGE_CHANGED[\s\S]{0,700}await transitionJobStatus\(\{\s*\n\s*jobId: svc\.id,/);
     // The covered visit reads like one covered before the mint at every later reader.
     expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
   });

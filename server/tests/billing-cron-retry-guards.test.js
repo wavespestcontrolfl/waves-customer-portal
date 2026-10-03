@@ -299,12 +299,9 @@ describe('processPaymentRetries — suppression guards', () => {
   });
 
   // B08: a live completion-minted membership-dues invoice IS the month's bill.
-  // The member's card expired, they got and are paying (or about to pay) the
-  // dues invoice, then restored autopay: the armed monthly retry must not
-  // charge the same month. An open invoice has no payment row to point at, so
-  // the failed row resolves against itself (the self-supersede convention) and
-  // stops counting as a balance beside the invoice.
-  test('a live stamped dues invoice bills the obligation month: no charge, rung resolved against itself', async () => {
+  // OPEN: the rung only defers (stays armed, untouched, no charge) so a later
+  // void or refund of that invoice leaves it collectible. PAID: it resolves.
+  test('an OPEN stamped dues invoice defers the rung: no charge, no write, no ledger row, still armed', async () => {
     mockDuesInvoiceRow = { id: 'inv-dues', status: 'sent', scheduled_service_id: 'visit-1' };
     mockFailedPayments = [monthlyFailedPayment()];
 
@@ -313,6 +310,17 @@ describe('processPaymentRetries — suppression guards', () => {
     expect(StripeService.charge).not.toHaveBeenCalled();
     expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
     expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(0);
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
+  test('a PAID stamped dues invoice resolves the rung against itself when no payment row exists', async () => {
+    mockDuesInvoiceRow = { id: 'inv-dues', status: 'paid', scheduled_service_id: 'visit-1' };
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(StripeService.charge).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     expect(mockPaymentUpdates[0].next_retry_at).toBeNull();
     expect(mockPaymentUpdates[0].superseded_by_payment_id).toBe('pay-failed-1');

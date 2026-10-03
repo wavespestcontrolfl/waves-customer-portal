@@ -1049,6 +1049,15 @@ const BillingCron = {
         continue;
       }
 
+      // DEFERRED, not resolved: an OPEN stamped dues invoice bills this month but
+      // is not money yet. The row stays armed and untouched (no retry_count, no
+      // ladder step, no notice, no ledger row) and is re-read every sweep: paid
+      // resolves it below, voided/refunded makes it collectible again.
+      if (verdict.reason === RETRY_REASONS.DUES_INVOICE_OPEN) {
+        logger.info(`[billing-cron] Retry for payment ${payment.id} deferred — ${obligationMonth} is billed on open dues invoice ${verdict.collectedByInvoiceId}; left armed`);
+        continue;
+      }
+
       // RESOLUTION: obligation month already collected through another door
       // — resolve the row against the collecting payment.
       if (verdict.reason === RETRY_REASONS.ALREADY_COLLECTED) {

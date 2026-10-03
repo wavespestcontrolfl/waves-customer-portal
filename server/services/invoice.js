@@ -1751,9 +1751,26 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
     scheduledServiceId,
     customerId,
     visitColumns: ["id", "estimated_price", "primary_line_price", "is_callback", "scheduled_date"],
+    customerLock: "share",
   });
+  // FOR SHARE, held through the insert (same transaction): an UPDATE of the
+  // billing terms (monthly_rate / billing_mode / waveguard_tier) waits for this
+  // mint to commit, and a mint that waited on one reads the NEW terms here, so
+  // the stamp is never judged on terms that changed before the insert.
+  // Lock order and deadlock reasoning: the chain above locked the customer
+  // (SHARE) BEFORE the visit row, the customer-before-visit order this codebase
+  // documents for its writers (customer-dedupe, settlement, Bill-To edit, the
+  // completion's own customer FOR SHARE), so a writer that holds the visit row
+  // never asks for this customer lock. FOR SHARE is compatible with FOR SHARE
+  // and FOR KEY SHARE, so two sibling dues mints never block each other on it,
+  // and this transaction never UPDATEs / FOR UPDATEs the customer row after it
+  // (create() and the stamp only read it and INSERT an invoice, whose FK check
+  // takes KEY SHARE), so there is no SHARE-to-UPDATE upgrade for two siblings
+  // to cycle on. Every dues-mint entry point takes this same lock through this
+  // function (completion mint, Charge now's pre-mint).
   const customer = await conn("customers")
     .where({ id: customerId })
+    .forShare()
     .first("billing_mode", "monthly_rate", "waveguard_tier");
   // Why a requested stamp may not hold, split by cause on the LOCKED visit row
   // plus the customer row read in this transaction:
@@ -1992,6 +2009,59 @@ async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
     throw new Error(
       `Cannot unvoid — ${month} membership dues were already collected (payment ${payment.id}); restoring this invoice would bill the month twice`,
     );
+  }
+}
+
+// A void releases a stamped dues invoice's month. Visits of that month that
+// completed AFTER the invoice existed, unpriced, with no invoice of their own
+// and not the invoice's own visit, skipped their dues mint because of it (or of
+// autopay / a cron payment: this identification is advisory, from existing
+// durable rows only, and over-reports rather than under-reports). When nothing
+// else covers the month after the void and there are such visits, ONE office
+// alert asks a person to bill the month again if it is still owed. Never mints.
+// Best effort after the void commits; a failure here never fails the void.
+async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
+  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
+  if (!month || !invoiceRow.customer_id) return;
+  try {
+    if (await monthlyDuesCollected(db, invoiceRow.customer_id, new Date(`${month}-15T12:00:00Z`))) return;
+    const rows = await db("scheduled_services as s")
+      .where({ "s.customer_id": invoiceRow.customer_id, "s.status": "completed" })
+      .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
+      .where((q) => q.whereNull("s.estimated_price").orWhere("s.estimated_price", 0))
+      .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
+      .whereNot("s.id", invoiceRow.scheduled_service_id || "00000000-0000-0000-0000-000000000000")
+      .where("s.completed_at", ">", invoiceRow.created_at)
+      .whereNotExists(db("invoices as i")
+        .whereRaw("i.scheduled_service_id = s.id")
+        .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
+      .select("s.id");
+    if (!rows.length) return;
+    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const { fitAction } = require("./admin-alert-names");
+    const customer = await db("customers").where({ id: invoiceRow.customer_id }).first("first_name", "last_name");
+    const [y, m] = month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    const n = rows.length;
+    await raiseAdminAlert("billing", {
+      area: "Billing",
+      action: fitAction("Billing", `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "the customer", [
+        (who) => `rebill ${who}'s ${monthName} dues`,
+        (who) => `rebill ${who}'s dues`,
+      ]),
+      why: `The ${monthName} dues invoice was voided; ${n} other visit${n > 1 ? "s" : ""} that month went unbilled because of it.`,
+      severity: "needs-you",
+      link: `/admin/customers?customerId=${invoiceRow.customer_id}`,
+      subject: { type: "invoice", id: String(invoiceRow.id) },
+      doneWhen: "month_billed",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided or cancelled, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} after it (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
+      bell: true,
+      dedupeKey: `dues_coverage_released:${invoiceRow.id}`,
+    });
+  } catch (err) {
+    logger.warn(`[invoice] dues-coverage-released check failed for invoice ${invoiceRow.id}: ${err.message}`);
   }
 }
 
@@ -6136,6 +6206,7 @@ const InvoiceService = {
           scheduledServiceId: sr.scheduled_service_id,
           customerId: sr.customer_id,
           visitColumns: ["id", "estimated_price"],
+          customerLock: membershipDuesMonth ? "share" : "key_share",
         });
         // Stale-basis refusal (codex #3344 r2): when the caller's amount
         // was derived from the row price, a locked price that no longer
@@ -6167,6 +6238,7 @@ const InvoiceService = {
           await acquireScheduledMintLockChain(conn, {
             scheduledServiceId: sr.scheduled_service_id,
             customerId: sr.customer_id,
+            customerLock: membershipDuesMonth ? "share" : "key_share",
           });
         }
         await recheckInTrx(conn);
@@ -10281,6 +10353,7 @@ const InvoiceService = {
       }
       invoice = updated;
     });
+    await alertIfMembershipDuesCoverageReleased(current);
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -12449,7 +12522,7 @@ const InvoiceService = {
       }
       const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
-          "total", "credit_applied", "line_items", "customer_id");
+          "total", "credit_applied", "line_items", "customer_id", "created_at", "scheduled_service_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
@@ -12646,6 +12719,7 @@ const InvoiceService = {
             `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
           );
           // Post-commit side effects, matching voidInvoice.
+          await alertIfMembershipDuesCoverageReleased(candidate);
           await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
           try {
             await require("./annual-prepay-renewals").syncTermForInvoicePayment(
