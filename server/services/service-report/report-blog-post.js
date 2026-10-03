@@ -113,10 +113,12 @@ function singularOf(word) {
   if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
   return word;
 }
+const pluralOf = (word) => (/(?:ch|sh|x|z|s|o)$/.test(word) ? `${word}es` : /[^aeiou]y$/.test(word) ? `${word.slice(0, -1)}ies` : `${word}s`);
 function formsOf(word) {
   const one = singularOf(word);
-  const plural = /(?:ch|sh|x|z|s|o)$/.test(one) ? `${one}es` : /[^aeiou]y$/.test(one) ? `${one.slice(0, -1)}ies` : `${one}s`;
-  return [...new Set([word, one, plural, `${one}s`])];
+  // The plural of the word as typed too: a singular that ends in s ("virus",
+  // "mantis") keeps its own plural (GitHub Codex P2 on #5652).
+  return [...new Set([word, one, pluralOf(word), pluralOf(one), `${one}s`])];
 }
 
 // The words a search matches on: each word of three characters or more
@@ -143,14 +145,26 @@ function searchTerms(query) {
 const sqlPattern = (term) => `\\m(?:${term.forms.join('|')})\\M`;
 const jsPattern = (term) => new RegExp(`\\b(?:${term.forms.join('|')})\\b`, 'i');
 
-// Rows of a table whose text holds any of the terms (the ranking below then
-// judges how well).
-function anyTermIn(query, columns, terms) {
-  return query.where(function anyTerm() {
-    for (const term of terms) {
-      for (const column of columns) this.orWhereRaw(`COALESCE(${column}, '') ~* ?`, [sqlPattern(term)]);
-    }
-  });
+// Rows of a table whose text holds any of the terms, those holding the most
+// terms first, newest first among them, at most MAX_CANDIDATES: the cap never
+// drops a post that holds every word for a newer one that holds fewer
+// (GitHub Codex P2 on #5652). The ranking below then judges how well.
+function anyTermIn(query, columns, terms, newestColumn) {
+  // Whether the row holds a term, in any of its text columns (one binding a
+  // column).
+  const holds = `(${columns.map((column) => `COALESCE(${column}, '') ~* ?`).join(' OR ')})`;
+  const holdsBindings = (term) => columns.map(() => sqlPattern(term));
+  return query
+    .where(function anyTerm() {
+      for (const term of terms) {
+        for (const column of columns) this.orWhereRaw(`COALESCE(${column}, '') ~* ?`, [sqlPattern(term)]);
+      }
+    })
+    .orderByRaw(
+      `(${terms.map(() => `CASE WHEN ${holds} THEN 1 ELSE 0 END`).join(' + ')}) DESC, ${newestColumn} DESC NULLS LAST`,
+      terms.flatMap(holdsBindings),
+    )
+    .limit(MAX_CANDIDATES);
 }
 
 // Which terms a post's text holds, and where (a title or headline over the
@@ -187,17 +201,13 @@ async function searchReportBlogPosts(knex, query) {
   const [registryRows, portalRows] = await Promise.all([
     anyTermIn(knex('content_registry')
       .where({ content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' })
-      .whereRaw('COALESCE(noindex_detected, false) = false'), REGISTRY_TEXT, terms)
-      .orderByRaw('published_at DESC NULLS LAST')
-      .limit(MAX_CANDIDATES)
+      .whereRaw('COALESCE(noindex_detected, false) = false'), REGISTRY_TEXT, terms, 'published_at')
       .select(REGISTRY_COLUMNS),
     anyTermIn(knex('blog_posts')
       .where('status', 'published')
       .where('astro_status', 'live')
       .whereNotNull('astro_live_url')
-      .whereRaw('astro_live_url ILIKE ?', [`%${SITE_HOST}%`]), PORTAL_TEXT, terms)
-      .orderByRaw('astro_published_at DESC NULLS LAST')
-      .limit(MAX_CANDIDATES)
+      .whereRaw('astro_live_url ILIKE ?', [`%${SITE_HOST}%`]), PORTAL_TEXT, terms, 'astro_published_at')
       .select([...COLUMNS, 'meta_description', 'keyword', 'astro_published_at']),
   ]);
   const found = new Map();

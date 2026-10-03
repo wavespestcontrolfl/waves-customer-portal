@@ -194,6 +194,12 @@ describe('searchTerms', () => {
     expect(words('')).toEqual([]);
   });
 
+  test('a singular that ends in s keeps its own plural (GitHub Codex P2 on #5652)', () => {
+    expect(searchTerms('virus')[0].forms).toEqual(expect.arrayContaining(['virus', 'viruses']));
+    expect(searchTerms('mantis')[0].forms).toEqual(expect.arrayContaining(['mantis', 'mantises']));
+    expect(searchTerms('pest')[0].forms).toEqual(expect.arrayContaining(['pest', 'pests']));
+  });
+
   test('each word carries the forms a post may use for it', () => {
     expect(searchTerms('roaches')[0].forms).toEqual(expect.arrayContaining(['roach', 'roaches']));
     expect(searchTerms('fly')[0].forms).toEqual(expect.arrayContaining(['fly', 'flies']));
@@ -233,13 +239,29 @@ describe('searchReportBlogPosts', () => {
       ['content_registry where', { content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' }],
       ['content_registry whereRaw', 'COALESCE(noindex_detected, false) = false'],
       ['content_registry inner orWhereRaw', "COALESCE(title, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
-      ['content_registry inner orWhereRaw', "COALESCE(meta_description, '') ~* ?", ['\\m(?:ants|ant)\\M']],
-      ['content_registry inner orWhereRaw', "COALESCE(h1, '') ~* ?", ['\\m(?:ants|ant)\\M']],
-      ['content_registry inner orWhereRaw', "COALESCE(target_keyword, '') ~* ?", ['\\m(?:ants|ant)\\M']],
+      ['content_registry inner orWhereRaw', "COALESCE(meta_description, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
+      ['content_registry inner orWhereRaw', "COALESCE(h1, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
+      ['content_registry inner orWhereRaw', "COALESCE(target_keyword, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
       ['blog_posts where', 'astro_status', 'live'],
       ['blog_posts whereRaw', 'astro_live_url ILIKE ?', ['%wavespestcontrol.com%']],
       ['blog_posts inner orWhereRaw', "COALESCE(keyword, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
     ]));
+  });
+
+  test('each source orders by how many words a row holds before its read cap (GitHub Codex P2 on #5652)', async () => {
+    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    for (const [table, newest] of [['content_registry', 'published_at'], ['blog_posts', 'astro_published_at']]) {
+      const calls = knex.calls.filter(([name]) => name.startsWith(`${table} `));
+      const order = calls.findIndex(([name]) => name === `${table} orderByRaw`);
+      const limit = calls.findIndex(([name]) => name === `${table} limit`);
+      expect(order).toBeGreaterThanOrEqual(0);
+      expect(order).toBeLessThan(limit);
+      const [, sql, bindings] = calls[order];
+      expect(sql).toMatch(new RegExp(`^\\(CASE WHEN .+ THEN 1 ELSE 0 END \\+ CASE WHEN .+ THEN 1 ELSE 0 END\\) DESC, ${newest} DESC NULLS LAST$`));
+      expect(bindings).toEqual(expect.arrayContaining(['\\m(?:ghost|ghosts)\\M', '\\m(?:ants|ant|antses)\\M']));
+      expect(calls[limit]).toEqual([`${table} limit`, 500]);
+    }
   });
 
   test('a plural finds the singular: "ghost ants" finds a Ghost Ant post, at its live URL', async () => {
