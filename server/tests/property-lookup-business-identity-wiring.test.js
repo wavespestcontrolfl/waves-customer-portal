@@ -219,6 +219,18 @@ describe('gate on', () => {
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
   });
 
+  test('staff answer "building" at an address with a verified size: the size is flagged HIGH for reconfirmation, since it may be one space\'s', async () => {
+    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), squareFootage: 1350, _verifiedFields: ['squareFootage'] }));
+    const p = (await run({ occupancyAnswer: 'building' })).enriched;
+    expect(p.serviceScopeDecision).toBe('entire_commercial_building');
+    expect(p.fieldVerifyFlags).toContainEqual(expect.objectContaining({
+      field: 'squareFootage', priority: 'HIGH', reason: expect.stringMatching(/verified size is saved.*confirm the building/),
+    }));
+    // No such flag without a verified size, or on the suite answer.
+    lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
+    expect((await run({ occupancyAnswer: 'building' })).enriched.fieldVerifyFlags.some((f) => /verified size is saved/.test(f.reason))).toBe(false);
+  });
+
   test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
     const baseline = await gateOffBaseline();
     const p = (await run({ occupancyAnswer: 'none' })).enriched;

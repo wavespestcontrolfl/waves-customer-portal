@@ -1827,6 +1827,14 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
 // merge history), the building's total simply can't be checked — trusted
 // by default rather than refusing every record that predates this evidence
 // convention.
+// A tech-verified squareFootage override is on the record.
+function recordSqftIsVerified(rc) {
+  return Number(rc?.squareFootage) > 0 && (
+    rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
+    || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'))
+  );
+}
+
 function verifiedSqftLooksSuiteScoped(rc) {
   const verifiedValue = Number(rc?.squareFootage);
   if (!(verifiedValue > 0)) return false;
@@ -2487,6 +2495,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // Business-identity flags (empty unless an identity arrived): the
   // Places-derived commercial classification and the scope question.
   fieldVerifyFlags.push(...businessScope.flags);
+  // Staff answered "the whole building" at an address that carries a
+  // verified size. Verified sizes are keyed by address, not by scope, so the
+  // figure may be one space's (verified while the job was "just their
+  // space"). It is not silently priced as the building: staff reconfirm it.
+  if (businessScope.decision === BUSINESS_SCOPE.BUILDING && recordSqftIsVerified(rc)) {
+    fieldVerifyFlags.push({
+      field: 'squareFootage',
+      reason: 'A verified size is saved for this address. It may be for one space, not the whole building — confirm the building\'s square footage before pricing.',
+      priority: 'HIGH',
+    });
+  }
   if (staleImageryConflict) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
