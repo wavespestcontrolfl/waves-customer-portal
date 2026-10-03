@@ -5808,7 +5808,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // stranded sweep owns the (corrected) text once the stop is whole.
     const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
       || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
-    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    // Edit appointment (expectVisit) repeats this request when a save is
+    // retried. A stop already at the target moved nothing this time, so the
+    // "your visit moved" text is not sent again.
+    const repeatOfCommittedMove = expectVisit != null && result?.visitMove?.alreadyAtTarget === true
+      && !(result.visitMove.moved || []).length;
+    const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatOfCommittedMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       // qualityDates: the same Set already passed to the rebooker above —
@@ -5852,6 +5857,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           memberIds: stuck,
         },
       });
+    }
+    if (repeatOfCommittedMove) {
+      return res.json({ ...result, ...(notifyCustomer !== false ? { notificationSent: false, notificationSkipped: 'already_at_target' } : {}) });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary

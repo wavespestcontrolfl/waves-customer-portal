@@ -60,7 +60,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitReschedule
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
-const { moveVisitAsUnit, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
+const { moveVisitAsUnit, visitSummaryForService, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
 const member = (id, over = {}) => ({ id, status: 'confirmed', technician_id: 't1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', ...over });
@@ -82,6 +82,26 @@ describe('shiftClock', () => {
     expect(shiftClock('09:00', 90)).toBe('10:30');
     expect(shiftClock('23:30', 60)).toBe('00:30');
     expect(shiftClock(null, 60)).toBe(null);
+  });
+});
+
+describe('visitSummaryForService', () => {
+  test('an ungrouped or unknown row has no summary; a grouped row gets the full membership with its live count', async () => {
+    db.__script = { scheduled_services: { first: () => null } };
+    expect(await visitSummaryForService(db, 'a')).toBe(null);
+    db.__script = { scheduled_services: { first: () => ({ visit_id: null }) } };
+    expect(await visitSummaryForService(db, 'a')).toBe(null);
+    db.__script = { scheduled_services: {
+      first: () => ({ visit_id: 'v1' }),
+      select: () => [
+        { id: 'a', visit_id: 'v1', status: 'confirmed', service_type: 'Lawn Care', estimated_duration_minutes: 30 },
+        { id: 'b', visit_id: 'v1', status: 'pending', service_type: 'Pest Control', estimated_duration_minutes: 45 },
+        { id: 'c', visit_id: 'v1', status: 'cancelled', service_type: 'Mosquito', estimated_duration_minutes: 20 },
+      ],
+    } };
+    expect(await visitSummaryForService(db, 'a')).toMatchObject({
+      id: 'v1', serviceCount: 3, liveCount: 2, memberIds: ['a', 'b', 'c'], serviceTypes: ['Lawn Care', 'Pest Control', 'Mosquito'],
+    });
   });
 });
 

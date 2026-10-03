@@ -232,6 +232,18 @@ async function openMembers(t, visitId, { forUpdate = false } = {}) {
   return q.select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
 }
 
+/** The visit summary (visitSummariesForRows) for one service, read live. Null = ungrouped. */
+async function visitSummaryForService(conn, serviceId) {
+  const row = await conn('scheduled_services').where({ id: serviceId }).first('visit_id');
+  if (!row || !row.visit_id) return null;
+  const members = await conn('scheduled_services').where({ visit_id: row.visit_id })
+    .orderBy('id')
+    .select('id', 'visit_id', 'status', 'service_type', 'estimated_duration_minutes');
+  const rows = members.map((m) => ({ id: m.id, visitId: m.visit_id, status: m.status, serviceType: m.service_type, estimatedDuration: m.estimated_duration_minutes }));
+  visitSummariesForRows(rows);
+  return rows.length ? rows[0].visit : null;
+}
+
 /**
  * Assign a visit's technician onto one member through the canonical
  * assignment writer (codex #3590 r13 P1): assignDispatchJob clears the
@@ -3532,6 +3544,7 @@ module.exports = {
   renewNotificationLease,
   finalizeVisitNotification,
   visitSummariesForRows,
+  visitSummaryForService,
   _test: {
     shiftClock,
     expectMatchesRow,

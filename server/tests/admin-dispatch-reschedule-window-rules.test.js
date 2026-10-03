@@ -253,6 +253,31 @@ test('expectVisit (Edit appointment, "move all of them together") pins the stop 
   expect(SmartRebooker.reschedule.mock.calls[1][5].expectGroupedVisit).toBeUndefined();
 });
 
+test('a repeated expectVisit request that finds the stop already at the target texts nobody again; other callers are unchanged', async () => {
+  const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+  const AppointmentReminders = require('../services/appointment-reminders');
+  const shown = { id: 'visit-1', memberIds: ['00000000-0000-4000-8000-000000000001', 'sibling-1'], liveCount: 2 };
+  const noop = { success: true, visitMove: { visitId: 'visit-1', moved: [], failed: [], alreadyAtTarget: true, unchanged: shown.memberIds } };
+  SmartRebooker.reschedule.mockResolvedValue(noop);
+  const repeated = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
+  expect(repeated.status).toBe(200);
+  expect(repeated.body).toMatchObject({ notificationSent: false, notificationSkipped: 'already_at_target' });
+  expect(sendRescheduleNoticeForVisit).not.toHaveBeenCalled();
+  // The reminder sync is told no notice follows.
+  const syncOptions = AppointmentReminders.handleReschedule.mock.calls.map((c) => c[2] || {});
+  expect(syncOptions.every((o) => o.coverDueWindows !== true)).toBe(true);
+  // A first move through the same request shape still texts.
+  SmartRebooker.reschedule.mockResolvedValue({ success: true, visitMove: { visitId: 'visit-1', moved: shown.memberIds, failed: [], visitStart: '09:00' } });
+  const first = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
+  expect(first.body.notificationSent).toBe(true);
+  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(1);
+  // No expectVisit (the board, Quick Move): a no-op keeps its existing behavior.
+  SmartRebooker.reschedule.mockResolvedValue(noop);
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true });
+  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(2);
+  SmartRebooker.reschedule.mockResolvedValue({ success: true });
+});
+
 describe('window resolved against the CURRENT visit row', () => {
   test("{ start } on a 2-hour visit derives and validates the REAL end: 19:00 → 19:00-21:00 is refused (never 19:00-11:00)", async () => {
     mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };

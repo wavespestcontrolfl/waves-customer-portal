@@ -6982,9 +6982,6 @@ router.get('/week', async (req, res, next) => {
       if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
         require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
       }
-      // Same `visit` summary as the day feed: the 5-Day and Week grids open
-      // the same Edit appointment form, which needs it to move a combo stop.
-      require('../services/visit-groups').visitSummariesForRows(servicePayloads);
 
       days.push({
         date: dateStr,
@@ -12814,9 +12811,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // topped up) by an unrelated save (Codex #3337 r5 P1).
       recurringOngoingBaseline,
       recurringNth, recurringWeekday, recurringIntervalDays,
-      // Edit appointment, after its whole-stop move re-dated this visit
-      // only: the posted ordinal (the stored one, or none) is kept as it is.
-      preserveRecurrenceAnchor,
       skipWeekends, weekendShift,
       estimatedPrice,
       primaryLinePrice,
@@ -13146,11 +13140,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // later maintenance would re-derive a drifted weekday/ordinal — codex r10
     // P2). monthly_nth_weekday stays raw passthrough: there the operator
     // supplies nth/weekday explicitly.
-    // preserveRecurrenceAnchor: the row's date was just moved on its own
-    // (this visit only), so deriving the ordinal from it would re-anchor the
-    // plan. A never-populated ordinal stays empty and later visits keep
-    // deriving from their own dates, as before the move.
-    const editMonthAnchorOpts = (isRecurring && preserveRecurrenceAnchor !== true
+    const editMonthAnchorOpts = (isRecurring
       && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
@@ -22327,6 +22317,18 @@ router.get('/:id/series-summary', async (req, res, next) => {
       // Same dark-ship contract for the price/service "Apply to" selector.
       canScopePriceService: isEnabled('editApptPriceServiceScope'),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/:id/visit-summary
+// The stop this service shares with others, read live: { visit: null } for
+// an ungrouped row, else the same summary the day feed attaches. Edit
+// appointment asks on open, so every screen that opens it (Day, 5-Day, Week,
+// List, the dispatch board) sees a combo the same way and with its full
+// membership, whatever its own feed carries.
+router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
+  try {
+    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
   } catch (err) { next(err); }
 });
 
