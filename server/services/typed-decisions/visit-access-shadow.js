@@ -264,8 +264,7 @@ async function loadHistory(svc, dbh, day, serviceLine) {
     .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
     .select('service_type', 'scheduled_date', 'completed_at');
   const last = recent.find((r) => detectServiceLine(r.service_type) === serviceLine);
-  const { lineRecords } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 10 });
-  const lastRecord = lineRecords.find((r) => dayString(r.service_date) < day);
+  const { lineRecords: [lastRecord] } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 1, before: day });
   return {
     count: Number(count) || 0,
     textsFrom: last ? (last.completed_at ? new Date(last.completed_at) : parseETDateTime(`${dayString(last.scheduled_date)}T00:00`)) : null,

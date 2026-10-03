@@ -54,13 +54,17 @@ async function loadLastServices(db, customerId, serviceType) {
 // opts.line overrides the label-derived verdict — combined-visit briefs
 // walk a COMPANION line (tree_shrub/termite/rodent) that no single label
 // on the appointment classifies to.
-async function loadRecentLineServices(db, customerId, serviceType, { limit = 5, line = null } = {}) {
+// opts.before (a YYYY-MM-DD day) walks only records dated before it, so a
+// caller rebuilding what was known ahead of a visit gets the same records
+// however many later ones exist.
+async function loadRecentLineServices(db, customerId, serviceType, { limit = 5, line = null, before = null } = {}) {
   const visitLine = line || detectServiceLine(serviceType);
   const lineRecords = [];
   let last = null;
   for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
     const rows = await db('service_records')
       .where({ customer_id: customerId, status: 'completed' })
+      .modify((q) => { if (before) q.where('service_date', '<', before); })
       .orderBy('service_date', 'desc')
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')

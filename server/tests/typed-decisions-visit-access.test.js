@@ -409,6 +409,11 @@ describe('visit access shadow: rules that need no database', () => {
     })));
     const built = await build(await visit());
     expect(built.state.last_tech_notes).toBe('Dog was loose in the yard.');
+    // Later same-line records never change what was known before the visit.
+    await database('service_records').insert(Array.from({ length: 12 }, (_, i) => ({
+      customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-11-01', technician_notes: `Later visit ${i}`,
+    })));
+    expect((await build((await database('scheduled_services').where({ status: 'confirmed' }).first('id')).id)).state.last_tech_notes).toBe('Dog was loose in the yard.');
   });
 
   test('many newer visits of another line neither cap the count nor hide the same-line anchor', async () => {
