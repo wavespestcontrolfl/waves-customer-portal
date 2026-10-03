@@ -4473,9 +4473,16 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
   // What an on-location contact is told they get. The server says when the
   // report text is on (GATE_CONTACT_REPORT_TEXT).
-  const contactTexts = propertyPrefs.some((p) => p.contactReportTexts === true)
+  // Per entry: a profile with its own visit-complete texts off sends none.
+  const contactTextsFor = (entry) => (entry?.contactReportTexts === true
     ? 'appointment texts and a text with the service report link after each visit'
-    : 'appointment texts';
+    : 'appointment texts');
+  // The entries the contact card renders (one house, or the profile list).
+  const contactCardEntries = perPropertyTexts
+    ? propertyPrefs.filter((p) => p.id === activePropertyId)
+    : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
+  // The card's header copy promises the report text only when every entry under it gets it.
+  const contactTexts = contactTextsFor({ contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) });
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5479,7 +5486,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             {/* A lone SECONDARY saved property (the primary retired) still gets its
                 own toggles — never the contacts-only card editing the profile
                 defaults (GitHub codex r0 P2). */}
-            {(perPropertyTexts ? propertyPrefs.filter((p) => p.id === activePropertyId) : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
+            {contactCardEntries.map((property) => {
               const label = property.propertyId
                 ? (property.label || propertyRelationshipChip(property) || property.profileLabel || 'Service property')
                 : (property.profileLabel || 'Service property');
@@ -5654,7 +5661,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {contactTexts} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
