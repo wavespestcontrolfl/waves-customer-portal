@@ -267,6 +267,7 @@ async function runBondRenewalSweep() {
       'customers.longitude as customer_longitude',
       'customers.home_line_location_id as customer_home_line_location_id',
       'customers.home_line_address_key as customer_home_line_address_key',
+      'customers.home_line_source as customer_home_line_source',
     );
 
   let sent = 0;
@@ -302,6 +303,7 @@ async function runBondRenewalSweep() {
             longitude: bond.customer_longitude,
             home_line_location_id: bond.customer_home_line_location_id,
             home_line_address_key: bond.customer_home_line_address_key,
+            home_line_source: bond.customer_home_line_source,
           }),
         },
         recipientType: 'customer',

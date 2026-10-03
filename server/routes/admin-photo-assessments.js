@@ -512,6 +512,11 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     const reportUrl = portalUrl(config.reportPath(reportToken));
     // sendAssessmentReportEmail contains its own failures (sent:false), but a
     // truly unexpected throw must not swallow the minted link either.
+    // The linked customer, so the email shows their home line (home-line
+    // PR 4); a lead-only assessment keeps the main line.
+    const linkedCustomer = row.customer_id
+      ? await db('customers').where({ id: row.customer_id }).first().catch(() => null)
+      : null;
     let emailResult;
     try {
       emailResult = await sendAssessmentReportEmail({
@@ -523,6 +528,7 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
         expiresAt,
         recipientType,
         recipientId,
+        customer: linkedCustomer,
       });
     } catch (emailErr) {
       logger.error(`[admin-photo-assessments] unexpected send error for ${row.id}: ${emailErr.message}`);

@@ -494,6 +494,7 @@ async function loadServiceRecord(recordId) {
       'customers.longitude as customer_longitude',
       'customers.home_line_location_id as customer_home_line_location_id',
       'customers.home_line_address_key as customer_home_line_address_key',
+      'customers.home_line_source as customer_home_line_source',
       ...SERVICE_CONTACT_COLUMNS.map((column) => `customers.${column}`),
       // The email's "completed ... at City, ST" line names the visit's
       // stamped city when present — a rental visit in another town must not
@@ -746,6 +747,7 @@ async function sendServiceReportV1Email(recordId, {
     longitude: service.customer_longitude,
     home_line_location_id: service.customer_home_line_location_id,
     home_line_address_key: service.customer_home_line_address_key,
+    home_line_source: service.customer_home_line_source,
   });
   const templateOutcomes = await Promise.allSettled(
     recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({

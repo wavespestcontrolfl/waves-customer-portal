@@ -297,7 +297,7 @@ async function resolveRecipient({ customerId, estimateId }) {
     ? await db('customers').where({ id: customerId }).first(
       'id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile',
       'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
-      'home_line_location_id', 'home_line_address_key',
+      'home_line_location_id', 'home_line_address_key', 'home_line_source',
     )
     : null;
   const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');

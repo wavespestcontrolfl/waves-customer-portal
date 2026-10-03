@@ -100,6 +100,7 @@ async function loadCustomer(customerId) {
       'longitude',
       'home_line_location_id',
       'home_line_address_key',
+      'home_line_source',
       'profile_label',
       // Service-contact slots so the email fallback can reach the same recipients
       // the appointment SMS targets (getAppointmentContacts reads these).

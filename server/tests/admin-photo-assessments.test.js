@@ -517,6 +517,8 @@ describe('POST /:type/:id/send-report', () => {
         firstName: 'Casey',
         recipientType: 'customer',
         recipientId: CUSTOMER,
+        // The linked customer rides along so the email shows their home line.
+        customer: expect.objectContaining({ id: CUSTOMER }),
       }));
     });
   });

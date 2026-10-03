@@ -70,7 +70,7 @@ async function loadCustomerEmail(customerId) {
     .first(
       'id', 'first_name', 'email',
       'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
-      'home_line_location_id', 'home_line_address_key',
+      'home_line_location_id', 'home_line_address_key', 'home_line_source',
     );
   const email = clean(customer?.email);
   if (!email || !email.includes('@')) return { customer: null, email: null };

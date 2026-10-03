@@ -131,7 +131,7 @@ async function loadCustomer(customerId) {
     .select(
       'id', 'first_name', 'last_name', 'company_name', 'email', 'phone',
       'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
-      'home_line_location_id', 'home_line_address_key',
+      'home_line_location_id', 'home_line_address_key', 'home_line_source',
     )
     .first();
 }

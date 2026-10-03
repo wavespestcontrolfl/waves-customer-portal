@@ -144,7 +144,7 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 // fold, billing-text-verdict.js), so they cannot drift apart.
 async function loadInvoiceEmailContext(invoice, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'home_line_source', 'property_type', 'company_name')
     .first();
   if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
   let prefsLookupFailed = false;
@@ -717,7 +717,7 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
 // answers with ({ ok: false, error, code? }).
 async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'home_line_source', 'property_type', 'company_name')
     .first();
   // A routed receipt (the receipt delivery queue, the no-show fee) is billing
   // mail: its recipient, the customer's receipt channel choice and the

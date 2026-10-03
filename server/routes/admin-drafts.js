@@ -864,7 +864,8 @@ router.get('/', async (req, res, next) => {
         'customers.longitude as customer_longitude',
         'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2',
         'customers.home_line_location_id as customer_home_line_location_id',
-        'customers.home_line_address_key as customer_home_line_address_key')
+        'customers.home_line_address_key as customer_home_line_address_key',
+        'customers.home_line_source as customer_home_line_source')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -901,6 +902,7 @@ router.get('/', async (req, res, next) => {
         address_line1: d.customer_address_line1, address_line2: d.customer_address_line2,
         home_line_location_id: d.customer_home_line_location_id,
         home_line_address_key: d.customer_home_line_address_key,
+        home_line_source: d.customer_home_line_source,
       } : null;
       const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
       const r = await resolveDraftRecipient(d, preloaded).catch(() => null);

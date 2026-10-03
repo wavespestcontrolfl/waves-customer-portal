@@ -299,7 +299,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
     .select(
       'id', 'first_name', 'last_name', 'email', 'phone', 'monthly_rate',
       'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
-      'home_line_location_id', 'home_line_address_key',
+      'home_line_location_id', 'home_line_address_key', 'home_line_source',
     )
     .orderBy('id', 'asc');
 

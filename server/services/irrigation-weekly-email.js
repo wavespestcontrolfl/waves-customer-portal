@@ -1062,6 +1062,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
       'c.longitude',
       'c.home_line_location_id',
       'c.home_line_address_key',
+      'c.home_line_source',
       'pp.irrigation_inches_per_week',
       'pp.irrigation_system',
       // Rain sensor drives only the derived schedule_note disclosure — the
