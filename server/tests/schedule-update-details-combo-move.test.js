@@ -153,6 +153,18 @@ describe('the stop the operator was shown', () => {
     await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
     expect(mockVisitGroups.splitChild).not.toHaveBeenCalled();
     expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // Shown as shared, but separated or down to one live service since:
+    // 'together' is refused, never run as a single-row move.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+    mockRow = { ...ROW, visit_id: null };
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+    // 'separate' on a row already off its stop is the ordinary edit.
+    expect(await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate', comboVisit: shown }))).toBe(null);
+    mockRow = { ...ROW };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }, { id: 'svc-b' }]);
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
     // The same stop: the move is planned on it.
     mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
     await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }));

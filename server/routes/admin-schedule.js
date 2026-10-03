@@ -11022,6 +11022,11 @@ async function separateComboService(req, row) {
   return { separated: true };
 }
 
+const comboStopChangedError = () => Object.assign(
+  httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
+  { code: 'VISIT_MEMBERSHIP_CHANGED' },
+);
+
 async function planComboEditMove(req) {
   const body = req.body || {};
   const choice = body.comboMove;
@@ -11031,9 +11036,17 @@ async function planComboEditMove(req) {
   }
   const row = await db('scheduled_services').where({ id: req.params.id })
     .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id');
-  if (!row || !row.visit_id) return null;
+  if (!row) return null;
   const vg = require('../services/visit-groups');
-  if ((await vg.openMembers(db, row.visit_id)).length < 2) return null;
+  const shared = !!row.visit_id && (await vg.openMembers(db, row.visit_id)).length >= 2;
+  if (!shared) {
+    // The operator was shown a shared stop and chose to keep it together,
+    // but it is not shared any more (separated or closed since): refuse,
+    // never move the one service as if that were the choice. 'separate' on
+    // a row already off its stop is the ordinary edit it asked for.
+    if (choice === 'together' && body.comboVisit != null) throw comboStopChangedError();
+    return null;
+  }
   const changes = comboEditChanges(body, row);
   if (!changes) return null;
   const changesSlot = changes.date || changes.start || changes.technician || changes.length;
@@ -11043,12 +11056,7 @@ async function planComboEditMove(req) {
   const repeatForText = choice === 'together' && body.notifyCustomer === true;
   if (!changesSlot && !repeatForText) return null;
   const live = await vg.visitSummaryForService(db, row.id);
-  if (comboShownStopChanged(body.comboVisit, live)) {
-    throw Object.assign(
-      httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
-      { code: 'VISIT_MEMBERSHIP_CHANGED' },
-    );
-  }
+  if (comboShownStopChanged(body.comboVisit, live)) throw comboStopChangedError();
 
   if (choice === 'separate') return separateComboService(req, row);
   return planComboTogetherMove(req, row, changes, live);
