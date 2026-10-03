@@ -1096,6 +1096,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // capture — and there is nothing to delete, on this socket or after a
       // reconnect (the store only adds).
       const statedFields = { ...estimateFields };
+      const estimateCallbackPhone = (input.callback_phone ? callerPhone : (nz(priorEstimateFields.callback_phone) || callerPhone)) || null;
       const accountConfirmed = input.use_account_details === true || priorEstimateFields.account_details_confirmed === 'true';
       const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
         ? await accountDetailsForEstimate(ctx, statedFields) : null;
@@ -1128,6 +1129,10 @@ async function executeTool(name, input = {}, ctx = {}) {
         ctx.noteEstimateFields({
           ...statedFields,
           ...(emailUnreadable && !statedFields.email ? { email_unreadable: 'true' } : {}),
+          // The callback number the caller chose is remembered too: a later
+          // capture that omits it must not put the inbound number back on
+          // the office card.
+          ...(input.callback_phone && isLikelyE164(callerPhone) ? { callback_phone: callerPhone } : {}),
           ...(input.use_account_details === true && accountDetails ? { account_details_confirmed: 'true' } : {}),
           ...(offerAccountQuestion ? { account_question_offered: 'true' } : {}),
         });
@@ -1741,7 +1746,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (!leadCreated && leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           if (typeof surfaceEstimateRequestForCustomer === 'function') {
-            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount, stillMissing: estimateMissing });
+            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount, stillMissing: estimateMissing });
           }
         }
       } else if (estimateRequested) {
@@ -1750,7 +1755,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {

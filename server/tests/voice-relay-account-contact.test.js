@@ -375,6 +375,17 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     }
   });
 
+  test('the callback number the caller chose stays on the card when a later capture omits it', async () => {
+    const ctx = estimateCtx(callStore());
+    await ask({ use_account_details: true, callback_phone: '941-555-0177' }, ctx);
+    expect(filedCards()[0][2].phone).toBe('+19415550177');
+    await ask({ email: 'new@example.com' }, ctx); // a correction, no number repeated
+    expect(filedCards()[1][1]).toMatchObject({ email: 'new@example.com' });
+    expect(filedCards()[1][2].phone).toBe('+19415550177'); // not the inbound number
+    await ask({ callback_phone: '941-555-0188' }, ctx);
+    expect(filedCards()[2][2].phone).toBe('+19415550188');
+  });
+
   test('use_account_details is a capture_lead input only while the caller-context lane is on', () => {
     const { activeTools, TOOLS } = require('../services/voice-agent/relay-tools');
     const props = (tools) => Object.keys(tools.find((t) => t.name === 'capture_lead').input_schema.properties);
