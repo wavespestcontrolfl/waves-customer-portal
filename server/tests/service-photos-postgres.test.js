@@ -250,4 +250,53 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
       .toEqual([expect.objectContaining({ id: committed.id })]);
     expect(mockObjects.size).toBe(1);
   }, 30000);
+
+  test('promotion leaves a photo staged after its locked selection available for the next pass', async () => {
+    const visitId = randomUUID();
+    const technicianId = randomUUID();
+    const firstId = randomUUID();
+    const laterId = randomUUID();
+    const stagedPhoto = (id) => ({
+      id, scheduled_service_id: visitId, technician_id: technicianId,
+      photo_type: 'before', s3_key: `qa-staged/${id}`, image_sha256: id.replaceAll('-', '').repeat(2),
+    });
+    try {
+      await db('technicians').insert({ id: technicianId, name: 'Synthetic Photo Technician' });
+      await db('scheduled_services').insert({ id: visitId, customer_id: customerId,
+        scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'QA promotion race', status: 'completed' });
+      await db('scheduled_service_photo_staging').insert(stagedPhoto(firstId));
+      const { promoteStagedServicePhotos } = require('../services/service-photos');
+      await db.transaction(async (trx) => {
+        // Pause at the next awaited read after the staged-row selection.
+        // Another real connection commits a later upload before deletion.
+        let laterInserted = false;
+        const observed = new Proxy(trx, {
+          apply(target, _thisArg, args) {
+            const query = target(...args);
+            if (args[0] === 'service_photos') {
+              const columnInfo = query.columnInfo.bind(query);
+              query.columnInfo = async (...columns) => {
+                if (!laterInserted) {
+                  laterInserted = true;
+                  await db('scheduled_service_photo_staging').insert(stagedPhoto(laterId));
+                }
+                return columnInfo(...columns);
+              };
+            }
+            return query;
+          },
+        });
+        const promoted = await promoteStagedServicePhotos({ scheduledServiceId: visitId, serviceRecordId: recordId, knex: observed });
+        expect(promoted).toHaveLength(1);
+      });
+      expect(await db('scheduled_service_photo_staging').where({ scheduled_service_id: visitId }).pluck('id')).toEqual([laterId]);
+      await promoteStagedServicePhotos({ scheduledServiceId: visitId, serviceRecordId: recordId, knex: db });
+      expect(await db('scheduled_service_photo_staging').where({ scheduled_service_id: visitId })).toHaveLength(0);
+      expect(await db('service_photos').where({ service_record_id: recordId })).toHaveLength(2);
+      expect((await validatePhotoChain(recordId, db)).valid).toBe(true);
+    } finally {
+      await db('scheduled_services').where({ id: visitId, customer_id: customerId }).del();
+      await db('technicians').where({ id: technicianId }).del();
+    }
+  }, 30000);
 });

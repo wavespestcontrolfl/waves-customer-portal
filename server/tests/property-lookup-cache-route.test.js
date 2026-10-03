@@ -3,6 +3,8 @@ let mockDbHandler = () => { throw new Error('db handler not configured'); };
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
+  // The pending stamp's attempt_count increment is a raw expression.
+  mock.raw = jest.fn((sql) => ({ __raw: sql }));
   return mock;
 });
 jest.mock('../services/property-lookup/ai-property-lookup', () => {
@@ -149,6 +151,14 @@ describe('performPropertyLookup cache integration', () => {
     // The attempt lifecycle DID stamp the row (owner ruling 2026-08-11):
     // a record-less lookup must still leave a countable, segmentable row.
     expect(writes.some(([, payload]) => payload && payload.last_attempt_status)).toBe(true);
+    // One attempt id across every stamp of the attempt (pending + finalize),
+    // so the replay can match the stamped attempt to its payload exactly.
+    const stampIds = writes
+      .filter(([, payload]) => payload && payload.last_attempt_status)
+      .map(([, payload]) => payload.last_attempt_id);
+    expect(stampIds.length).toBeGreaterThanOrEqual(2);
+    expect(stampIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(new Set(stampIds).size).toBe(1);
     // …and the stamp never rewrites DATA freshness: updated_at is what the
     // route reports as meta.cachedAt, and moving it on every attempt made
     // months-old property data read as newly cached (codex r58 P2).

@@ -4,14 +4,15 @@
 # DATABASE_URL.
 #
 # Two-step design (load-bearing — do not flatten into one step):
-#   1. The full jest suite runs WITHOUT DATABASE_URL. Several suites change
+#   1. The full jest suite runs WITHOUT DATABASE_URL (the `server-unit` job,
+#      three parallel shards). Several suites change
 #      semantics when it is set: the pricing golden masters
 #      (pricing-engine.regression, pricing-engine-v1-adapter.regression) sync
 #      live pricing_config and diff against a baseline captured from PROD's
 #      admin-edited rows — a fresh migration-seeded DB legitimately differs,
 #      so setting DATABASE_URL globally turns them red by design, not by bug.
-#   2. The self-skipping DB-gated suites then run WITH DATABASE_URL against
-#      the migrated database, serially (--runInBand: they share tables and
+#   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the `server`
+#      job) against the migrated database, serially (--runInBand: they share tables and
 #      clash under parallel workers). products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
@@ -27,7 +28,7 @@ on:
     branches: [main]
 
 # Only PR runs cancel their superseded predecessor. On main every push shares
-# the one ref, and merges land faster than the ~16-minute server job, so
+# the one ref, and merges land faster than a full run finishes, so
 # cancelling there left main with no completed run at all (2026-09-24: 14
 # consecutive main pushes, every run cancelled). Main runs queue instead.
 concurrency:
@@ -129,7 +130,7 @@ jobs:
         working-directory: server
         env:
           LOOKUP_REFRESH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/property-lookup-refresh-claim-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/property-lookup-refresh-claim-postgres.test.js tests/property-lookup-attempt-provenance-postgres.test.js
       - name: Same-stop regroup sweep tests
         working-directory: server
         env:
@@ -238,14 +239,10 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
-      - name: Server tests (no DB — golden masters keep in-memory semantics)
-        working-directory: server
-        # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=2 --config='{"workerIdleMemoryLimit":"2GB"}'
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
-        # autopay, notification, and upload-validation logic. The broad suite
-        # above still runs every server test; this step adds the coverage gate.
+        # autopay, notification, and upload-validation logic. The server-unit
+        # job still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
       - name: Customer App preference, delivery, and billing connection tests
@@ -355,6 +352,34 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
+
+  # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
+  # (no Postgres service here, on purpose). It was the long pole of the whole
+  # run (~16 of the server job's ~22 minutes), so it runs as three parallel
+  # shards. `jest --shard` splits the test files deterministically: every file
+  # runs in exactly one shard. fail-fast is off so one red shard does not
+  # cancel the others and hide their failures.
+  server-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      NODE_ENV: test
+      JWT_SECRET: ci-only-test-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Server tests (no DB — golden masters keep in-memory semantics)
+        working-directory: server
+        # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
+        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
 
   client:
     runs-on: ubuntu-latest

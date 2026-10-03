@@ -143,6 +143,7 @@ function makePromotionKnex({ staged = [], existingHash = null } = {}) {
     let insertPayload = null;
     const chain = {
       where: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
       orderByRaw: jest.fn(() => chain),

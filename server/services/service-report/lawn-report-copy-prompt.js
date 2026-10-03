@@ -139,6 +139,13 @@ The title WHAT WE FOUND does not authorize inventing a finding. When findings ar
 
 The application already appends selected next-step copy. When that instruction is present, do not repeat or paraphrase it as your closing line. Spend the available space explaining the recorded work and what remains to be assessed.`;
 
+// Lawn result timing (P15, only while GATE_LAWN_REPORT_COPY_V6 is live, so the
+// gate-off prompt is byte-identical): the writer states no result timing; the
+// report's "What to expect" carries it in owner-approved words, built from the
+// final products (owner rulings 2026-10-01 / 10-02). generate-report screens
+// the output with report-writer-rules lawnResultTimingViolation.
+const LAWN_RESULT_TIMING_RULE = `RESULT TIMING (this rule wins over "realistic response expectation" above): never say when a result will show. No number of days, weeks or months, no "within", "over the coming weeks", "soon" or "over time". Describe the expected response without any timeframe; the report states timing elsewhere in approved words.`;
+
 // Canonical catalog identities take precedence over loose display names.
 // Older calls without a catalog identity retain the three established
 // writers; specialty calls need a verified key or findings type.
@@ -217,7 +224,9 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
     palm: ['# SERVICE REPORT COPY — TREE AND SHRUB v1', TREE_SHRUB_MAIN_REPORT_PROMPT],
     pest: ['# SERVICE REPORT COPY — RECURRING PEST v1', RECURRING_PEST_MAIN_REPORT_PROMPT],
   };
-  const selected = modules[writer];
+  const selected = writer === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live()
+    ? [...modules.lawn, LAWN_RESULT_TIMING_RULE]
+    : modules[writer];
   if (!selected) return null;
   // Under the writer rules a pest re-service gets the remaining-service
   // callback modifier, which the pest writer never received.
@@ -227,4 +236,6 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback]);
 }
 
-module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, selectReportCopyPrompt, writerRulesInScope };
+module.exports = {
+  LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, LAWN_RESULT_TIMING_RULE, selectReportCopyPrompt, writerRulesInScope,
+};

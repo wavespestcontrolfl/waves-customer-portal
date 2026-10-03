@@ -5,7 +5,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false), typedDecisionsClefLive: jest.fn(() => false) }));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
-jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
+jest.mock('../services/typed-decisions/shadow-recorder', () => {
+  const actual = jest.requireActual('../services/typed-decisions/shadow-recorder');
+  return { recordDecisions: jest.fn(), sampleFor: actual.sampleFor, stableDraw: actual.stableDraw };
+});
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
@@ -13,7 +16,7 @@ const { typedDecisionsLive, typedDecisionsClefLive } = require('../config/featur
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
-const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines } = require('../services/call-self-audit');
+const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
 // Each sampled call is asked call_judge.v2 and call_gate_checks.v1; these
 // read one package's asks, records and tally.
@@ -414,5 +417,221 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
     expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 0, failed: 1, skippedLong: 0 });
     expect(res.audited).toBe(1);
+  });
+});
+
+describe('voicemail triage evidence (voicemail.v1: every inbound voicemail beside what production decided)', () => {
+  const JEV = { ok: true, answers: { callback_requested: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+  const VM_TEXT = 'Hi, this is about my termites, please call me back.';
+  const VM_HASH = callSubjectHash(VM_TEXT);
+  const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', disposition: null, voicemail_callback_alerted_at: null, transcription: VM_TEXT, ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
+  // A stored answer row (decision_reviews) on the current transcript unless told otherwise.
+  let nextId = 1;
+  const REVIEW = (subject_id, provider, over = {}) => ({
+    id: `r${nextId++}`, capability: 'voicemail', package_id: 'voicemail.v1', subject_type: 'call_log', subject_id, question_id: 'callback_requested',
+    provider, jev_answer: { p: 0.9, yes: true, confident: true }, baseline_answers: { production: true }, sampled_for: null, label_status: 'unreviewed', subject_hash: VM_HASH, ...over,
+  });
+
+  // Thenable knex stand-in over in-memory rows. decision_reviews honors an
+  // object where() on subject_id / subject_hash / id and applies updates.
+  function vmDb({ rows = [], leadSids = [], triageIds = [], reviews = [] } = {}) {
+    const seen = { callLog: [], updates: [], reviews };
+    db.raw = (sql) => sql;
+    db.mockImplementation((table) => {
+      const conds = {};
+      const note = (a) => { if (table === 'call_log') seen.callLog.push(a); };
+      const matches = (r) => Object.entries(conds).every(([k, v]) => r[k] === v);
+      const b = {
+        modify(fn) { fn(b); return b; }, whereRaw(...a) { note(a); return b; }, whereIn(...a) { note(a); return b; },
+        where(...a) {
+          if (typeof a[0] === 'function') { a[0](b); return b; }
+          if (a[0] && typeof a[0] === 'object') Object.assign(conds, a[0]); else note(a);
+          return b;
+        },
+        whereNot() { return b; }, orWhereNot(...a) { note(a); return b; }, orderBy() { return b; }, whereNull(...a) { note(['null', ...a]); return b; },
+        select: async () => {
+          if (table === 'call_log') return rows;
+          if (table === 'leads') return leadSids.map((sid) => ({ twilio_call_sid: sid }));
+          if (table === 'decision_reviews') return reviews.filter(matches);
+          return [];
+        },
+        update: async (patch) => {
+          const hit = reviews.filter(matches);
+          for (const r of hit) Object.assign(r, { ...patch, baseline_answers: typeof patch.baseline_answers === 'string' ? JSON.parse(patch.baseline_answers) : patch.baseline_answers });
+          seen.updates.push({ table, patch, ids: hit.map((r) => r.id) });
+          return hit.length;
+        },
+        distinct: async () => (table === 'triage_items' ? triageIds.map((id) => ({ call_log_id: id })) : []),
+      };
+      return b;
+    });
+    return seen;
+  }
+  const bySubject = () => Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
+
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(true);
+    typedDecisionsClefLive.mockReturnValue(false);
+    askPackage.mockReset(); recordDecisions.mockReset();
+    askPackage.mockResolvedValue(JEV); recordDecisions.mockResolvedValue({ recorded: 3 });
+  });
+  afterAll(() => typedDecisionsLive.mockReturnValue(false));
+
+  test('gate off: nothing read, asked or recorded', async () => {
+    typedDecisionsLive.mockReturnValue(false);
+    vmDb({ rows: [VM()] });
+    expect(await shadowVoicemails()).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
+    expect(askPackage).not.toHaveBeenCalled();
+  });
+
+  test('reached a person = the callback alert claim (delivery-independent), a lead, or a triage item; none of them = not', async () => {
+    vmDb({
+      rows: [
+        VM({ id: 'vm-alert', twilio_call_sid: 'CA_1', voicemail_callback_alerted_at: new Date() }),
+        VM({ id: 'vm-lead', twilio_call_sid: 'CA_2', processing_status: 'processed' }),
+        VM({ id: 'vm-failed-lead', twilio_call_sid: 'CA_3', processing_status: 'lead_creation_failed' }),
+        VM({ id: 'vm-silent', twilio_call_sid: 'CA_4' }),
+      ],
+      leadSids: ['CA_2'], triageIds: ['vm-failed-lead'],
+    });
+    const tally = await shadowVoicemails();
+    const s = bySubject();
+    for (const id of ['vm-alert', 'vm-lead', 'vm-failed-lead']) expect(s[id].baselines.callback_requested).toEqual({ production: true });
+    expect(s['vm-silent'].baselines.callback_requested).toEqual({ production: false });
+    expect(s['vm-silent']).toMatchObject({ capability: 'voicemail', subjectType: 'call_log', provider: 'typesafe' });
+    expect(s['vm-silent'].baselines).not.toHaveProperty('needs_attention_today'); // no production decision: no baseline
+    expect(tally).toEqual({ asked: 4, recorded: 4, failed: 0, skippedLong: 0 });
+  });
+
+  test('spam baseline: spam status, is_spam, or an uncleared vendor nature; a job applicant and a cleared partner are not', async () => {
+    const v2 = (o) => ({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(o) });
+    vmDb({ rows: [
+      VM({ id: 'vm-s', processing_status: 'spam' }),
+      VM({ id: 'vm-x', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: true, is_spam: true }) }),
+      VM({ id: 'vm-vendor', ...v2({ call_nature: 'vendor_or_partner' }) }),
+      VM({ id: 'vm-partner', ...v2({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false } }) }),
+      VM({ id: 'vm-applicant', disposition: 'vendor_logged', ...v2({ call_nature: 'job_applicant' }) }),
+      VM({ id: 'vm-real' }),
+      VM({ id: 'call-live', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: false }) }),
+    ] });
+    await shadowVoicemails();
+    const s = bySubject();
+    expect(Object.keys(s).sort()).toEqual(['vm-applicant', 'vm-partner', 'vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
+    for (const id of ['vm-s', 'vm-x', 'vm-vendor']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: true });
+    for (const id of ['vm-real', 'vm-applicant', 'vm-partner']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: false });
+  });
+
+  test('a failed extraction is a voicemail when the voice webhook says so, retry budget or not', async () => {
+    vmDb({ rows: [
+      VM({ id: 'vm-ef', processing_status: 'extraction_failed', ai_extraction: null, answered_by: 'voicemail' }),
+      VM({ id: 'vm-ef2', processing_status: 'extraction_failed', ai_extraction: null, call_outcome: 'voicemail' }),
+      VM({ id: 'call-ef', processing_status: 'extraction_failed', ai_extraction: null, answered_by: 'human' }),
+    ] });
+    await shadowVoicemails();
+    expect(Object.keys(bySubject()).sort()).toEqual(['vm-ef', 'vm-ef2']);
+  });
+
+  test('ASK: each enabled provider until its answer on the current transcript is recorded', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    try {
+      vmDb({
+        rows: [VM({ id: 'vm-half' }), VM({ id: 'vm-done' }), VM({ id: 'vm-new' }), VM({ id: 'vm-stale' }), VM({ id: 'vm-labeled' })],
+        reviews: [
+          REVIEW('vm-half', 'typesafe'),
+          REVIEW('vm-done', 'typesafe'), REVIEW('vm-done', 'cloudflare'),
+          // answered on an older transcript: asked again
+          REVIEW('vm-stale', 'typesafe', { subject_hash: 'old' }), REVIEW('vm-stale', 'cloudflare', { subject_hash: 'old' }),
+          // ...but a labeled answer can never be re-answered, so it is not asked again
+          REVIEW('vm-labeled', 'typesafe', { subject_hash: 'old', label_status: 'confirmed_correct' }), REVIEW('vm-labeled', 'cloudflare'),
+        ],
+      });
+      const tally = await shadowVoicemails();
+      const asked = asksFor('voicemail.v1').map((c) => (c[2] && c[2].provider) || 'typesafe').sort();
+      // vm-half: Clef; vm-new: both; vm-stale: both; vm-done / vm-labeled: none
+      expect(asked).toEqual(['cloudflare', 'cloudflare', 'cloudflare', 'typesafe', 'typesafe']);
+      expect(tally).toMatchObject({ asked: 2, clef: { asked: 3 } });
+      // the retried leg is handed the stored current answer of the provider that already answered
+      const half = recordsFor('voicemail.v1').map(([a]) => a).find((a) => a.subjectId === 'vm-half');
+      expect(half).toMatchObject({ provider: 'cloudflare', siblingAnswers: { callback_requested: [{ p: 0.9, yes: true, confident: true }] } });
+    } finally { typedDecisionsClefLive.mockReturnValue(false); }
+  });
+
+  test('REFRESH: a baseline follows production (a later callback claim), and the cohort is recomputed, without a model call', async () => {
+    // Jev said "callback wanted"; production had rung nothing when asked (baseline false, a disagreement)...
+    const row = REVIEW('vm-1', 'typesafe', { baseline_answers: { production: false }, sampled_for: 'disagreement' });
+    // ...and has since claimed the callback alert (a retry or reprocess, same transcript).
+    const seen = vmDb({ rows: [VM({ id: 'vm-1', voicemail_callback_alerted_at: new Date() })], reviews: [row] });
+    await shadowVoicemails();
+    expect(askPackage).not.toHaveBeenCalled();
+    expect(row.baseline_answers).toEqual({ production: true });
+    expect(row.sampled_for).not.toBe('disagreement'); // they agree now (null, or the stable audit draw)
+    expect(seen.updates).toHaveLength(1);
+    // a second pass changes nothing
+    await shadowVoicemails();
+    expect(seen.updates).toHaveLength(1);
+  });
+
+  test('REFRESH: two providers who disagree both join the disagreement cohort; an inherited cohort is replaced when they agree', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    try {
+      const jev = REVIEW('vm-split', 'typesafe');
+      const clef = REVIEW('vm-split', 'cloudflare', { jev_answer: { p: 0.1, yes: false, confident: true } });
+      // agree with each other and with production, but carry a cohort copied from an old transcript's row
+      const a = REVIEW('vm-same', 'typesafe', { sampled_for: 'disagreement' });
+      const b = REVIEW('vm-same', 'cloudflare', { sampled_for: 'disagreement' });
+      vmDb({ rows: [VM({ id: 'vm-split', voicemail_callback_alerted_at: new Date() }), VM({ id: 'vm-same', voicemail_callback_alerted_at: new Date() })], reviews: [jev, clef, a, b] });
+      await shadowVoicemails();
+      expect(askPackage).not.toHaveBeenCalled();
+      expect([jev.sampled_for, clef.sampled_for].every((c) => c === 'disagreement' || c === 'random_audit')).toBe(true);
+      expect(jev.sampled_for).toBe(clef.sampled_for); // same cohort for both rows
+      expect(a.sampled_for).not.toBe('disagreement');
+      expect(a.sampled_for).toBe(b.sampled_for);
+    } finally { typedDecisionsClefLive.mockReturnValue(false); }
+  });
+
+  test('REFRESH never writes a labeled or held-out answer, but counts it as a sibling', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    try {
+      const labeled = REVIEW('vm-1', 'typesafe', { label_status: 'confirmed_correct', sampled_for: 'random_audit', baseline_answers: { production: false } });
+      const held = REVIEW('vm-1', 'cloudflare', { sampled_for: 'heldout', baseline_answers: { production: false } });
+      vmDb({ rows: [VM({ id: 'vm-1', voicemail_callback_alerted_at: new Date() })], reviews: [labeled, held] });
+      await shadowVoicemails();
+      expect(labeled).toMatchObject({ sampled_for: 'random_audit', baseline_answers: { production: false } });
+      expect(held).toMatchObject({ sampled_for: 'heldout', baseline_answers: { production: false } });
+    } finally { typedDecisionsClefLive.mockReturnValue(false); }
+  });
+
+  test('reads only terminal, quiet, inbound voicemails whose row changed in the last 7 days; a long one is counted, never asked', async () => {
+    const seen = vmDb({ rows: [VM({ id: 'vm-long', transcription: 'Hi please call me back about the termites. '.repeat(200) })] });
+    const tally = await shadowVoicemails({ now: new Date('2026-10-03T08:00:00Z') });
+    expect(tally).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
+    expect(askPackage).not.toHaveBeenCalled();
+    const calls = seen.callLog;
+    expect(calls.map((a) => String(a[0]))).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
+    expect(calls.find((a) => a[0] === 'processing_status')[1]).toEqual(['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed']);
+    // the window follows the row's last change, bounded by age
+    expect(calls).toContainEqual(['updated_at', '>', new Date('2026-09-26T08:00:00Z')]);
+    expect(calls).toContainEqual(['created_at', '>', new Date('2026-09-03T08:00:00Z')]);
+    // quiet: no processing claim, unchanged for 30 minutes (the callback claim lands after the terminal status)
+    expect(calls).toContainEqual(['updated_at', '<', new Date('2026-10-03T07:30:00Z')]);
+    expect(calls).toContainEqual(['null', 'processing_token']);
+    // a rejected transcription (the hallucination guard's sentinel) is never evidence
+    expect(calls).toContainEqual(['transcription_status', 'rejected']);
+  });
+
+  test('runs even when the self-audit itself is off or has no Anthropic client: it has its own gate and needs neither', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation((name) => name !== 'callSelfAudit');
+    try {
+      vmDb({ rows: [VM({ id: 'vm-1' })] });
+      const res = await runSelfAudit();
+      expect(res).toMatchObject({ skipped: 'gate_off', voicemails: { asked: 1, recorded: 1 } });
+      expect(asksFor('voicemail.v1')).toHaveLength(1);
+    } finally { isEnabled.mockImplementation(() => true); }
+  });
+
+  test('a read failure is logged, never thrown', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
   });
 });
