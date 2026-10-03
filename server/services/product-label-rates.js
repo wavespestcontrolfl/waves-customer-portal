@@ -57,6 +57,32 @@ function sameRateProduct(product, snapshot) {
 // Whitespace, case and dash style are not part of "verbatim".
 const labelText = (value) => String(value).replace(/[‐-―−]/g, '-').replace(/\s+/g, ' ').trim().toLowerCase();
 
+const DIGIT = '[\\d\\u00bc-\\u00be\\u2150-\\u215e]';
+const NUM = new RegExp(DIGIT);
+// A copied run that starts or stops part-way through the printed rate is a
+// different rate: "2 fl oz" out of "0.2 fl oz", "3 fl oz" out of "1/3 fl oz",
+// "2/3 oz" out of "2 2/3 oz", one end of a range, a rate without its
+// "per ...", or a unit cut short.
+const CUT_BEFORE = [
+  new RegExp(`${DIGIT}[.,/]?$`), // inside a number, decimal or fraction
+  new RegExp(`${DIGIT}\\s+$`), // the whole part of a mixed fraction
+  new RegExp(`${DIGIT}\\s*(?:-|\\b(?:to|or|through|and))\\s*$`), // the low end of a range
+  /[.,/]$/,
+];
+const CUT_AFTER = [
+  new RegExp(`^(?:[a-z%]|${DIGIT})`), // inside a word or number
+  /^[.,/]\d/,
+  new RegExp(`^\\s*(?:per\\b|/|(?:-|to\\b|or\\b|through\\b)\\s*${DIGIT})`), // more of the rate follows
+];
+function wholeRateInQuote(quote, rateText) {
+  for (let at = quote.indexOf(rateText); at !== -1; at = quote.indexOf(rateText, at + 1)) {
+    const before = quote.slice(0, at);
+    const after = quote.slice(at + rateText.length);
+    if (!CUT_BEFORE.some((cut) => cut.test(before)) && !CUT_AFTER.some((cut) => cut.test(after))) return true;
+  }
+  return false;
+}
+
 // The shape is already schema-checked; this is what a schema cannot say.
 function rateFactsError(facts, pageCount) {
   for (const direction of facts.directions) {
@@ -67,9 +93,9 @@ function rateFactsError(facts, pageCount) {
       if (rateText) return 'unscoped_label_value';
       continue;
     }
-    if (!/[\d¼-¾⅐-⅞]/.test(rateText)) return 'missing_label_value';
+    if (!NUM.test(rateText)) return 'missing_label_value';
     // The amount is evidence only as the label's own words.
-    if (!labelText(direction.quote).includes(rateText)) return 'rate_not_in_quote';
+    if (!wholeRateInQuote(labelText(direction.quote), rateText)) return 'rate_not_in_quote';
   }
   return null;
 }

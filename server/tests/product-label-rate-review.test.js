@@ -143,6 +143,10 @@ describe('rate direction validation', () => {
   ])('%s is kept exactly as the label prints it', (rateText) => {
     expect(error([printed(rateText)])).toBeNull();
   });
+  test('a rate printed twice passes when one printing is whole', () => {
+    expect(error([direction({ rateText: '2 fl oz per gallon', quote: 'Synthetic label: use 0.2 fl oz per gallon indoors, 2 fl oz per gallon outdoors.' })])).toBeNull();
+    expect(error([direction({ rateText: '0.5 fl oz per gallon', quote: 'Synthetic label: Step 2. 0.5 fl oz per gallon (see page 4).' })])).toBeNull();
+  });
   test('spacing, case and dash style do not break the verbatim check', () => {
     expect(error([direction({ rateText: '0.2\u20130.8 FL OZ  per gallon', quote: 'Synthetic label: mix 0.2-0.8 fl oz\nper gallon.' })])).toBeNull();
   });
@@ -157,6 +161,16 @@ describe('rate direction validation', () => {
     ['a rate that is not in the quote', [direction({ rateText: '0.2 to 0.9 fl oz per gallon of water' })], 'rate_not_in_quote'],
     ['a converted fraction', [direction({ rateText: '0.33 fl oz per gallon', quote: 'Synthetic label: mix 1/3 fl oz per gallon.' })], 'rate_not_in_quote'],
     ['a reworded denominator', [direction({ rateText: '0.2 to 0.8 fl oz per gal' , quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per 10 gallons.' })], 'rate_not_in_quote'],
+    ['a rate starting inside a decimal', [direction({ rateText: '2 fl oz per gallon', quote: 'Synthetic label: mix 0.2 fl oz per gallon.' })], 'rate_not_in_quote'],
+    ['a rate starting inside a fraction', [direction({ rateText: '3 fl oz per gallon', quote: 'Synthetic label: mix 1/3 fl oz per gallon.' })], 'rate_not_in_quote'],
+    ['a rate starting inside a mixed fraction', [direction({ rateText: '2/3 oz per gallon', quote: 'Synthetic label: mix 2 2/3 oz per gallon.' })], 'rate_not_in_quote'],
+    ['a rate starting inside a thousands number', [direction({ rateText: '500 lb per acre', quote: 'Synthetic label: apply 1,500 lb per acre.' })], 'rate_not_in_quote'],
+    ['only the high end of a range', [direction({ rateText: '0.8 fl oz per gallon of water' })], 'rate_not_in_quote'],
+    ['only the high end of a dashed range', [direction({ rateText: '0.8 fl oz per gallon', quote: 'Synthetic label: mix 0.2-0.8 fl oz per gallon.' })], 'rate_not_in_quote'],
+    ['only the low end of a range', [direction({ rateText: '0.2', quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per gallon.' })], 'rate_not_in_quote'],
+    ['a rate without its denominator', [direction({ rateText: '0.2 to 0.8 fl oz' })], 'rate_not_in_quote'],
+    ['a rate stopping inside the denominator number', [direction({ rateText: '1 fl oz per 1', quote: 'Synthetic label: mix 1 fl oz per 10 gallons.' })], 'rate_not_in_quote'],
+    ['a rate stopping inside a unit', [direction({ rateText: '0.2 to 0.8 fl oz per gal' })], 'rate_not_in_quote'],
     ['a conditional line carrying an amount', [conditional({ rateText: '0.2 fl oz per gallon' })], 'unscoped_label_value'],
     ['a model-made number beside the text', [{ ...direction(), low: 0.2 }], 'invalid_label_shape'],
     ['a model-made unit code beside the text', [{ ...direction(), unit: 'fl_oz' }], 'invalid_label_shape'],
