@@ -866,6 +866,34 @@ describe('sweepUnenrichedProperties', () => {
   });
 });
 
+describe('sweepUnenrichedPropertiesAfterKill (deploy-kill retry keeps the nightly budget)', () => {
+  const { sweepUnenrichedPropertiesAfterKill, _private: { backfillBudgetLeft } } = require('../services/call-property-lookup');
+  const ledgerCount = (n) => db.mockImplementation((table) => {
+    if (table !== 'property_lookups') throw new Error(`unexpected table ${table}`);
+    return { whereRaw() { return this; }, count() { return this; }, first: async () => (n instanceof Error ? Promise.reject(n) : { n: String(n) }) };
+  });
+  afterEach(() => { delete process.env.PROPERTY_BACKFILL_BATCH; });
+
+  test('what is left = the batch minus the attempts already in the ledger, never below zero', async () => {
+    ledgerCount(19);
+    expect(await backfillBudgetLeft()).toBe(1);
+    process.env.PROPERTY_BACKFILL_BATCH = '5';
+    expect(await backfillBudgetLeft()).toBe(0);
+  });
+
+  test('a killed run that spent the whole batch buys nothing more', async () => {
+    ledgerCount(20);
+    expect(await sweepUnenrichedPropertiesAfterKill()).toEqual({ skipped: 'budget_spent' });
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable ledger throws: no budget figure, no spend', async () => {
+    ledgerCount(new Error('ledger down'));
+    await expect(sweepUnenrichedPropertiesAfterKill()).rejects.toThrow('ledger down');
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+});
+
 describe('fetchBackfillCandidates', () => {
   const { _private } = require('../services/call-property-lookup');
 

@@ -1317,13 +1317,16 @@ function initScheduledJobs() {
   // sweep — single source of truth; independent of the per-call
   // GATE_CALL_PROPERTY_LOOKUP lane). Real nightly LLM spend — the batch
   // cap is the budget. runExclusive: a deploy overlap must not double-buy
-  // the same batch. Re-run when a deploy kills it mid-run: the attempt
-  // cooldown shields rows the killed run already tried.
+  // the same batch. Re-run when a deploy kills it mid-run: the retry gets
+  // only the part of the batch the killed run left, and the attempt cooldown
+  // shields rows the killed run already tried.
   // =========================================================================
-  const runPropertyEnrichBackfill = async () => {
+  const runPropertyEnrichBackfill = async ({ afterKill = false } = {}) => {
     try {
-      const res = await runExclusive('property-enrich-backfill', () =>
-        require('./call-property-lookup').sweepUnenrichedProperties());
+      const res = await runExclusive('property-enrich-backfill', () => {
+        const lookup = require('./call-property-lookup');
+        return afterKill ? lookup.sweepUnenrichedPropertiesAfterKill() : lookup.sweepUnenrichedProperties();
+      });
       if (res && !res.skipped) {
         logger.info(`Property-enrich ${res.mode === 'call_time_recovery' ? 'call-time recovery' : 'backfill'}: ${res.enriched}/${res.processed} enriched (${res.cooledDown} cooled, ${res.parked} parked, ${res.failed} failed)`);
       }
@@ -1331,8 +1334,8 @@ function initScheduledJobs() {
       logger.error(`Property-enrich backfill failed: ${err.message}`);
     }
   };
-  cron.schedule('55 3 * * *', runPropertyEnrichBackfill, { timezone: 'America/New_York' });
-  registerDeployKillRetry('property-enrich-backfill', runPropertyEnrichBackfill);
+  cron.schedule('55 3 * * *', () => runPropertyEnrichBackfill(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('property-enrich-backfill', () => runPropertyEnrichBackfill({ afterKill: true }));
 
   // =========================================================================
   // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at

@@ -1172,12 +1172,38 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   };
 }
 
+// How much of the nightly batch is left, from the attempt ledger: every
+// lookup attempt in the window counts, the killed run's and any earlier
+// retry's alike. Call-time lookups stamp the same ledger, so this can only
+// under-count what is left — a retry never buys past the nightly cap.
+const RETRY_BUDGET_WINDOW_HOURS = 12;
+async function backfillBudgetLeft() {
+  const res = await db('property_lookups')
+    .whereRaw(`last_attempt_at > NOW() - INTERVAL '${RETRY_BUDGET_WINDOW_HOURS} hours'`)
+    .count({ n: '*' })
+    .first();
+  return Math.max(0, backfillBatchSize() - (Number(res?.n) || 0));
+}
+
+/**
+ * The sweep, re-run after a deploy killed the nightly run mid-batch
+ * (utils/deploy-kill-retry.js). The batch cap is the night's budget, so the
+ * retry gets only what the killed run left. A ledger read failure throws:
+ * no budget figure, no spend.
+ */
+async function sweepUnenrichedPropertiesAfterKill() {
+  const limit = await backfillBudgetLeft();
+  if (limit <= 0) return { skipped: 'budget_spent' };
+  return sweepUnenrichedProperties({ limit });
+}
+
 module.exports = {
   runCallPropertyLookup,
   enqueueCallPropertyLookup,
   sweepUnenrichedProperties,
+  sweepUnenrichedPropertiesAfterKill,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
-    reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    backfillBudgetLeft, reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };
