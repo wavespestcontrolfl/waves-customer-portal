@@ -78,17 +78,14 @@ and its own gate, which also needs `GATE_LABEL_PIPELINE`. `product-label-review.
 holds the one flow; `product-label-rates.js` holds what differs: the prompt, the
 direction schema, validation and the reader.
 
-A direction is one label line: use site, target pests, method, the amount as the
-label prints it (low, high, the unit in the label's own words, and the label's
-own denominator as an amount plus its unit in the label's own words, so
-"2 oz per 1,000 board feet" is stored exactly), stated yearly/interval limits, the
-source quote and the physical PDF page. The model may not compute, convert,
-average or infer an amount or a denominator. A percent dilution uses the label's
-own mixing table when one is printed; otherwise it stays a percent. A line whose
-amount depends on a table, a calculation or the applicator's volume is
-`conditional` and carries no number. `unit` and `perUnit` are classifiers for a
-later reader that does math; `other` means the printed text is the only record,
-never that the rate was dropped.
+A direction is one label line: use site, target pests, method, the source quote,
+the physical PDF page, and `rateText`: the amount and what it is per, copied
+verbatim out of the quote ("1/3 to 2/3 fl oz per 1,000 board feet"). The server
+rejects a `rateText` that does not appear in the quote, so the stored amount is
+always the label's own words: units, denominators and fractions stay as printed
+and there is no model-made number or unit code beside the text. Limits the label
+states for the line stay in the quote. A line whose amount depends on a table, a
+calculation or the applicator's volume is `conditional` and carries no amount.
 
 Approval is admin-only, needs the same identity and source-page confirmation,
 and rechecks the latest PPLS filename and checksum. It writes only
@@ -98,6 +95,8 @@ pricing. `label_verified_at` is not a label-provenance signal (planning rates
 carry it), which is why rate evidence has its own record.
 
 Nothing consumes approved directions for a dose in this change.
+The mix tool parses `rateText` in code (never the model) and refuses what it
+cannot parse.
 `reviewedRates(product, sourceStatus)` is the reader for the later mix tool: it
 returns the directions only for an approved review whose product identity
 (name, registration, formulation) is unchanged and whose EPA source is current,

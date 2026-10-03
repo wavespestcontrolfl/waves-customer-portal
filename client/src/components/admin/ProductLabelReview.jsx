@@ -53,23 +53,9 @@ const KINDS = {
   },
 };
 
-// The denominator in the label's own words: "per gallon", "per 1,000 board feet".
-function rateBasis(direction) {
-  if (direction.perUnit === "dilution") return "dilution";
-  if (direction.perAmount == null || !direction.perUnitText) return "";
-  return direction.perAmount === 1
-    ? `per ${direction.perUnitText}`
-    : `per ${Number(direction.perAmount).toLocaleString("en-US")} ${direction.perUnitText}`;
-}
-
+// The amount is the label's own text; nothing is reformatted here.
 function rateAmount(direction) {
-  if (direction.status !== "rate") return "CONDITIONAL";
-  const unit = direction.unit === "percent" ? "%" : ` ${direction.unitText || ""}`;
-  const range =
-    direction.high != null && direction.high !== direction.low
-      ? `${direction.low}–${direction.high}`
-      : `${direction.low}`;
-  return `${range}${unit} ${rateBasis(direction)}`.trim();
+  return direction.status === "rate" ? direction.rateText : "CONDITIONAL";
 }
 
 async function request(productId, path, action = "", body) {
@@ -159,10 +145,6 @@ function Evidence({ entry, kind }) {
                 {[
                   direction.targets,
                   direction.method,
-                  direction.maxApplicationsPerYear != null &&
-                    `Max ${direction.maxApplicationsPerYear} applications per year`,
-                  direction.minIntervalDays != null &&
-                    `At least ${direction.minIntervalDays} days apart`,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
