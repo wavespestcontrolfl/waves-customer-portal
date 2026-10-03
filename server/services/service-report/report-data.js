@@ -2812,12 +2812,15 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
-  // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the swipe strip
-  // for a labeled grid, so the same rule: a PDF cached before a flip is never
-  // served after it, and the stamp rides only while the gate is live.
-  if (lawnReportPhotoSetLive()) irrigationStamp += ':photoset=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
+  // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
+  // gallery for a labeled set in shot order, so the same rule: a PDF cached
+  // before a flip is never served after it. The stamp rides only while the gate
+  // is live AND this visit's assessment carries the shot-list marker, the one
+  // case where the payload (and so the document) changes; a legacy visit keeps
+  // its key. An unreadable marker means no stamp.
+  if (lawnReportPhotoSetLive() && carriesShotListMarker(assessment?.photos)) irrigationStamp += ':photoset=1';
   const lawnHistory = propertyHistoryEnabled
     ? await require('../lawn-assessment-history').historyForReport(service, { assessment }, knex)
     : null;

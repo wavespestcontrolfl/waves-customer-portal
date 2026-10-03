@@ -258,17 +258,36 @@ describe('GATE_LAWN_REPORT_PHOTO_SET on the lawn report payload', () => {
     });
   });
 
-  test('the PDF cache key moves only while the gate is live, for any visit', async () => {
+  describe('the PDF cache key', () => {
     const sig = async () => (await resolveCanonicalLawnRender(
       { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' },
       makeKnex(fixtures(cur)),
     )).signature;
-    const off = await sig();
-    expect(await sig()).toBe(off);
-    process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
-    expect(await sig()).not.toBe(off);
-    delete process.env.GATE_LAWN_REPORT_PHOTO_SET;
-    expect(await sig()).toBe(off);
+
+    test('gate on + marked visit: stamped, and back to the old key when the gate goes off', async () => {
+      const off = await sig();
+      expect(await sig()).toBe(off);
+      process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+      expect(await sig()).not.toBe(off);
+      delete process.env.GATE_LAWN_REPORT_PHOTO_SET;
+      expect(await sig()).toBe(off);
+    });
+
+    test('gate on + unmarked visit: identical to the gate off key (no re-key of legacy PDFs)', async () => {
+      cur = curRow(LEGACY_META);
+      const off = await sig();
+      process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+      expect(await sig()).toBe(off);
+    });
+
+    test('gate on + stored photo metadata that cannot be read: no stamp', async () => {
+      cur = curRow('not json');
+      const off = await sig();
+      process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+      expect(await sig()).toBe(off);
+      cur = curRow(null);
+      expect(await sig()).toBe(off);
+    });
   });
 });
 
