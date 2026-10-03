@@ -282,7 +282,8 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
 
 // Codex #5424 round 13: MESSAGING waits on any active collection_hold (dispute or wrong-number /
 // wrong-party fallback); CHARGING stops on a dispute only. The two predicates must not drift: every
-// module that still reads the dispute-only readers is a money / charge / lapse lane, listed here on
+// module that still reads the dispute-only readers is a money / charge / lapse lane (or the one
+// read-only Intelligence Bar billing reader, which reports the hold and never sends), listed here on
 // purpose. A messaging lane that reads them would let a restored fallback hold through.
 describe('messaging hold predicate vs charging hold predicate (round 13)', () => {
   test('only the charge / lapse / credit lanes read the dispute-only readers; no messaging module does', () => {
@@ -291,6 +292,7 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
       'services/annual-prepay-renewals.js', // card-expiry exemption: a charge lane
       'services/completion-balance-sweep.js', // off-session charge sweep
       'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
+      'services/intelligence-bar/billing-reader-tools.js', // read-only owner reporting: names an active dispute hold; sends and charges nothing
       'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
       'services/termite-annual-signature-charge.js', // signature charge
     ]);

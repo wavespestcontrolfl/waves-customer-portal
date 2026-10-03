@@ -140,3 +140,16 @@ it('locks the slot pickers while the analysis request is in flight', async () =>
   // look saved but never persist.
   expect(screen.getByLabelText('Slot for photo 1').disabled).toBe(true);
 });
+
+it('asks for a second photo at one photo, never blocks Analyze, and drops the hint at two (owner 2026-10-02)', async () => {
+  mount();
+  const fileInput = await screen.findByLabelText('Add turf photos');
+  fireEvent.change(fileInput, { target: { files: [new File(['photo1'], 'a.jpg', { type: 'image/jpeg' })] } });
+  await screen.findByLabelText('Slot for photo 1');
+  expect(screen.getByTestId('lawn-photo-nudge').textContent).toMatch(/2 or 3 photos work best/);
+  // A hint, not a requirement: one photo still analyzes.
+  expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+  fireEvent.change(fileInput, { target: { files: [new File(['photo2'], 'b.jpg', { type: 'image/jpeg' })] } });
+  await screen.findByLabelText('Slot for photo 2');
+  expect(screen.queryByTestId('lawn-photo-nudge')).toBeNull();
+});
