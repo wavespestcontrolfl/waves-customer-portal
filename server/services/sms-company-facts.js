@@ -28,14 +28,18 @@ const COMPANY_FACTS = Object.freeze([
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
   `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
   // Service knowledge (owner-approved 2026-10-03; each line restates an earlier ruling).
-  'A cockroach treatment is two visits for one price. The second visit is included.',
+  // Scoped to what holds for EVERY customer the line could reach (Codex #5723 r1): the
+  // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the
+  // recurring card rail only (invoice / commercial / one-time differ); 6x lawn plans
+  // still exist for older customers; only qualifying services count toward a tier.
+  'A standard cockroach treatment is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
   'WaveGuard members get one free termite inspection a year. A WDO inspection for a real-estate sale is a separate paid service.',
   // "guarantee" is a banned customer-copy word (hasBannedCustomerCopy), so the no-guarantee ruling is worded without it.
   'Termite work: never promise results or how long a treatment lasts. A termite bond or pre-slab warranty is a separate purchase.',
-  'New customers save a card when they book and are charged after the first visit. There is no deposit.',
-  'The lawn program runs 9 or 12 applications a year.',
+  'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
+  'New lawn plans run 9 or 12 applications a year.',
   'Arrival windows are two hours and start on the hour.',
-  'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many recurring services a customer has.',
+  'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
 ]);
 
 // The static section: fixed owner-approved policy, identical on every draft
