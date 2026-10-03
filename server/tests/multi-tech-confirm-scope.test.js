@@ -180,7 +180,7 @@ describe('wiring', () => {
     expect(src).toContain('technician_id: bookingTechnicianId,');
     expect(src).not.toContain('technician_id: defaultTechnicianId,');
     // Reused unassigned row: the pick excludes the row itself.
-    expect(src).toContain('excludeServiceIds: [existing.id],');
+    expect(src).toMatch(/excludeServiceIds: \[existing\.id\],\s+excludeCustomerId: null,/);
     // …and reads the row's OWN day and window, not the time this call stated.
     expect(src).toContain('date: callBookingDateOnly(existing.scheduled_date),');
     expect(src).toContain('followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)');

@@ -81,6 +81,13 @@ describe('pickTechnicianForVisit', () => {
     }
   });
 
+  test('assigning an existing row: only that row is excluded, the customer\'s other visits still count', async () => {
+    await pickTechnicianForVisit({ conn: makeConn(), ...base, excludeServiceIds: ['row-1'], excludeCustomerId: null });
+    for (const [arg] of occupancy.findConflictingVisits.mock.calls) {
+      expect(arg).toMatchObject({ excludeCustomerId: null, excludeServiceIds: ['row-1'] });
+    }
+  });
+
   test('a tie goes to the customer\'s last technician, then the lighter day', async () => {
     mockState.slots = [slot(A, 10, 2), slot(B, 10 + TIE_MINUTES, 6)];
     mockState.last = 'tech-b';

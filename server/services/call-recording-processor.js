@@ -17980,6 +17980,7 @@ const CallRecordingProcessor = {
                         serviceType: existing.service_type || serviceType,
                         customerId,
                         excludeServiceIds: [existing.id],
+                        excludeCustomerId: null,
                       }));
                       if (reusePick.active) reuseCandidateTechId = reusePick.technician?.id || null;
                     } catch (pickErr) {

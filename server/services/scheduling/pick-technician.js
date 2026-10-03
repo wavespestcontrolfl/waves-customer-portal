@@ -107,6 +107,12 @@ function rankCandidates(candidates, lastTechnicianId) {
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
   lat = null, lng = null, serviceType = null, customerId = null, excludeServiceIds = [],
+  // Whose rows the availability probe skips. Default: the customer's own (a
+  // fresh booking, where the caller's same-day guard owns same-customer
+  // overlaps — parity with its save probe). A caller assigning an EXISTING
+  // row passes null and excludes only that row, so the customer's other
+  // visit on a technician's route still counts.
+  excludeCustomerId = customerId,
 } = {}) {
   if (!pickTechnicianActive()) return { active: false, technician: null, reason: 'gate_off' };
   if (!date || !windowStart || !windowEnd) return { active: false, technician: null, reason: 'no_window' };
@@ -128,7 +134,7 @@ async function pickTechnicianForVisit({
   for (const tech of techs) {
     const clash = await findConflictingVisits({
       db: conn, date, windowStart, windowEnd, technicianId: tech.id,
-      excludeCustomerId: customerId, excludeServiceIds,
+      excludeCustomerId, excludeServiceIds,
     });
     if (!clash.length) free.push(tech);
   }
