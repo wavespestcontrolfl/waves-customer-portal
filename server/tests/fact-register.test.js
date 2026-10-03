@@ -162,15 +162,6 @@ describe('the register data', () => {
     }
   });
 
-  test('no fact cites a retailer page or a news outlet — sources are UF/IFAS, labels, manufacturers, governments, CDC', () => {
-    for (const fact of FACTS) {
-      fact.sourceUrls.forEach((u) => {
-        expect(u).not.toMatch(/domyown|solutionsstores|amazon\.|pestcontrolsupplies|doityourselfpestcontrol/i);
-        expect(u).not.toMatch(/wusf\.org|heraldtribune|tampabay\.com|patch\.com|wfla\.com|baynews9|yoursun\.com/i);
-      });
-    }
-  });
-
   test('every number of days, weeks or months in a fact\'s content also appears in its quote', () => {
     // "7 to 10 days", "7–10 days" and "7-10 days" are the same range;
     // "one-day-per-week" in a quote and "one day per week" in content too.

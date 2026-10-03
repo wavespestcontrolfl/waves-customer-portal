@@ -111,8 +111,10 @@
  *   GATE_PORTAL_CHAT_VISIT_FACTS=true (portal Waves Assistant past-visit answers: a question about what was done at a visit, when the last visit was, or where the report is reads the customer's last three completed visits from the Completed tab's own read; the model answers from the structured facts — date, service, technician first name, kinds of product applied — and the customer sees a server-rendered card with each visit's reviewed summary and report link; the owner-approved company facts join the portal prompt. The summary text, prices, product brands and addresses never reach the model. Off unless exactly 'true', read at call time via portalChatVisitFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of GATE_PORTAL_CHAT_FACTS. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_CHAT_RESERVICE=true (portal Waves Assistant free re-service offer, PEST ONLY (owner ruling 2026-10-02; lawn problems hand off with topic pest_problem, a lawn check follows in its own PR): a customer whose message this turn is an active pest report (the SMS flow's isActivePestReport, no separately priced specialty) gets a server-built button to the /reservice booking page when that page's own verdict says the pest lane is bookable and no address hold applies, a button to move an already booked pest re-service when the reschedule page would move it, and a hand-off otherwise; never under a secondary saved-property selection (the page books at the primary address). The model never decides a visit is free. Also needs GATE_RESERVICE_SELF_SERVE and GATE_RESERVICE_STREAMLINE. Off unless exactly 'true', read at call time via portalChatReserviceLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of the other portal chat gates. Off = byte-identical apart from portal chat's newest-first history read. Sends nothing to a customer.)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
+ *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
+ *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
@@ -1778,6 +1780,8 @@ const gates = {
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
+  // Correction loop for calls (logGateStatus only; read live via callIncidentsLive()).
+  callIncidents: gateEnvValue('GATE_CALL_INCIDENTS') && process.env.GATE_CALL_SELF_AUDIT === 'true',
   // Fail-open booking: a CONFIRMED appointment books despite recoverable
   // contact-field flags (ANI satisfies caller_phone_missing; an existing
   // customer's on-file address clears address flags; garbled email is
@@ -4217,6 +4221,14 @@ function typedDecisionsLive() {
   return gateEnvValue('GATE_TYPED_DECISIONS');
 }
 
+// GATE_CALL_INCIDENTS read at CALL time — ships DARK, off unless set, and
+// honoured only while GATE_CALL_SELF_AUDIT is on (its findings are the
+// evidence). Off, the nightly adjudicator and the Sunday call proposer return
+// before any read or provider call; unset is the kill, no redeploy.
+function callIncidentsLive() {
+  return gateEnvValue('GATE_CALL_INCIDENTS') && process.env.GATE_CALL_SELF_AUDIT === 'true';
+}
+
 // GATE_TYPED_DECISIONS_CLEF read at CALL time — ships DARK, off unless set,
 // and honoured only while GATE_TYPED_DECISIONS is also live (the second
 // provider answers the same packages into the same review lane). Off,
@@ -5080,6 +5092,15 @@ function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
 
+// GATE_PERMIT_DETAIL_SYNC read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the Manatee permit detail collector
+// (services/property-lookup/manatee-permit-detail.js): off, the weekly cron
+// step returns {skipped:'gated'} before any network or DB read. Independent
+// of GATE_PERMIT_SYNC (the report sync). Collection only.
+function permitDetailSyncLive() {
+  return process.env.GATE_PERMIT_DETAIL_SYNC === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5177,6 +5198,7 @@ module.exports.portalChatReserviceLive = portalChatReserviceLive;
 // GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
+module.exports.callIncidentsLive = callIncidentsLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
@@ -5203,3 +5225,5 @@ module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
+// GATE_PERMIT_DETAIL_SYNC reader, on its own line so gate PRs never conflict.
+module.exports.permitDetailSyncLive = permitDetailSyncLive;

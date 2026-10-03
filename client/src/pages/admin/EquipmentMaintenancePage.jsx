@@ -157,7 +157,10 @@ function FleetLoadError({
 }
 export default function EquipmentMaintenancePage({
   embedded = false,
-  initialTab = "fleet"
+  initialTab = "fleet",
+  // A technician reads the fleet; resolving alerts, recording maintenance and
+  // logging mileage are owner-only writes (staff allow-list, 2026-10-02).
+  readOnly = false
 }) {
   const actionRef = useRef(false);
   const [actionError, setActionError] = useState("");
@@ -297,6 +300,7 @@ export default function EquipmentMaintenancePage({
       alerts,
       dismissAlert,
       resolvingAlert: pendingAction,
+      readOnly,
       filtered,
       categories,
       filterCat,
@@ -336,6 +340,7 @@ function FleetTab({
   alerts,
   dismissAlert,
   resolvingAlert,
+  readOnly,
   filtered,
   categories,
   filterCat,
@@ -390,9 +395,9 @@ function FleetTab({
         }}>
                 {a.title}
               </span>{" "}
-              <Button onClick={() => dismissAlert(a.id)} disabled={!!resolvingAlert} loading={resolvingAlert === a.id} type="button" variant="secondary" className="min-w-11">
+              {!readOnly && <Button onClick={() => dismissAlert(a.id)} disabled={!!resolvingAlert} loading={resolvingAlert === a.id} type="button" variant="secondary" className="min-w-11">
                 Dismiss
-              </Button>{" "}
+              </Button>}{" "}
             </div>)}
           {alerts.length > 5 && <div style={{
         fontSize: 14,
@@ -465,7 +470,7 @@ function FleetTab({
       gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(340, 1fr))",
       gap: 12
     }}>
-        {filtered.map(eq => <EquipmentCard key={eq.id} eq={eq} isExpanded={expandedId === eq.id} onToggle={() => setExpandedId(expandedId === eq.id ? null : eq.id)} showToast={showToast} loadFleet={loadFleet} />)}
+        {filtered.map(eq => <EquipmentCard key={eq.id} eq={eq} isExpanded={expandedId === eq.id} onToggle={() => setExpandedId(expandedId === eq.id ? null : eq.id)} showToast={showToast} loadFleet={loadFleet} readOnly={readOnly} />)}
       </div>
       {filtered.length === 0 && <div style={{
       color: "#71717A",
@@ -488,7 +493,8 @@ function EquipmentCard({
   isExpanded,
   onToggle,
   showToast,
-  loadFleet
+  loadFleet,
+  readOnly = false
 }) {
   const [formBusy, setFormBusy] = useState(false);
   const isMobile = useIsMobile(768);
@@ -724,7 +730,7 @@ function EquipmentCard({
             </div>{" "}
           </div>
           {/* Action Buttons */}
-          <div style={{
+          {!readOnly && <div style={{
         display: "flex",
         gap: 8,
         marginBottom: 16,
@@ -737,7 +743,7 @@ function EquipmentCard({
             {eq.category === "vehicle" && <Button onClick={() => toggleForm("mileage")} type="button" variant="secondary" className="min-w-11" disabled={formBusy}>
                 {mileageForm ? "Cancel" : "Log Mileage"}
               </Button>}
-          </div>
+          </div>}
           {/* Record Maintenance Form */}
           {recordForm && <MaintenanceForm equipmentId={eq.id} schedules={detail.schedules || []} onDone={() => {
         setOpenForm(null);

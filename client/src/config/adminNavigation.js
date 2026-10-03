@@ -509,7 +509,9 @@ const TECH_ALLOWED_PATH_PREFIXES = [
   "/admin/lawn-assessment",
   "/admin/lawn-protocol",
   "/admin/lawn-diagnostic",
-  "/admin/turf-height",
+  // /admin/turf-height (OCR review queue) is owner-only: its review read and
+  // resolve write are both admin-only server-side, so a technician-reachable
+  // page would only ever render a 403.
   "/admin/protocols",
   "/admin/equipment",
   "/admin/equipment-calibration",

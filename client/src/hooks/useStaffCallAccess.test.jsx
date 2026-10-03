@@ -6,6 +6,7 @@ import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import { useCanAccessCalls } from "./useStaffCallAccess";
 import AuthenticatedCallAudio from "../components/admin/AuthenticatedCallAudio";
+import CallBridgeLink from "../components/admin/CallBridgeLink";
 
 afterEach(cleanup);
 
@@ -49,5 +50,23 @@ describe("call audio is not shown to a technician", () => {
     cleanup();
     const admin = renderInShell({ role: "admin" }, <AuthenticatedCallAudio recordingId="RE123" />);
     expect(admin.container.querySelector("[data-audio-state]")).not.toBeNull();
+  });
+});
+
+describe("the call bridge is not offered to a technician", () => {
+  it("shows the number as plain text for a technician, and the call button for an admin", () => {
+    renderInShell({ role: "technician" }, <CallBridgeLink phone="+15555550123">(555) 555-0123</CallBridgeLink>);
+    expect(screen.getByText("(555) 555-0123")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    cleanup();
+    // A styled "Call" pill becomes the plain number, never a dead control
+    // carrying the button classes (codex #5683 r1).
+    renderInShell({ role: "technician" }, <CallBridgeLink phone="+15555550123" className="pill-button">Call</CallBridgeLink>);
+    expect(screen.getByText("+15555550123")).toBeInTheDocument();
+    expect(screen.queryByText("Call")).not.toBeInTheDocument();
+    expect(document.querySelector(".pill-button")).toBeNull();
+    cleanup();
+    renderInShell({ role: "admin" }, <CallBridgeLink phone="+15555550123">(555) 555-0123</CallBridgeLink>);
+    expect(screen.getByRole("button", { name: /call/i })).toBeInTheDocument();
   });
 });
