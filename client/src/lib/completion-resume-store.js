@@ -221,6 +221,21 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
   });
 }
 
+// Discover this operator's attempts even after a visit leaves today's route.
+// Enumerate keys first so another operator's photo-bearing bodies are not read.
+export async function listFastCompletionAttempts(operatorId) {
+  if (!operatorId) return { available: false, attempts: [] };
+  const keys = await withStore(FAST_COMPLETION_DB_NAME, "readonly", null, (store) => store.getAllKeys());
+  if (!Array.isArray(keys)) return { available: false, attempts: [] };
+  const prefix = `${FAST_COMPLETION_PREFIX}${String(operatorId)}:`;
+  const results = await Promise.all(keys.filter((key) => String(key).startsWith(prefix))
+    .map((key) => getFastCompletionAttempt(String(key).slice(prefix.length), operatorId)));
+  return {
+    available: results.every((result) => result.available),
+    attempts: results.map((result) => result.attempt).filter(Boolean),
+  };
+}
+
 export function deleteFastCompletionAttempt(serviceId, operatorId, expectedIdempotencyKey) {
   const key = fastCompletionAttemptKey(serviceId, operatorId);
   const expected = String(expectedIdempotencyKey || "");
