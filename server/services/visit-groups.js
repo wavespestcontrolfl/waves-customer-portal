@@ -2426,6 +2426,22 @@ function expectMatchesRow(row, expect) {
   return true;
 }
 
+// expectVisitMembership ({ id, memberIds, liveCount }): the stop a caller's
+// operator was shown. A live member they never saw, a different live count,
+// or another visit changes what the move would do, so it is refused. Checked
+// at every point before the first member write: the locked plan, the
+// reminder-hold claim, and inside the primary's own move transaction.
+function assertShownMembership(shown, visitId, liveMemberIds) {
+  if (!shown) return;
+  const seen = new Set(shown.memberIds.map(String));
+  const same = String(visitId) === String(shown.id)
+    && liveMemberIds.every((id) => seen.has(String(id)))
+    && (shown.liveCount == null || liveMemberIds.length === shown.liveCount);
+  if (!same) {
+    throw Object.assign(new Error('This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was moved.'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
+  }
+}
+
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
   if (!rebooker || !service || !service.visit_id) return null;
   const logger = require('./logger');
@@ -2500,16 +2516,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // The caller named the stop its operator was shown (Edit appointment's
         // "move all of them together"): a member they never saw, or one that
         // has since left or closed, changes what this move would do.
-        if (options.expectVisitMembership) {
-          const shown = options.expectVisitMembership;
-          const seen = new Set(shown.memberIds.map(String));
-          const same = String(visit.id) === String(shown.id)
-            && members.every((m) => seen.has(String(m.id)))
-            && (shown.liveCount == null || members.length === shown.liveCount);
-          if (!same) {
-            throw Object.assign(new Error('This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was moved.'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
-          }
-        }
+        assertShownMembership(options.expectVisitMembership, visit.id, members.map((m) => m.id));
         // One live member is not a grouped stop: the rebooker's ordinary
         // single-row path moves it (its seam detaches an unfrozen visit).
         if (members.length < 2) return null;
@@ -2852,6 +2859,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // fenced by the plan's own per-member checks.
       await lockStopForRow(t, serviceId);
       const membershipNow = (await openMembers(t, plan.visitId)).map((m) => String(m.id));
+      assertShownMembership(options.expectVisitMembership, plan.visitId, membershipNow);
       const holdMemberIds = [...new Set([...plan.memberIds.map(String), ...membershipNow])];
       reminderHoldMemberIds = holdMemberIds;
       // EVERY represented member's row is held — including members already
@@ -3008,6 +3016,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // dispatch broadcast). The rebooker's occupancy probe therefore runs on
     // the row's CURRENT technician; staff surfaces are advisory anyway.
     const { technicianId: _primaryTech, ...primaryBase } = options;
+    // The shown membership is re-read inside the primary's own move
+    // transaction, under the stop lock (the position the rebooker's solo
+    // recheck takes it): the primary moves first, so a join or a leave up to
+    // its commit refuses the move with nothing written.
+    if (options.expectVisitMembership) {
+      const callerBeforeMove = options.beforeMove;
+      primaryBase.beforeMove = async (trx) => {
+        if (typeof callerBeforeMove === 'function') await callerBeforeMove(trx);
+        try {
+          await lockStopForRow(trx, serviceId);
+        } catch (lockErr) {
+          // The stop moved under us: the same stale-stop refusal.
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') assertShownMembership(options.expectVisitMembership, null, []);
+          throw lockErr;
+        }
+        assertShownMembership(options.expectVisitMembership, plan.visitId, (await openMembers(trx, plan.visitId)).map((m) => m.id));
+      };
+    }
     // A unit move that ALSO changes technician re-points every member
     // through assignDispatchJob right after — that writer sends the
     // moved-off / new-visit pair, so the member's own rebooker call must not

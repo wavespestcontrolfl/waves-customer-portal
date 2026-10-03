@@ -3655,6 +3655,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringWeekday
               : (keepStoredOrdinal ? storedWeekday : undefined),
+          // Keep the ordinal exactly as posted (the stored one, or none for
+          // an older plan that never had one) instead of deriving it from
+          // the moved date.
+          preserveRecurrenceAnchor: keepStoredOrdinal || undefined,
           recurringIntervalDays:
             recurringControlsActive && recurringFreq === "custom"
               ? recurringIntervalDays

@@ -510,6 +510,40 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
   });
 
+  test('expectVisitMembership is re-checked inside the primary\'s own move transaction: a service that joined after the plan refuses the move there', async () => {
+    const shown = { id: 'v1', memberIds: ['a', 'b'], liveCount: 2 };
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rebooker = fakeRebooker();
+    const callerBeforeMove = jest.fn();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectVisitMembership: shown, beforeMove: callerBeforeMove } });
+    const primaryCall = rebooker.reschedule.mock.calls.find((c) => c[0] === 'a');
+    const siblingCall = rebooker.reschedule.mock.calls.find((c) => c[0] === 'b');
+    expect(typeof primaryCall[5].beforeMove).toBe('function');
+    expect(siblingCall[5].beforeMove).toBe(callerBeforeMove);
+    const trxWith = (live) => {
+      const trx = jest.fn(() => {
+        const chain = {};
+        for (const m of ['where', 'whereNotIn', 'whereNull', 'orderBy', 'forUpdate']) chain[m] = () => chain;
+        chain.first = async () => ({ id: 'a', visit_id: 'v1', stop_base_key: 'p1:2026-08-30', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30' });
+        chain.select = async () => live;
+        chain.then = (res, rej) => Promise.resolve(live).then(res, rej);
+        return chain;
+      });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      return trx;
+    };
+    await expect(primaryCall[5].beforeMove(trxWith([member('a'), member('b'), member('c')]))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+    await expect(primaryCall[5].beforeMove(trxWith([member('a')]))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+    callerBeforeMove.mockClear();
+    await primaryCall[5].beforeMove(trxWith([member('a'), member('b')]));
+    expect(callerBeforeMove).toHaveBeenCalledTimes(1);
+    // No expectVisitMembership: the primary's options are untouched.
+    db.__script = script({ members: [member('a'), member('b')] });
+    const plain = fakeRebooker();
+    await moveVisitAsUnit({ rebooker: plain, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(plain.reschedule.mock.calls.find((c) => c[0] === 'a')[5].beforeMove).toBeUndefined();
+  });
+
   test('a reassignment detaches a late joiner still on another technician instead of keeping a split-tech visit', async () => {
     db.__script = script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' },

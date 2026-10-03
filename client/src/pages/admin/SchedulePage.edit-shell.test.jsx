@@ -454,7 +454,28 @@ it('a month-based recurring combo moved together sends its stored ordinal back, 
   fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-10' } });
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(JSON.parse(writes()[1][1].body)).toMatchObject({ recurringNth: 1, recurringWeekday: 2 });
+  expect(JSON.parse(writes()[1][1].body)).toMatchObject({ recurringNth: 1, recurringWeekday: 2, preserveRecurrenceAnchor: true });
+});
+
+it('an older month-based plan with no stored ordinal sends none and asks the server not to derive one from the moved date', async () => {
+  fetch.mockImplementation(async (url) => okJson(url));
+  render(<EditServiceModal service={{ ...combo, isRecurring: true, recurringPattern: 'quarterly' }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-10' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  const put = JSON.parse(writes()[1][1].body);
+  expect(put.preserveRecurrenceAnchor).toBe(true);
+  expect(put.recurringNth).toBeUndefined();
+  expect(put.recurringWeekday).toBeUndefined();
+});
+
+it('an ordinary edit of a recurring combo (no move) does not ask to preserve the ordinal', async () => {
+  fetch.mockImplementation(async (url) => okJson(url));
+  render(<EditServiceModal service={{ ...combo, isRecurring: true, recurringPattern: 'quarterly' }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(JSON.parse(writes()[0][1].body).preserveRecurrenceAnchor).toBeUndefined();
 });
 
 it('a stop of three services says all three moved', async () => {

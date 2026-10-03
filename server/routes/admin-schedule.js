@@ -6982,6 +6982,9 @@ router.get('/week', async (req, res, next) => {
       if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
         require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
       }
+      // Same `visit` summary as the day feed: the 5-Day and Week grids open
+      // the same Edit appointment form, which needs it to move a combo stop.
+      require('../services/visit-groups').visitSummariesForRows(servicePayloads);
 
       days.push({
         date: dateStr,
@@ -12811,6 +12814,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // topped up) by an unrelated save (Codex #3337 r5 P1).
       recurringOngoingBaseline,
       recurringNth, recurringWeekday, recurringIntervalDays,
+      // Edit appointment, after its whole-stop move re-dated this visit
+      // only: the posted ordinal (the stored one, or none) is kept as it is.
+      preserveRecurrenceAnchor,
       skipWeekends, weekendShift,
       estimatedPrice,
       primaryLinePrice,
@@ -13140,7 +13146,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // later maintenance would re-derive a drifted weekday/ordinal — codex r10
     // P2). monthly_nth_weekday stays raw passthrough: there the operator
     // supplies nth/weekday explicitly.
-    const editMonthAnchorOpts = (isRecurring
+    // preserveRecurrenceAnchor: the row's date was just moved on its own
+    // (this visit only), so deriving the ordinal from it would re-anchor the
+    // plan. A never-populated ordinal stays empty and later visits keep
+    // deriving from their own dates, as before the move.
+    const editMonthAnchorOpts = (isRecurring && preserveRecurrenceAnchor !== true
       && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
       ? recurrenceOrdinalOptions(editAnchorDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
