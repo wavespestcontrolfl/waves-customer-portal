@@ -157,7 +157,16 @@ function addressTokens(value) {
   return tokens;
 }
 
-const isStateOrZip = (t) => t === 'fl' || /^\d{5}$/.test(t) || /^\d{4}$/.test(t);
+// The one ending that may differ: a state, a ZIP, or both, in that order,
+// with a +4 only straight after a 5-digit ZIP ("#1234" alone is a unit).
+function isStateZipTail(tail, before) {
+  let i = 0;
+  if (tail[i] === 'fl') i += 1;
+  let afterZip = i === 0 && /^\d{5}$/.test(before || '');
+  if (/^\d{5}$/.test(tail[i] || '')) { i += 1; afterZip = true; }
+  if (afterZip && /^\d{4}$/.test(tail[i] || '')) i += 1;
+  return i > 0 && i === tail.length;
+}
 
 function sameProperty(a, b) {
   const x = addressTokens(a);
@@ -167,20 +176,35 @@ function sameProperty(a, b) {
   if (short.length === long.length) return true;
   // A house number, a street word and one more word at least, before a
   // missing state or ZIP is read as formatting.
-  return short.length >= 3 && long.slice(short.length).every(isStateOrZip);
+  return short.length >= 3 && isStateZipTail(long.slice(short.length), short[short.length - 1]);
 }
 
-// The WaveGuard setup fee is not an edit either. The builder's save folds
-// it into the stored one-time total (result.oneTime.membershipFee); the
-// engine draft's stored one-time total does not carry it (60-day read
-// 2026-10-03: 34 of 36 one-time changes were exactly this fee). So a
-// builder-saved row is compared net of that fee against an engine baseline;
-// the amount taken out is recorded as setupFeeExcluded.
+// The WaveGuard setup fee stored two ways is not an edit. The builder's
+// save folds it into the stored one-time total (result.oneTime.membershipFee,
+// which the mapper takes from the pest line's initialFee); the engine
+// draft's stored one-time total leaves the same fee out (60-day read
+// 2026-10-03: 34 of 36 one-time changes were exactly this fee). So when the
+// baseline is an engine draft whose own pest line already owed the fee, a
+// builder-saved row is compared net of it (setupFeeExcluded records the
+// amount). A fee the baseline did NOT owe (a bundle edited down to a
+// single-service plan) is a real price change and stays in the diff.
+const isBuilderShape = (data) => Array.isArray(data?.engineRequest?.selectedServices);
+const positive = (value) => {
+  const num = parseFloat(value);
+  return Number.isFinite(num) && num > 0 ? money(num) : 0;
+};
+
 function builderSetupFee(data) {
-  if (!Array.isArray(data?.engineRequest?.selectedServices)) return 0;
+  if (!isBuilderShape(data)) return 0;
   const root = data.result && typeof data.result === 'object' ? data.result : data;
-  const fee = parseFloat(root?.oneTime?.membershipFee);
-  return Number.isFinite(fee) && fee > 0 ? money(fee) : 0;
+  return positive(root?.oneTime?.membershipFee);
+}
+
+function engineOwedSetupFee(data) {
+  if (isBuilderShape(data)) return 0;
+  const lines = data?.engineResult?.lineItems;
+  if (!Array.isArray(lines)) return 0;
+  return positive(lines.find((line) => line?.service === 'pest_control')?.initialFee);
 }
 
 /**
@@ -204,8 +228,8 @@ function computeEditSummary({ baseline, sentRow }) {
     const from = money(fields[key]);
     let to = money(sentRow[key]);
     if (key === 'onetime_total') {
-      // Net of the setup fee only when the baseline does not hold it too.
-      const fee = builderSetupFee(sentData) - builderSetupFee(baselineData);
+      // Net of the fee only up to what the engine baseline already owed.
+      const fee = Math.min(builderSetupFee(sentData), engineOwedSetupFee(baselineData));
       if (fee > 0 && to >= fee) {
         to = money(to - fee);
         summary.setupFeeExcluded = fee;
@@ -441,6 +465,7 @@ module.exports = {
     serviceKeysFrom,
     sameProperty,
     builderSetupFee,
+    engineOwedSetupFee,
     money,
     norm,
     // Test-only: the cutover is cached for the process lifetime.
