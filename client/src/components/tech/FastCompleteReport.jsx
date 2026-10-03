@@ -179,7 +179,7 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
 // tells the sheet what holds the report meanwhile: an open description, a
 // change being saved, or a removal waiting for its answer.
 const NOTE_PHOTO_PALETTE = {
-  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#ef4444', onDanger: '#fff',
+  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#a32d2d', onDanger: '#fff',
 };
 const NOTE_PHOTO_ERRORS = {
   photo_caption_banned_copy: 'That description has wording we can’t put on a customer’s report. Describe the photo in other words.',
