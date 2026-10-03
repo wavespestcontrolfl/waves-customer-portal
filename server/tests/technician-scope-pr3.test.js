@@ -80,3 +80,12 @@ describe('sender-line lookup is scoped for a technician (codex #5683 r1)', () =>
     expect(block).toMatch(/ownLast10 !== fullPhoneLast10\(phone\)\) return res\.json\(\{ fromNumber: null \}\)/);
   });
 });
+
+describe('technician restock requests stay deduplicated (codex #5683 r3)', () => {
+  test('allowDuplicate is honoured for an admin only', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/admin-inventory.js'), 'utf8');
+    const handler = src.slice(src.indexOf("router.post('/waveguard-forecast/:productId/restock-request'"));
+    expect(handler.slice(0, 1200)).toMatch(/allowDuplicate: req\.techRole === 'admin' \? body\.allowDuplicate : false,/);
+    expect(handler.slice(0, 1200)).not.toMatch(/allowDuplicate: body\.allowDuplicate,/);
+  });
+});
