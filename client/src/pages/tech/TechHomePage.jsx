@@ -290,7 +290,8 @@ async function techRequest(path, options = {}) {
   const res = await fetch(`${API}/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // A FormData body (a recorded clip) sets its own multipart boundary.
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `Bearer ${token}`,
       ...(options.headers || {}),
     },
@@ -981,6 +982,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+                onGateChanged={fetchSchedule}
               /></div>}
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
@@ -1277,6 +1279,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onToggle={() => toggleStop(stop)}
                 onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
+                onGateChanged={fetchSchedule}
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedVisit(s)
@@ -1857,7 +1860,7 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine, onGateChanged }) {
   // The busy guard lives in the list's toggleStop (any header, not only
   // this row's, must leave a panel with a text or bridge in flight mounted).
   const toggle = () => onToggle();
@@ -1961,6 +1964,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           techLine={techLine}
           onBusyChange={onBusyChange}
           request={techRequest}
+          onGateChanged={onGateChanged}
         />
       )}
     </div>

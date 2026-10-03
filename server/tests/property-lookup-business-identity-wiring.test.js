@@ -219,16 +219,20 @@ describe('gate on', () => {
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
   });
 
-  test('staff answer "building" at an address with a verified size: the size is flagged HIGH for reconfirmation, since it may be one space\'s', async () => {
+  test('staff answer "building" at an address with a verified size: the size is withheld (it may be one space\'s) and flagged HIGH', async () => {
     lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), squareFootage: 1350, _verifiedFields: ['squareFootage'] }));
     const p = (await run({ occupancyAnswer: 'building' })).enriched;
     expect(p.serviceScopeDecision).toBe('entire_commercial_building');
+    expect(p.homeSqFt).toBe(0);
+    expect(p.footprint).toBe(0);
     expect(p.fieldVerifyFlags).toContainEqual(expect.objectContaining({
-      field: 'squareFootage', priority: 'HIGH', reason: expect.stringMatching(/verified size is saved.*confirm the building/),
+      field: 'squareFootage', priority: 'HIGH', reason: expect.stringMatching(/1,350 sq ft.*was not applied/),
     }));
-    // No such flag without a verified size, or on the suite answer.
+    // No withholding without a verified size.
     lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
-    expect((await run({ occupancyAnswer: 'building' })).enriched.fieldVerifyFlags.some((f) => /verified size is saved/.test(f.reason))).toBe(false);
+    const plain = (await run({ occupancyAnswer: 'building' })).enriched;
+    expect(plain.homeSqFt).toBe(9000);
+    expect(plain.fieldVerifyFlags.some((f) => /was not applied/.test(f.reason))).toBe(false);
   });
 
   test('one tenant\'s verified size is not the next tenant\'s: a suite known only from the staff answer never applies an address-wide verified size', async () => {

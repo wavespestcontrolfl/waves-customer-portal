@@ -2301,6 +2301,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // the client keys its own stale-field reset off this (unitScopedLookup),
   // the same way it already keys off residentialUnitLookup (primary review
   // of PR #4840 r5 P1).
+  // Staff answered "the whole building" at an address that carries a
+  // verified size. Verified sizes are keyed by address, not by scope, so the
+  // figure may be one space's (verified while the job was "just their
+  // space"). It is never priced as the building: the size is withheld
+  // (blank, like any size the lookup cannot vouch for) and a HIGH flag asks
+  // staff for the building's.
+  const verifiedSizeWithheldForBuilding = (businessScope.decision === BUSINESS_SCOPE.BUILDING && recordSqftIsVerified(rc))
+    ? Number(rc.squareFootage) : null;
+  if (verifiedSizeWithheldForBuilding) rc = { ...rc, squareFootage: 0 };
   const commercialSuiteUnitScoped = Boolean(commercialSuiteScope?.applies);
   if (commercialSuiteUnitScoped) {
     // SAME blanking residentialUnitLookup applies below, via the shared
@@ -2502,14 +2511,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // Business-identity flags (empty unless an identity arrived): the
   // Places-derived commercial classification and the scope question.
   fieldVerifyFlags.push(...businessScope.flags);
-  // Staff answered "the whole building" at an address that carries a
-  // verified size. Verified sizes are keyed by address, not by scope, so the
-  // figure may be one space's (verified while the job was "just their
-  // space"). It is not silently priced as the building: staff reconfirm it.
-  if (businessScope.decision === BUSINESS_SCOPE.BUILDING && recordSqftIsVerified(rc)) {
+  if (verifiedSizeWithheldForBuilding) {
     fieldVerifyFlags.push({
       field: 'squareFootage',
-      reason: 'A verified size is saved for this address. It may be for one space, not the whole building — confirm the building\'s square footage before pricing.',
+      reason: `A verified size (${verifiedSizeWithheldForBuilding.toLocaleString()} sq ft) is saved for this address, but it may be for one space, not the whole building, so it was not applied. Enter the building's square footage.`,
       priority: 'HIGH',
     });
   }

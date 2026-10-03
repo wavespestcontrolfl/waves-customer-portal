@@ -2234,13 +2234,17 @@ export function ProductsTab({
   canAuthor = false,
 }) {
   const [labelPipelineEnabled, setLabelPipelineEnabled] = useState(false);
+  const [labelRatesEnabled, setLabelRatesEnabled] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setLabelPipelineEnabled(false);
+    setLabelRatesEnabled(false);
     if (canAuthor)
       adminFetch("/admin/inventory/label-pipeline")
         .then((data) => {
-          if (!cancelled) setLabelPipelineEnabled(data.enabled === true);
+          if (cancelled) return;
+          setLabelPipelineEnabled(data.enabled === true);
+          setLabelRatesEnabled(data.rates === true);
         })
         .catch(() => {});
     return () => {
@@ -2893,6 +2897,7 @@ export function ProductsTab({
                         vendors={vendors}
                         canAuthor={canAuthor}
                         labelPipelineEnabled={labelPipelineEnabled}
+                        labelRatesEnabled={labelRatesEnabled}
                         onSave={savePrice}
                         onInventoryChanged={load}
                         showToast={showToast}
@@ -3617,6 +3622,7 @@ function AutoReorderEditor({
 }
 function ExpandedProduct({
   labelPipelineEnabled = false,
+  labelRatesEnabled = false,
   product,
   vendors,
   canAuthor = false,
@@ -3759,6 +3765,13 @@ function ExpandedProduct({
       )}
       {canAuthor && labelPipelineEnabled && (
         <ProductLabelReview key={product.id} product={product} />
+      )}
+      {canAuthor && labelRatesEnabled && (
+        <ProductLabelReview
+          key={`rates-${product.id}`}
+          product={product}
+          kind="rates"
+        />
       )}
       {product.vendorPricing.length > 0 && (
         <div className="mb-[12px]">

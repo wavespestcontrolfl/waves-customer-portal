@@ -388,10 +388,20 @@ describe('buildLawnExpectations', () => {
       }
     });
 
-    it('every label-sourced row leaves room for its by-next-visit line under the report word cap', () => {
-      const labelRows = ALL_ROWS.filter((r) => [r.windows?.first, r.windows?.full].some((w) => w?.source === 'label'));
-      expect(labelRows.map((r) => r.id).sort()).toEqual(['herbicide_celsius', 'herbicide_sedgehammer', 'herbicide_speedzone']);
-      for (const row of labelRows) {
+    it('rows with no label or catalog timeline print no number in the report sentences', () => {
+      // Owner 2026-10-03: where no label states a timeline and no turf source
+      // gives one, the report says what happens, not when.
+      for (const id of ['herbicide_broadleaf', 'granular_fertilizer', 'iron_micros', 'fungicide_curative', 'insecticide_curative']) {
+        const row = PRODUCT_ROWS[id];
+        const printed = [row.visibleChange, ...row.limits, ...Object.values(row.byNextVisit)];
+        for (const line of printed) expect(line).not.toMatch(/\d/);
+      }
+      const chinch = ISSUE_ROWS.chinch;
+      for (const line of [chinch.visibleChange, ...Object.values(chinch.byNextVisit)]) expect(line).not.toMatch(/\d/);
+    });
+
+    it('every row leaves room for its by-next-visit line under the report word cap', () => {
+      for (const row of ALL_ROWS) {
         for (const line of Object.values(row.byNextVisit || {})) {
           expect(wordCount(row.visibleChange) + wordCount(line)).toBeLessThanOrEqual(FIELD_CAPS.whatToExpect);
         }
@@ -613,15 +623,24 @@ describe('buildLawnExpectations', () => {
     });
 
     it('a normal row can still be behind, and too_early never is', () => {
-      const row = rowFor('LESCO Three-Way Selective Herbicide');
+      // Celsius WG: gain window opens day 1, full from day 7, closes day 28.
+      const row = rowFor('Celsius WG');
       expect(row.behindEligible).toBe(true);
-      expect(judgeProgress(row, { daysSinceApplication: 2, scoreDelta: -20 })).toBe('too_early');
-      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: -9 })).toBe('behind');
-      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: 0 })).toBe('behind');
-      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('ahead');
-      expect(judgeProgress(row, { daysSinceApplication: 25, scoreDelta: 9 })).toBe('on_track');
+      expect(judgeProgress(row, { daysSinceApplication: 0, scoreDelta: -20 })).toBe('too_early');
+      expect(judgeProgress(row, { daysSinceApplication: 29, scoreDelta: -9 })).toBe('behind');
+      expect(judgeProgress(row, { daysSinceApplication: 29, scoreDelta: 0 })).toBe('behind');
+      expect(judgeProgress(row, { daysSinceApplication: 3, scoreDelta: 9 })).toBe('ahead');
+      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('on_track');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 1 })).toBe('in_window');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: null })).toBe('unclear');
+    });
+
+    it('a broadleaf row (windows removed 2026-10-03) is never behind-eligible and never judged', () => {
+      const row = rowFor('LESCO Three-Way Selective Herbicide');
+      expect(row.behindEligible).toBe(false);
+      expect(judgeProgress(row, { daysSinceApplication: 2, scoreDelta: -20 })).toBe('holding_steady');
+      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: -9 })).toBe('holding_steady');
+      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('holding_steady');
     });
   });
 
@@ -632,9 +651,20 @@ describe('buildLawnExpectations', () => {
 
     it('covers the rows that can be judged (config-derived, not a hand list)', () => {
       expect(rowsWithWindows.map((r) => r.id).sort()).toEqual([
-        'herbicide_broadleaf', 'herbicide_celsius', 'granular_fertilizer', 'fungicide_curative',
-        'insecticide_curative', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
+        'herbicide_celsius', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
       ].sort());
+    });
+
+    it('the product rows with no metric and no window are exactly the ones whose day counts were unsourced', () => {
+      const unjudged = Object.values(PRODUCT_ROWS).filter((r) => r.metric === null);
+      expect(unjudged.map((r) => r.id).sort()).toEqual([
+        'fungicide_curative', 'granular_fertilizer', 'herbicide_broadleaf', 'herbicide_sedge',
+        'herbicide_sedgehammer', 'herbicide_speedzone', 'insecticide_curative',
+      ]);
+      for (const row of unjudged) {
+        expect(row.metricWindows).toEqual({});
+        expect(row.behindEligible).toBe(false);
+      }
     });
 
     it.each(cases)('%s / %s window is well formed and sourced', (_id, _metric, _row, win) => {
@@ -662,9 +692,9 @@ describe('buildLawnExpectations', () => {
     });
 
     it('a metric a row has no window for is never judged, on any day', () => {
-      const broadleaf = PRODUCT_ROWS.herbicide_broadleaf;
+      const celsius = PRODUCT_ROWS.herbicide_celsius;
       for (const d of [0, 30, 400]) {
-        expect(judgeProgress(broadleaf, { metric: 'turf_density', daysSinceApplication: d, scoreDelta: -40 })).toBe('holding_steady');
+        expect(judgeProgress(celsius, { metric: 'turf_density', daysSinceApplication: d, scoreDelta: -40 })).toBe('holding_steady');
       }
     });
 
@@ -697,16 +727,28 @@ describe('buildLawnExpectations', () => {
       expect(judgeProgress(scalped, { metric: 'color_health', daysSinceApplication: 20, scoreDelta: 0 })).toBe('in_window');
     });
 
-    it('granular nitrogen: color closes at 21 days, density only at 90', () => {
-      const n = PRODUCT_ROWS.granular_fertilizer;
-      expect(judgeProgress(n, { metric: 'color_health', daysSinceApplication: 22, scoreDelta: 0 })).toBe('behind');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 30, scoreDelta: 0 })).toBe('too_early');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 75, scoreDelta: 0 })).toBe('in_window');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 91, scoreDelta: 0 })).toBe('behind');
+    it('rows without a progress window are never judged: not behind, ahead, too_early, in_window or on_track, on any metric', () => {
+      // Owner 2026-10-03: the day counts for these rows were unsourced estimates.
+      // Granular nitrogen (color at 21 days, density at 90), selective broadleaf,
+      // curative fungicide and curative insecticide no longer carry a window.
+      const rows = [
+        PRODUCT_ROWS.granular_fertilizer, PRODUCT_ROWS.herbicide_broadleaf,
+        PRODUCT_ROWS.fungicide_curative, PRODUCT_ROWS.insecticide_curative,
+      ];
+      for (const row of rows) {
+        expect(row.metric).toBeNull();
+        for (const metric of ['weed_suppression', 'color_health', 'stress_damage', 'turf_density', undefined]) {
+          for (const daysSinceApplication of [0, 5, 22, 30, 75, 91, 400]) {
+            for (const scoreDelta of [-30, -12, 0, 9, 30]) {
+              expect(judgeProgress(row, { metric, daysSinceApplication, scoreDelta })).toBe('holding_steady');
+            }
+          }
+        }
+      }
     });
 
-    it('spread rows (fungicide, insecticide, chinch, large patch) judge a falling score, never regrowth or fill-in', () => {
-      for (const row of [PRODUCT_ROWS.fungicide_curative, PRODUCT_ROWS.insecticide_curative, ISSUE_ROWS.chinch, ISSUE_ROWS.large_patch]) {
+    it('spread issue rows (chinch, large patch) judge a falling score, never regrowth or fill-in', () => {
+      for (const row of [ISSUE_ROWS.chinch, ISSUE_ROWS.large_patch]) {
         expect(row.metricWindows.stress_damage.mode).toBe('hold');
         // 30 days later, flat: spread stopped, so not behind and not "no regrowth"
         expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: 0 })).toBe('on_track');
@@ -885,9 +927,10 @@ describe('buildLawnExpectations', () => {
         expect(tagged).toEqual(named);
       });
 
-      it('a tag with no named cause (fairy ring) keeps the default window', () => {
+      it('a tag with no named cause (fairy ring) keeps the default lines', () => {
         const out = run({ app: { targets: ['Fairy ring'] } });
-        expect(out.rows[0].lines.join(' ')).toContain('2 to 4 weeks');
+        expect(out.rows[0].lines.join(' ')).toContain('New leaves have to grow in.');
+        expect(out.rows[0].lines.join(' ')).not.toContain('weeks to months');
       });
     });
 
