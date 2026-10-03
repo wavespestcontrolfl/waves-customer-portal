@@ -181,8 +181,9 @@ function snapshotMatchesLine1(snapshot, line1) {
   return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
-// The ONE writer of the sprinkler-settings move guard: stamp the move and
-// reset the per-field confirmation set on the customer's preference row.
+// The ONE writer of the sprinkler-settings move guard: stamp the move, reset the
+// per-field confirmation set and clear the new-sod date on the customer's
+// preference row.
 // Callers: this fan-out (a move, an address removal), the different-homes
 // customer merge, and the primary-residence promotion (codex #3565 gh-r26).
 // Never touches the settings themselves. Returns the row count.
@@ -195,7 +196,12 @@ async function markSprinklerSettingsMoved(customerId, conn = db) {
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     ['property-preferences', String(customerId)],
   );
-  const stamp = { irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) };
+  // sod_laid_on (lawn report new-sod mode, P35) is a fact about the home that was
+  // just left: the date survives an address edit, a merge and a primary promotion
+  // on the customer-level row, so the SAME stamp clears it in the same
+  // transaction. The next visit at the new home gets the normal report and the
+  // normal watering text. (Clearing a date is harmless with the gate off.)
+  const stamp = { irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]), sod_laid_on: null };
   const n = await conn('property_preferences').where({ customer_id: customerId }).update(stamp);
   if (n) return n;
   // No preferences row (tech-only irrigation readings are common): the guard

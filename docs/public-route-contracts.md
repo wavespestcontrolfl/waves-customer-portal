@@ -2203,7 +2203,9 @@ service record's `service_date` (America/New_York), never the assessment's captu
 (a redo, or `GATE_LAWN_PROPERTY_HISTORY` off, cannot move it) and never the clock, so a
 reopened report reads the same. The sod date belongs to the customer's primary home, so a
 visit whose stamped service address diverges from it, or that cannot be tied to its
-appointment, gets the normal report; a failed read of the visit gives the normal report
+appointment, gets the normal report; a move of the primary home (address edit or removal,
+different-homes merge, primary-property promotion) clears the sod date in the same
+transaction, so the next visit at the new home is the normal report; a failed read of the visit gives the normal report
 too, uncacheable, with an emailed PDF deferred. One resolver
 (`lawn-new-sod-visit.js`) serves the report, the Fast Complete sheet, the job card and
 the watering text. It adds no key; it replaces the content of
