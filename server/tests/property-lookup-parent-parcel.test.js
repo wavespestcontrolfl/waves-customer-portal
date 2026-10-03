@@ -233,6 +233,17 @@ describe('who sees the parent parcel', () => {
     expect(shared.propertyRecord._parentParcel).toEqual({ parcelId: 'EXAMPLE-PARCEL' });
   });
 
+  test('the legacy rentcast alias of the same record is stripped too, and stays the same object as propertyRecord', () => {
+    const record = { squareFootage: 0, _parentParcel: { parcelId: 'EXAMPLE-PARCEL' } };
+    const publicView = route.withoutParentParcelUnlessOptedIn({ propertyRecord: record, rentcast: record, meta: {} }, {});
+    expect(publicView.rentcast).not.toHaveProperty('_parentParcel');
+    expect(publicView.rentcast).toBe(publicView.propertyRecord);
+    expect(JSON.stringify(publicView)).not.toMatch(/EXAMPLE-PARCEL/);
+    // A separate rentcast object carrying it is stripped as well.
+    const split = route.withoutParentParcelUnlessOptedIn({ propertyRecord: null, rentcast: { _parentParcel: { parcelId: 'EXAMPLE-PARCEL' } } }, {});
+    expect(JSON.stringify(split)).not.toMatch(/EXAMPLE-PARCEL/);
+  });
+
   test('a record with no parent parcel, or no record, passes through as it is', () => {
     const plain = { propertyRecord: { squareFootage: 2000 } };
     expect(route.withoutParentParcelUnlessOptedIn(plain, {})).toBe(plain);

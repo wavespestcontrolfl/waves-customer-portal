@@ -374,9 +374,18 @@ async function performPropertyLookup(address, options = {}) {
 // it. Everyone else's response carries the record without it — a copy, so
 // the coalesced result other callers share is not touched.
 function withoutParentParcelUnlessOptedIn(result, options) {
-  if (options.commercialSuiteSizing === true || !result?.propertyRecord || !('_parentParcel' in result.propertyRecord)) return result;
-  const { _parentParcel: _dropped, ...record } = result.propertyRecord;
-  return { ...result, propertyRecord: record };
+  if (options.commercialSuiteSizing === true || !result) return result;
+  // The same record rides the result under two names (propertyRecord and
+  // the legacy `rentcast` alias); both are replaced.
+  const strip = (record) => {
+    if (!record || typeof record !== 'object' || !('_parentParcel' in record)) return record;
+    const { _parentParcel: _dropped, ...rest } = record;
+    return rest;
+  };
+  const propertyRecord = strip(result.propertyRecord);
+  const rentcast = result.rentcast === result.propertyRecord ? propertyRecord : strip(result.rentcast);
+  if (propertyRecord === result.propertyRecord && rentcast === result.rentcast) return result;
+  return { ...result, propertyRecord, ...('rentcast' in result ? { rentcast } : {}) };
 }
 
 // A cached stacked-association aggregate that the live path would now
