@@ -79,10 +79,13 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
     const item = confirmsRef.current.find((entry) => entry.id === id);
     const [kind, key] = String(item?.watch || '').split(':');
     if (kind === 'row') {
-      const { ops, products, form } = latest.current;
+      const { ops, products } = latest.current;
       const row = products.rows.find((r) => String(r.productId) === key);
       // the confirmed amount is the tech's too
-      if (row) products.updateRow(row.productId, row.added ? { amountPicked: true, methodPicked: true, methodInput: ops.rowMethod(row, form.method) } : { amountPicked: true });
+      // ...and so is its own way, when it has one (a bait, a granule). A spray row
+      // that follows How keeps following it: How has its own confirm.
+      const ownWay = row?.added && !ops.followsVisitMethod(row);
+      if (row) products.updateRow(row.productId, ownWay ? { amountPicked: true, methodPicked: true } : { amountPicked: true });
     }
     setConfirms((prev) => prev.filter((entry) => entry.id !== id));
   }, []);
