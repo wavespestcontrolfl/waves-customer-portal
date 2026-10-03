@@ -131,6 +131,16 @@ function keyIndex(openMetadata) {
 async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   const out = { raised: 0, failed: 0, closed: 0 };
   if (!reviewLowRatingAlertLive()) return { ...out, skipped: 'gate_off' };
+  // One pass at a time (pre-push audit P1): the close step judges open items
+  // against THIS pass's snapshot, so an overlapping pass (a manual sync during
+  // the hourly one) could close an item the other just raised. A pass that
+  // finds the lock held does nothing; the holder or the next sync covers it.
+  const { runExclusive } = require('../utils/cron-lock');
+  const ran = await runExclusive('review-low-rating-alert', () => reconcile(conn, now, out), { recordHealth: false });
+  return ran && typeof ran === 'object' && 'raised' in ran ? ran : { ...out, skipped: 'busy' };
+}
+
+async function reconcile(conn, now, out) {
   try {
     const episodes = require('./admin-alert-episodes');
     const since = await activationBoundary(conn);
@@ -163,7 +173,9 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
             // re-rings it).
             dedupeVersion: `customer:${review.customer_id || 'none'}`,
             refreshOnDedupe: true,
-            ringOnRefresh: false,
+            // A function (notification-service resolveRingOnRefresh treats
+            // anything else as "ring"): a linkage refresh never re-rings.
+            ringOnRefresh: () => false,
             // customerId at the top level: notification-service's central
             // internal-test-customer suppression reads it there.
             metadata: {

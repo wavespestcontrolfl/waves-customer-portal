@@ -4,6 +4,8 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(), openAdminAlertMetadata: jest.fn() };
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
+const mockLock = { held: false };
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => (mockLock.held ? { skipped: true, reason: 'lease_held' } : fn()) }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -184,7 +186,26 @@ describe('syncLowRatingReviewAlerts', () => {
   test('the linkage is the version: linking a customer quietly refreshes the standing item (never re-rings)', async () => {
     const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 2, reviewer_name: 'Pat', customer_id: 'cust-7' }] });
     await syncLowRatingReviewAlerts({ conn });
-    expect(mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0][3]).toMatchObject({ dedupeVersion: 'customer:cust-7', refreshOnDedupe: true, ringOnRefresh: false, metadata: { customerId: 'cust-7', subject: { type: 'customer', id: 'cust-7' } } });
+    const opts = mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0][3];
+    expect(opts).toMatchObject({ dedupeVersion: 'customer:cust-7', refreshOnDedupe: true, metadata: { customerId: 'cust-7', subject: { type: 'customer', id: 'cust-7' } } });
+    // a FUNCTION returning false: notification-service rings on any non-function value
+    expect(typeof opts.ringOnRefresh).toBe('function');
+    expect(opts.ringOnRefresh()).toBe(false);
+    // ...and the real notification service reads it as "do not ring" (a bare false would ring)
+    const { resolveRingOnRefresh } = jest.requireActual('../services/notification-service')._private;
+    await expect(resolveRingOnRefresh(opts.ringOnRefresh, {}, {})).resolves.toBe(false);
+    await expect(resolveRingOnRefresh(false, {}, {})).resolves.toBe(true);
+  });
+
+  test('one pass at a time: a pass that finds the lock held raises and closes nothing', async () => {
+    mockLock.held = true;
+    try {
+      mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R1}`]);
+      const { conn } = fakeConn({ reviews: [{ id: R2, google_review_id: 'g-2', star_rating: 2, reviewer_name: 'Pat', customer_id: null }] });
+      expect(await syncLowRatingReviewAlerts({ conn })).toMatchObject({ skipped: 'busy' });
+      expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      expect(mockEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    } finally { mockLock.held = false; }
   });
 
   test('a failed write is counted and retried next pass (the review is still there), never thrown', async () => {
