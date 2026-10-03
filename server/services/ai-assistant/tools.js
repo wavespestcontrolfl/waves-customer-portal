@@ -209,6 +209,9 @@ function addAction(actions, action) {
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
 // `context.customerMessage`: the customer's message this turn.
+// `turn` is the opt-in coordinator adapter. Existing assistant callers retain
+// their current path until the separate coordinator activation supplies it;
+// this module must support both callers during that staged rollout.
 // eslint-disable-next-line complexity -- one explicit branch per declared assistant tool
 async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}, turn = null) {
   try {
