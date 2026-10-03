@@ -845,17 +845,27 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     expect(tables.call_log[0].duration_seconds).toBe(61);
   });
 
-  test('the first terminal callback stamps when the call ended; a ringing event and a retry leave it alone', async () => {
-    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'initiated', duration_seconds: 0 });
-    const event = (CallStatus) => post('/call-status', { CallSid: PARENT, CallStatus, CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
-    await event('ringing');
+  test('a terminal callback stamps Twilio\'s event time as the call end, once; never our receipt time', async () => {
+    const createdAt = new Date(Date.now() - 10 * 60 * 1000);
+    const hungUpAt = new Date(createdAt.getTime() + 3 * 60 * 1000);
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'initiated', duration_seconds: 0, created_at: createdAt });
+    const event = (CallStatus, Timestamp) => post('/call-status', {
+      CallSid: PARENT, CallStatus, CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101',
+      ...(Timestamp ? { Timestamp } : {}),
+    });
+    await event('ringing', hungUpAt.toUTCString());
+    // No Timestamp, an unreadable one, one before the call and one in the future: no stamp.
+    await event('completed');
+    await event('completed', 'soon');
+    await event('completed', new Date(createdAt.getTime() - 60 * 1000).toUTCString());
+    await event('completed', new Date(Date.now() + 60 * 60 * 1000).toUTCString());
     expect(tables.call_log[0].metadata).toBeUndefined();
-    await event('completed');
-    const endedAt = tables.call_log[0].metadata.ended_at;
-    expect(new Date(endedAt).toISOString()).toBe(endedAt);
-    tables.call_log[0].metadata.ended_at = '2026-10-03T15:52:00.000Z';
-    await event('completed');
-    expect(tables.call_log[0].metadata.ended_at).toBe('2026-10-03T15:52:00.000Z');
+    // Delivered minutes late: the end is still when Twilio says the call ended.
+    await event('completed', hungUpAt.toUTCString());
+    expect(tables.call_log[0].metadata.ended_at).toBe(new Date(Math.floor(hungUpAt.getTime() / 1000) * 1000).toISOString());
+    const first = tables.call_log[0].metadata.ended_at;
+    await event('completed', new Date(hungUpAt.getTime() + 60 * 1000).toUTCString());
+    expect(tables.call_log[0].metadata.ended_at).toBe(first);
   });
 });
 

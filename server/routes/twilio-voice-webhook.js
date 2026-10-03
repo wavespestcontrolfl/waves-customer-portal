@@ -3550,6 +3550,9 @@ router.post('/call-status', async (req, res) => {
         // duration-gated recording sweeps).
         const status = nextCallStatus(existing.status, CallStatus);
         const incomingDuration = parseInt(CallDuration || 0) || 0;
+        const eventMs = Date.parse(req.body.Timestamp || '');
+        const callEndedAt = Number.isFinite(eventMs) && eventMs <= Date.now() && eventMs >= new Date(existing.created_at).getTime()
+          ? new Date(eventMs).toISOString() : null;
         // On a row that is already terminal the duration never decreases: a
         // retried "completed" or a late leg callback can carry
         // CallDuration "0" (a truthy string) and would otherwise zero the
@@ -3560,13 +3563,16 @@ router.post('/call-status', async (req, res) => {
         await trx('call_log').where('twilio_call_sid', CallSid).update({
           status,
           duration_seconds: duration,
-          // When the call actually ended, stamped once by the first terminal
-          // callback (the existing key wins). created_at is written before
-          // any ringing and duration_seconds is one leg's, so their sum is
-          // not the end; sms-pending-conversations.js reads this to tell
-          // whether a text arrived before the conversation was over.
-          ...(TERMINAL_CALL_STATUSES.has(CallStatus) ? {
-            metadata: trx.raw("jsonb_build_object('ended_at', ?::text) || COALESCE(metadata, '{}'::jsonb)", [new Date().toISOString()]),
+          // When the call actually ended: Twilio's own event time on the
+          // first terminal callback (the existing key wins on a retry).
+          // created_at is written before any ringing and duration_seconds is
+          // one leg's, so their sum is not the end;
+          // sms-pending-conversations.js reads this to tell whether a text
+          // arrived before the conversation was over. Never our receipt
+          // time: a delayed callback would move the end past texts that
+          // came in after the hangup. No usable Timestamp, no stamp.
+          ...(TERMINAL_CALL_STATUSES.has(CallStatus) && callEndedAt ? {
+            metadata: trx.raw("jsonb_build_object('ended_at', ?::text) || COALESCE(metadata, '{}'::jsonb)", [callEndedAt]),
           } : {}),
           updated_at: new Date(),
         });
