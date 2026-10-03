@@ -65,6 +65,7 @@ describe('visit access shadow: rules that need no database', () => {
     ['a code on the line after its access point', 'Garage:\nsesame', 'sesame'],
     ['a spoken code on a continuation line', 'Gate code:\nfour five four five', 'four five'],
     ['a code in a later sentence', 'The side gate sticks. Try sesame twice.', 'sesame'],
+    ['a word code after an instruction verb', 'Use sesame', 'sesame'],
   ])('%s never reaches the state', (_name, text, secret) => {
     const out = access.redactForState(text);
     expect(out).not.toContain(secret);
@@ -212,6 +213,15 @@ describe('visit access shadow: rules that need no database', () => {
     expect(JSON.stringify(built.state)).not.toMatch(/7731|5512|9042|latch/);
     expect(built.baselines).toEqual({ dog_on_property: { rules: true }, needs_code_key_or_person: { rules: true } });
     expect(Object.keys(built.state).sort()).toEqual([...pkg.stateShape].sort());
+  });
+
+  test('the access fields never leave as written, whatever they say', async () => {
+    await database('property_preferences').insert({ customer_id: customerId, access_notes: 'sesame', side_gate_access: 'bluebird' });
+    const visitId = await visit();
+    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    expect(JSON.stringify(built.state)).not.toMatch(/sesame|bluebird/);
+    expect(built.state.notes_text).toBe('Access notes: [access detail withheld]\nSide gate: [access detail withheld]');
+    expect(built.state.structured.side_gate).toBe(true);
   });
 
   test('one row per question; a second pass over an unchanged visit asks nobody; a new text asks again', async () => {

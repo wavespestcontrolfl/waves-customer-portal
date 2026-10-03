@@ -77,6 +77,9 @@ const ACCESS_NOUNS = [
   ['remote', /\b(?:fobs?|remotes?|openers?)\b/i],
 ];
 const ACCESS_PROBLEM_RE = /\b(?:locked|stuck|jammed|blocked|broken|closed|no\s+access|not?\s+(?:get|reach|access|open|enter)|(?:could|can|did|would|was|were)(?:\s+not|n['’]?t)\s+(?:get|reach|access|open|enter|able)|unable|nobody\s+(?:was\s+)?home|no\s+one\s+(?:was\s+)?home)\b/i;
+// An instruction verb a credential rides on with no access noun beside it
+// ("use sesame", "punch in blue"): such a text is withheld as well.
+const ACCESS_VERB_RE = /\b(?:use|using|type|typing|punch(?:ing)?|press(?:ing)?|enter(?:ing)?|dial(?:ing)?|key\s+in|say|tell\s+(?:them|him|her))\b/i;
 const PLAIN_NUMBER_RE = /^(?:\d{1,2}|\d+(?:st|nd|rd|th)|\d{1,2}(?::\d{2})?(?:am|pm)?|\d{1,2}\/\d{1,2})$/i;
 const CAPS_CODE_RE = /^[A-Z][A-Z#*-]{2,}$/;
 function shouted(sentence) {
@@ -87,7 +90,18 @@ function shouted(sentence) {
 function mentionsAccess(text) {
   const { isAccessSentence } = require('../completion-comms-context');
   const whole = String(text || '');
-  return ACCESS_NOUNS.some(([, re]) => re.test(whole)) || whole.split(/(?<=[.!?])\s+|\n+/).some((sentence) => isAccessSentence(sentence));
+  return ACCESS_NOUNS.some(([, re]) => re.test(whole)) || ACCESS_VERB_RE.test(whole)
+    || whole.split(/(?<=[.!?])\s+|\n+/).some((sentence) => isAccessSentence(sentence));
+}
+
+// The closed-vocabulary marker for a withheld text: which access points it
+// named and whether it reports a problem. Never any of its words.
+function accessMarker(raw) {
+  const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(raw)).map(([name]) => name);
+  const parts = [];
+  if (nouns.length) parts.push(`mentions ${nouns.join(', ')}`);
+  if (ACCESS_PROBLEM_RE.test(raw)) parts.push('reports a problem getting in');
+  return parts.length ? `[access detail withheld: ${parts.join('; ')}]` : '[access detail withheld]';
 }
 
 // The unit is the WHOLE text (one note field, one customer text), never a
@@ -99,13 +113,7 @@ function redactForState(text) {
   const { redactAccessCodes } = require('../context-aggregator');
   const raw = String(text || '');
   if (!raw.trim()) return '';
-  if (mentionsAccess(raw)) {
-    const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(raw)).map(([name]) => name);
-    const parts = [];
-    if (nouns.length) parts.push(`mentions ${nouns.join(', ')}`);
-    if (ACCESS_PROBLEM_RE.test(raw)) parts.push('reports a problem getting in');
-    return parts.length ? `[access detail withheld: ${parts.join('; ')}]` : '[access detail withheld]';
-  }
+  if (mentionsAccess(raw)) return accessMarker(raw);
   return redactAccessCodes(raw).split(/\n+/).map((line) => {
     const loud = shouted(line);
     return line.replace(/\S+/g, (word) => {
@@ -155,6 +163,13 @@ function visitAccessSubjectHash(state) {
 function labelled(label, value, max) {
   const text = compact(redactForState(value), max);
   return text ? `${label}: ${text}` : null;
+}
+
+// A field whose whole purpose is how to get in (access notes, the side gate
+// field): any word in it can be the credential ("sesame"), so it never leaves
+// as written, whatever it says. Only its marker does.
+function labelledAccessField(label, value) {
+  return String(value || '').trim() ? `${label}: ${accessMarker(String(value))}` : null;
 }
 
 /**
@@ -219,12 +234,12 @@ async function buildVisitAccessState(svc, dbh) {
   const hasCodes = Boolean(prefs && (prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code));
   const petCount = Number.isInteger(prefs && prefs.pet_count) ? prefs.pet_count : 0;
   const notes = [
-    labelled('Access notes', prefs && prefs.access_notes, NOTE_CHARS),
+    labelledAccessField('Access notes', prefs && prefs.access_notes),
     labelled('Parking', prefs && prefs.parking_notes, NOTE_CHARS),
     labelled('Special instructions', prefs && prefs.special_instructions, NOTE_CHARS),
     labelled('Pets', prefs && prefs.pet_details, NOTE_CHARS),
     labelled('Pets secured plan', prefs && prefs.pets_secured_plan, NOTE_CHARS),
-    labelled('Side gate', prefs && prefs.side_gate_access, 200),
+    labelledAccessField('Side gate', prefs && prefs.side_gate_access),
     prefs && prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
     labelled('Visit note', svc.notes, NOTE_CHARS),
   ].filter(Boolean).join('\n').slice(0, NOTES_TEXT_CHARS);
