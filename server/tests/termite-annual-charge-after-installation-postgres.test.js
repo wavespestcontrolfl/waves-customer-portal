@@ -45,7 +45,7 @@ async function createScratchDb() {
   const schema = `termite_afterinst_${randomUUID().replace(/-/g, '')}`;
   const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 6 } });
   await db.raw('CREATE SCHEMA ??', [schema]);
-  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid, accepted_at timestamptz)');
+  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid, accepted_at timestamptz, estimate_data jsonb)');
   await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -130,6 +130,9 @@ async function createScratchDb() {
     source_estimate_id uuid,
     annual_prepay_term_id uuid,
     property_id uuid,
+    recurring_parent_id uuid,
+    paf_held_term_id uuid,
+    prepaid_method text,
     status text,
     service_type text,
     scheduled_date date
@@ -154,6 +157,9 @@ async function createScratchDb() {
     status text NOT NULL,
     renewal_decision text,
     renewed_from_term_id uuid,
+    dispute_suspended_at timestamptz,
+    annual_plan_version text,
+    coverage_service_type text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -245,8 +251,10 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     if (fixture) await fixture.destroy();
   });
 
+  let visitPayerId = null;
   function load({ method = 'default', chargeImpl, notifyAdminImpl } = {}) {
     const { db } = fixture;
+    visitPayerId = null;
     const notifyAdmin = jest.fn(notifyAdminImpl || (async () => ({ id: randomUUID(), deduped: false })));
     const resolvedMethod = method === 'default'
       ? {
@@ -268,6 +276,8 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn(async () => ({ total: FROZEN_TOTAL })),
     }));
     jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+    // The visit's payer, as completion's own payer exclusion resolves it.
+    jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => (visitPayerId ? { payerId: visitPayerId } : null)) }));
     jest.doMock('../services/estimate-converter', () => ({
       canAutoSendDraftInvoice: () => true,
       frozenTermiteAnnualFinancialsFor: (estimate) => {
@@ -316,8 +326,20 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
   }
 
   const chargeState = async (db) => (await db('estimates').where({ id: ids.estimateId }).first()).annual_plan_signature_charge;
-  // A completed installation visit with a performed closeout record, unless
-  // `closeout` says otherwise (null = no record at all).
+  // What the closeout does for the plan (complete-scheduled-service.js): ask
+  // the real holding-term rule, waiting year first and then an activated one,
+  // and stamp the answer on the visit. Returns the stamped term id or null.
+  const closeoutStamp = async (db, visit) => {
+    const Renewals = jest.requireActual('../services/annual-prepay-renewals');
+    const row = await db('scheduled_services').where({ id: visit.id }).first();
+    const held = await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true })
+      || await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true, activated: true });
+    await db('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: held?.id || null });
+    return held?.id || null;
+  };
+  // A completed installation visit with a performed closeout record, closed
+  // out (stamped) like a real completion, unless `closeout` says otherwise
+  // (null = no record at all, and no closeout run).
   const addInstall = async (db, fields = {}, closeout = {}) => {
     const [visit] = await db('scheduled_services').insert({
       customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: dayOffset(0), ...fields,
@@ -326,9 +348,11 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       await db('service_records').insert({
         scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify(closeout),
       });
+      await closeoutStamp(db, visit);
     }
     return visit;
   };
+  const stampOf = async (db, visit) => (await db('scheduled_services').where({ id: visit.id }).first()).paf_held_term_id;
   const signedDaysAgo = (db, days) => db('estimates').where({ id: ids.estimateId }).update({
     annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [
       JSON.stringify({ signed_at: new Date(Date.now() - days * 86400e3).toISOString() }),
@@ -419,27 +443,24 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect((await chargeState(db)).status).toBe('awaiting_installation');
   });
 
-  describe('the plan covers its own installation visit (no second bill beside the plan invoice)', () => {
-    // The real coverage chokepoint every completion / billing caller asks.
-    const covers = (db, visit, opts) => jest.requireActual('../services/annual-prepay-renewals')
-      .annualPrepayCoversVisit(visit, db, opts);
-    // The rule alone, for the "not covered" cases: past it the chokepoint
-    // goes on to the paid-coverage checks, which need the full billing schema.
-    const ruleCovers = (db, visit) => jest.requireActual('../services/annual-prepay-renewals')
-      .termiteDeferredInstallCoversVisit(visit, db, { throwOnError: true });
+  describe('the closeout stamps the installation visit; coverage, release and text read the stamp', () => {
+    const Renewals = () => jest.requireActual('../services/annual-prepay-renewals');
+    const stampCovers = async (db, visit) => Renewals().pafHeldStampCovers(await db('scheduled_services').where({ id: visit.id }).first(), db);
+    const firstVisitText = async (db, visit) => jest.requireActual('../services/paf-prepay-release')
+      .isFirstHeldVisitOfUnpaidYear(await db('scheduled_services').where({ id: visit.id }).first(), db);
 
-    test('a priced installation visit is covered while the charge waits, in strict mode too, and stays covered after the charge', async () => {
+    test('the installation is stamped with the plan term, covered while the charge waits and after it, and sends the after-visit text only while unpaid', async () => {
       const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
       await atSigning();
       const visit = await addInstall(db);
 
-      expect(await covers(db, visit)).toBe(true);
-      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+      expect(await stampOf(db, visit)).toBe(ids.termId);
+      expect(await stampCovers(db, visit)).toBe(true);
+      expect(await firstVisitText(db, visit)).toBe(true);
 
-      await sweep();
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
       expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
-      await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'active' });
-      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+      expect(await firstVisitText(db, visit)).toBe(false);
     });
 
     test('still covered after a declined charge: the plan pay link collects it, never a visit bill', async () => {
@@ -451,95 +472,106 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       await sweep();
 
       expect((await chargeState(db)).status).toBe('declined');
-      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+      expect(await stampCovers(db, visit)).toBe(true);
     });
 
-    test('only the installation itself: once it is performed, a later bait/station job of the same plan bills normally', async () => {
+    test('one installation per plan: a later bait/station job is not stamped and bills normally', async () => {
       const { atSigning, sweep, db } = load();
       await atSigning();
       const install = await addInstall(db);
-      const later = await addInstall(db, { scheduled_date: dayOffset(30), status: 'confirmed', service_type: 'Termite Bait Station Cartridge Replacement' });
+      const later = await addInstall(db, { scheduled_date: dayOffset(30), service_type: 'Termite Bait Station Cartridge Replacement' });
 
-      expect(await ruleCovers(db, install)).toBe(true);
-      expect(await ruleCovers(db, later)).toBe(false);
+      expect(await stampOf(db, install)).toBe(ids.termId);
+      expect(await stampOf(db, later)).toBeNull();
 
-      await sweep(); // anchors the term and charges the plan
-      expect(await ruleCovers(db, install)).toBe(true);
-      expect(await ruleCovers(db, later)).toBe(false);
+      await sweep();
+      // A fresh closeout of the later job after the plan is paid still finds the installation's stamp.
+      await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'active' });
+      await db('invoices').where({ id: ids.invoiceId }).update({ paid_at: new Date() });
+      expect(await closeoutStamp(db, later)).toBeNull();
     });
 
-    test('the installation in progress (no closeout record yet) is covered', async () => {
-      const { atSigning, db } = load();
-      await atSigning();
-      const booked = await addInstall(db, { status: 'confirmed' });
-      const closing = await addInstall(db, { scheduled_date: dayOffset(1) }, null);
-
-      expect(await ruleCovers(db, booked)).toBe(true);
-      expect(await ruleCovers(db, closing)).toBe(true);
-    });
-
-    test('an unsuccessful first visit, then the real installation: the real one is covered and charged once; the first is not the installation', async () => {
+    test('an unsuccessful first visit, then the real installation: only the real one is stamped, and the plan is charged once', async () => {
       const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
       await atSigning();
       const inspected = await addInstall(db, { scheduled_date: dayOffset(-1) }, { visitOutcome: 'inspection_only' });
 
-      // The anchor may record the inspection-only visit for coverage dates;
-      // it must not decide money.
-      await sweep();
+      expect(await stampOf(db, inspected)).toBeNull();
+      await sweep(); // the anchor may take the inspection-only visit for coverage dates; it decides no money
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect(await ruleCovers(db, inspected)).toBe(false);
 
-      const install = await addInstall(db, {}, null); // closing out now
-      expect(await ruleCovers(db, install)).toBe(true);
-      await db('service_records').insert({ scheduled_service_id: install.id, status: 'completed', structured_notes: JSON.stringify({}) });
-      expect(await ruleCovers(db, install)).toBe(true);
-
+      const install = await addInstall(db);
+      expect(await stampOf(db, install)).toBe(ids.termId);
       expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
       expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
-      expect(await ruleCovers(db, install)).toBe(true);
-      expect(await ruleCovers(db, inspected)).toBe(false);
     });
 
-    test('another visit of the same customer is not covered by it', async () => {
+    test('an installation billed to a third-party payer is not stamped: no automatic charge, and the office hears at 14 days', async () => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, notifyAdmin, db } = load();
+      await atSigning();
+      visitPayerId = randomUUID();
+      const visit = await addInstall(db);
+
+      expect(await stampOf(db, visit)).toBeNull();
+      expect((await sweep()).installChargeScanned).toBe(0);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+
+      await signedDaysAgo(db, 15);
+      expect((await sweep()).neverInstalledAlerted).toBe(1);
+      expect(bellTitles(notifyAdmin)).toContain('Termite annual plan — signed, installation has not released the charge');
+    });
+
+    test('an installation paid another way (prepaid stamp) is not held: no automatic charge', async () => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const visit = await addInstall(db, { prepaid_method: 'cash' });
+
+      expect(await stampOf(db, visit)).toBeNull();
+      expect((await sweep()).installChargeScanned).toBe(0);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    test('another visit of the same customer, and a liquid termite job, are not stamped', async () => {
       const { atSigning, db } = load();
       await atSigning();
       const pest = await addInstall(db, { service_type: 'Quarterly Pest Control' });
       const liquid = await addInstall(db, { service_type: 'Termite Bora-Care Install' });
 
-      expect(await ruleCovers(db, pest)).toBe(false);
-      expect(await ruleCovers(db, liquid)).toBe(false);
+      expect(await stampOf(db, pest)).toBeNull();
+      expect(await stampOf(db, liquid)).toBeNull();
     });
 
-    test('an at-signing plan is unchanged: its unpaid installation visit is not covered by this rule', async () => {
+    test('an at-signing plan is unchanged: its installation visit is not stamped by this rule', async () => {
       const { atSigning, db } = load({ method: null });
       await db('customer_contracts').where({ id: ids.contractId }).update({ contract_text_snapshot: r3.TEMPLATE_V3_ANNUAL_R3_BODY });
       await atSigning();
       const visit = await addInstall(db);
 
       expect((await chargeState(db)).deferred_at).toBeUndefined();
-      expect(await ruleCovers(db, visit)).toBe(false);
+      expect(await stampOf(db, visit)).toBeNull();
     });
 
-    test('a plan cancelled before installation covers nothing', async () => {
+    test('a plan cancelled before installation holds nothing', async () => {
       const { atSigning, db } = load();
       await atSigning();
       await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled' });
+      await db('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
       const visit = await addInstall(db);
 
-      expect(await ruleCovers(db, visit)).toBe(false);
+      expect(await stampOf(db, visit)).toBeNull();
     });
 
-    test('a two-property customer: an installation at the other property is not covered', async () => {
+    test('a two-property customer: an installation at the other property is not stamped', async () => {
       const { atSigning, db } = load();
       await atSigning();
       const [a] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
       const [b] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
       await db('estimates').where({ id: ids.estimateId }).update({ property_id: a.id });
-      const here = await addInstall(db, { property_id: a.id });
       const there = await addInstall(db, { property_id: b.id });
+      const here = await addInstall(db, { property_id: a.id });
 
-      expect(await ruleCovers(db, here)).toBe(true);
-      expect(await ruleCovers(db, there)).toBe(false);
+      expect(await stampOf(db, there)).toBeNull();
+      expect(await stampOf(db, here)).toBe(ids.termId);
     });
   });
 
@@ -577,6 +609,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     await db('service_records').insert({
       scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify({}), created_at: new Date(Date.now() + 60000),
     });
+    await closeoutStamp(db, visit);
 
     expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
@@ -689,7 +722,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     await signedDaysAgo(db, 15);
     expect((await sweep()).neverInstalledAlerted).toBe(1);
     expect((await sweep()).neverInstalledAlerted).toBe(0);
-    expect(bellTitles(notifyAdmin).filter((title) => title === 'Termite annual plan — signed, not installed, not charged')).toHaveLength(1);
+    expect(bellTitles(notifyAdmin).filter((title) => title === 'Termite annual plan — signed, installation has not released the charge')).toHaveLength(1);
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect((await chargeState(db)).status).toBe('awaiting_installation');
   });

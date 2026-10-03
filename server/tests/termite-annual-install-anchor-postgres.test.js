@@ -115,6 +115,7 @@ async function createScratchDb() {
     source_estimate_id uuid,
     annual_prepay_term_id uuid,
     property_id uuid,
+    paf_held_term_id uuid,
     status text,
     service_type text,
     scheduled_date date

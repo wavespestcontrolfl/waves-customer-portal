@@ -1220,9 +1220,10 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
 // An agreement signed on the charge-after-installation wording records
 // 'awaiting_installation' at signing (termite-annual-signature-charge.js):
 // no charge, no pay link. This pass collects it once the plan's
-// installation visit is PERFORMED — the anchor's installation rule
-// (whereInstallationVisitForPlan) plus a performed, non-backfill closeout
-// (wherePerformedCloseout), read by the same daily sweep for the
+// installation visit is PERFORMED — the visit the closeout stamped as this
+// plan's installation (paf_held_term_id, see deferredInstallHoldingTerm) with
+// a performed, non-backfill closeout (wherePerformedCloseout), read by the
+// same daily sweep for the
 // same reason (every completion writer is covered by one reader). The charge
 // is at most a day behind the installation.
 //
@@ -1247,66 +1248,76 @@ function awaitingInstallationRows(conn) {
     .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
 }
 
-// Is `visitId` the installation visit of a plan whose first-year charge was
-// deferred to the installation? Its setup + annual invoice already bills
-// that installation, so the visit must never ALSO mint a completion bill of
-// its own (annual-prepay-renewals.js annualPrepayCoversVisit reads this).
-// Keyed on the durable wait record (deferred_at stays on the charge record
-// through claim, paid, declined), so the answer is the same before, during
-// and after the charge — a declined charge sends the plan's pay link, never
-// a second bill for the visit. A plan cancelled before installation (term
-// neither payment_pending nor active) covers nothing: that visit bills
-// normally. By the same plan-scoped installation rule as the anchor, and
-// bound to the ONE performed installation visit (see the body). It does not
-// read installation_anchor_visit_id: the anchor records coverage DATES from
-// the earliest completed visit and is not a money identity.
-async function installationVisitOfDeferredPlan(conn, visitId) {
-  // The deferred plan(s) this visit matches by the plan-scoped rule.
-  const plans = await whereInstallationVisitForPlan(
-    conn('scheduled_services as ss')
-      .join('annual_prepay_terms as apt', 'apt.customer_id', 'ss.customer_id')
-      .join('estimates as e', 'e.id', 'apt.source_estimate_id')
-      .where('ss.id', visitId)
-      .whereNotIn('ss.status', DEAD_VISIT_STATUSES)
-      .where('e.annual_plan_activation_status', 'activated')
-      .whereRaw("e.annual_plan_signature_charge ->> 'deferred_at' IS NOT NULL")
-      .whereNull('apt.renewed_from_term_id')
-      .whereIn('apt.status', ['payment_pending', 'active']),
-    {
-      customerId: conn.raw('??', ['apt.customer_id']),
-      estimateId: conn.raw('??', ['e.id']),
-      estimatePropertyId: conn.raw('??', ['e.property_id']),
-      termId: conn.raw('??', ['apt.id']),
-      floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
-    },
-  ).select(
-    'apt.id', 'apt.customer_id', 'apt.source_estimate_id', 'apt.term_start', 'apt.created_at',
-  );
-  for (const term of plans) {
-    // ONE identity for "the installation", shared with the charge release
-    // (earliestPerformedInstallation): the plan's earliest PERFORMED
-    // installation visit. Once one exists it is the only covered visit — a
-    // later bait/station job, or a visit that was closed as inspection only
-    // before it, is not.
-    const performed = await earliestPerformedInstallation(term, conn);
-    if (performed) {
-      if (String(performed.id) === String(visitId)) return true;
-      continue;
-    }
-    // None performed yet: this visit may be the installation in progress (its
-    // closeout asks before the service record exists). Covered unless its own
-    // newest closeout already says the work was not performed — that visit
-    // is not the installation, and the real one comes later.
+// "Stamp the visit" (owner ruling 2026-10-03 on #5816, the same call as the
+// prepay lane's "stamp + narrow"): is this visit the installation of a plan
+// whose first-year charge waits for (or was released by) that installation?
+// Returns the plan's term, or null. Completion asks this at closeout through
+// annual-prepay-renewals.js pafDeferredHoldingTerm and stamps the answer on
+// the visit (scheduled_services.paf_held_term_id). From then on the stamp IS
+// the installation's identity: the plan covers that visit (no second bill),
+// the charge release reads it (chargeInstalledTerms), and so does the
+// first-visit text. `terms` are the customer's candidate terms the caller
+// already loaded (payment_pending, or paid coverage when it re-decides after
+// activation).
+//
+// Held only when ALL of these stand:
+//   - a termite installation service type, matching the plan by the anchor's
+//     plan-scoped rule (whereInstallationVisitForPlan);
+//   - the plan was deferred to installation (deferred_at on its charge
+//     record) and its invoice is still live;
+//   - the visit's own newest closeout does not say the work was not performed
+//     (inspection only / customer declined / incomplete / backfill): that
+//     visit is not the installation;
+//   - no OTHER live visit already carries this plan's stamp: one installation
+//     per plan, so a later bait/station job bills normally;
+//   - the visit is not billed to a third-party payer.
+// A visit paid another way (prepaid_method) never reaches here, and the
+// closeout clears a stamp from a payer-billed or separately paid visit. So an
+// installation collected outside the plan is never stamped, never releases
+// the automatic charge, and reaches the office through the never-released
+// alert.
+const DEAD_PLAN_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+async function deferredInstallHoldingTerm(visit, terms, conn) {
+  if (!visit?.id || !visit.customer_id) return null;
+  let serviceType = visit.service_type;
+  if (serviceType === undefined) {
+    serviceType = (await conn('scheduled_services').where({ id: visit.id }).first('service_type'))?.service_type;
+  }
+  if (!isTermiteInstallationServiceType(serviceType)) return null;
+  for (const term of terms) {
+    if (term.renewed_from_term_id || !term.source_estimate_id || !term.prepay_invoice_id) continue;
+    const estimate = await conn('estimates').where({ id: term.source_estimate_id })
+      .first('annual_plan_activation_status', 'annual_plan_signature_charge', 'property_id');
+    if (estimate?.annual_plan_activation_status !== 'activated') continue;
+    if (!parseJsonish(estimate.annual_plan_signature_charge)?.deferred_at) continue;
+    const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
+    if (!invoice || DEAD_PLAN_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) continue;
+    const matches = await whereInstallationVisitForPlan(
+      conn('scheduled_services as ss').where('ss.id', visit.id).whereNotIn('ss.status', DEAD_VISIT_STATUSES),
+      installationPlanFor(term, estimate),
+    ).first('ss.id');
+    if (!matches) continue;
     const closeout = await conn('service_records')
-      .where({ scheduled_service_id: visitId })
+      .where({ scheduled_service_id: visit.id })
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .first('status', 'structured_notes');
     const notes = parseJsonish(closeout?.structured_notes) || {};
-    const closedUnperformed = !!closeout && closeout.status === 'completed'
-      && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true');
-    if (!closedUnperformed) return true;
+    if (closeout && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true')) continue;
+    const other = await conn('scheduled_services')
+      .where({ paf_held_term_id: term.id })
+      .whereNot({ id: visit.id })
+      .whereNotIn('status', DEAD_VISIT_STATUSES)
+      .first('id');
+    if (other) continue;
+    // Same resolver, same strictness, as the prepay hold: a payer-billed
+    // visit is billed to that payer and never held.
+    const visitPayer = await require('./payer').resolveForInvoice({
+      database: conn, customerId: visit.customer_id, scheduledServiceId: visit.id, throwOnError: true,
+    });
+    if (visitPayer?.payerId) return null;
+    return term;
   }
-  return false;
+  return null;
 }
 
 // The service-type half of the installation rule, for a caller holding the
@@ -1336,29 +1347,22 @@ function wherePerformedCloseout(builder) {
   )`, [NOT_PERFORMED_OUTCOMES]);
 }
 
-// The plan's earliest PERFORMED installation (see wherePerformedCloseout).
+// THE installation that releases a plan's charge: the visit the closeout
+// STAMPED as held by this plan's term (deferredInstallHoldingTerm), completed,
+// with a performed closeout. Nothing is re-derived from service types or
+// properties here — the stamp is the identity.
 async function earliestPerformedInstallation(term, conn) {
-  const estimate = term.source_estimate_id
-    ? await conn('estimates').where({ id: term.source_estimate_id }).first('property_id')
-    : null;
-  return wherePerformedCloseout(whereInstallationVisitForPlan(
-    conn('scheduled_services as ss').where('ss.status', 'completed'),
-    installationPlanFor(term, estimate),
-  )).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+  return wherePerformedCloseout(
+    conn('scheduled_services as ss').where('ss.paf_held_term_id', term.id).where('ss.status', 'completed'),
+  ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
 }
 
+// Correlated form for the sweep's scans over annual_prepay_terms `apt`.
 function completedInstallationForRow(conn) {
   return function completedInstallation() {
-    wherePerformedCloseout(this);
-    whereInstallationVisitForPlan(
-      this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
-      {
-        customerId: conn.ref('apt.customer_id'),
-        estimateId: conn.ref('e.id'),
-        estimatePropertyId: conn.ref('e.property_id'),
-        termId: conn.ref('apt.id'),
-        floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
-      },
+    wherePerformedCloseout(
+      this.select(conn.raw('1')).from('scheduled_services as ss')
+        .whereRaw('ss.paf_held_term_id = apt.id').where('ss.status', 'completed'),
     );
   };
 }
@@ -1827,7 +1831,7 @@ module.exports = {
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
   earliestPerformedInstallation,
-  installationVisitOfDeferredPlan,
+  deferredInstallHoldingTerm,
   isTermiteInstallationServiceType,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,

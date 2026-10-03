@@ -104,8 +104,8 @@ const BELL_COPY = {
     body: `The customer signed the annual termite agreement (estimate #${ctx.estimateId}) and the plan is active, but charging the payment method on file for invoice #${ctx.invoiceId} failed: ${ctx.reason}. The pay link is being sent instead. The card will NOT be retried automatically.`,
   }),
   never_installed: (ctx) => ({
-    title: 'Termite annual plan — signed, not installed, not charged',
-    body: `The customer signed the annual termite agreement (estimate #${ctx.estimateId}) ${NEVER_INSTALLED_ALERT_DAYS} or more days ago and no station installation visit is completed. Invoice #${ctx.invoiceId} is charged only after the installation. Schedule the installation, or cancel the plan if the customer will not go ahead.`,
+    title: 'Termite annual plan — signed, installation has not released the charge',
+    body: `The customer signed the annual termite agreement (estimate #${ctx.estimateId}) ${NEVER_INSTALLED_ALERT_DAYS} or more days ago and no completed installation visit has released the charge for invoice #${ctx.invoiceId}. Either the installation is not done yet (schedule it, or cancel the plan if the customer will not go ahead), or it was paid another way or billed to a payer (then collect or settle this invoice by hand — it is not charged automatically).`,
   }),
   charge_unresolved: (ctx) => ({
     title: `Termite annual plan — ${chargeWord(ctx)} needs reconciliation`,
@@ -608,6 +608,20 @@ async function installedAndOwed({ conn, estimateId, invoiceId }) {
   return !!(await earliestPerformedInstallation(term, conn));
 }
 
+// For the installation visit's completion text (paf-prepay-release.js
+// isFirstHeldVisitOfUnpaidYear): the plan behind `term` still waits to be
+// charged — its record reads 'awaiting_installation' and its invoice is
+// still owed. Then the visit says the plan payment is processed after it,
+// never "nothing is due".
+async function installationStillAwaitsCharge(term, conn = db) {
+  if (!term?.source_estimate_id || String(term.status || '') !== 'payment_pending') return false;
+  const state = await readChargeState(conn, term.source_estimate_id);
+  if (state?.status !== AWAITING_INSTALLATION || !state.invoice_id) return false;
+  const invoice = await conn('invoices').where({ id: state.invoice_id }).first('status');
+  const status = String(invoice?.status || '').toLowerCase();
+  return !!invoice && !['processing', 'paid', 'prepaid', 'void', 'voided', 'canceled', 'cancelled', 'refunded'].includes(status);
+}
+
 // One office alert for a plan signed NEVER_INSTALLED_ALERT_DAYS ago whose
 // installation is still not completed. The alert lands FIRST and the stamp
 // is written only after it did: a failed or interrupted alert leaves the
@@ -632,6 +646,7 @@ module.exports = {
   chargeAnnualInvoiceAtSignature,
   chargeAnnualInvoiceAfterInstallation,
   alertNeverInstalled,
+  installationStillAwaitsCharge,
   AWAITING_INSTALLATION,
   NEVER_INSTALLED_ALERT_DAYS,
   _private: {
