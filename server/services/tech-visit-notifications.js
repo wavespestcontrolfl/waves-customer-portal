@@ -642,11 +642,13 @@ async function pushAutoDispatchSummary({ runId } = {}) {
     for (let i = 0; i < 5 && visitQueues.size; i += 1) {
       await Promise.allSettled([...visitQueues.values()]);
     }
-    // Taken before the gate check: a gate turned off mid-run discards this
-    // run's held cards instead of leaving them for the next run's count.
+    // Taken first, so nothing is left for the next run's count. The summary
+    // gate decided at HOLD time: a card held while it was on gets this push
+    // even if the gate turned off mid-run, since its own push never went out
+    // (Codex #5786 P2). Only the notifications kill switch stops it.
     const held = [...heldAutoDispatchCards.entries()];
     heldAutoDispatchCards.clear();
-    if (!enabled() || !gateEnvValue(SUMMARY_GATE)) return { pushed: 0 };
+    if (!enabled()) return { pushed: 0 };
     const PushService = require('./push-notifications');
     let pushed = 0;
     for (const [technicianId, cards] of held) {

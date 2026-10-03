@@ -465,12 +465,21 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
-  test('a summary gate turned off mid-run discards that run\'s held cards; a later run never inherits them', async () => {
+  test('a summary gate turned off mid-run still sends the summary for cards it held (their own push never went out); a later run never inherits them', async () => {
     await move('auto_dispatch');
     delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
-    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 0 });
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit' }));
+    mockSendToAdminUser.mockClear();
     process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
     expect(await notices.pushAutoDispatchSummary({ runId: 'r2' })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('the notifications kill switch off drops the held summary', async () => {
+    await move('auto_dispatch');
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
@@ -487,7 +496,7 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
   });
 
-  test('summary gate off → no summary push (each move already pushed on its own)', async () => {
+  test('summary gate off for the whole run → no summary push (each move already pushed on its own)', async () => {
     delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
     await move('auto_dispatch');
     mockSendToAdminUser.mockClear();
