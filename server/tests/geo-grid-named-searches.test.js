@@ -3,7 +3,7 @@
  * Pure summary over per-run aggregate rows; no DB, no HTTP.
  */
 const {
-  summarizeNamedSearches, NAMED_SEARCH_CITIES, NAMED_SEARCH_KEYWORDS,
+  summarizeNamedSearches, weeklyScanBlockedBy, NAMED_SEARCH_CITIES, NAMED_SEARCH_KEYWORDS,
 } = require('../services/seo/geo-grid-named-searches');
 const { KEYWORDS } = require('../services/seo/geo-grid-tracker');
 
@@ -99,5 +99,20 @@ describe('summarizeNamedSearches', () => {
     expect(find(rows, 'bradenton', 'lawn care').current.position).toBe(2);
     expect(find(rows, 'bradenton').current).toBeNull();
     expect(rows.filter((r) => r.current)).toHaveLength(1);
+  });
+});
+
+describe('weeklyScanBlockedBy', () => {
+  const on = (...names) => (gate) => names.includes(gate);
+
+  test('nothing is missing when every switch the Sunday scan needs is on', () => {
+    expect(weeklyScanBlockedBy({ gateOn: on('geoGridTracking', 'seoIntelligence', 'cronJobs'), dataforseoConfigured: true })).toEqual([]);
+  });
+
+  test('names each missing switch, the scheduler master gate and the login included', () => {
+    expect(weeklyScanBlockedBy({ gateOn: on('seoIntelligence', 'cronJobs'), dataforseoConfigured: true })).toEqual(['GATE_GEO_GRID']);
+    expect(weeklyScanBlockedBy({ gateOn: on('geoGridTracking', 'cronJobs'), dataforseoConfigured: true })).toEqual(['GATE_SEO_INTELLIGENCE']);
+    expect(weeklyScanBlockedBy({ gateOn: on('geoGridTracking', 'seoIntelligence'), dataforseoConfigured: true })).toEqual(['GATE_CRON_JOBS']);
+    expect(weeklyScanBlockedBy({ gateOn: on('geoGridTracking', 'seoIntelligence', 'cronJobs'), dataforseoConfigured: false })).toEqual(['the DataForSEO login']);
   });
 });

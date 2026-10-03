@@ -60,7 +60,7 @@ function seoFixture(api, method) {
   if (api === '/admin/seo/refresh-audit?limit=200') return { items: [], pages: [] };
   if (api.startsWith('/admin/seo/rankings-monitor?period=')) return { rows: [], annotations: [], summary: {} };
   if (api === '/admin/seo/geo-grid') return { offices: [{ id: 'bradenton', name: 'Bradenton' }], keywords: ['pest control'], gridSize: 5, scanning: false };
-  if (api === '/admin/seo/geo-grid/named-searches') return { searches: [], gated: true };
+  if (api === '/admin/seo/geo-grid/named-searches') return { searches: [], weeklyScanBlockedBy: ['GATE_GEO_GRID'] };
   if (api.startsWith('/admin/seo/geo-grid/heatmap?')) return { pins: geoPins, center: { lat: 27.49, lng: -82.57 }, gridSize: 5 };
   if (api === '/admin/seo/llm-mentions') return {
     summary: { queriesTracked: 0, platforms: [] }, benchmark: null, entity: null,

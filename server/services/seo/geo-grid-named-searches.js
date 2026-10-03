@@ -13,6 +13,8 @@
 const db = require('../../models/db');
 const GeoGrid = require('./geo-grid-tracker');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { isEnabled } = require('../../config/feature-gates');
+const dataforseo = require('./dataforseo');
 
 // office_id is the WAVES_LOCATIONS key. The 'bradenton' office's GBP is branded
 // Lakewood Ranch, but the priority city it stands for is Bradenton.
@@ -90,6 +92,19 @@ function summarizeNamedSearches(runs, liveKeywords = []) {
   return out;
 }
 
+// Everything the Sunday scan needs, in one place: scheduler.js registers the job
+// only with cronJobs on and runs it only with geoGridTracking on; serpMaps is
+// blocked without seoIntelligence; runScan skips without DataForSEO credentials.
+// Returns what is missing, by the name the owner would set (empty = it runs).
+function weeklyScanBlockedBy({ gateOn = isEnabled, dataforseoConfigured = dataforseo.configured } = {}) {
+  const missing = [];
+  if (!gateOn('geoGridTracking')) missing.push('GATE_GEO_GRID');
+  if (!gateOn('seoIntelligence')) missing.push('GATE_SEO_INTELLIGENCE');
+  if (!gateOn('cronJobs')) missing.push('GATE_CRON_JOBS');
+  if (!dataforseoConfigured) missing.push('the DataForSEO login');
+  return missing;
+}
+
 async function getNamedSearches() {
   const keywords = NAMED_SEARCH_KEYWORDS.map((k) => k.keyword);
   // scan_date is an Eastern calendar date (etDateString), so the cutoff is too.
@@ -113,12 +128,16 @@ async function getNamedSearches() {
       db.raw('avg(map_pack_rank) as avg_rank'),
       db.raw('count(*) filter (where map_pack_rank <= 3) as top3'),
     );
-  return { searches: summarizeNamedSearches(runs, await GeoGrid.getKeywords()) };
+  return {
+    searches: summarizeNamedSearches(runs, await GeoGrid.getKeywords()),
+    weeklyScanBlockedBy: weeklyScanBlockedBy(),
+  };
 }
 
 module.exports = {
   getNamedSearches,
   summarizeNamedSearches,
+  weeklyScanBlockedBy,
   NAMED_SEARCH_CITIES,
   NAMED_SEARCH_KEYWORDS,
   BASELINE_MIN_DAYS,

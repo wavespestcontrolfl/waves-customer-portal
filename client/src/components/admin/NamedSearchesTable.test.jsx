@@ -29,7 +29,7 @@ describe("NamedSearchesTable", () => {
   });
 
   it("shows position, top-3 share and the change since last month", () => {
-    render(<NamedSearchesTable data={{ searches: [search()], gated: false }} />);
+    render(<NamedSearchesTable data={{ searches: [search()], weeklyScanBlockedBy: [] }} />);
     expect(screen.getByText("Pest control in Sarasota")).toBeInTheDocument();
     expect(screen.getByText("3.2")).toBeInTheDocument();
     expect(screen.getByText("60% of 25 points")).toBeInTheDocument();
@@ -41,10 +41,10 @@ describe("NamedSearchesTable", () => {
   it("says the scan is off when nothing has been scanned and the gate is off", () => {
     render(
       <NamedSearchesTable
-        data={{ searches: [search({ current: null, baseline: null, positionChange: null })], gated: true }}
+        data={{ searches: [search({ current: null, baseline: null, positionChange: null })], weeklyScanBlockedBy: ["GATE_GEO_GRID"] }}
       />,
     );
-    expect(screen.getByText(/weekly scan is off \(it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE\)/)).toBeInTheDocument();
+    expect(screen.getByText(/weekly scan is off \(it needs GATE_GEO_GRID\), so there is nothing to show yet/)).toBeInTheDocument();
     expect(screen.getByText("Not scanned yet")).toBeInTheDocument();
   });
 
@@ -53,7 +53,7 @@ describe("NamedSearchesTable", () => {
       <NamedSearchesTable
         data={{
           searches: [search({ keyword: "lawn care", tracked: false, current: null, baseline: null, positionChange: null })],
-          gated: false,
+          weeklyScanBlockedBy: [],
         }}
       />,
     );
@@ -83,7 +83,7 @@ describe("stale rows", () => {
       label: "Pest control in Venice",
       current: { scanDate: "2026-09-20", gridSize: 5, pins: 25, found: 25, position: 6, top3Pct: 8 },
     });
-    render(<NamedSearchesTable data={{ searches: [search(), older], gated: false }} />);
+    render(<NamedSearchesTable data={{ searches: [search(), older], weeklyScanBlockedBy: [] }} />);
     expect(screen.getByText("10/4")).toBeInTheDocument();
     expect(screen.getByText("9/20")).toBeInTheDocument();
   });
@@ -91,13 +91,19 @@ describe("stale rows", () => {
   it("a keyword removed from the scan keeps its numbers and says they will not update", () => {
     const row = search({ keyword: "lawn care", tracked: false });
     expect(scannedText(row)).toBe('10/4, no longer tracked: add "lawn care" under Edit keywords');
-    render(<NamedSearchesTable data={{ searches: [row], gated: false }} />);
+    render(<NamedSearchesTable data={{ searches: [row], weeklyScanBlockedBy: [] }} />);
     expect(screen.getByText("3.2")).toBeInTheDocument();
     expect(screen.getByText(/no longer tracked/)).toBeInTheDocument();
   });
 
   it("says the scan is off even when earlier scans are on the page", () => {
-    render(<NamedSearchesTable data={{ searches: [search()], gated: true }} />);
-    expect(screen.getByText(/weekly scan is off \(it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE\), so these numbers will not update/)).toBeInTheDocument();
+    render(
+      <NamedSearchesTable
+        data={{ searches: [search()], weeklyScanBlockedBy: ["GATE_SEO_INTELLIGENCE", "GATE_CRON_JOBS"] }}
+      />,
+    );
+    expect(
+      screen.getByText(/weekly scan is off \(it needs GATE_SEO_INTELLIGENCE and GATE_CRON_JOBS\), so these numbers will not update/),
+    ).toBeInTheDocument();
   });
 });

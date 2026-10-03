@@ -60,6 +60,8 @@ export default function NamedSearchesTable({ data }) {
   const searches = data?.searches || [];
   if (!searches.length) return null;
   const anyScan = searches.some((s) => s.current);
+  // What the Sunday scan is missing, named by the server (empty = it runs).
+  const blockedBy = data?.weeklyScanBlockedBy || [];
   return (
     <UiCard className="p-6 [margin-bottom:16px]">
       <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
@@ -68,10 +70,10 @@ export default function NamedSearchesTable({ data }) {
       <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
         Average map position across the points around each office where we
         show up. Lower is better.{" "}
-        {data?.gated
-          ? anyScan
-            ? "The weekly scan is off (it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE), so these numbers will not update."
-            : "The weekly scan is off (it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE), so there is nothing to show yet."
+        {blockedBy.length
+          ? `The weekly scan is off (it needs ${blockedBy.join(" and ")}), so ${
+              anyScan ? "these numbers will not update" : "there is nothing to show yet"
+            }.`
           : anyScan
             ? ""
             : "No scan has finished yet."}

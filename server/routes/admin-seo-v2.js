@@ -456,7 +456,7 @@ router.get('/geo-grid/heatmap', async (req, res, next) => {
 // stored scans (no DataForSEO call).
 router.get('/geo-grid/named-searches', async (req, res, next) => {
   try {
-    res.json({ ...(await GeoGridNamedSearches.getNamedSearches()), gated: geoGridGated() });
+    res.json(await GeoGridNamedSearches.getNamedSearches());
   } catch (err) { next(err); }
 });
 
