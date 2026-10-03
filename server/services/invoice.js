@@ -10128,10 +10128,15 @@ const InvoiceService = {
       // which every Bill-To writer takes before the invoice. Taking them here
       // puts this restore on that same order; the reconciliation below is
       // then re-entrant on rows this transaction already holds.
-      if (current.visit_completion_packet_id && current.customer_id) {
-        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+      // The invoice's ownership links are re-read HERE (a plain read, no lock): the outer `current` can predate
+      // a customer merge that moved the invoice and its visit, and locking that stale customer would take the
+      // winner's lock only later, while holding the invoice. The chain below is built from the fresh row.
+      const own = await trx("invoices").where({ id }).first("customer_id", "scheduled_service_id", "service_record_id", "visit_completion_packet_id");
+      if (!own) throw new Error("Invoice not found — re-check and retry");
+      if (own.visit_completion_packet_id && own.customer_id) {
+        await trx("customers").where({ id: own.customer_id }).forShare().first("id");
         const billedMembers = await trx("visit_completion_packet_items")
-          .where({ packet_id: current.visit_completion_packet_id })
+          .where({ packet_id: own.visit_completion_packet_id })
           .pluck("scheduled_service_id");
         if (billedMembers.length) {
           await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
@@ -10140,11 +10145,11 @@ const InvoiceService = {
       // A restored invoice that rides a visit WITHOUT a packet (a service-record or direct
       // visit link) takes the same rows in the same order: the withdrawal below resolves its
       // live owner under them.
-      if (!current.visit_completion_packet_id && current.customer_id
-        && (current.scheduled_service_id || current.service_record_id)) {
+      if (!own.visit_completion_packet_id && own.customer_id
+        && (own.scheduled_service_id || own.service_record_id)) {
         // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To
         // writer takes, BEFORE the invoice row below is updated.
-        await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, current);
+        await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
       }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
@@ -10179,6 +10184,11 @@ const InvoiceService = {
         .returning("*");
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
+      }
+      // The customer is judged again once the invoice itself is held: a merge that committed between the
+      // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.
+      if (String(updated.customer_id) !== String(own.customer_id)) {
+        throw new Error("Invoice ownership changed while unvoiding — re-check and retry");
       }
       // The preserved withdrawal stamp is re-judged against LIVE ownership
       // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped

@@ -851,6 +851,27 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(() => assertInvoiceCollectible(after)).toThrow(/third-party payer/);
   });
 
+  test('unvoid builds its ownership lock chain from the invoice as it is INSIDE the transaction: an invoice a merge moved after the outer read locks the NEW customer', async () => {
+    const InvoiceService = require('../services/invoice');
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const stale = await fixture({ link: 'record', status: 'void', invoice: { stripe_payment_intent_id: 'pi_unvoid_stale' } });
+    const winner = await fixture({ link: 'record' });
+    // The outer read sees the invoice on the loser; while its stale payment session is verified, a merge
+    // commits: invoice, record and visit now belong to the winner.
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async () => {
+      await mockPg('scheduled_services').where({ id: stale.visitId }).update({ customer_id: winner.customerId });
+      await mockPg('service_records').where({ id: stale.recordId }).update({ customer_id: winner.customerId });
+      await mockPg('invoices').where({ id: stale.invoiceId }).update({ customer_id: winner.customerId });
+      return { id: 'pi_unvoid_stale', status: 'canceled', metadata: {} };
+    });
+    const locked = [];
+    const real = Linked.lockLinkedOwnershipRows;
+    jest.spyOn(Linked, 'lockLinkedOwnershipRows').mockImplementation(async (trx, invoice) => { locked.push(String(invoice.customer_id)); return real(trx, invoice); });
+    await InvoiceService.unvoidInvoice(stale.invoiceId);
+    expect(locked).toEqual([String(winner.customerId)]);
+    expect((await invoiceRow(stale.invoiceId)).status).not.toBe('void');
+  });
+
   test('the canonical linkage resolver is exported and agrees with the withdrawal scope', async () => {
     const { linkedScheduledServiceId } = require('../services/invoice');
     const record = await fixture({ link: 'record' });
