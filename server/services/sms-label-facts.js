@@ -1043,8 +1043,9 @@ function hasUnknownShortWord(text, { namesExempt = false, maxWords = 4 } = {}) {
   if (isPureReaction(c)) return false;
   const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
   if (!words.length || words.length > maxWords) return false;
-  return words.some((raw) => {
-    if (namesExempt && /^\p{Lu}/u.test(raw)) return false;
+  return words.some((raw, i) => {
+    // 'after-first': only a capitalized word after the first is a name (a sentence's first word is always capitalized)
+    if (namesExempt && /^\p{Lu}/u.test(raw) && (namesExempt !== 'after-first' || i > 0)) return false;
     const w = raw.toLowerCase();
     return !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w));
   });

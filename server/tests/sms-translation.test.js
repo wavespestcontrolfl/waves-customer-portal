@@ -569,6 +569,22 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
   });
 
+  test('a quote-first reaction (Japanese) is left out of the vote; a name after the first word stays English', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'Hi Nadia, see you Wednesday between 12 and 2.' }]);
+    mockEarlier.mockResolvedValueOnce([
+      { message_body: '「Hi Nadia, see you Wednesday between 12 and 2.」にいいねしました' }, { message_body: '「Hi Nadia, see you Wednesday」にいいねしました' },
+      { message_body: 'Thanks Nadia' }, { message_body: 'Ok see you then' },
+    ]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
+  test('a mistranslated "reaction" is held by the meaning check, never skipped', async () => {
+    const quoted = 'Hi Nadia, we moved your service to Wednesday.';
+    scriptModels({ inbound: { is_english: false, language: 'Russian', language_code: 'ru', english: `Liked «${quoted}»` }, inboundMeaning: { same_meaning: false, differences: ['the original says it does NOT work'], original_numbers: [] } });
+    expect(await runTranslationTrial({ inboundMessage: `Не подходит «${quoted}»`, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'meaning_changed_in_inbound_translation' });
+  });
+
   test('an ordinary reply with a short quote is not a reaction; it still votes', async () => {
     mockOutbound.mockResolvedValueOnce([{ message_body: 'Which day works: Thursday or Friday?' }]);
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Dije “jueves”' }, { message_body: 'Vale' }, { message_body: 'Ok thanks' }]);
