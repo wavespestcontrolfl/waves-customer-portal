@@ -55,6 +55,7 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
+import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -216,18 +217,6 @@ function reportFlowFields(service, { stationMapOff = false } = {}) {
   };
 }
 
-// Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
-// flag): `treeShrubFastCompleteEnabled` rides the schedule payload per
-// service, true only when the gate is live AND this tech has the flag. An
-// open tree & shrub visit then opens the one-screen sheet instead of the
-// Dispatch typed-completion deep link. Flag off, or any other service, routes
-// exactly as before.
-function isTreeShrubFastCompleteEligible(service) {
-  return service?.treeShrubFastCompleteEnabled === true
-    && service?.completionProfile?.findingsType === 'tree_shrub'
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
-
 // Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
 // `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
 // open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
@@ -302,7 +291,8 @@ async function techRequest(path, options = {}) {
   const res = await fetch(`${API}/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // A FormData body (a recorded clip) sets its own multipart boundary.
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `Bearer ${token}`,
       ...(options.headers || {}),
     },
@@ -999,6 +989,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+                onGateChanged={fetchSchedule}
               /></div>}
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
@@ -1295,6 +1286,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onToggle={() => toggleStop(stop)}
                 onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
+                onGateChanged={fetchSchedule}
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedVisit(s)
@@ -1875,7 +1867,7 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine, onGateChanged }) {
   // The busy guard lives in the list's toggleStop (any header, not only
   // this row's, must leave a panel with a text or bridge in flight mounted).
   const toggle = () => onToggle();
@@ -1979,6 +1971,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           techLine={techLine}
           onBusyChange={onBusyChange}
           request={techRequest}
+          onGateChanged={onGateChanged}
         />
       )}
     </div>

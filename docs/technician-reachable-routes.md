@@ -58,7 +58,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/dispatch/:serviceId/completion-profile` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/completion-status` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/default-products` | admin-dispatch |
-| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/lane-facts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/lawn-reservice/fast-context` | admin-dispatch |
 | PATCH | `/api/admin/dispatch/:serviceId/note` | admin-dispatch |
@@ -134,6 +134,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/intelligence-bar/threads/:id` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/threads/latest` | admin-intelligence-bar |
 | GET | `/api/admin/inventory` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/inventory/:id/label-rate-review` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/:id/label-review` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/:productId/movements` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/aliases` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
@@ -175,6 +176,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/lawn-assessment/history/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/latest/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/service/:serviceId` | admin-lawn-assessment |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries` | admin-neighborhood-access |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries/:entryId/wrong` | admin-neighborhood-access |
 | GET | `/api/admin/notifications` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/done` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/read` | admin-notifications |
@@ -454,6 +457,9 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/inventory` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | DELETE | `/api/admin/inventory/:id` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/inventory/:id` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/:id/label-rate-review/decision` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/:id/label-rate-review/extract` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/:id/label-rate-review/revoke` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/:id/label-review/decision` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/:id/label-review/extract` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/:id/label-review/revoke` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
