@@ -1133,6 +1133,16 @@ function buildCadastralRecord(parcel, address) {
 // house-number match (an interpolated point can land on a neighbor, and a
 // wrong parcel at county weight is far worse than the address search).
 // Centroid/approximate results stay excluded.
+// The county retrieval budget, and the most a point query can get out of it
+// at the start of a lookup — shared with the replay harness so it waits
+// exactly as long as the live call would.
+function countyPropertyTimeoutMs() {
+  return positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+}
+function livePointQueryBudgetMs() {
+  return Math.min(parcelGisTimeoutMs(), countyPropertyTimeoutMs());
+}
+
 function parcelGisPrecision(geoContext) {
   if (!geoContext
       || geoContext.partialMatch
@@ -2327,7 +2337,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
   const searchAddress = canonicalLookupAddress(address, geoContext);
-  const countyTimeoutMs = positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const countyTimeoutMs = countyPropertyTimeoutMs();
   const t0 = Date.now();
   // Interactive estimating gives each county retrieval its own attempt.
   // A slow GIS request must not consume the address-search fallback window.
@@ -5655,6 +5665,7 @@ module.exports = {
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
     applyGisParcelGuards,
+    livePointQueryBudgetMs,
     addressHasSubpremise,
     FL_FLOOR_RE,
     normalizeCountyStreetLine,

@@ -526,7 +526,7 @@ describe('guard gates at startup', () => {
     jest.isolateModules(() => {
       jest.doMock('../services/property-lookup/ai-property-lookup', () => ({
         auditAddressHouseNumber: async () => null,
-        _private: { parcelGisPrecision: () => 'rooftop', applyGisParcelGuards: () => ({}) },
+        _private: { parcelGisPrecision: () => 'rooftop', applyGisParcelGuards: () => ({}), livePointQueryBudgetMs: () => 3500 },
       }));
       jest.doMock('../services/property-lookup/county-parcel-gis', () => ({
         lookupCountyParcelByPoint: async () => null,
@@ -546,6 +546,8 @@ describe('guard gates at startup', () => {
       jest.dontMock('../services/property-lookup/county-parcel-gis');
     }
     expect(logs.find((l) => l.includes('parcel-guard gates'))).toMatch(/GATE_CONDO_UNIT_FOLIO=on/);
+    // Addresses + coordinates: owner-only file.
+    expect(fs.statSync(outFile).mode & 0o777).toBe(0o600);
     const [header, row] = fs.readFileSync(outFile, 'utf8').trim().split('\n').map((l) => l.split('\t'));
     expect(row[header.indexOf('lat')]).toBe('27.4');
     expect(row[header.indexOf('lng')]).toBe('-82.5');
@@ -640,6 +642,22 @@ describe('county point lookup diag on an exhausted budget', () => {
     } finally {
       global.fetch = realFetch;
       Date.now = realNow;
+    }
+  });
+});
+
+describe('live point budget and private output', () => {
+  test('the point budget is the parcel-GIS timeout capped by the county budget', () => {
+    const { _private } = require('../services/property-lookup/ai-property-lookup');
+    const saved = { p: process.env.PARCEL_GIS_TIMEOUT_MS, c: process.env.COUNTY_PROPERTY_TIMEOUT_MS };
+    try {
+      process.env.PARCEL_GIS_TIMEOUT_MS = '9000';
+      process.env.COUNTY_PROPERTY_TIMEOUT_MS = '4000';
+      expect(_private.livePointQueryBudgetMs()).toBe(4000);
+    } finally {
+      for (const [k, v] of [['PARCEL_GIS_TIMEOUT_MS', saved.p], ['COUNTY_PROPERTY_TIMEOUT_MS', saved.c]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
     }
   });
 });

@@ -376,8 +376,8 @@ async function pointStep(address, geo, countyHint, deps) {
   const diag = { errors: [] };
   let parcel = null;
   try {
-    // The live point step's own budget (parcelGisTimeoutMs; live also caps it
-    // by what is left of the county budget, which only shortens it).
+    // The live point step's own budget (livePointQueryBudgetMs: the parcel-GIS
+    // timeout capped by the county budget, as at the start of a live lookup).
     parcel = await deps.lookupCountyParcelByPoint(geo.lat, geo.lng, { county: countyHint ?? undefined, diag, timeoutMs: deps.pointTimeoutMs });
   } catch (err) {
     diag.errors.push({ county: countyHint, aborted: false, error: errText(err) });
@@ -680,7 +680,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     // Stored county text varies ("MANATEE", "Manatee County"); the live
     // lookup canonicalizes it the same way before choosing a layer.
     normalizeCountyName: countyGis.normalizeCountyName,
-    pointTimeoutMs: require(path.join(__dirname, '..', 'services', 'property-lookup', 'parcel-gis')).parcelGisTimeoutMs(),
+    // The live point budget: min(parcel-GIS timeout, county budget).
+    pointTimeoutMs: aiLookup._private.livePointQueryBudgetMs(),
   };
 
   const results = await runReplay(rows, deps, {
@@ -694,7 +695,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 
   const outPath = args.out || defaultOutPath();
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, formatTsv(results));
+  // Addresses and exact coordinates: owner-only, whatever the umask, and an
+  // existing file named by --out is tightened before it is overwritten.
+  fs.writeFileSync(outPath, formatTsv(results), { mode: 0o600 });
+  fs.chmodSync(outPath, 0o600);
   const summary = summarizeResults(results);
   console.log('');
   console.log(formatSummary(summary));
