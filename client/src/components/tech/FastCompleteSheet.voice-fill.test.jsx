@@ -68,8 +68,17 @@ const FILL = {
 
 function makeRequest({ fill = FILL, fillError = null } = {}) {
   const calls = [];
+  let fills = 0;
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
+    // The clip goes through the sheet's own request (multipart).
+    // `request.onFill(n)` may answer the nth clip itself with { status, body }.
+    if (path.endsWith('/voice-fill/clip')) {
+      fills += 1;
+      const answer = request.onFill?.(fills) || (fillError ? { status: fillError.status || 502, body: { error: 'x' } } : { status: 200, body: fill });
+      if (answer.status >= 200 && answer.status < 300) return answer.body;
+      throw Object.assign(new Error(answer.body?.error || `Request failed (${answer.status})`), { status: answer.status, code: answer.body?.code });
+    }
     if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: CATALOG };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
@@ -78,16 +87,6 @@ function makeRequest({ fill = FILL, fillError = null } = {}) {
     return {};
   });
   request.calls = calls;
-  // The clip goes by fetch (multipart): the same call log, the same fill.
-  // `request.onFill(n)` may answer the nth clip itself with { status, body }.
-  let fills = 0;
-  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
-    calls.push({ path: String(url).replace(/^\/api/, ''), options });
-    fills += 1;
-    const own = request.onFill?.(fills);
-    const answer = own || (fillError ? { status: fillError.status || 502, body: { error: 'x' } } : { status: 200, body: fill });
-    return { ok: answer.status >= 200 && answer.status < 300, status: answer.status, json: async () => answer.body };
-  }));
   return request;
 }
 

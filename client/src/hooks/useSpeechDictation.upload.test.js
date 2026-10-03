@@ -260,6 +260,17 @@ describe("useSpeechDictation upload fallback", () => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
     });
 
+    it("never starts a clip on a page hidden while the mic prompt was open", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(track.stop).toHaveBeenCalled());
+      expect(result.current.listening).toBe(false);
+      expect(clipHandler).not.toHaveBeenCalled();
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    });
+
     it("stops recording on pagehide", async () => {
       const clipHandler = vi.fn(async () => {});
       const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));

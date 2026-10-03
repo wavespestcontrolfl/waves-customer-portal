@@ -301,7 +301,8 @@ async function techRequest(path, options = {}) {
   const res = await fetch(`${API}/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // A FormData body (a recorded clip) sets its own multipart boundary.
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `Bearer ${token}`,
       ...(options.headers || {}),
     },

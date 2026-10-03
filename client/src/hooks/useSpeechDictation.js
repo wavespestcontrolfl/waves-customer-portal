@@ -212,6 +212,13 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       doneStarting();
       return;
     }
+    if (clipMode && typeof document !== "undefined" && document.visibilityState === "hidden") {
+      // Hidden while the permission prompt was open (locked phone, another
+      // tab): a clip never starts behind a page the tech is not looking at.
+      stream.getTracks().forEach((t) => t.stop());
+      doneStarting();
+      return;
+    }
     const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
     const mimeType = preferred.find(
       (t) => typeof window.MediaRecorder.isTypeSupported === "function" && window.MediaRecorder.isTypeSupported(t),

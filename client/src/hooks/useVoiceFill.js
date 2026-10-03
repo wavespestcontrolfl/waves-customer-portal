@@ -18,12 +18,11 @@ export const VOICE_FILL_ERROR = "Couldn't fill from your words — tap the answe
 export const VOICE_FILL_NOTHING_HEARD = "Didn't catch anything — tap the mic and try again";
 export const VOICE_FILL_TOO_LONG = 'That was too long to fill at once — say it in shorter pieces';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const clipExtension = (type) => (type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : type.includes('mpeg') ? 'mp3' : 'webm');
 
 const IDLE = { status: 'idle', result: null, error: '', unavailable: false };
 
-export default function useVoiceFill({ serviceId, sheet }) {
+export default function useVoiceFill({ request, serviceId, sheet }) {
   const [state, setState] = useState(IDLE);
   const mounted = useRef(true);
   useEffect(() => {
@@ -41,24 +40,29 @@ export default function useVoiceFill({ serviceId, sheet }) {
       form.append('sheet', sheet);
       if (Number.isFinite(durationSeconds) && durationSeconds > 0) form.append('duration_seconds', String(Math.round(durationSeconds)));
       form.append('audio', blob, `voice-fill.${clipExtension(type)}`);
-      const token = localStorage.getItem('waves_admin_token');
-      const response = await fetch(`${API_BASE}/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/clip`, {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        body: form,
-      });
-      const result = await response.json().catch(() => null);
+      // The sheet's own request: the page's API origin and sign-in, with the
+      // form sent as multipart. A refusal arrives as a thrown { status, code }.
+      let result;
+      try {
+        result = await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/clip`, { method: 'POST', body: form });
+      } catch (err) {
+        if (!mounted.current) return null;
+        // Gate off: 404 { enabled: false }. Not an error.
+        if (err?.status === 404) {
+          setState({ ...IDLE, unavailable: true });
+          return null;
+        }
+        if (err?.status === 413 && err?.code === 'clip_too_long') {
+          setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_TOO_LONG }));
+          return null;
+        }
+        throw err;
+      }
       if (!mounted.current) return null;
-      // Gate off: 404 { enabled: false }. Not an error.
-      if (response.status === 404 || result?.enabled === false) {
+      if (!result || result.enabled === false) {
         setState({ ...IDLE, unavailable: true });
         return null;
       }
-      if (response.status === 413 && result?.code === 'clip_too_long') {
-        setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_TOO_LONG }));
-        return null;
-      }
-      if (!response.ok || !result) throw new Error(`voice fill failed (${response.status})`);
       if (result.heardNothing) {
         setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_NOTHING_HEARD }));
         return null;
@@ -69,7 +73,7 @@ export default function useVoiceFill({ serviceId, sheet }) {
       if (mounted.current) setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_ERROR }));
       return null;
     }
-  }, [serviceId, sheet]);
+  }, [request, serviceId, sheet]);
 
   return { ...state, fillFromClip };
 }

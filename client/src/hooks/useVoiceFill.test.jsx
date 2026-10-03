@@ -6,25 +6,33 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import useVoiceFill, { VOICE_FILL_ERROR, VOICE_FILL_NOTHING_HEARD, VOICE_FILL_TOO_LONG } from './useVoiceFill';
 
-const setup = () => renderHook(() => useVoiceFill({ serviceId: 'svc-1', sheet: 'pest_reservice' }));
+// The sheet's request (TechHomePage techRequest): resolves to the body, throws { status, code } on a refusal.
+let request;
+const setup = () => renderHook(() => useVoiceFill({ request, serviceId: 'svc-1', sheet: 'pest_reservice' }));
 
 describe('useVoiceFill.fillFromClip', () => {
-  afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); });
+  afterEach(() => { request = undefined; });
   const clip = () => new Blob(['clip'], { type: 'audio/mp4' });
-  const answer = (status, body) => vi.stubGlobal('fetch', vi.fn(async () => ({ ok: status >= 200 && status < 300, status, json: async () => body })));
+  const answer = (status, body) => {
+    request = vi.fn(async () => {
+      if (status >= 200 && status < 300) return body;
+      throw Object.assign(new Error(body?.error || 'x'), { status, code: body?.code });
+    });
+  };
 
   test('sends the recording (never words) to the clip route and hands back the fill', async () => {
-    localStorage.setItem('waves_admin_token', 'staff-jwt');
     const fill = { enabled: true, products: [], visit: {}, customerNote: '', officeNote: '', unclear: [] };
     answer(200, fill);
     const { result } = setup();
     let returned;
     await act(async () => { returned = await result.current.fillFromClip(clip(), 6.4); });
     expect(returned).toEqual(fill);
-    const [url, options] = fetch.mock.calls[0];
-    expect(url).toBe('/api/admin/dispatch/svc-1/fast-complete/voice-fill/clip');
+    // the page's own request builds the URL and sign-in: the hook passes the path and the form
+    const [path, options] = request.mock.calls[0];
+    expect(path).toBe('/admin/dispatch/svc-1/fast-complete/voice-fill/clip');
     expect(options.method).toBe('POST');
-    expect(options.headers.Authorization).toBe('Bearer staff-jwt');
+    expect(options.headers).toBeUndefined();
+    expect(options.body).toBeInstanceOf(FormData);
     expect(options.body.get('sheet')).toBe('pest_reservice');
     expect(options.body.get('duration_seconds')).toBe('6');
     expect(options.body.get('audio').name).toBe('voice-fill.mp4');
@@ -63,21 +71,21 @@ describe('useVoiceFill.fillFromClip', () => {
   });
 
   test('an empty recording asks for nothing', async () => {
-    vi.stubGlobal('fetch', vi.fn());
+    request = vi.fn();
     const { result } = setup();
     await act(async () => { expect(await result.current.fillFromClip(new Blob([]), 0)).toBeNull(); });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
   });
 });
 
 test('is filling while the clip is out', async () => {
   let finish;
-  vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { finish = resolve; })));
+  request = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
   const { result } = setup();
   let pending;
   act(() => { pending = result.current.fillFromClip(new Blob(['clip'], { type: 'audio/webm' }), 3); });
   expect(result.current.status).toBe('filling');
-  await act(async () => { finish({ ok: true, status: 200, json: async () => ({ enabled: true, products: [] }) }); await pending; });
+  await act(async () => { finish({ enabled: true, products: [] }); await pending; });
   expect(result.current.status).toBe('done');
   vi.unstubAllGlobals();
 });

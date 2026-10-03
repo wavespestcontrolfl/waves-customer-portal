@@ -700,6 +700,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   }), [service?.serviceType]);
   const voice = useVoiceFillSheet({
     enabled: voiceFillEnabled,
+    request,
     serviceId: service?.id,
     sheet: { ops: voiceOps, ctx, products, form, setForm, chooseMethod, appendNote },
   });

@@ -22,8 +22,8 @@ export const OFFICE_NOTE_MAX_CHARS = 800;
 // The sheet's voice-fill state: Checks, Heard lines, the office note, and
 // `apply`, which turns one fill into taps. `sheet` carries the sheet's own
 // pieces: { ops, ctx, products, form, setForm, chooseMethod, appendNote }.
-export function useVoiceFillSheet({ enabled, serviceId, sheet }) {
-  const { fillFromClip, status, error, unavailable } = useVoiceFill({ serviceId, sheet: VOICE_SHEET });
+export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
+  const { fillFromClip, status, error, unavailable } = useVoiceFill({ request, serviceId, sheet: VOICE_SHEET });
   const [checks, setChecks] = useState([]);
   // What the fill set, until the tech taps ✓ or changes it (one tap per product,
   // visit taps too: owner 2026-10-02).
