@@ -272,6 +272,10 @@ async function runSelfAudit(depsIn = {}) {
   for (const call of calls) {
     const gateBaselines = gateCheckBaselines(call, wavesPromiseCallIds);
     let verdict;
+    // The model that actually answered (createDeepMessage can fall back to
+    // another provider): the call-incident adjudicator needs it to pick a
+    // second reader on a DIFFERENT provider.
+    let auditorModel = null;
     try {
       // Blind audit: the model sees ONLY the transcript. Leaking production's
       // status would bias the auditor toward the very label being audited.
@@ -280,6 +284,7 @@ async function runSelfAudit(depsIn = {}) {
         system: AUDIT_PROMPT,
         messages: [{ role: 'user', content: `${callDirectionBlock(call.direction)}\nTranscript:\n${call.transcription.slice(0, 5000)}` }],
       });
+      auditorModel = res?.model || null;
       const text = (res?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
@@ -318,7 +323,7 @@ async function runSelfAudit(depsIn = {}) {
           old_value: String(prod[f]),
           new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
-          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition }),
+          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel }),
         })
         .onConflict(['call_log_id', 'audit_source', 'category', 'field'])
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])

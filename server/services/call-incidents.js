@@ -7,13 +7,15 @@
  * call_audit_findings. One model disagreeing is a lead, not a mistake, so
  * each finding is adjudicated here under the same two-model rule as texts:
  *
- *   confirmed_mistake — a second model on a DIFFERENT provider (the OpenAI
- *     leg of TEXT_POLICIES.fastStructured; the auditor is Anthropic), reading
+ *   confirmed_mistake — a second model on a DIFFERENT provider from the one
+ *     that actually answered the audit (its served model is stored on the
+ *     finding; the fastStructured leg on the other provider), reading
  *     the same transcript blind with the auditor's own prompt, reaches the
  *     auditor's answer for that field, AND both readers' supporting excerpts
  *     are words the transcript really contains.
- *   lead — anything else (the second reader sides with production, its
- *     excerpt is not in the transcript, the auditor's excerpt is not).
+ *   lead — anything else (the second reader sides with production, an
+ *     excerpt is not in the transcript, the auditor's provider is unknown,
+ *     or the call is longer than the readers are shown).
  *
  * A second reader that cannot be reached stores nothing (retried next run).
  * The typed-decision answers (TypeSafe Jev, Cloudflare Clef) for the same
@@ -62,6 +64,19 @@ function excerptInTranscript(excerpt, transcript) {
 }
 
 /**
+ * The provider behind a served model id, from the model catalog (an exact
+ * id, else the catalog id it extends, e.g. a dated snapshot). Unknown → null.
+ */
+function providerForModel(model) {
+  if (!model) return null;
+  const { MODEL_CATALOG } = require('../config/models');
+  const id = String(model);
+  if (MODEL_CATALOG[id]) return MODEL_CATALOG[id].provider || null;
+  const base = Object.keys(MODEL_CATALOG).filter((k) => id.startsWith(k)).sort((a, b) => b.length - a.length)[0];
+  return base ? MODEL_CATALOG[base].provider || null : null;
+}
+
+/**
  * The two-model rule for one finding. `auditorValue` is the auditor's answer
  * for `field` (the finding's new_value); `second` is the second reader's
  * parsed JSON (null = answered but unusable).
@@ -89,17 +104,18 @@ function parseReaderJson(text) {
 }
 
 /**
- * Ask the second reader: the OpenAI leg of fastStructured, alone (no
- * fallback — the auditor is already Anthropic). Returns { ok, answer,
- * provider, model } or { ok: false }.
+ * Ask the second reader: the fastStructured leg on the OTHER provider from
+ * the auditor's, alone (no fallback — a fallback could land on the
+ * auditor's own provider). Returns { ok, answer, provider, model } or
+ * { ok: false }.
  */
-async function askSecondReader(call) {
+async function askSecondReader(call, auditorProvider) {
   const { dispatchWithFallback } = require('./llm/call');
   const MODELS = require('../config/models');
   const { AUDIT_PROMPT, callDirectionBlock } = require('./call-self-audit');
   const policy = MODELS.TEXT_POLICIES.fastStructured;
-  const leg = [policy.primary, policy.fallback].find((l) => l && l.provider === 'openai');
-  if (!leg) return { ok: false, reason: 'no_openai_leg' };
+  const leg = [policy.primary, policy.fallback].find((l) => l && l.provider !== auditorProvider);
+  if (!leg) return { ok: false, reason: 'no_other_provider_leg' };
   const routed = await dispatchWithFallback(
     { name: policy.name, primary: leg },
     {
@@ -129,6 +145,9 @@ async function typedSignals(dbi, callId, field) {
 }
 
 const isUniqueViolation = (err) => err && err.code === '23505';
+const safeJson = (t) => {
+  try { return JSON.parse(t) || {}; } catch { return {}; }
+};
 
 /**
  * Nightly: every self-audit finding from the last LOOKBACK_DAYS not yet
@@ -154,7 +173,7 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .orderBy('f.created_at', 'asc')
     .limit(batchLimit)
     .select(
-      'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category',
+      'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',
       'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at', 'c.ai_extraction_prompt_version'
     );
 
@@ -166,14 +185,32 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
       const auditorValue = row.new_value === 'true';
       // A row whose two values agree is not a disagreement (defensive).
       if (prodValue === auditorValue) continue;
-      const reading = await reader(row);
-      if (!reading.ok) {
-        logger.warn(`[call-incidents] second reader unavailable for finding ${String(row.finding_id).slice(0, 8)} (${reading.reason}); retried next run`);
-        continue;
+      const detail = typeof row.detail === 'string' ? safeJson(row.detail) : (row.detail || {});
+      const auditorProvider = providerForModel(detail.auditor_model);
+      // Two cases are leads without a second reading (no call made): the
+      // auditor's provider is unknown, so a second reader could share it; or
+      // the call is longer than what both readers are shown, so a
+      // disagreement may sit in the part neither read.
+      const skipRule = !auditorProvider ? 'auditor_provider_unknown'
+        : String(row.transcription || '').length > TRANSCRIPT_CHARS ? 'transcript_truncated' : null;
+      let reading = { ok: true, provider: null, model: null, answer: null };
+      if (!skipRule) {
+        reading = await reader(row, auditorProvider);
+        if (!reading.ok) {
+          logger.warn(`[call-incidents] second reader unavailable for finding ${String(row.finding_id).slice(0, 8)} (${reading.reason}); retried next run`);
+          continue;
+        }
       }
-      const decision = decideCallFinding({
-        field: row.field, auditorValue, auditorExcerpt: row.transcript_excerpt, second: reading.answer, transcript: row.transcription,
-      });
+      const decision = skipRule
+        ? { disposition: 'lead', rule: skipRule, auditorExcerptVerified: excerptInTranscript(row.transcript_excerpt, row.transcription), secondValue: null, secondExcerptVerified: false }
+        : decideCallFinding({
+          field: row.field, auditorValue, auditorExcerpt: row.transcript_excerpt, second: reading.answer, transcript: row.transcription,
+        });
+      // Belt: the two readers must be on different providers to confirm.
+      if (decision.disposition === 'confirmed_mistake' && reading.provider === auditorProvider) {
+        decision.disposition = 'lead';
+        decision.rule = 'same_provider';
+      }
       const signals = await typedSignals(dbi, row.call_id, row.field);
       const base = {
         area: AREA,
@@ -193,7 +230,7 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
         rule: decision.rule,
         field: row.field,
         production: prodValue,
-        auditor: { value: auditorValue, excerpt_verified: decision.auditorExcerptVerified },
+        auditor: { value: auditorValue, model: detail.auditor_model || null, provider: auditorProvider, excerpt_verified: decision.auditorExcerptVerified },
         second: { provider: reading.provider, model: reading.model, value: decision.secondValue, excerpt_verified: decision.secondExcerptVerified },
         typed_signals: signals,
         ...extra,
@@ -248,6 +285,7 @@ async function proposeCallFixes({ dbi = db, now = new Date() } = {}) {
 
 module.exports = {
   AREA,
+  providerForModel,
   FIELDS,
   FAILURE_MODES,
   failureModeFor,

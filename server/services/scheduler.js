@@ -3393,7 +3393,7 @@ function initScheduledJobs() {
   // DAILY 4:10AM ET — Call incident adjudicator (correction loop for calls,
   // Part B wave 1). After the 03:40 self-audit: each new field disagreement
   // becomes an ai_incidents row, confirmed only when a second model on the
-  // OpenAI leg reaches the auditor's answer blind. Shadow data; dark behind
+  // other provider from the auditor's reaches the auditor's answer blind. Shadow data; dark behind
   // GATE_CALL_INCIDENTS (needs GATE_CALL_SELF_AUDIT); CALL_INCIDENT_BATCH=0
   // stops it. The gate is read inside the job.
   // =========================================================================

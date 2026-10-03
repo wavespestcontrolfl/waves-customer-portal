@@ -35,6 +35,14 @@ describe('the two-model rule for a call finding', () => {
     expect(decide({ second: second({ appointment_agreed: 'yes' }) })).toMatchObject({ disposition: 'lead', rule: 'second_unusable' });
   });
 
+  test('a served model resolves to its provider through the catalog; unknown is null', () => {
+    expect(calls.providerForModel('claude-opus-5-5')).toBe('anthropic');
+    expect(calls.providerForModel('claude-opus-5-5-20261001')).toBe('anthropic');
+    expect(calls.providerForModel('gpt-6-luna')).toBe('openai');
+    expect(calls.providerForModel('mystery-model')).toBeNull();
+    expect(calls.providerForModel(null)).toBeNull();
+  });
+
   test('excerpts are matched as words of the transcript, ignoring speaker labels and case, and must be long enough', () => {
     expect(calls.excerptInTranscript('caller: thursday AT 2 works', TRANSCRIPT)).toBe(true);
     expect(calls.excerptInTranscript('Thursday', TRANSCRIPT)).toBe(false);
@@ -73,7 +81,9 @@ describe('the two-model rule for a call finding', () => {
     const id = randomUUID();
     await database('call_audit_findings').insert({
       id, call_log_id: callId, audit_source: 'self_audit', category: 'field_drift', field: 'appointment_agreed',
-      old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'), ...over,
+      old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'),
+      // The self-audit stores the model that actually answered.
+      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5' }), ...over,
     });
     return id;
   };
@@ -90,7 +100,7 @@ describe('the two-model rule for a call finding', () => {
     await database.raw(`CREATE TABLE ??.call_log (id uuid PRIMARY KEY, direction varchar(20), transcription text,
       created_at timestamptz, ai_extraction_prompt_version varchar(80))`, [schema]);
     await database.raw(`CREATE TABLE ??.call_audit_findings (id uuid PRIMARY KEY, call_log_id uuid, audit_source varchar(40),
-      category varchar(40), field varchar(40), old_value text, new_value text, transcript_excerpt text, created_at timestamptz)`, [schema]);
+      category varchar(40), field varchar(40), old_value text, new_value text, transcript_excerpt text, detail jsonb, created_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.decision_reviews (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_type varchar(30),
       subject_id uuid, question_id varchar(60), provider varchar(30), package_id varchar(80), jev_answer jsonb)`, [schema]);
   });
@@ -118,7 +128,7 @@ describe('the two-model rule for a call finding', () => {
       surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', disposition: 'confirmed_mistake', prompt_version: 'v2-extract-abc',
     });
     expect(row.produced_at.toISOString()).toBe('2026-10-02T15:00:00.000Z');
-    expect(row.adjudication).toMatchObject({ rule: 'two_models', production: false, auditor: { value: true, excerpt_verified: true }, second: { provider: 'openai', value: true } });
+    expect(row.adjudication).toMatchObject({ rule: 'two_models', production: false, auditor: { value: true, provider: 'anthropic', excerpt_verified: true }, second: { provider: 'openai', value: true } });
     expect(row.adjudication.typed_signals).toEqual([expect.objectContaining({ provider: 'typesafe', package: 'call_judge.v2' })]);
     // The summary names the field and the values, never the transcript.
     expect(row.summary).not.toMatch(/kitchen|Thursday/);
@@ -144,6 +154,27 @@ describe('the two-model rule for a call finding', () => {
     await finding(callId, { created_at: new Date('2026-10-03T07:41:00Z') });
     const out = await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(out.byDisposition).toEqual({ confirmed_mistake: 1, duplicate: 1 });
+  });
+
+  test('the second reader is on the other provider; unknown provenance or a truncated call stays a lead with no call made', async () => {
+    const anthropicAudit = await finding(await call());
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect(agreeing).toHaveBeenLastCalledWith(expect.objectContaining({ finding_id: anthropicAudit }), 'anthropic');
+
+    // The deep call fell back to OpenAI: the reader is asked to avoid OpenAI,
+    // and a reader that answers from OpenAI anyway never confirms.
+    const openaiAudit = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'gpt-6-luna' }) });
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect(agreeing).toHaveBeenLastCalledWith(expect.objectContaining({ finding_id: openaiAudit }), 'openai');
+    expect(await database('ai_incidents').where({ evidence_id: openaiAudit }).first()).toMatchObject({ disposition: 'lead', adjudication: expect.objectContaining({ rule: 'same_provider' }) });
+
+    agreeing.mockClear();
+    const unknown = await finding(await call(), { detail: JSON.stringify({}) });
+    const long = await finding(await call({ transcription: `${TRANSCRIPT}\n${'Agent: more.\n'.repeat(500)}` }));
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect(agreeing).not.toHaveBeenCalled();
+    expect((await database('ai_incidents').where({ evidence_id: unknown }).first()).adjudication.rule).toBe('auditor_provider_unknown');
+    expect((await database('ai_incidents').where({ evidence_id: long }).first()).adjudication.rule).toBe('transcript_truncated');
   });
 
   test('old findings, other audit sources and unknown fields are not read', async () => {
