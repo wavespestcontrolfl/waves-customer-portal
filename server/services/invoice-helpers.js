@@ -215,15 +215,20 @@ function invoiceWithdrawnFromCustomer(invoice) {
  * terminalize that invoice, hand back credit the replacement still consumes,
  * or cancel prepay coverage the replacement is paying for.
  *
- * The invoice row is the authority: it owns-by-payment when its own
- * stripe_payment_intent_id equals the refunded PI (pay-page / saved-card
- * charges), OR its own stripe_charge_id equals the refunded charge (a
- * charge-only reconciled payment carries no PI — the reconcile route stamps
- * invoices.stripe_charge_id and leaves any stale PI alone, so a PI mismatch
- * alone must not disown it). An invoice pointing at neither (including one
- * whose pointers a dispute reopen cleared) is not owned by this payment. A
- * payment with no Stripe identity at all has nothing to compare, so it keeps
- * the legacy answer.
+ * The invoice row is the authority, and the CHARGE is the stronger pointer.
+ * When the invoice carries a stripe_charge_id and the refunded payment has a
+ * charge id, they must be equal: the reconcile route stamps
+ * invoices.stripe_charge_id for a charge-only payment and deliberately leaves
+ * any older PaymentIntent on the row, so a replacement charge can sit beside
+ * the ORIGINAL payment's stale PI — matching on that PI would hand the
+ * replacement-paid invoice back to the original. Every settle write restamps
+ * the charge pointer (to the new charge, or to null), so a non-null one is
+ * always the current owner. Only when the charges cannot be compared (the
+ * invoice has none yet — a refund arriving before settlement — or the payment
+ * has none) does the PaymentIntent decide. An invoice pointing at neither
+ * (including one whose pointers a dispute reopen cleared) is not owned by
+ * this payment. A payment with no Stripe identity at all has nothing to
+ * compare, so it keeps the legacy answer.
  */
 function refundedPaymentOwnsInvoice(invoice, { paymentIntentId, chargeId } = {}) {
   if (!invoice) return false;
@@ -232,7 +237,8 @@ function refundedPaymentOwnsInvoice(invoice, { paymentIntentId, chargeId } = {})
   if (!pi && !charge) return true;
   const invoicePi = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
   const invoiceCharge = invoice.stripe_charge_id ? String(invoice.stripe_charge_id) : null;
-  return (!!pi && invoicePi === pi) || (!!charge && invoiceCharge === charge);
+  if (charge && invoiceCharge) return invoiceCharge === charge;
+  return !!pi && invoicePi === pi;
 }
 
 // Codex round-23 P1: ONE definition of "a collectible invoice the HOMEOWNER owes" shared by the SMS context

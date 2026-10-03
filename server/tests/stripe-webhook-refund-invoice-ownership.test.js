@@ -212,6 +212,10 @@ describe('refundedPaymentOwnsInvoice', () => {
     expect(refundedPaymentOwnsInvoice(inv({ stripe_payment_intent_id: 'pi_2', stripe_charge_id: 'ch_2' }), { paymentIntentId: 'pi_1', chargeId: 'ch_1' })).toBe(false);
     expect(refundedPaymentOwnsInvoice(inv(), { paymentIntentId: 'pi_1', chargeId: 'ch_1' })).toBe(false);
     expect(refundedPaymentOwnsInvoice(null, { paymentIntentId: 'pi_1', chargeId: 'ch_1' })).toBe(false);
+    // Stale PI beside a REPLACEMENT charge (charge-only reconcile leaves the old PI): the charge decides.
+    expect(refundedPaymentOwnsInvoice(inv({ stripe_payment_intent_id: 'pi_1', stripe_charge_id: 'ch_2' }), { paymentIntentId: 'pi_1', chargeId: 'ch_1' })).toBe(false);
+    // Charges cannot be compared (invoice has none yet): the PI decides.
+    expect(refundedPaymentOwnsInvoice(inv({ stripe_payment_intent_id: 'pi_1' }), { paymentIntentId: 'pi_1', chargeId: 'ch_1' })).toBe(true);
     // Nothing to compare: legacy answer.
     expect(refundedPaymentOwnsInvoice(inv({ stripe_payment_intent_id: 'pi_2' }), {})).toBe(true);
   });
@@ -272,6 +276,21 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
 
     expect(payments[0]).toEqual(expect.objectContaining({ status: 'refunded' }));
     expect(invoices[0]).toEqual(expect.objectContaining({ status: 'paid', credit_applied: 20 }));
+    expect(CustomerCredit.returnAppliedCreditOnRefund).not.toHaveBeenCalled();
+    expect(termsTouched()).toBe(false);
+  });
+
+  test('(c3) invoice still carries the ORIGINAL PI but a charge-only reconcile stamped a replacement charge: left alone', async () => {
+    payments.push(
+      paymentRow(), // P1: pi_1 / ch_1, metadata still names inv-1
+      paymentRow({ id: 'pay-2', stripe_payment_intent_id: null, stripe_charge_id: 'ch_2' }),
+    );
+    invoices.push(invoiceRow({ stripe_payment_intent_id: 'pi_1', stripe_charge_id: 'ch_2' }));
+
+    await handleChargeRefunded(fullRefundOf('ch_1', 'pi_1'));
+
+    expect(payments.find((p) => p.id === 'pay-1')).toEqual(expect.objectContaining({ status: 'refunded', refund_status: 'full' }));
+    expect(invoices[0]).toEqual(expect.objectContaining({ status: 'paid', credit_applied: 20, stripe_charge_id: 'ch_2' }));
     expect(CustomerCredit.returnAppliedCreditOnRefund).not.toHaveBeenCalled();
     expect(termsTouched()).toBe(false);
   });
