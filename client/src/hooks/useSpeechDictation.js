@@ -8,6 +8,9 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // normal pauses, until the tech taps stop. See IDLE_STOP_MS below for the
 // one time-based cutoff that still ends it on its own.
 const IDLE_STOP_MS = 60000;
+// Clip mode: the longest one recording runs. A visit said aloud is well under a
+// minute; three minutes of speech is also about what the fill accepts at once.
+export const CLIP_MAX_MS = 3 * 60 * 1000;
 
 /**
  * Voice dictation, extracted from CommunicationsPageV2 so the completion
@@ -59,6 +62,7 @@ const IDLE_STOP_MS = 60000;
 export default function useSpeechDictation(onTranscript, options = {}) {
   const uploadServiceId = options.uploadServiceId ?? null;
   const clipMode = typeof options.clipHandler === "function";
+  const clipMaxMs = Number(options.clipMaxMs) > 0 ? Number(options.clipMaxMs) : CLIP_MAX_MS;
   const clipHandlerRef = useRef(options.clipHandler);
   clipHandlerRef.current = options.clipHandler;
   const [listening, setListening] = useState(false);
@@ -245,8 +249,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       if (document.visibilityState === "hidden") stopRecording();
     };
     const guarded = clipMode && typeof document !== "undefined";
+    let cutoffTimer = null;
     const unguard = () => {
       if (!guarded) return;
+      clearTimeout(cutoffTimer);
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("pagehide", stopRecording);
       unguardRef.current = null;
@@ -260,6 +266,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       }
       document.addEventListener("visibilitychange", onHidden);
       window.addEventListener("pagehide", stopRecording);
+      // A forgotten mic on a visible page (a phone on a mount) ends by itself:
+      // the clip stops at the cutoff and what was recorded is handed over.
+      cutoffTimer = setTimeout(stopRecording, clipMaxMs);
       unguardRef.current = unguard;
     }
     const chunks = [];
@@ -303,7 +312,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // `starting || listening` never sees a gap between them.
     doneStarting();
     setListening(true);
-  }, [uploadClip, uploading]);
+  }, [uploadClip, uploading, clipMode, clipMaxMs]);
 
   const toggle = useCallback((event) => {
     const SR =
