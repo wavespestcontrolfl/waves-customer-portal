@@ -193,6 +193,24 @@ function portalToolsFor({ payments = false, visits = false, reservice = false, r
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice']);
+const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
+const TOOL_CANCELLATION_NAMES = new Set(['AbortError', 'KnexTimeoutError']);
+
+function isToolCancellation(err) {
+  return TOOL_CANCELLATION_CODES.has(err?.code) || TOOL_CANCELLATION_NAMES.has(err?.name);
+}
+
+const TOOL_EXECUTORS = new Map([
+  ['get_upcoming_services', ({ customerId, turn }) => getUpcomingServices(customerId, turn)],
+  ['get_pest_advice', ({ input, turn }) => getPestAdvice(input.topic, turn)],
+  ['offer_reschedule_link', ({ customerId, actions, turn }) => offerRescheduleLink(customerId, actions, turn)],
+  ['open_portal_section', ({ input, actions, turn }) => openPortalSection(input.section, actions, turn)],
+  ['show_recent_payments', ({ customerId, actions, cards, turn }) => showRecentPayments(customerId, actions, cards, turn)],
+  ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
+  ['offer_reservice', ({ customerId, input, actions, context, turn }) => offerReservice(customerId, input, actions, context, turn)],
+  // Handled in assistant.js before reaching here.
+  ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
+]);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -209,10 +227,9 @@ function addAction(actions, action) {
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
 // `context.customerMessage`: the customer's message this turn.
-// `turn` is the opt-in coordinator adapter. Existing assistant callers retain
-// their current path until the separate coordinator activation supplies it;
-// this module must support both callers during that staged rollout.
-// eslint-disable-next-line complexity -- one explicit branch per declared assistant tool
+// `turn` belongs to authenticated portal chat. SMS uses this same dispatcher
+// without the portal coordinator and keeps its existing execution policy.
+// The portal caller is wired in the separate coordinator activation slice.
 async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}, turn = null) {
   try {
     input = input && typeof input === 'object' ? input : {};
@@ -229,29 +246,11 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
       }
     }
 
-    switch (toolName) {
-      case 'get_upcoming_services':
-        return await getUpcomingServices(contextCustomerId, turn);
-      case 'get_pest_advice':
-        return await getPestAdvice(input.topic, turn);
-      case 'offer_reschedule_link':
-        return await offerRescheduleLink(contextCustomerId, actions, turn);
-      case 'open_portal_section':
-        return openPortalSection(input.section, actions, turn);
-      case 'show_recent_payments':
-        return await showRecentPayments(contextCustomerId, actions, cards, turn);
-      case 'get_recent_visits':
-        return await getRecentVisits(contextCustomerId, actions, cards, turn);
-      case 'offer_reservice':
-        return await offerReservice(contextCustomerId, input, actions, context, turn);
-      case 'escalate':
-        // Handled in assistant.js before reaching here
-        return { escalated: true, reason: input.reason };
-      default:
-        return { error: `Unknown tool: ${toolName}` };
-    }
+    const execute = TOOL_EXECUTORS.get(toolName);
+    if (!execute) return { error: `Unknown tool: ${toolName}` };
+    return await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
   } catch (err) {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.error(`Tool ${toolName} failed: ${err.message}`);
     return { error: `Tool failed: ${err.message}` };
   }
@@ -298,11 +297,11 @@ function shortDateLabel(dateKey) {
 async function movableVisit(id, database = db) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const svc = await loadById(id, database).catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     return null;
   });
   const verdict = svc && await pageEligibility(svc, new Date(), database).catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
     return null;
   });
@@ -403,7 +402,7 @@ async function showRecentPayments(customerId, actions, cards, turn) {
       ? await turn.transaction('payment history', (database) => listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN, database }))
       : await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
   } catch (err) {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
     return NOT_SHOWN;
   }
@@ -465,7 +464,7 @@ async function getRecentVisits(customerId, actions, cards, turn) {
       }))
       : await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
   } catch (err) {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
     return UNAVAILABLE;
   }
@@ -547,7 +546,7 @@ async function bookedReserviceResult(customerId, line, booked, database = db) {
   if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
     return null;
   });
@@ -636,14 +635,14 @@ async function offerReserviceResult(customerId, line, database = db) {
   // visit booked while the plan covered the line stays on the schedule after
   // coverage changes, and the customer is told about it.
   const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId, database).catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
     return null;
   });
   if (!open) return { result: RESERVICE_HAND_OFF };
   if (open[line]) return bookedReserviceResult(customerId, line, open[line], database);
   const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
     return null;
   });
@@ -654,7 +653,7 @@ async function offerReserviceResult(customerId, line, database = db) {
   const page = require('../../routes/reservice-public')._internals;
   if (!page.TOKEN_RE.test(token)) return { result: RESERVICE_HAND_OFF };
   const state = await page.pageLaneState(token, database).catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
     return null;
   });
@@ -663,7 +662,7 @@ async function offerReserviceResult(customerId, line, database = db) {
   // An address held for staff review shows no times on the page, only
   // instructions to text or call: hand off rather than promise a time.
   const reviewHold = await page.reserviceLocationReviewRequired(state.customer, database).catch((err) => {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     return true;
   });
   if (reviewHold) return { result: RESERVICE_HAND_OFF };
@@ -699,7 +698,7 @@ async function getPestAdvice(topic, turn) {
     const result = turn ? await turn.waitFor(read, 'knowledge answer') : await read();
     return { answer: result.answer, sources: result.articlesUsed };
   } catch (err) {
-    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    if (isToolCancellation(err)) throw err;
     return { answer: 'Knowledge base unavailable. General SWFL advice: contact your technician for specific pest identification and treatment recommendations.' };
   }
 }

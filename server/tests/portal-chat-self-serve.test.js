@@ -5,6 +5,8 @@
 // chats escalated, 49 escalation rows never claimed).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockWikiQuery = jest.fn();
+jest.mock('../services/knowledge/wiki-qa', () => ({ query: mockWikiQuery }));
 jest.mock('../routes/reschedule-public', () => ({
   _internals: { loadById: jest.fn(async (id) => ({ id })), pageEligibility: jest.fn() },
 }));
@@ -174,6 +176,29 @@ describe('portal tools', () => {
   test('a channel that cannot render buttons gets none', async () => {
     expect((await executeToolCall('open_portal_section', { section: 'billing' }, 'cust-1')).shown).toBe(false);
     expect((await executeToolCall('offer_reschedule_link', {}, 'cust-1')).available).toBe(false);
+  });
+
+  test.each([
+    ['portal deadline', { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['abort code', { code: 'ABORT_ERR' }],
+    ['database cancellation', { code: '57014' }],
+    ['abort name', { name: 'AbortError' }],
+    ['Knex timeout', { name: 'KnexTimeoutError' }],
+  ])('the top-level dispatcher propagates a %s without adding a late action', async (_label, identity) => {
+    const cancelled = Object.assign(new Error('cancelled'), identity);
+    const query = mockUpcoming([]);
+    query.offset.mockRejectedValue(cancelled);
+    const actions = [];
+
+    await expect(executeToolCall('offer_reschedule_link', {}, 'cust-1', actions)).rejects.toBe(cancelled);
+    expect(actions).toEqual([]);
+  });
+
+  test('the knowledge fallback does not swallow a recognized cancellation', async () => {
+    const cancelled = Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' });
+    mockWikiQuery.mockRejectedValue(cancelled);
+
+    await expect(executeToolCall('get_pest_advice', { topic: 'ants' }, 'cust-1')).rejects.toBe(cancelled);
   });
 });
 
