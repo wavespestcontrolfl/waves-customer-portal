@@ -241,6 +241,8 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
 
   it("a technician who must rotate their password goes to the signed-in change page from Today (Codex #5573 r11)", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    localStorage.setItem("waves_tech_route_snapshot", JSON.stringify({ techId: "tech-1" }));
     vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...TECH, mustChangePassword: true, email: "tech@example.com" })));
     render(
       <TechNavigationLock>
@@ -257,6 +259,9 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     );
     expect(await screen.findByText("Change password page")).toBeInTheDocument();
     expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+    // The pre-rotation offline pass and saved route are gone (Codex #5573 r22).
+    expect(localStorage.getItem("waves_tech_offline_pass")).toBeNull();
+    expect(localStorage.getItem("waves_tech_route_snapshot")).toBeNull();
   });
 
   it("leaving Today while its bounded check is pending restarts it unbounded, so a slow answer still verifies (Codex #5573 r12)", async () => {

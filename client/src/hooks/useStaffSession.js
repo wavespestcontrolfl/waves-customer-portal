@@ -87,8 +87,13 @@ export default function useStaffSession() {
           // The field workspace keeps the retired /tech shell's flow: the
           // verified session goes to the signed-in change-password page, which
           // adminAuthenticate permits for a rotation (Codex #5573 r11).
-          if (isFieldPath(locationRef.current.pathname)) navigate("/admin/change-password", { replace: true });
-          else endSession("/admin/forgot-password", { email: profile.email, resetRequired: true });
+          // The token stays for that flow, but the offline pass and route
+          // snapshot go: a reopen with no signal before the rotation must not
+          // unlock Today from a pass that predates it (Codex #5573 r22).
+          if (isFieldPath(locationRef.current.pathname)) {
+            clearStaffDeviceData();
+            navigate("/admin/change-password", { replace: true });
+          } else endSession("/admin/forgot-password", { email: profile.email, resetRequired: true });
           return;
         }
         patch({ user: profile, offline: false, status: "ready" });
