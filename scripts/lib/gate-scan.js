@@ -7,7 +7,8 @@
  * gate is.
  *
  * A gate is a GATE_* name the code READS from the environment:
- *   process.env.GATE_X or env.GATE_X, process.env['GATE_X'],
+ *   process.env.GATE_X or env.GATE_X, process.env['GATE_X'] (each also
+ *   with optional chaining: env?.GATE_X),
  *   const { GATE_X } = process.env,
  *   a gate helper called with the name (gateEnvValue('GATE_X'),
  *   gateEnvTimestamp('GATE_X'), gate('GATE_X')), or a gate-named constant
@@ -30,6 +31,10 @@ const EXCLUDE_PATTERNS = [
   /(^|\/)fixtures?\//,
   /(^|\/)migrations\//,
   /(^|\/)seeds\//,
+  // Not production code, the same as scripts/check-domain-rules.js: one-off
+  // and maintenance scripts, and the contract-test harness.
+  /^server\/scripts\//,
+  /^server\/contract-tests\//,
 ];
 
 const FEATURE_GATES_FILE = 'server/config/feature-gates.js';
@@ -39,10 +44,12 @@ const FEATURE_GATES_FILE = 'server/config/feature-gates.js';
 const NAME = 'GATE_[A-Z0-9_]*[A-Z0-9]';
 const QUOTED = `['"\`](${NAME})['"\`]`;
 const READ_PATTERNS = [
-  new RegExp(`\\benv\\.(${NAME})\\b`, 'g'),
-  new RegExp(`\\benv\\[\\s*${QUOTED}\\s*\\]`, 'g'),
+  // env.GATE_X, env?.GATE_X
+  new RegExp(`\\benv\\s*\\??\\.\\s*(${NAME})\\b`, 'g'),
+  // env['GATE_X'], env?.['GATE_X']
+  new RegExp(`\\benv\\s*(?:\\?\\.)?\\[\\s*${QUOTED}\\s*\\]`, 'g'),
   // gateEnvValue('GATE_X'), featureGates.gateEnvTimestamp('GATE_X'), gate('GATE_X')
-  new RegExp(`[A-Za-z0-9_$]*[gG]ate[A-Za-z0-9_$]*\\(\\s*${QUOTED}`, 'g'),
+  new RegExp(`[A-Za-z0-9_$]*[gG]ate[A-Za-z0-9_$]*\\s*(?:\\?\\.)?\\(\\s*${QUOTED}`, 'g'),
   // const GATE_ENV = 'GATE_X'; const SUMMARY_GATE = 'GATE_X';
   new RegExp(`\\b(?:const|let|var)\\s+[A-Za-z0-9_$]*(?:GATE|[gG]ate)[A-Za-z0-9_$]*\\s*=\\s*${QUOTED}`, 'g'),
 ];

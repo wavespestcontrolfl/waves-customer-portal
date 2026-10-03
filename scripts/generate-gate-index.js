@@ -24,7 +24,6 @@ const path = require('path');
 const { ROOT, scanGates, headerDescriptions } = require('./lib/gate-scan');
 
 const INDEX_FILE = 'docs/gate-index.md';
-const MAX_FILES = 3;
 
 const HEADING = [
   '# Index of every gate the code reads (generated)',
@@ -34,10 +33,10 @@ const HEADING = [
 ].join('\n');
 
 function indexLine(name, files, description) {
-  const shown = files.slice(0, MAX_FILES).map((file) => `\`${file}\``).join(', ');
-  const more = files.length > MAX_FILES ? ` (+${files.length - MAX_FILES} more)` : '';
+  // Every reader path, so a moved read always changes the line.
+  const shown = files.map((file) => `\`${file}\``).join(', ');
   const tail = description ? ` — ${description}` : '';
-  return `- \`${name}\` — ${shown}${more}${tail}`;
+  return `- \`${name}\` — ${shown}${tail}`;
 }
 
 // The gate names that have a line in an index text.

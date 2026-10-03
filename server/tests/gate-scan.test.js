@@ -15,6 +15,14 @@ describe('gate scan: what counts as a gate the code reads', () => {
     `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO', 'GATE_CHARLIE', 'GATE_DELTA_SINCE', 'GATE_ECHO']);
   });
 
+  test('reads through optional chaining', () => {
+    expect(names(`
+      const a = process.env?.GATE_ALPHA;
+      const b = import.meta.env?.['GATE_BRAVO'];
+      const c = gates.gateEnvValue?.('GATE_CHARLIE');
+    `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO', 'GATE_CHARLIE']);
+  });
+
   test('reads destructured from process.env, with an alias or a default', () => {
     expect(names(`
       const { GATE_ALPHA, GATE_BRAVO: bravo = 'off', NODE_ENV } = process.env;
