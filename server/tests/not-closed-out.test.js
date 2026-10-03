@@ -188,8 +188,9 @@ describe('the dispatcher\'s two decisions', () => {
   test.each([
     ['completed in between', { status: 'completed' }],
     ['rebooked to another day in between', { status: 'no_show', scheduled_date: '2026-10-06' }],
+    ['rebooked later the same day and missed again', { status: 'no_show', window_start: '14:00:00', window_end: '15:00:00' }],
   ])('a reopen never undoes the settlement of a visit %s', async (_label, visitNow) => {
-    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'rebooked', resolved_by: 'admin', original_date: '2026-09-29' })];
+    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'rebooked', resolved_by: 'admin', original_date: '2026-09-29', original_window: '09:00:00-10:00:00' })];
     mockTables.dispatch_alerts = [];
     mockTables.scheduled_services = [{ ...service, ...visitNow }];
     expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF, reopen: true })).toEqual({ ok: false, reason: 'visit_moved_on' });

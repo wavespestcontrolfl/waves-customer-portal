@@ -3,15 +3,21 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 
 const mockRaiseCard = jest.fn(async () => ({ raised: true }));
-jest.mock('../services/not-closed-out', () => ({ raiseCard: (...a) => mockRaiseCard(...a) }));
+jest.mock('../services/not-closed-out', () => {
+  const actual = jest.requireActual('../services/not-closed-out');
+  return { isSameNoShowOccurrence: actual.isSameNoShowOccurrence, RESOLUTION_BY_STATUS: actual.RESOLUTION_BY_STATUS, raiseCard: (...a) => mockRaiseCard(...a) };
+});
 
+const db = require('../models/db');
 const MissedAppointment = require('../services/workflows/missed-appointment');
 
 function fakeConn(service) {
   const inserts = [];
+  const locks = [];
   const conn = (table) => {
     const chain = {
       where() { return chain; },
+      forUpdate() { locks.push(table); return chain; },
       select() { return chain; },
       first: async () => {
         if (table === 'scheduled_services') return service;
@@ -27,7 +33,7 @@ function fakeConn(service) {
     return chain;
   };
   conn.raw = (sql) => sql;
-  return { conn, inserts };
+  return { conn, inserts, locks };
 }
 
 test('the log row carries the occurrence scope as it was at the miss', async () => {
@@ -88,5 +94,40 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     expect(inserts.find((i) => i.table === 'reschedule_log').row).toMatchObject({ miss_confirmed_by: 'dispatch' });
     expect(inserts.find((i) => i.table === 'reschedule_log').row.miss_confirmed_at).toBeInstanceOf(Date);
     expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ confirmed: true }));
+  });
+
+  // Dispatch calls onSkip on the shared pool, after its status change committed.
+  describe('a dispatch no-show is logged under the visit lock', () => {
+    const occurrence = { id: 'visit-4', scheduled_date: '2026-09-29', window_start: '09:00:00', window_end: '10:00:00' };
+    function onPool(visitNow) {
+      const fake = fakeConn(visitNow);
+      db.transaction = jest.fn(async (fn) => fn(fake.conn));
+      jest.spyOn(MissedAppointment, 'evaluateThreshold').mockResolvedValueOnce(null);
+      return fake;
+    }
+
+    test('still that no-show occurrence: an open confirmed miss and its card', async () => {
+      const { inserts, locks } = onPool({ ...visit, status: 'no_show' });
+      await MissedAppointment.onSkip('visit-4', 'manual_no_show', undefined, { occurrence });
+      expect(locks).toEqual(['scheduled_services']);
+      const log = inserts.find((i) => i.table === 'reschedule_log').row;
+      expect(log.resolved_at).toBeUndefined();
+      expect(log.miss_confirmed_by).toBe('dispatch');
+      expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ confirmed: true }));
+    });
+
+    test.each([
+      ['completed in between', { status: 'completed' }, 'completed'],
+      ['cancelled in between', { status: 'cancelled' }, 'dismissed'],
+      ['rebooked to another day', { status: 'pending', scheduled_date: '2026-10-06' }, 'rebooked'],
+      ['rebooked later the same day and missed again', { status: 'no_show', window_start: '14:00:00', window_end: '15:00:00' }, 'rebooked'],
+    ])('%s: the miss is still counted but written settled, with no card', async (_label, change, resolution) => {
+      const { inserts } = onPool({ ...visit, ...change });
+      await MissedAppointment.onSkip('visit-4', 'manual_no_show', undefined, { occurrence });
+      const log = inserts.find((i) => i.table === 'reschedule_log').row;
+      expect(log).toMatchObject({ reason_code: 'customer_noshow', original_date: '2026-09-29', original_window: '09:00:00-10:00:00', resolution, resolved_by: 'system' });
+      expect(log.resolved_at).toBeInstanceOf(Date);
+      expect(mockRaiseCard).not.toHaveBeenCalled();
+    });
   });
 });

@@ -21,9 +21,24 @@ class MissedAppointment {
   // no-show transition). Its slot and scope are what the log freezes — a fresh read
   // here could capture an edit committed after the transition (Codex #5669 r1).
   async onSkip(scheduledServiceId, reason = 'no_show', conn = db, { occurrence = null } = {}) {
-    const current = await conn('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first();
+    // A dispatch-marked no-show is recorded AFTER its status change committed, so a
+    // rebook or a completion can land in between. Its log row and card are written
+    // in one transaction that holds the visit's row lock and rechecks the occurrence
+    // (logSkip). The nightly check stays lock-free on the caller's connection.
+    if (reason === 'manual_no_show' && conn === db) {
+      const customerId = await db.transaction((t) => this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true }));
+      return customerId ? this.evaluateThreshold(customerId, reason, db) : null;
+    }
+    const customerId = await this.logSkip(scheduledServiceId, reason, conn, { occurrence });
+    return customerId ? this.evaluateThreshold(customerId, reason, conn) : null;
+  }
+
+  // Write the flagged row (and raise its card). Returns the customer id, or null
+  // when the visit or its customer is gone.
+  async logSkip(scheduledServiceId, reason, conn, { occurrence = null, lockVisit = false } = {}) {
+    const currentQuery = conn('scheduled_services').where({ id: scheduledServiceId });
+    if (lockVisit) currentQuery.forUpdate();
+    const current = await currentQuery.first();
     const service = current && occurrence && String(occurrence.id) === String(scheduledServiceId)
       ? { ...current, ...pickOccurrence(occurrence) }
       : current;
@@ -46,14 +61,21 @@ class MissedAppointment {
     // A person marking the no-show in dispatch is a confirmed miss from the start;
     // the nightly check only knows the visit was still open (not-closed-out.js).
     const personMarked = reason === 'manual_no_show';
+    const notClosedOut = require('../not-closed-out');
+    const originalWindow = service.window_start ? `${service.window_start}-${service.window_end}` : null;
+    // Under the visit lock: is the visit still the no-show occurrence being logged?
+    // If it was rebooked or closed in between, the miss still counts (the row is
+    // written) but it is already settled — no open confirmed miss, no card.
+    const movedOn = lockVisit && !notClosedOut.isSameNoShowOccurrence(current, { date: service.scheduled_date, window: originalWindow });
     const inserted = await conn('reschedule_log').insert({
       customer_id: customerId,
       scheduled_service_id: scheduledServiceId,
       reason_code: 'customer_noshow',
       initiated_by: 'system',
       ...(personMarked ? { miss_confirmed_at: new Date(), miss_confirmed_by: 'dispatch' } : {}),
+      ...(movedOn ? { resolved_at: new Date(), resolution: notClosedOut.RESOLUTION_BY_STATUS[current.status] || 'rebooked', resolved_by: 'system' } : {}),
       original_date: service.scheduled_date || null,
-      original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+      original_window: originalWindow,
       // what was missed and where, frozen now: the row's own fields can change later
       occurrence_service_type: service.service_type || null,
       occurrence_service_id: service.service_id || null,
@@ -62,13 +84,13 @@ class MissedAppointment {
     }).returning('id');
     // The office's card for this flagged visit (gated; never blocks the log).
     const logId = Array.isArray(inserted) && inserted[0] ? (inserted[0].id || inserted[0]) : null;
-    if (logId) {
-      await require('../not-closed-out').raiseCard({
+    if (logId && !movedOn) {
+      await notClosedOut.raiseCard({
         logId, service: { ...service, id: scheduledServiceId }, confirmed: personMarked, trx: conn === db ? null : conn,
       });
     }
 
-    return this.evaluateThreshold(customerId, reason, conn);
+    return customerId;
   }
 
   /**

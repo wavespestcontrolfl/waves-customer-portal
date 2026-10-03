@@ -37,6 +37,21 @@ const RESOLUTION_BY_STATUS = Object.freeze({ completed: 'completed', cancelled: 
 const queueEnabled = () => isEnabled('notClosedOutQueue');
 const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
 
+/**
+ * Is the visit — read under its row lock — still the no-show occurrence a flagged
+ * row recorded (`date` + `window` = the row's original_date / original_window)?
+ * A manual no-show is recorded after its status change committed, so a rebook, a
+ * completion or a second no-show can land first; the occurrence key is the slot,
+ * not the visit row. A NULL date or window on the row matches (legacy rows).
+ */
+function isSameNoShowOccurrence(visit, { date = null, window = null } = {}) {
+  if (!visit || visit.status !== 'no_show') return false;
+  if (date && dateOnly(date) !== dateOnly(visit.scheduled_date)) return false;
+  const visitWindow = visit.window_start ? `${visit.window_start}-${visit.window_end}` : null;
+  if (window && window !== visitWindow) return false;
+  return true;
+}
+
 // Run `fn(t)` in its own transaction, or — inside a caller's — in a savepoint,
 // so an error here never poisons the caller's transaction.
 function isolated(trx, fn) {
@@ -188,7 +203,7 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
     if (reopen) {
       const ref = await t('reschedule_log').where({ id: logId, reason_code: 'customer_noshow' }).first('scheduled_service_id');
       if (ref && ref.scheduled_service_id) {
-        visit = await t('scheduled_services').where({ id: ref.scheduled_service_id }).forUpdate().first('id', 'status', 'scheduled_date');
+        visit = await t('scheduled_services').where({ id: ref.scheduled_service_id }).forUpdate().first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
       }
     }
     const log = await lockLog(t, logId);
@@ -196,9 +211,9 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
     if (log.resolved_at) {
-      const sameOccurrence = visit && visit.status === 'no_show'
-        && (!log.original_date || dateOnly(log.original_date) === dateOnly(visit.scheduled_date));
-      if (!sameOccurrence) return { ok: false, reason: 'visit_moved_on' };
+      if (!isSameNoShowOccurrence(visit, { date: log.original_date, window: log.original_window })) {
+        return { ok: false, reason: 'visit_moved_on' };
+      }
       await t('reschedule_log').where({ id: logId })
         .update({ resolved_at: null, resolution: null, resolved_by: null, miss_confirmed_at: t.fn.now(), miss_confirmed_by: by });
     } else if (!log.miss_confirmed_at) {
@@ -281,6 +296,7 @@ module.exports = {
   ALERT_SOURCE,
   RESOLUTIONS,
   RESOLUTION_BY_STATUS,
+  isSameNoShowOccurrence,
   raiseCard,
   resolveForService,
   resolveForServices,
