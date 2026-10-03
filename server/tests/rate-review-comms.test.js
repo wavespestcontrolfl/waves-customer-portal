@@ -518,11 +518,12 @@ describe('the letter (real renderer over the seeded template)', () => {
     await expect(comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW })).rejects.toMatchObject({ status: 404 });
   });
 
-  test('the letter is never replayed from a stored copy (single-shot, gate-checked at the send)', () => {
+  test('the letter is never replayed from a stored copy, and a bounced one raises only the reconciliation alert (not the "will not be re-sent" final-notice alert)', () => {
     const { isSenderRenderedEmail } = require('../services/billing-email-no-replay');
     expect(isSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(true);
-    // no later stage re-sends it: a provider block raises the final-notice alert
-    expect(require('../services/billing-email-no-replay').isFinalSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(true);
+    // ...but it is NOT a final notice: a bounced one is returned to the batch for re-send by the
+    // reconciliation alert, so the "will not be re-sent" alert must not also fire
+    expect(require('../services/billing-email-no-replay').isFinalSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(false);
   });
 
   test('the seeded template carries no banned wording', () => {
@@ -676,6 +677,94 @@ describe('customer surfaces', () => {
     expect(res).toMatchObject({ sent: 0, uncertain: 0, inFlight: 1 });
     expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
     expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'recipient_changed' });
+  });
+
+  test('held_lines: two prepared approved lines, one suppressed → NEITHER is sent (bucket heldLines = 1); both sendable → one letter with both', async () => {
+    const mkBook = (laterDate) => {
+      const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: laterDate, noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+      const b = book({ notices: [draft(1), second] });
+      b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+      return b;
+    };
+    mockDb.reset(mkBook('2026-11-20')); // under 30 days: too_late
+    const held = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(held.counts).toMatchObject({ letters: 0, heldLines: 1, awaitingLines: 0 });
+    expect(held.customers[0]).toMatchObject({ reason: 'held_lines' });
+    expect(held.customers[0].suppressedLines.map((l) => l.reason)).toEqual(['too_late']);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: held.digest, now: NOW })).toMatchObject({ ok: false, reason: 'nothing_to_send' });
+    expect(emailLeg).not.toHaveBeenCalled();
+    mockDb.reset(mkBook('2026-12-20'));
+    const ok = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(ok.counts).toMatchObject({ letters: 1, lines: 2, heldLines: 0 });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: ok.digest, now: NOW });
+    expect(emailLeg).toHaveBeenCalledTimes(1);
+    expect(notices().map((n) => n.status)).toEqual(['sent', 'sent']);
+  });
+
+  test('the whole-letter hold is also checked after the claim: a sibling line that appears between the preview and the claim holds the letter, nothing sent', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => {
+      if (!fired) { fired = true; mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(2, { id: ROW(2), customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'approved', delta_cents: 300, notice_id: null })); }
+      return { rows: [] };
+    }]);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('awaiting_lines');
+    expect(emailLeg).not.toHaveBeenCalled();
+  });
+
+  test('send: an ambiguous provider error whose bounce callback already landed on the live row is a certain non-send — back to draft with the failure recorded, not send_uncertain', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    emailLeg.mockImplementation(async () => {
+      const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+      await comms.handleEmailDeliveryEvent(mockDb, { id: 'em-1', template_key: comms.TEMPLATE_KEY, recipient_type: 'customer', recipient_id: CUSTOMER(1), idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }, { event: 'bounce', type: 'bounce', reason: '550 no mailbox', timestamp: 1790000000 });
+      return { sent: false, attempted: true }; // the caller saw an ambiguous error
+    });
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(res).toMatchObject({ sent: 0, uncertain: 0, failed: 1 });
+    expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+    const m = JSON.parse(notices()[0].metadata);
+    expect(m.delivery_revoked).toMatchObject({ event: 'bounce', channel: 'email' });
+    expect(m.send_hold.reason).toBe('delivery_failed_before_stamp');
+    expect(m.early_failures).toBeUndefined();
+    // with no callback evidence the same ambiguous error still parks
+    mockDb.reset(book());
+    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
+  });
+
+  test('gate: the live kill switch is read inside each provider handoff — switched off after the per-entry check, no provider call, released with gate_off, counted in stoppedByGate', async () => {
+    for (const leg of ['email', 'sms']) {
+      process.env.GATE_RATE_REVIEW = 'true';
+      mockDb.reset(book(leg === 'sms' ? { customers: [customer(1, { email: null })] } : {}));
+      emailLeg.mockReset();
+      smsLeg.mockReset().mockResolvedValue({ sent: false, attempted: false });
+      const dispatch = jest.fn(async () => ({ ok: true }));
+      if (leg === 'email') {
+        emailLeg.mockImplementation(async ({ sendOptions }) => {
+          process.env.GATE_RATE_REVIEW = 'false';
+          expect(await sendOptions.withProviderHandoff(dispatch, { to: 'cust1@example.com' })).toEqual({ ok: false, reason: 'gate_off' });
+          return { sent: false, attempted: true };
+        });
+      } else {
+        emailLeg.mockResolvedValue({ sent: false, attempted: false });
+        smsLeg.mockImplementation(async ({ sendOptions }) => {
+          process.env.GATE_RATE_REVIEW = 'false';
+          const verdict = await sendOptions.withSmsHandoff(dispatch);
+          expect(verdict).toMatchObject({ ok: false, code: 'ELIGIBILITY:gate_off' });
+          return { sent: false, attempted: false, blockedCode: verdict.code };
+        });
+      }
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      process.env.GATE_RATE_REVIEW = 'true';
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ sent: 0, uncertain: 0, stoppedByGate: 1, ok: false });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+      expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('gate_off');
+    }
   });
 
   test('awaiting_lines: a customer with an approved line not yet prepared gets no partial letter; the bucket counts it; once prepared, one letter carries both lines', async () => {
@@ -1658,5 +1747,26 @@ describe('SMS pointer (the existing price_change_notice template, reused unchang
     const seg = countSegments(rendered);
     expect(seg.encoding).toBe('GSM_7');
     expect(seg.segmentCount).toBeLessThanOrEqual(2);
+  });
+
+  test('a multi-date letter\'s pointer is date-neutral and still unsigned, GSM-7, within 2 segments; a single-date letter keeps its date', async () => {
+    const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1), second] });
+    b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+    mockDb.reset(b);
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(smsLeg.mock.calls[0][0].vars.effective_date).toBe('the dates shown in your notice');
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const body = "Hello Christopher, it's Waves. Your recurring service price changes on {effective_date}. New price and details: portal.wavespestcontrol.com/price-change/".concat('a'.repeat(32))
+      .replace('{effective_date}', smsLeg.mock.calls[0][0].vars.effective_date);
+    expect(body).toMatch(/changes on the dates shown in your notice\./);
+    expect(body).not.toMatch(/Adam|Waves Pest Control/);
+    const seg = countSegments(body);
+    expect(seg.encoding).toBe('GSM_7');
+    expect(seg.segmentCount).toBeLessThanOrEqual(2);
+    mockDb.reset(book());
+    smsLeg.mockClear();
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(smsLeg.mock.calls[0][0].vars.effective_date).toBe('December 10, 2026');
   });
 });

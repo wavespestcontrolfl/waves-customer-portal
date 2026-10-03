@@ -82,6 +82,7 @@ const REASONS = Object.freeze({
   renewal_declined: 'Customer declined to renew the prepaid plan',
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
   rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
+  held_lines: 'Another line of this customer is held (see its reason) — the letter waits so it goes out once, complete',
   awaiting_lines: 'Another approved line for this customer is not prepared yet (a scheduling hold?) — the letter waits so it goes out once, complete',
   line_gone: 'No open application left on this plan line, or one was repriced since the notice was prepared',
   apply_hold: 'The plan line has a structure the nightly rate change cannot carry out (add-ons, a discount, prepaid money, a parked reschedule, more than one series, a replaced plan) — fix it before sending',
@@ -498,13 +499,29 @@ const LINE_RULES = [
   ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 2 : 0)],
 ];
 const ACCOUNT_RULES = [
-  // One complete letter per customer per batch: never a partial letter ahead of a line still being prepared.
-  ['awaiting_lines', ({ awaiting }) => !!awaiting],
+  // One complete letter per customer per batch: never a partial letter ahead of a line still being
+  // prepared (awaiting_lines) or held by a line rule (held_lines) — see accountHoldFor.
+  ['awaiting_lines', (ctx) => accountHoldFor({ awaiting: ctx.awaiting, suppressedLines: ctx.entry.suppressedLines }) === 'awaiting_lines'],
+  ['held_lines', (ctx) => accountHoldFor({ awaiting: ctx.awaiting, suppressedLines: ctx.entry.suppressedLines }) === 'held_lines'],
   ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
   ['too_many_lines', ({ entry }) => entry.lines.length > LINE_SLOTS],
   ['no_contact', ({ entry }) => !entry.channels.email && !entry.channels.sms],
 ];
 const firstMatch = (rules, ctx) => (rules.find(([, test]) => test(ctx)) || [null])[0];
+
+// ONE account-level decision for "this customer's letter cannot go out as a complete
+// letter right now": an approved positive-delta line with no notice yet
+// (awaiting_lines), or a prepared line that is suppressed by any line rule or still in
+// flight (held_lines). Used by the preview/digest, the post-claim revalidation and the
+// provider-handoff recheck, so a partial letter cannot be produced anywhere.
+// Not holds: a line the owner un-approved, one that is no longer an increase, or a
+// prepaid renewal the customer declined — those are not lines of this letter any more.
+const NON_BLOCKING_LINE_REASONS = new Set(['not_approved', 'invalid_amount', 'renewal_declined']);
+function accountHoldFor({ awaiting = false, suppressedLines = [] } = {}) {
+  if (awaiting) return 'awaiting_lines';
+  if (suppressedLines.some((l) => !NON_BLOCKING_LINE_REASONS.has(l.reason))) return 'held_lines';
+  return null;
+}
 
 function planEntry(data, customerId, notices, { today, now }) {
   const customer = data.customers.get(customerId) || null;
@@ -562,6 +579,7 @@ function summarize(entries) {
     sms: sendable.filter((e) => e.channels.sms).length,
     suppressedCustomers: entries.filter((e) => e.reason && e.lines.length).length,
     awaitingLines: entries.filter((e) => e.reason === 'awaiting_lines').length,
+    heldLines: entries.filter((e) => e.reason === 'held_lines').length,
     suppressedLines: entries.reduce((s, e) => s + e.suppressedLines.length + (e.reason ? e.lines.length : 0), 0),
     alreadySent: entries.reduce((s, e) => s + e.alreadySent.length, 0),
   };
@@ -697,6 +715,13 @@ async function claimLines(dbh, entry) {
           .whereIn('status', SENDABLE_STATUSES)
           .update({ status: 'sending', updated_at: new Date() });
         if (!n) throw new ClaimLost();
+        // A new attempt starts with no failures remembered from an earlier one.
+        const claimedRow = await trx('price_change_notices').where({ id: l.noticeId }).first('metadata');
+        const claimedMeta = parseJson(claimedRow && claimedRow.metadata, {});
+        if (claimedMeta.early_failures) {
+          const { early_failures: _gone, ...rest } = claimedMeta;
+          await trx('price_change_notices').where({ id: l.noticeId }).update({ metadata: JSON.stringify(rest) });
+        }
         claimed.push(l.noticeId);
       }
       return claimed;
@@ -735,12 +760,53 @@ async function freezeLetter(dbh, entry, frozen) {
 // (recorded on each line as metadata.send_hold; the next attempt clears it).
 async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
   for (const l of entry.lines) {
-    const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
-    const next = { ...meta, ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
+    // The LIVE row's metadata, not the copy read before the provider calls: a callback
+    // (a bounce, a failed text) may have written early_failures onto it meanwhile.
+    const live = await dbh('price_change_notices').where({ id: l.noticeId }).first('metadata');
+    const { pending_letter: _p, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
+    // The failures belong to the attempt that is ending: kept only while it is parked uncertain.
+    const next = { ...meta, ...(status === UNCERTAIN && early ? { early_failures: early } : {}), ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
   }
+}
+
+// Parking a send whose outcome is unknown: the evidence on the LIVE rows decides. A
+// channel that a callback has already proven failed is no longer unknown; with no
+// unknown channel left the letter is a certain non-send — a retryable draft with the
+// failure recorded — instead of a permanent send_uncertain. Returns { retryable }.
+async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, dispatchMeta }) {
+  let retryable = true;
+  const alerts = [];
+  for (const l of entry.lines) {
+    const live = await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first();
+    if (!live) continue;
+    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, ...meta } = parseJson(live.metadata, {});
+    const stillUnknown = (emailUnknown && !early.email) || (smsUnknown && !early.sms);
+    if (stillUnknown) {
+      retryable = false;
+      await dbh('price_change_notices').where({ id: live.id }).update({
+        status: UNCERTAIN, updated_at: new Date(),
+        metadata: JSON.stringify({ ...meta, ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}), pending_letter: frozen }),
+      });
+      continue;
+    }
+    const failure = early.email || early.sms;
+    await dbh('price_change_notices').where({ id: live.id }).update({
+      status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: new Date(),
+      metadata: JSON.stringify({ ...meta, ...dispatchMeta, channel_failures: early, delivery_revoked: failure, send_hold: { reason: 'delivery_failed_before_stamp', at: new Date().toISOString() } }),
+    });
+    const snap = await dbh('rate_review_snapshots').where({ notice_id: live.id }).first();
+    if (snap) {
+      const flags = flagList(snap.flags);
+      if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
+      await dbh('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), updated_at: new Date() });
+    }
+    alerts.push({ noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten: false, channel: early.email ? 'email' : 'sms', event: failure.event });
+  }
+  if (alerts.length) await raiseDeliveryAlerts(alerts);
+  return { retryable };
 }
 
 async function stillOwned(dbh, noticeIds, customerId) {
@@ -792,6 +858,10 @@ const CLAIM_STATE_RULES = new Set(['send_uncertain', 'in_flight']);
 // letter instead of being sent on stale amounts. ok:false → the reason to
 // release the claim with; ok:true → the lines rebuilt from the fresh rows.
 async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
+  // The live kill switch, read each time this runs: after the claim and inside each
+  // provider handoff, immediately before the request. Off stops every entry that has
+  // not crossed a provider boundary.
+  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   const notices = await dbh('price_change_notices').whereIn('id', claimed);
   const snapshots = await dbh('rate_review_snapshots').whereIn('notice_id', claimed);
   const ctx = await loadLineContext(dbh, { snapshots, notices, today });
@@ -809,6 +879,28 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
     // preview digest covered.
     if (line.currentCents !== planned.currentCents || line.newCents !== planned.newCents || line.effectiveDate !== planned.effectiveDate) return { ok: false, reason: 'line_changed' };
     lines.push({ ...line, notice });
+  }
+  // The whole-letter rule, on the live rows: a sibling line of this customer's batch that is
+  // unprepared, suppressed or in flight holds the letter (never a partial letter).
+  const batchKey = snapshots[0] && snapshots[0].batch_key;
+  if (batchKey) {
+    const siblings = await dbh('rate_review_snapshots').where({ batch_key: batchKey, customer_id: entry.customerId });
+    const claimedIds = new Set(claimed.map(String));
+    const awaiting = siblings.some((r) => r.status === 'approved' && !r.notice_id && Number(r.delta_cents) > 0);
+    const otherSnaps = siblings.filter((r) => r.notice_id && !claimedIds.has(String(r.notice_id)));
+    const suppressedLines = [];
+    if (otherSnaps.length) {
+      const others = await dbh('price_change_notices').whereIn('id', otherSnaps.map((r) => r.notice_id));
+      const octx = await loadLineContext(dbh, { snapshots: otherSnaps, notices: others, today });
+      for (const n of others.filter((x) => !x.sent_at)) {
+        const snap = octx.snapshots.get(String(n.id)) || null;
+        const line = lineFor(n, snap, octx.customers.get(String(n.customer_id)) || customer);
+        const reason = firstMatch(LINE_RULES, { notice: n, snapshot: snap, line, today, now, declinedTerms: octx.declinedTerms, liveLanes: octx.liveLanes, ratesMoved: octx.ratesMoved, linesGone: octx.linesGone });
+        if (reason) suppressedLines.push({ reason });
+      }
+    }
+    const hold = accountHoldFor({ awaiting, suppressedLines });
+    if (hold) return { ok: false, reason: hold };
   }
   lines.sort(byEffective);
   return { ok: true, entry: { ...entry, lines } };
@@ -841,7 +933,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   const fresh = await revalidateClaimed(dbh, entry, claimed, { today, now });
   if (!fresh.ok) {
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null, hold: fresh.reason });
-    return { outcome: 'in_flight', holdReason: fresh.reason };
+    return { outcome: fresh.reason === 'gate_off' ? 'gate_off' : 'in_flight', holdReason: fresh.reason };
   }
   entry = fresh.entry;
   const claimKey = claimKeyFor(claimed, priorAttempts(entry.lines));
@@ -930,7 +1022,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // uncertain must not stamp sent_at — the nightly apply reads that as
     // the customer having been told.
     requireAccepted: true,
-    vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
+    // One date states it; a letter whose lines start on different dates points at the
+    // notice instead (the reused template reads "changes on {date}").
+    vars: { effective_date: new Set(entry.lines.map((l) => l.effectiveDate)).size > 1 ? 'the dates shown in your notice' : payload.effective_date, price_change_url: payload.notice_url },
     actorId,
     // Whether the customer HAS an email leg (an address on file), not whether
     // it succeeded: the canonical consent gate enforces an email-only channel
@@ -984,10 +1078,18 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // never parked unreachable.
     if (holdReason && !attempted) {
       await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
-      return { outcome: emailRejected || smsNotPrepared ? 'rejected' : 'in_flight', holdReason };
+      return { outcome: emailRejected || smsNotPrepared ? 'rejected' : (holdReason === 'gate_off' ? 'gate_off' : 'in_flight'), holdReason };
     }
-    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason, extra: attempted ? dispatchMeta : { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
-    return { outcome: attempted ? 'uncertain' : 'unreachable' };
+    if (attempted) {
+      const settled = await settleAttempted(dbh, entry, {
+        frozen, dispatchMeta,
+        emailUnknown: !!email.attempted && !emailHold && !emailRejected,
+        smsUnknown: !!sms.attempted && !smsNotPrepared,
+      });
+      return settled.retryable ? { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' } : { outcome: 'uncertain' };
+    }
+    await settleLines(dbh, entry, { status: 'unreachable', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
+    return { outcome: 'unreachable' };
   }
   const sentAt = clock();
   // Every line of one letter is stamped together, under the customer-comms
@@ -1129,7 +1231,8 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
           if (res.sms) summary.texted += 1;
-        } else if (res.outcome === 'in_flight') summary.inFlight += 1;
+        } else if (res.outcome === 'gate_off') summary.stoppedByGate += 1;
+        else if (res.outcome === 'in_flight') summary.inFlight += 1;
         else if (res.outcome === 'rejected') {
           // A definite provider refusal: nothing was sent and the lines are back to draft with the reason.
           summary.failed += 1;
