@@ -60,7 +60,11 @@ function csv(value) {
 }
 
 // A stable identifier for who labeled: the admin's email, else their id.
+// A request the labeler-token router verified (routes/typed-decisions-labeler.js)
+// carries req.machineLabeler; it is stamped with this fixed name.
+const MACHINE_LABELER = 'claude-labeler';
 function labeler(req) {
+  if (req.machineLabeler) return MACHINE_LABELER;
   return String(req.technician?.email || req.technicianId || 'admin').slice(0, 120);
 }
 
@@ -246,16 +250,22 @@ async function subjectMoved(target) {
   return (await liveSubjectHash(target)) !== target.subject_hash;
 }
 
-async function unwrittenLabel(id, force) {
+async function unwrittenLabel(id, force, machine = false) {
   const existing = await db(TABLE).where({ id }).first('id', 'label_status');
   if (!existing) return [404, { error: 'Review not found' }];
+  if (machine && existing.label_status !== 'unreviewed') {
+    return [409, { error: 'A person has already labeled this review', code: 'already_labeled', labelStatus: existing.label_status }];
+  }
   if (!force && CONFIRMED.includes(existing.label_status)) {
     return [409, { error: 'This review already has a confirmed label; send force: true to replace it', code: 'already_confirmed', labelStatus: existing.label_status }];
   }
   return [409, { error: "This review's answer or transcript changed since it was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status }];
 }
 
-router.post('/reviews/:id/label', async (req, res, next) => {
+// One label write for both callers: a signed-in admin (this router) and the
+// labeler token (routes/typed-decisions-labeler.js, narrower: no force, only
+// rows still unreviewed).
+async function labelReview(req, res, next) {
   try {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Review not found' });
@@ -270,6 +280,9 @@ router.post('/reviews/:id/label', async (req, res, next) => {
       return res.status(409).json({ error: 'This message or call changed after Jev answered; it is not what Jev judged', code: 'subject_changed' });
     }
     const { verdict, seen, seenSubject, note, reason, force } = request;
+    // The machine labeler never replaces a label: no force, and only a row
+    // still unreviewed (a person's 'unclear' stays a person's).
+    if (req.machineLabeler && force) return res.status(403).json({ error: 'The labeler token cannot replace a label', code: 'labeler_no_force' });
     const labelStatus = VERDICT_STATUS[verdict];
 
     const update = db(TABLE).where({ id }).update({
@@ -280,23 +293,24 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     });
     // A confirmed label is only replaced on purpose.
     if (!force) update.whereNotIn('label_status', CONFIRMED);
+    if (req.machineLabeler) update.where('label_status', 'unreviewed');
     update.whereRaw('jev_answer = ?::jsonb', [JSON.stringify(seen)]);
     // ...and the same transcript version: a nightly re-record after a
     // reprocess can replace subject_hash while leaving an identical answer.
     update.whereRaw('subject_hash IS NOT DISTINCT FROM ?', [seenSubject]);
     const [row] = await update.returning('*');
     if (!row) {
-      const [status, payload] = await unwrittenLabel(id, force);
+      const [status, payload] = await unwrittenLabel(id, force, req.machineLabeler);
       return res.status(status).json(payload);
     }
 
     await recordAuditEvent({
-      actor_type: 'technician',
-      actor_id: req.technicianId || null,
+      actor_type: req.machineLabeler ? 'system' : 'technician',
+      actor_id: req.machineLabeler ? null : (req.technicianId || null),
       action: 'typed_decision.labeled',
       resource_type: 'decision_review',
       resource_id: id,
-      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null },
+      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null, labeled_by: labeler(req) },
       ip_address: req.ip,
       user_agent: req.get('user-agent') || null,
     });
@@ -307,6 +321,8 @@ router.post('/reviews/:id/label', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}
+router.post('/reviews/:id/label', labelReview);
 
 module.exports = router;
+module.exports.labelReview = labelReview;
