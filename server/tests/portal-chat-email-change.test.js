@@ -25,11 +25,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: jest.fn(async () => {}) }));
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
+const { recordGap } = require('../services/agent-gap-reports');
 const assistant = require('../services/ai-assistant/assistant');
 const { portalToolsFor, executeToolCall, emailReadBackAwaitingAnswer } = require('../services/ai-assistant/tools');
 
@@ -266,8 +268,18 @@ test('a confirmed change and an escalate call in one reply ring one bell, the on
 
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/New email, confirmed/);
-  // An escalate call about the email change itself adds no second line.
-  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).not.toMatch(/also asked/);
+});
+
+test('another account change beside the confirmed email is carried too, and a gap is filed under its own reason', async () => {
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'new gate code is needed on the account', topic: 'account_change', not_supported: true } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: NEW, customer_confirmed: true } },
+  ] });
+
+  await say(afterReadBack('Yes, and my gate code changed too'));
+
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/The customer also asked about an account change: new gate code is needed on the account/);
+  expect(recordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'new gate code is needed on the account' }));
 });
 
 test('when the bell does not ring the customer is not told the team has it', async () => {

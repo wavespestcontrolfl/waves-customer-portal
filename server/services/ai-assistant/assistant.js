@@ -391,11 +391,14 @@ function emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked }) {
     ...(alsoAsked ? [`The customer also asked about ${TOPIC_WORDING[alsoAsked.topic] || 'something else'}: ${alsoAsked.reason}`] : []),
   ];
 }
-// The escalate call the model made beside a confirmed email change, when it
-// is about something other than that change, as options for the one hand-off.
+const gapReason = (reason, alsoAsked) => (alsoAsked ? alsoAsked.reason : reason);
+// The escalate call the model made beside a confirmed email change, as
+// options for the one hand-off. Always carried, whatever its topic: another
+// account change (a phone number, a gate code) shares the email change's
+// topic, and a line that only repeats the email request costs nothing.
 function alsoAskedBeside(toolUses) {
   const input = toolUses.find((t) => t.name === 'escalate')?.input;
-  if (!input || input.topic === 'account_change') return {};
+  if (!input) return {};
   return {
     alsoAsked: { topic: input.topic, reason: String(input.reason || '').trim() || 'no detail given' },
     gap: input.not_supported === true,
@@ -815,7 +818,9 @@ class WavesAssistant {
     // (`gap`), since classifyEscalation's keyword buckets can't tell a
     // missing feature from a staff workflow. Fire-and-forget — a failed write
     // must never affect the escalation reply.
-    if (gap) recordEscalationGap(customerMessage, reason);
+    // A gap flagged on a request carried beside an email change is about
+    // that request, not the email change.
+    if (gap) recordEscalationGap(customerMessage, gapReason(reason, alsoAsked));
 
     // The ai_escalations row above is the source of truth. Once it exists,
     // the customer must get the escalation reply — session bookkeeping and
