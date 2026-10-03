@@ -27413,6 +27413,7 @@ function blackoutDateString(value) {
 // are no products a report could name: their ordinary words ("yard sign",
 // "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
 // visit whose notes said "yard" (prod 2026-10-02).
+const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
 function catalogScreensForPrompt(catalogRows, promptText) {
   const names = [];
   const actives = [];
@@ -27421,8 +27422,13 @@ function catalogScreensForPrompt(catalogRows, promptText) {
     // By its name or its short display name. A registered alias the prompt
     // writes out is screened in the shared builder (mentionedText): aliases
     // are staff shorthand, matched whole.
+    // Neither the report screen's own generic words (the pests, "station",
+    // "trap", "yard", "care") nor the plain report words inside catalog names
+    // ("high", "contact", "monitoring") mark a product named: a note that says
+    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
+    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
     const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
-      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true }));
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
     // Its alias written out counts as naming it for its actives.
     const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
     names.push(...mentioned);
