@@ -39,6 +39,8 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+const { resolveVisitMeasuredCold } = require('./lawn-measured-cold');
+const { measuredColdApplies } = require('./lawn-seasonality');
 const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
@@ -2820,8 +2822,18 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
     : JSON.stringify(assessment.recommendations || '');
+  // The measured-cold rule (GATE_LAWN_MEASURED_COLD, P36) can change what a
+  // cooler-calendar visit prints (the seasonal-dip sentence), so a PDF cached
+  // before the flip must not be served after it. Only visits the rule can touch
+  // (Mar-Apr, Oct-Feb by the report's own visit day) carry the stamp; summer
+  // visits and gate-off keep their existing key. The verdict itself is frozen
+  // before any render may be stored (an unsettled read is never cached), so
+  // the constant stamp is enough.
+  const coldStamp = typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()
+    && measuredColdApplies(ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))
+    ? '|cold=1' : '';
   const stamp = crypto.createHash('sha1')
-    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}`)
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}${coldStamp}`)
     .digest('hex')
     .slice(0, 12);
   return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanAvailableAt, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
@@ -3301,7 +3313,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, measuredColdOut, measuredColdFetch = false } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3647,6 +3659,26 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // The fetch itself threw — transient by definition, and no week was
       // resolved. Render soft, cache nothing.
       weekWeatherUnfrozen = true;
+    }
+  }
+  // GATE_LAWN_MEASURED_COLD (P36): the seasonal-dip sentence needs >= 2 nights
+  // at or below 55F in the 7 nights before the VISIT's day. The caller opts in
+  // through `measuredColdOut` (gate on, lawn only); the verdict is handed back
+  // through that out-param, never through the payload (no new public key).
+  // Frozen with the visit like the week's weather above; only the rendering
+  // callers (measuredColdFetch) make the weather call, every other builder
+  // replays a frozen verdict or reads as unknown (no dip sentence).
+  if (measuredColdOut && typeof measuredColdOut === 'object') {
+    const coldDay = ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date);
+    if (measuredColdApplies(coldDay)) {
+      const cold = await resolveVisitMeasuredCold({ service, day: coldDay, knex, allowFetch: measuredColdFetch === true });
+      measuredColdOut.applies = true;
+      measuredColdOut.met = cold.met;
+      // A failed read or freeze is not reproducible: the same flags a failed
+      // week-weather freeze sets (no PDF cache, a pinned email defers).
+      if (cold.unfrozen) { weekWeatherUnfrozen = true; if (readFailures) readFailures.add('measured_cold'); }
+      // Nothing failed but the verdict cannot be read yet (no coordinates).
+      if (cold.pendingReason && !weekWeatherPendingReason) weekWeatherPendingReason = cold.pendingReason;
     }
   }
   const lawnScheduleUnconfirmed = reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment });
@@ -4371,8 +4403,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // runs: no reads, no writes, no new payload key.
   const visitMemoryLive = serviceLine === 'lawn' && typeof featureGates.lawnVisitMemoryLive === 'function' && featureGates.lawnVisitMemoryLive();
   const visitMemoryOut = {};
+  // GATE_LAWN_MEASURED_COLD (P36), read once at call time. Off = the loader
+  // gets no out-param: no read, no write, no weather call, byte-identical.
+  const measuredColdOut = serviceLine === 'lawn' && typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()
+    ? {} : null;
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     propertyHistoryEnabled, lawnHistory,
+    ...(measuredColdOut ? { measuredColdOut, measuredColdFetch: opts.lawnMeasuredCold === true } : {}),
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
     // undefined = unpinned (live snapshot); null = the signature saw none.
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
@@ -5615,6 +5652,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         mowingHeight,
         applications,
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
+        // Measured cold (P36): present only for a visit the rule applies to.
+        ...(measuredColdOut && measuredColdOut.applies ? { measuredCold: measuredColdOut.met } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,

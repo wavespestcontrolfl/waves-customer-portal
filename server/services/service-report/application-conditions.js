@@ -927,7 +927,54 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
   }
 }
 
+// The overnight low (°F) for each of the given ET calendar days (YYYY-MM-DD,
+// oldest first), for the measured-cold rule on the lawn seasonal-dip sentence.
+// Returns [{ date, minF }] with minF null for a day the provider did not
+// supply (never 0: only a finite number is a reading), or null when nothing
+// could be read (no usable coordinates, bad dates, both endpoints failed).
+// Like the service week, a closed range prefers the reanalysis archive and
+// the forecast endpoint fills (or replaces) what the archive lacks. Successful
+// reads are cached 6h in process; the caller freezes the verdict, so a failed
+// read is retried on the next view.
+async function fetchNightlyMinsF({ latitude, longitude, dates } = {}) {
+  const lat = toCoordinate(latitude);
+  const lon = toCoordinate(longitude);
+  if (lat == null || lon == null || (lat === 0 && lon === 0)) return null;
+  if (!Array.isArray(dates) || !dates.length || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(String(d)))) return null;
+  const start = dates[0];
+  const end = dates[dates.length - 1];
+  const key = `nightmins:${lat.toFixed(3)},${lon.toFixed(3)}:${start}..${end}`;
+  const cached = _rainCache.get(key);
+  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value.map((n) => ({ ...n }));
+
+  const byDate = new Map();
+  for (const base of [OPEN_METEO_ARCHIVE, OPEN_METEO_FORECAST]) {
+    const url = new URL(base);
+    url.searchParams.set('latitude', lat.toFixed(4));
+    url.searchParams.set('longitude', lon.toFixed(4));
+    url.searchParams.set('daily', 'temperature_2m_min');
+    url.searchParams.set('start_date', start);
+    url.searchParams.set('end_date', end);
+    url.searchParams.set('temperature_unit', 'fahrenheit');
+    url.searchParams.set('timezone', 'America/New_York');
+    const res = await openMeteoJson(url, 3500);
+    if (!res.ok) continue;
+    const times = res.payload?.daily?.time;
+    const mins = res.payload?.daily?.temperature_2m_min;
+    if (!Array.isArray(times) || !Array.isArray(mins)) continue;
+    times.forEach((date, i) => {
+      if (typeof mins[i] === 'number' && Number.isFinite(mins[i]) && !byDate.has(date)) byDate.set(date, mins[i]);
+    });
+    if (dates.every((d) => byDate.has(d))) break;
+  }
+  const nights = dates.map((date) => ({ date, minF: byDate.has(date) ? byDate.get(date) : null }));
+  if (!nights.some((n) => n.minF != null)) return null;
+  if (nights.every((n) => n.minF != null)) _rainCache.set(key, { at: Date.now(), value: nights });
+  return nights;
+}
+
 module.exports = {
+  fetchNightlyMinsF,
   toCoordinate,
   nextEtMidnight,
   fetchApplicationConditions,

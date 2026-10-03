@@ -174,6 +174,9 @@ describe('POST /reports/:token/ask never resolves pest expectations weather', ()
     expect(buildReportV1Data).toHaveBeenCalledTimes(1);
     const opts = buildReportV1Data.mock.calls[0][3];
     expect(opts.pestWeekWeather).toBe(false);
+    // GATE_LAWN_MEASURED_COLD (P36): the lawn overnight-low lookup is the same
+    // kind of render-only weather call, so /ask never opts into it either.
+    expect(opts.lawnMeasuredCold).toBe(false);
   });
 
   test('the live heavy-rain NWS forecast is never fetched for /ask, even with the gate on, PEST_REPORT_V2 on, and a same-day service date', async () => {
@@ -201,9 +204,10 @@ describe('POST /reports/:token/ask never resolves pest expectations weather', ()
     };
     const { buildServiceReportV1ResponseData } = reportsRouter;
 
-    await buildServiceReportV1ResponseData(service, VALID_TOKEN, { mode: 'live', pestExpectationsWeather: true });
+    await buildServiceReportV1ResponseData(service, VALID_TOKEN, { mode: 'live', pestExpectationsWeather: true, lawnMeasuredCold: true });
     expect(mockGetDailyRainOutlookBounded).toHaveBeenCalledTimes(1);
     expect(buildReportV1Data.mock.calls[0][3].pestWeekWeather).toBe(true);
+    expect(buildReportV1Data.mock.calls[0][3].lawnMeasuredCold).toBe(true);
 
     mockGetDailyRainOutlookBounded.mockClear();
     buildReportV1Data.mockClear();

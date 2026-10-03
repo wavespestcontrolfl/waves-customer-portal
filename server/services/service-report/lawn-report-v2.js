@@ -555,8 +555,13 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6 } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6, measuredCold } = {}) {
   if (!lawnAssessment) return null;
+  // GATE_LAWN_MEASURED_COLD (P36): undefined = the rule is off or does not apply
+  // to this visit (legacy behavior). true = >= 2 of the 7 nights before the visit
+  // were 55F or colder, the only value that lets the seasonal-dip sentence print.
+  // false / null = not cold / not known: no dip sentence (fail closed).
+  const dipMeasured = measuredCold === undefined || measuredCold === true;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};
@@ -600,7 +605,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const assessDate = lawnAssessment.assessmentDate ? dateOnlyToNoonUtc(lawnAssessment.assessmentDate) : null;
   const assessMonth = assessDate ? (assessDate.getUTCMonth() + 1) : null;
   const dormancy = dormancyLikely({ colorHealth: scores.colorHealth, stressDamage: scores.stressDamage, month: assessMonth });
-  if (dormancy.likely) {
+  // Measured cold (P36): the calendar says the lawn may be slowing, the weather
+  // must agree. Not cold, or not known, the color card keeps its own status and
+  // words: no seasonal excuse and no dip sentence we did not measure.
+  if (dormancy.likely && dipMeasured) {
     const colorCat = categories.find((c) => c.key === 'color_vigor');
     if (colorCat && (colorCat.status === 'watch' || colorCat.status === 'needs_attention')) {
       // Seasonally-expected low color is not a problem — demote it out of the issue
@@ -778,11 +786,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const beforeAfter = buildBeforeAfter(lawnAssessment);
   // Cross-season comparison note: a winter-vs-summer wipe/trend shouldn't read as decline.
   const progressionNote = (lawnAssessment.beforeAfter && lawnAssessment.beforeAfter.before && lawnAssessment.beforeAfter.after)
-    ? crossSeasonNote(lawnAssessment.beforeAfter.before.date, lawnAssessment.beforeAfter.after.date)
+    ? crossSeasonNote(lawnAssessment.beforeAfter.before.date, lawnAssessment.beforeAfter.after.date, { dipClaim: dipMeasured })
     : null;
   const trendRows = Array.isArray(lawnAssessment.trend) ? lawnAssessment.trend : [];
   const trendSeasonNote = trendRows.length >= 2
-    ? crossSeasonNoteFromSeasons(trendRows[0].season, trendRows[trendRows.length - 1].season)
+    ? crossSeasonNoteFromSeasons(trendRows[0].season, trendRows[trendRows.length - 1].season, { dipClaim: dipMeasured })
     : null;
   // Chronological progression frames for the swipeable slider. Currently the two
   // dated captures we can back (before + current); extends to N when a per-visit

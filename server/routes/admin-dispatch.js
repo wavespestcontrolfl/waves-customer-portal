@@ -51,7 +51,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
+const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun, measuredColdLiftApplies } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -742,12 +742,33 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .first('reviewed_findings', 'added_details')
         .catch(() => null)
       : null;
+    // GATE_LAWN_MEASURED_COLD (P36): the cooler-nights lawn tip keeps its
+    // Oct-Nov lift only when the 7 nights before the visit day were measured
+    // cold. Undefined (gate off, not a lawn visit, a month the tip is not
+    // lifted in) leaves the order untouched; a failed read is null = no lift.
+    // Ranking only, so nothing is frozen and the tip is never hidden.
+    let measuredCold;
+    if (registryLineFor(serviceLine) === 'lawn' && /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '')
+      && typeof require('../config/feature-gates').lawnMeasuredColdLive === 'function'
+      && require('../config/feature-gates').lawnMeasuredColdLive()
+      && measuredColdLiftApplies(visitDay)) {
+      measuredCold = null;
+      try {
+        const { readMeasuredCold } = require('../services/service-report/lawn-measured-cold');
+        const cust = svc.customer_id
+          ? await db('customers').where({ id: svc.customer_id }).first('latitude', 'longitude')
+          : null;
+        const read = cust ? await readMeasuredCold({ latitude: cust.latitude, longitude: cust.longitude, visitDay }) : null;
+        measuredCold = read ? read.met : null;
+      } catch { measuredCold = null; }
+    }
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
       findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
+      ...(measuredCold === undefined ? {} : { measuredCold }),
     });
     // The 90-day window is ET calendar days: the database's own current
     // date follows the session zone (UTC on Railway) and would roll the

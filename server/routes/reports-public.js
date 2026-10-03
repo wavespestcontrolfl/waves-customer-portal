@@ -526,6 +526,13 @@ async function buildServiceReportV1ResponseData(service, token, {
   // watering banner's rain close-out (GATE_LAWN_WATERING_FORECAST), so only it
   // pays for the radar lookup. Applied for mode === 'live' only.
   lawnWateringCloseOut = false,
+  // OPT-IN on the same terms (GATE_LAWN_MEASURED_COLD, P36): only a caller that
+  // RENDERS the lawn report pays for the property's overnight-low lookup that
+  // decides whether the seasonal-dip sentence may print: the /data render and
+  // the direct PDF route (the PDF queue passes it to buildReportV1Data itself).
+  // Ask Waves (/ask) builds the report purely for context and must not, so it
+  // only replays a verdict already frozen with the visit.
+  lawnMeasuredCold = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -544,6 +551,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
+    lawnMeasuredCold,
     // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
     // #5137 deferred finding a): only a caller that opts into
     // pestExpectationsWeather above — the /data live render and the direct
@@ -2301,6 +2309,7 @@ router.get('/:token', async (req, res, next) => {
             // it pays for the weather lookups (codex P2 #5137 deferred
             // finding a) — see pestExpectationsWeather's own doc above.
             pestExpectationsWeather: true,
+            lawnMeasuredCold: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           apRenderedSignature = applicatorRenderedPdfSignature(data);
@@ -2624,6 +2633,7 @@ router.get('/:token/data', async (req, res, next) => {
         // pestExpectationsWeather's own doc above.
         pestExpectationsWeather: true,
         lawnWateringCloseOut: true,
+        lawnMeasuredCold: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

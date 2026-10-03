@@ -155,12 +155,29 @@ function lawnFindingsFromRun(run) {
   return [...found];
 }
 
+// Tips whose month lift depends on measured cold (GATE_LAWN_MEASURED_COLD). Kept
+// as a set here, not a field on the tip, so the served tip objects keep their shape.
+const MEASURED_COLD_TIPS = new Set(['lawn_cooler_nights']);
+
+// True when `date` falls in a month where a measured-cold tip would be lifted:
+// the only visits whose tip order the rule can change.
+function measuredColdLiftApplies(date = new Date()) {
+  const month = monthForDate(date);
+  return TIPS.some((tip) => MEASURED_COLD_TIPS.has(tip.id) && (tip.months || []).includes(month));
+}
+
 // 4 for a tip written for one of this visit's findings, 2 for the owner's
 // months, 1 for the wet/dry season (the old in-season-first order).
-function tipRank(tip, { season, month, findings }) {
+function tipRank(tip, { season, month, findings, measuredCold }) {
   const fits = findings.size > 0 && (tip.findings || []).some((key) => findings.has(key) || findings.has(LAWN_FINDINGS[key]));
+  // GATE_LAWN_MEASURED_COLD (P36): a tip about cooling nights keeps its month
+  // lift only when the nights were measured cold. measuredCold is undefined
+  // with the gate off (the lift is unchanged); false / null (not cold, or the
+  // read failed) lose the lift. Ranking only: the tip stays in the list.
+  const monthLift = (tip.months || []).includes(month)
+    && !(MEASURED_COLD_TIPS.has(tip.id) && measuredCold !== undefined && measuredCold !== true);
   return (fits ? 4 : 0)
-    + ((tip.months || []).includes(month) ? 2 : 0)
+    + (monthLift ? 2 : 0)
     + (tip.season === 'all' || tip.season === season ? 1 : 0);
 }
 
@@ -1006,12 +1023,12 @@ function registryLineFor(serviceLine) {
  * 2026-10-02) leads those visits' list in its own group ("For this service")
  * and stays out of every other visit's list.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [] } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], measuredCold } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
   // Within a group the best fit leads: this visit's confirmed findings, then
   // the month, then the season; ties keep registry order (the sort is stable).
-  const rankCtx = { season, month: monthForDate(date), findings: new Set(Array.isArray(findings) ? findings : []) };
+  const rankCtx = { season, month: monthForDate(date), findings: new Set(Array.isArray(findings) ? findings : []), measuredCold };
   const bySeason = (a, b) => tipRank(b, rankCtx) - tipRank(a, rankCtx);
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
@@ -1129,6 +1146,7 @@ module.exports = {
   lawnFindingsFromRun,
   registryLineFor,
   tipsForVisit,
+  measuredColdLiftApplies,
   resolveTipIds,
   freezeTechTips,
   sentenceCount,
