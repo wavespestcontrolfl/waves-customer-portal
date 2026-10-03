@@ -488,6 +488,28 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule).toHaveBeenCalledTimes(3);
   });
 
+  test('expectVisitMembership: a stop whose live services differ from the ones the operator was shown is refused before any write', async () => {
+    const shown = { id: 'v1', memberIds: ['a', 'b'], liveCount: 2 };
+    const refused = { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' };
+    const rebooker = fakeRebooker();
+    const move = (options) => moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options });
+    // A service joined.
+    db.__script = script({ members: [member('a'), member('b'), member('c')] });
+    await expect(move({ expectVisitMembership: shown })).rejects.toMatchObject(refused);
+    // A service left or closed (the plan read returns live members only).
+    db.__script = script({ members: [member('a')] });
+    await expect(move({ expectVisitMembership: shown })).rejects.toMatchObject(refused);
+    // The row now belongs to a different visit.
+    db.__script = script({ members: [member('a'), member('b')] });
+    await expect(move({ expectVisitMembership: { ...shown, id: 'v0' } })).rejects.toMatchObject(refused);
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+    // Unchanged: the move runs. A closed member the operator saw is not required to be live.
+    db.__script = script({ members: [member('a'), member('b')] });
+    await move({ expectVisitMembership: { id: 'v1', memberIds: ['a', 'b', 'closed'], liveCount: 2 } });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+  });
+
   test('a reassignment detaches a late joiner still on another technician instead of keeping a split-tech visit', async () => {
     db.__script = script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' },

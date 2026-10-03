@@ -2178,6 +2178,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [comboMove, setComboMove] = useState("together");
   // What this modal already did, so a retried save never moves or splits twice.
   const comboDoneRef = useRef({ moved: false, separated: false });
+  // Warnings from a whole-stop move this modal committed (a double booking,
+  // a text that did not send). The move is never repeated, so they are kept
+  // until a save goes through and shown on every failure in between.
+  const comboWarningsRef = useRef([]);
+  const comboAllServices = comboVisit && Number(comboVisit.serviceCount) > 2 ? `All ${Number(comboVisit.serviceCount)} services` : "Both services";
   // Where the stop IS: the slot the form opened on, then the slot of each
   // whole-stop move this modal committed. Every comparison is against this,
   // so after a move whose follow-up edit failed, going back to the original
@@ -3384,6 +3389,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     savingRef.current = true;
     setSaveError("");
     setSaving(true);
+    const inputsAtSaveStart = saveInputsRef.current;
     // Revalidate right before POSTING money — the hook polls, but a gate
     // flip between the last probe and this click would still save under the
     // semantics the preview used. Codex pre-push audit P1 (round 4 on
@@ -3490,7 +3496,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     let comboMovedThisSave = false;
     let comboSeparatedThisSave = false;
-    let comboMoveWarnings = [];
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3513,7 +3518,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         comboSeparatedThisSave = true;
       } else if (comboSlotChanged) {
         if (comboLengthChanged) {
-          throw new Error("Moving both services keeps each one's length. Save the move first, or choose Separate to change this service's length.");
+          throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
         }
         if (comboPlaceChanged) {
           const moved = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
@@ -3522,6 +3527,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               newDate: form.scheduledDate,
               ...(comboStart ? { newWindow: { start: comboStart, end: comboEnd || undefined }, deriveWindowFromCurrentVisit: true } : {}),
               notifyCustomer: notifyOnMove,
+              // A technician change rides the whole-stop move, so every
+              // service lands on the new technician; on the PUT alone it
+              // would reassign this row only and detach it from the stop.
+              ...(form.technicianId !== (service.technicianId || "") ? { technicianId: form.technicianId || null } : {}),
+              // The stop the operator was shown. The server refuses the move
+              // if a service joined or left it since.
+              ...(Array.isArray(comboVisit.memberIds)
+                ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount } }
+                : {}),
             }),
           });
           // 200 with needsAttention = only part of the stop moved (a
@@ -3534,12 +3548,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           comboDoneRef.current.moved = true;
           comboBaseRef.current = { ...comboBaseRef.current, date: form.scheduledDate, start: comboStart, end: comboEnd };
           comboMovedThisSave = true;
-          if (Array.isArray(moved?.warnings) && moved.warnings.length) comboMoveWarnings = moved.warnings;
+          if (Array.isArray(moved?.warnings) && moved.warnings.length) comboWarningsRef.current = [...comboWarningsRef.current, ...moved.warnings];
           if (notifyOnMove && moved?.notificationSent === false) {
-            comboMoveWarnings = [...comboMoveWarnings, `The customer was not texted about the move: ${moved.notificationError || "the text could not be sent"}.`];
+            comboWarningsRef.current = [...comboWarningsRef.current, `The customer was not texted about the move: ${moved.notificationError || "the text could not be sent"}.`];
           }
         }
       }
+      // A field edited while the move or split was in flight is not in this
+      // closure's payload: never post the stale values over it.
+      if ((comboMovedThisSave || comboSeparatedThisSave) && saveInputsDrifted(inputsAtSaveStart)) {
+        throw new Error("The form changed while that was saving. Review it and save again.");
+      }
+      // The whole-stop move re-dated this visit only. A month-based plan's
+      // stored ordinal must go back unchanged, or the server derives a new
+      // one from the moved date and re-dates the later visits.
+      const keepStoredOrdinal = !!comboVisit && comboDoneRef.current.moved
+        && recurringControlsActive && recurringFreq !== "monthly_nth_weekday";
+      const storedNth = service.recurringNth ?? service.recurring_nth ?? undefined;
+      const storedWeekday = service.recurringWeekday ?? service.recurring_weekday ?? undefined;
       // The stop sits where a whole-stop move from this modal put it: the
       // PUT moves nothing, so it must not text or re-ack (also on a retry).
       const comboMovedByUnit = !!comboVisit && comboDoneRef.current.moved
@@ -3618,11 +3644,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           recurringNth:
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringNth
-              : undefined,
+              : (keepStoredOrdinal ? storedNth : undefined),
           recurringWeekday:
             recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringWeekday
-              : undefined,
+              : (keepStoredOrdinal ? storedWeekday : undefined),
           recurringIntervalDays:
             recurringControlsActive && recurringFreq === "custom"
               ? recurringIntervalDays
@@ -3687,6 +3713,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
+      const comboMoveWarnings = comboWarningsRef.current;
+      comboWarningsRef.current = [];
       if (comboMoveWarnings.length || (Array.isArray(result?.warnings) && result.warnings.length)) {
         showScheduleSaveNotice(`Appointment saved.\n\n${[...comboMoveWarnings, ...(result?.warnings || [])].join("\n\n")}`);
       }
@@ -3841,9 +3869,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // after it fails, say what already happened — every branch below — so
       // nobody re-does the move or closes on an unnoticed split.
       const committed = comboMovedThisSave
-        ? "Both services were moved, but the other changes were not saved. "
+        ? `${comboAllServices} were moved, but the other changes were not saved. `
         : (comboSeparatedThisSave ? "This service was separated from the stop, but the other changes were not saved. " : "");
-      const setSaveError = (message) => setSaveErrorState(committed + message);
+      // The move is not repeated on a retry, so its warnings (a double
+      // booking, a text that did not send) are shown again here.
+      const moveWarnings = comboWarningsRef.current.length ? ` ${comboWarningsRef.current.join(" ")}` : "";
+      const setSaveError = (message) => setSaveErrorState(committed + message + moveWarnings);
       const ack = parseSeriesAckError(e);
       if (ack?.code === SERIES_ACK_REQUIRED) {
         // Nothing saved, nothing moved — the server refused up front. Show

@@ -5658,6 +5658,27 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;
+    // Edit appointment's "move all of them together" names the stop the
+    // operator was shown ({ id, memberIds, liveCount } from the schedule
+    // payload's visit summary). The unit mover checks it against the locked
+    // membership, and visit_id rides the CAS, so a service that joined, left
+    // or was separated since is refused instead of changing what moves.
+    const expectVisit = req.body.expectVisit;
+    if (expectVisit != null) {
+      const validExpectVisit = typeof expectVisit === 'object' && !Array.isArray(expectVisit)
+        && typeof expectVisit.id === 'string' && expectVisit.id
+        && Array.isArray(expectVisit.memberIds) && expectVisit.memberIds.length > 0
+        && expectVisit.memberIds.every((id) => typeof id === 'string' && id)
+        && (expectVisit.liveCount == null || Number.isInteger(expectVisit.liveCount));
+      if (!validExpectVisit) return res.status(400).json({ error: 'expectVisit must be { id, memberIds, liveCount }' });
+      rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: expectVisit.id };
+      rescheduleOptions.expectGroupedVisit = true;
+      rescheduleOptions.expectVisitMembership = {
+        id: expectVisit.id,
+        memberIds: expectVisit.memberIds,
+        liveCount: expectVisit.liveCount == null ? null : expectVisit.liveCount,
+      };
+    }
     // Disclosure contract (PR2 wires it): the collective choke point would
     // widen this singular move to the whole series. A surface that sent
     // `scope: 'this_only'` without `seriesAck: true` has not shown the

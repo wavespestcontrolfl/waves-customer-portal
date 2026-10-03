@@ -2497,6 +2497,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (liveClaim) {
           throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
         }
+        // The caller named the stop its operator was shown (Edit appointment's
+        // "move all of them together"): a member they never saw, or one that
+        // has since left or closed, changes what this move would do.
+        if (options.expectVisitMembership) {
+          const shown = options.expectVisitMembership;
+          const seen = new Set(shown.memberIds.map(String));
+          const same = String(visit.id) === String(shown.id)
+            && members.every((m) => seen.has(String(m.id)))
+            && (shown.liveCount == null || members.length === shown.liveCount);
+          if (!same) {
+            throw Object.assign(new Error('This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was moved.'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
+          }
+        }
         // One live member is not a grouped stop: the rebooker's ordinary
         // single-row path moves it (its seam detaches an unfrozen visit).
         if (members.length < 2) return null;

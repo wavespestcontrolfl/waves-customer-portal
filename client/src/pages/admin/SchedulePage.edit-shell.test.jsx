@@ -350,3 +350,90 @@ it('the move choice is frozen while a save is in flight', async () => {
   expect(writeUrls()[0]).toBe('POST /admin/dispatch/fixture-visit/reschedule');
 });
 
+// ---- GitHub Codex round 1 on #5759 ----
+const putFailsOnce = () => {
+  const state = { putFails: true };
+  fetch.mockImplementation(async (url, options) => (
+    String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT' && state.putFails
+      ? { ok: false, status: 500, json: async () => ({ error: 'boom' }) }
+      : okJson(url)));
+  return state;
+};
+
+it('a field edited while the whole-stop move is in flight is not saved over: the move is disclosed and the edit is not posted', async () => {
+  let releaseMove;
+  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
+    ? new Promise((resolve) => { releaseMove = () => resolve({ ok: true, json: async () => ({}) }); })
+    : okJson(url)));
+  const dialog = openCombo();
+  const date = dialog.querySelector('input[type="date"]');
+  fireEvent.change(date, { target: { value: '2035-01-03' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  fireEvent.change(date, { target: { value: '2035-01-04' } });
+  await act(async () => releaseMove());
+  expect(await screen.findByRole('alert')).toHaveTextContent('Both services were moved, but the other changes were not saved. Save failed: The form changed while that was saving. Review it and save again.');
+  expect(writeUrls()).toEqual(['POST /admin/dispatch/fixture-visit/reschedule']);
+});
+
+it('a technician change rides the whole-stop move, and the move names the stop the operator was shown', async () => {
+  const shown = { ...combo, technicianId: 'tech-1', visit: { ...combo.visit, memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2 } };
+  fetch.mockImplementation(async (url) => okJson(url));
+  render(<EditServiceModal service={shown} technicians={[{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  const techSelect = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'tech-2'));
+  fireEvent.change(techSelect, { target: { value: 'tech-2' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  const move = JSON.parse(writes()[0][1].body);
+  expect(move.technicianId).toBe('tech-2');
+  expect(move.expectVisit).toEqual({ id: 'fixture-stop', memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2 });
+});
+
+it('an unchanged technician is not sent on the whole-stop move', async () => {
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(JSON.parse(writes()[0][1].body)).not.toHaveProperty('technicianId');
+});
+
+it('warnings from a committed move are shown when the edit after it fails', async () => {
+  fetch.mockImplementation(async (url, options) => {
+    if (String(url).includes('/reschedule')) return { ok: true, json: async () => ({ warnings: ['Fixture overlap warning.'] }) };
+    if (String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT') {
+      return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+    }
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Both services were moved, but the other changes were not saved. Save failed: boom Fixture overlap warning.');
+  // The move is not repeated, so a second failure still carries its warning.
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(3));
+  expect(screen.getByRole('alert')).toHaveTextContent('Save failed: boom Fixture overlap warning.');
+});
+
+it('a month-based recurring combo moved together sends its stored ordinal back, so later visits are not re-dated', async () => {
+  fetch.mockImplementation(async (url) => okJson(url));
+  const recurring = { ...combo, isRecurring: true, recurringPattern: 'quarterly', recurringNth: 1, recurringWeekday: 2 };
+  render(<EditServiceModal service={recurring} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-10' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(JSON.parse(writes()[1][1].body)).toMatchObject({ recurringNth: 1, recurringWeekday: 2 });
+});
+
+it('a stop of three services says all three moved', async () => {
+  putFailsOnce();
+  render(<EditServiceModal service={{ ...combo, visit: { id: 'fixture-stop', serviceCount: 3, serviceTypes: ['Lawn Care', 'Pest Control', 'Mosquito'] } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('All 3 services were moved, but the other changes were not saved.');
+});
+

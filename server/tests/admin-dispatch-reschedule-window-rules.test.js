@@ -234,6 +234,25 @@ test('an absent / null / empty window is a date-only move and reaches the rebook
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(3);
 });
 
+test('expectVisit (Edit appointment, "move all of them together") pins the stop the operator was shown; a malformed one is 400 before the rebooker', async () => {
+  const shown = { id: 'visit-1', memberIds: ['00000000-0000-4000-8000-000000000001', 'sibling-1'], liveCount: 2 };
+  const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', expectVisit: shown });
+  expect(status).toBe(200);
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ visit_id: 'visit-1' });
+  expect(options.expectGroupedVisit).toBe(true);
+  expect(options.expectVisitMembership).toEqual(shown);
+  for (const bad of ['visit-1', { id: 'visit-1' }, { id: 'visit-1', memberIds: [] }, { id: '', memberIds: ['a'] }, { id: 'visit-1', memberIds: ['a'], liveCount: 'two' }]) {
+    const refused = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', expectVisit: bad });
+    expect(refused.status).toBe(400);
+  }
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  // No expectVisit: no membership pin (every other caller is unchanged).
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
+  expect(SmartRebooker.reschedule.mock.calls[1][5].expectVisitMembership).toBeUndefined();
+  expect(SmartRebooker.reschedule.mock.calls[1][5].expectGroupedVisit).toBeUndefined();
+});
+
 describe('window resolved against the CURRENT visit row', () => {
   test("{ start } on a 2-hour visit derives and validates the REAL end: 19:00 → 19:00-21:00 is refused (never 19:00-11:00)", async () => {
     mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };
