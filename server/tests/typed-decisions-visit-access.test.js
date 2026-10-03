@@ -461,6 +461,27 @@ describe('visit access shadow: rules that need no database', () => {
     expect(JSON.stringify(built.state)).not.toContain('6612');
   });
 
+  test('a visit that has started is never re-read: a note edited after arrival is not judged', async () => {
+    // NOW is 10:00 Eastern on 10-05; this visit's window started at 09:00.
+    const started = await visit({ scheduled_date: '2026-10-05', window_start: '09:00', status: 'on_site' });
+    const later = await visit({ scheduled_date: '2026-10-05', window_start: '13:00' });
+    expect(await sweep()).toMatchObject({ considered: 2, asked: 1, skipped: 1 });
+    expect(await rows(started)).toHaveLength(0);
+    expect(await rows(later)).toHaveLength(Object.keys(pkg.questions).length);
+  });
+
+  test('recruiting texts are never read; many Waves texts do not hide the customer\'s own', async () => {
+    await text('I can start Monday, my code for the job portal is sesame', '2026-10-03T15:00:00Z', { message_type: 'job_applicant_reply' });
+    await text('We have a new puppy', '2026-09-20T15:00:00Z');
+    await database('sms_log').insert(Array.from({ length: 150 }, (_, i) => ({
+      id: randomUUID(), customer_id: customerId, direction: 'outbound', message_body: `Reminder ${i}`, message_type: 'reminder', status: 'delivered',
+      created_at: new Date(Date.parse('2026-09-25T12:00:00Z') + i * 60000),
+    })));
+    const built = await build(await visit());
+    expect(built.state.recent_texts).toContain('We have a new puppy');
+    expect(JSON.stringify(built.state)).not.toMatch(/sesame|job portal|Reminder/);
+  });
+
   test('a provider that is down does not keep later visits from their first answer', async () => {
     process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
     mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false, reason: 'error' } : reply()));
@@ -543,8 +564,10 @@ describe('visit access shadow: rules that need no database', () => {
     await text('We got a puppy', '2026-10-05T13:50:00Z');
     await sweep();
     expect(await database('visit_access_states').where({ scheduled_service_id: visitId })).toHaveLength(2);
+    // Retention is its own, ungated step.
     await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
-    await sweep();
+    gates(false);
+    expect(await access.pruneVisitAccessStates({ dbh: database, now: NOW })).toBe(2);
     expect(await database('visit_access_states')).toHaveLength(0);
   });
 });

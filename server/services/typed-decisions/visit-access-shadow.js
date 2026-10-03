@@ -286,22 +286,39 @@ async function loadHistory(svc, dbh, day, serviceLine) {
 // window enter the state: the rest is there solely so a reply to an access
 // question ("What is your gate password?" / "sesame") is withheld with it.
 const TEXT_READ_LIMIT = 120;
+const TEXT_READ_PAGES = 10;
 async function loadCustomerTexts(svc, dbh, floor, cutoff) {
   const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
   const { isSmsReaction } = require('../sms-intent');
-  const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
-    .whereIn('direction', ['inbound', 'outbound'])
-    .where('created_at', '>=', new Date(floor.getTime() - ACCESS_REPLY_MS))
-    .where('created_at', '<', cutoff)
-    .orderBy('created_at', 'desc')
-    .limit(TEXT_READ_LIMIT)
-    .select('created_at', 'direction', 'message_body', 'message_type', 'status');
+  const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
+  const reaction = (row) => row.message_type === 'sms_reaction' || isSmsReaction(row.message_body);
+  // Newest first, page by page, until the window holds enough of the
+  // customer's own texts: Waves texts, tapbacks and reply-context rows before
+  // the floor never use up the read. Recruiting texts (an applicant who is
+  // also a customer) are owner-only and never read
+  // (utils/recruiting-thread-scope.js).
+  const texts = [];
+  let truncated = false;
+  for (let page = 0; page < TEXT_READ_PAGES; page += 1) {
+    const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: svc.customer_id })))
+      .whereIn('direction', ['inbound', 'outbound'])
+      .where('created_at', '>=', new Date(floor.getTime() - ACCESS_REPLY_MS))
+      .where('created_at', '<', cutoff)
+      .orderBy('created_at', 'desc').orderBy('id', 'desc')
+      .offset(page * TEXT_READ_LIMIT)
+      .limit(TEXT_READ_LIMIT)
+      .select('created_at', 'direction', 'message_body', 'message_type', 'status');
+    texts.push(...rows);
+    truncated = rows.length >= TEXT_READ_LIMIT;
+    const own = texts.filter((row) => row.direction === 'inbound' && !reaction(row) && new Date(row.created_at) >= floor).length;
+    if (!truncated || own >= MAX_TEXTS) break;
+  }
   // A truncated read hides what came before its oldest row: fail closed and
   // withhold a full reply-window from there.
-  let withholdUntil = texts.length >= TEXT_READ_LIMIT ? new Date(texts[texts.length - 1].created_at).getTime() + ACCESS_REPLY_MS : 0;
+  let withholdUntil = truncated ? new Date(texts[texts.length - 1].created_at).getTime() + ACCESS_REPLY_MS : 0;
   // Oldest first, so a text that follows an access-bearing one is seen as such.
   const lines = texts
-    .filter((row) => row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body))
+    .filter((row) => !reaction(row))
     .reverse()
     .map((row) => {
       const at = new Date(row.created_at).getTime();
@@ -371,11 +388,15 @@ const VISIT_COLUMNS = [
 
 // One visit: ask every live provider that has not already answered THIS
 // state, then record each answer with the others' answers beside it.
-async function shadowVisit(svc, { dbh, providers, out }) {
+async function shadowVisit(svc, { dbh, providers, out, now }) {
   const { askPackage } = require('./jev');
   const { recordDecisions, TABLE } = require('./shadow-recorder');
   const { packageFor } = require('./packages');
   const pkg = packageFor(PACKAGE_ID);
+  // The evidence is what was known BEFORE the visit. Once it has started (its
+  // window start; a visit can sit en_route or on_site long after), nothing is
+  // re-read: a note or preference edited after arrival must not be judged.
+  if (now >= stateCutoff(svc)) { out.skipped += 1; return; }
   const built = await buildVisitAccessState(svc, dbh);
   if (!built) { out.skipped += 1; return; }
 
@@ -516,7 +537,7 @@ async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
     const worker = async () => {
       for (let svc = queue.shift(); svc; svc = queue.shift()) {
         try {
-          await shadowVisit(svc, { dbh: conn, providers, out });
+          await shadowVisit(svc, { dbh: conn, providers, out, now });
         } catch (err) {
           out.failed += 1;
           logger.warn(`[typed-decisions] visit access failed for ${svc.id}: ${err.message}`);
@@ -524,8 +545,6 @@ async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
       }
     };
     await Promise.all(Array.from({ length: Math.min(WORKERS, queue.length) }, worker));
-    await conn(STATES_TABLE).where('created_at', '<', new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000)).del()
-      .catch((err) => logger.warn(`[typed-decisions] visit access state prune failed: ${err.message}`));
   } catch (err) {
     logger.error(`[typed-decisions] visit access sweep failed: ${err.message}`);
     return { ...out, skippedReason: 'error' };
@@ -571,7 +590,19 @@ async function storedVisitAccess(pairs, dbh) {
 // reads 14 days and a label is rarely given later than a few weeks.
 const STATE_RETENTION_DAYS = 180;
 
+// Retention is NOT gated: the stored states hold customer words, so they are
+// dropped on schedule even after the shadow is switched off. Never throws.
+async function pruneVisitAccessStates({ dbh = null, now = new Date() } = {}) {
+  try {
+    const conn = dbh || require('../../models/db');
+    return await conn(STATES_TABLE).where('created_at', '<', new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000)).del();
+  } catch (err) {
+    logger.warn(`[typed-decisions] visit access state prune failed: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
-  runVisitAccessSweep, buildVisitAccessState, storedVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
+  runVisitAccessSweep, pruneVisitAccessStates, buildVisitAccessState, storedVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
   redactForState, stateCutoff, PACKAGE_ID, SUBJECT_TYPE,
 };

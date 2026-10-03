@@ -4379,10 +4379,14 @@ function initScheduledJobs() {
   // reads only. Hourly across the booking day so a same-day add or a new
   // customer text is picked up; :34 is clear of the :19/:49 brief sweep.
   cron.schedule('34 5-19 * * *', async () => {
-    if (!require('../config/feature-gates').visitAccessShadowLive()) return;
     try {
       await runExclusive('visit-access-shadow', async () => {
-        const result = await require('./typed-decisions/visit-access-shadow').runVisitAccessSweep();
+        const VisitAccess = require('./typed-decisions/visit-access-shadow');
+        // Retention runs whatever the gate says: stored states are dropped on
+        // schedule even after the shadow is switched off.
+        await VisitAccess.pruneVisitAccessStates();
+        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        const result = await VisitAccess.runVisitAccessSweep();
         logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
       });
     } catch (err) {
