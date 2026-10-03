@@ -1374,5 +1374,27 @@ describe('a spray adjuvant is labeled for what it does to the spray', () => {
   it('tree & shrub keeps its own leaf wording', () => {
     expect(applicationPurpose(surfactant, 'tree_shrub')).toBe('Spray coverage aid');
     expect(applicationPurposeCopy(surfactant, 'tree_shrub')).toBe('Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.');
+    expect(applicationTechnicalExplanation(surfactant, 'tree_shrub')[0]).toMatch(/^LESCO 90\/10 Nonionic Surfactant is a spray adjuvant, not a pesticide\. It lowers the surface tension/);
+  });
+
+  // GitHub Codex P1 on 4cc22e648b: the card's technical details still called
+  // it a residual perimeter application that pests contact.
+  it('its technical details agree: a spray adjuvant, never a residual perimeter application', () => {
+    for (const line of ['pest', 'termite', 'rodent', 'mosquito']) {
+      const details = applicationTechnicalExplanation(surfactant, line);
+      expect(details[0]).toBe('LESCO 90/10 Nonionic Surfactant is a spray adjuvant, not a pesticide. It is mixed into the spray so the treatment spreads evenly and sticks to the treated surfaces, improving the coverage of the products it is mixed with.');
+      expect(details.join(' ')).not.toMatch(/residual exterior perimeter application|bait placement/);
+      expect(applicationPurpose(surfactant, line)).toBe('Spray coverage aid');
+    }
+  });
+
+  it('matched by its active ingredient alone, the label and the details still agree', () => {
+    const byActive = { method: 'perimeter_spray', targets: [], product: { name: 'Spreader 90', category: '', active_ingredient: 'Nonionic surfactant' } };
+    expect(applicationPurpose(byActive, 'pest')).toBe('Spray coverage aid');
+    expect(applicationTechnicalExplanation(byActive, 'pest')[0]).toMatch(/^Spreader 90 is a spray adjuvant, not a pesticide\./);
+  });
+
+  it('the perimeter insecticide keeps its residual perimeter details', () => {
+    expect(applicationTechnicalExplanation(perimeterInsecticide, 'pest')[0]).toMatch(/residual exterior perimeter application/);
   });
 });

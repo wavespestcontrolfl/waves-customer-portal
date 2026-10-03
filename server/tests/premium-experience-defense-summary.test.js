@@ -30,3 +30,20 @@ test('documented findings keep the documented wording', () => {
   expect(summary([FINDING], [SPRAY])).toBe('We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.');
   expect(summary([FINDING], [])).toBe('We’re tracking the documented areas between visits — the breakdown below shows exactly what we’re watching.');
 });
+
+// GitHub Codex P1 on 4cc22e648b: completion writes a "no_activity" finding on
+// a clean visit, and it counted as documented activity.
+test('a clean visit\'s no-activity finding is no documented activity: summary, front entry and lanai read clear', () => {
+  const clean = { id: 'f0', category: 'no_activity', title: 'No activity observed', detail: 'Front entry and lanai checked, nothing found', severity: 'info', recommendation: null };
+  const out = buildPropertyDefenseStatusContext({ record: {}, findings: [clean], applications: [SPRAY], zones: [], pressureTrend });
+  expect(out.overallLabel).toBe('watch');
+  expect(out.summary).toBe('We treated your property today and are watching activity levels between visits — the breakdown below shows what we’re tracking.');
+  expect(out.items.find((item) => item.key === 'front_entry')).toMatchObject({ status: 'clear', detail: 'No active entry finding was documented.' });
+  // It still says there is a lanai: the row shows, clear.
+  expect(out.items.find((item) => item.key === 'lanai')).toMatchObject({ status: 'clear', detail: 'No lanai activity was documented.' });
+});
+
+test('a real finding beside the no-activity one still reads as documented', () => {
+  const clean = { id: 'f0', category: 'no_activity', title: 'No activity observed', detail: '', severity: 'info', recommendation: null };
+  expect(summary([clean, { ...FINDING, category: 'pest_activity' }], [SPRAY])).toBe('We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.');
+});

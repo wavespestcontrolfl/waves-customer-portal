@@ -1198,6 +1198,14 @@ export function applicationPestFamily(app = {}) {
   return families.size === 1 ? families.values().next().value : null;
 }
 
+// A spray adjuvant (the surfactant in the tank mix), by name, category or
+// active ingredient. One test for the label and the technical details, so
+// the two never disagree (GitHub Codex P1 on 4cc22e648b).
+function isSprayAdjuvant(app = {}) {
+  const product = app.product || {};
+  return /surfactant|adjuvant|wetting/i.test(`${product.name || ''} ${product.category || ''} ${product.active_ingredient || ''}`);
+}
+
 export function applicationPurpose(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const product = String(app.product?.name || '').toLowerCase();
@@ -1217,6 +1225,11 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (method.includes('granular') || category.includes('fert')) return 'Lawn nutrient application';
     return 'Lawn treatment application';
   }
+  // A spray adjuvant (the surfactant in the tank mix) is no treatment of its
+  // own: never "Perimeter protection" (or a mosquito treatment) because of
+  // the mix it rode in (owner report review 2026-10-03). Tree & shrub's own
+  // branch below gives it the same label.
+  if (isSprayAdjuvant(app)) return 'Spray coverage aid';
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
   if (serviceLine === 'tree_shrub') {
     // Classify from name + category + ACTIVE ingredient — blank/Uncategorized
@@ -1234,11 +1247,6 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient/.test(hay)) return 'Plant nutrition application';
     return 'Plant health treatment';
   }
-  // A spray adjuvant (the surfactant in the tank mix) is no treatment of its
-  // own: never "Perimeter protection" because the mix it rode in was a
-  // perimeter spray (owner report review 2026-10-03). Same match as the
-  // tree & shrub branch above.
-  if (/surfactant|adjuvant|wetting/.test(`${product} ${category}`)) return 'Spray coverage aid';
   if (serviceLine === 'termite' || serviceLine === 'rodent') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
@@ -1439,6 +1447,15 @@ export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') 
       details.push(`${productName} was applied to the affected plants${active ? ` (active ingredient: ${active})` : ''} per its label directions, targeting the documented activity while minimizing impact on the surrounding landscape.`);
     }
     details.push('The application is tracked against this property’s plant inventory, photo history, and prior treatments so the next visit measures response rather than starting over.');
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  // A spray adjuvant is no residual application or bait of its own: it is
+  // described for what it does to the spray, as its label reads (GitHub
+  // Codex P1 on 4cc22e648b).
+  if (isSprayAdjuvant(app)) {
+    details.push(`${productName} is a spray adjuvant, not a pesticide. It is mixed into the spray so the treatment spreads evenly and sticks to the treated surfaces, improving the coverage of the products it is mixed with.`);
     details.push(...productIdentifierDetails(app));
     return details;
   }

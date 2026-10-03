@@ -391,7 +391,14 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
   const pressure = pressureTrend?.current?.pressureIndex ?? customerVisiblePressureIndex(record?.pressure_index);
   const activeMethods = new Set(applications.map((app) => app.method));
   const textByZone = new Map(zones.map((zone) => [zone.id, `${zone.letter} ${zone.label}`.toLowerCase()]));
-  const findingText = findings.map((finding) => `${finding.title} ${finding.detail} ${textByZone.get(String(finding.zoneId)) || ''}`.toLowerCase());
+  // A "no activity" finding records that nothing was found (completion
+  // writes one on a clean visit): it is never documented activity, in the
+  // area rows or the summary (GitHub Codex P1 on 4cc22e648b). It still says
+  // an area exists, so presence (lanai, pool) reads every finding.
+  const activityFindings = findings.filter((finding) => finding.category !== 'no_activity');
+  const textOfFinding = (finding) => `${finding.title} ${finding.detail} ${textByZone.get(String(finding.zoneId)) || ''}`.toLowerCase();
+  const findingText = activityFindings.map(textOfFinding);
+  const anyFindingText = findings.map(textOfFinding);
   const hasFrontEntry = findingText.some((text) => text.includes('front') || text.includes('entry') || text.includes('threshold'));
   const hasLanaiActivity = findingText.some((text) => text.includes('lanai') && !text.includes('clear'));
   const hasPoolActivity = findingText.some((text) => text.includes('pool') && !text.includes('clear'));
@@ -406,9 +413,9 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
     .join(' ');
   const allZoneText = `${zones.map((zone) => `${zone.label || ''} ${zone.letter || ''}`.toLowerCase()).join(' ')} ${appAreaText}`;
   const lanaiOnProperty = hasLanaiActivity || allZoneText.includes('lanai') || allZoneText.includes('patio')
-    || findingText.some((text) => text.includes('lanai'));
+    || anyFindingText.some((text) => text.includes('lanai'));
   const poolOnProperty = hasPoolActivity || allZoneText.includes('pool')
-    || findingText.some((text) => text.includes('pool'));
+    || anyFindingText.some((text) => text.includes('pool'));
   const highAction = findings.some((finding) => ['critical', 'high'].includes(finding.severity) && finding.recommendation);
   const anyRecommendation = findings.some((finding) => finding.recommendation);
   const lowPressure = Number.isFinite(pressure) && pressure < 2;
@@ -474,7 +481,7 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
           ? 'One recommendation needs attention to reduce recurring activity.'
           // With nothing documented this visit, the summary never claims a
           // treated "documented activity" (owner report review 2026-10-03).
-          : findings.length
+          : activityFindings.length
             ? (applications.length
               ? 'We treated the documented activity today and are tracking those areas between visits — the breakdown below shows exactly what we’re watching.'
               : 'We’re tracking the documented areas between visits — the breakdown below shows exactly what we’re watching.')
