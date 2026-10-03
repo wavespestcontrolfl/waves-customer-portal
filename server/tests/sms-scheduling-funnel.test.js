@@ -148,3 +148,23 @@ test('a would-move is scored only after its 48h, and only against a logged move 
     would_move_unmatched: 2,
   });
 });
+
+test('recall counts real accepts (offers whose visit then moved into an offered time) and how many got that would-move', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }, { date: '2026-10-07', start: '14:00' }];
+  const offer = (id, visit) => ({ id, kind: 'move_visit', scheduled_service_id: visit, sent_at: '2026-10-01T13:00:00Z', slots });
+  const offers = [offer('o1', 'v1'), offer('o2', 'v2'), offer('o3', 'v3'), { ...offer('o4', 'v4'), kind: 'book_new' }];
+  const moves = new Map([
+    ['v1', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-07', new_window: '14:00-15:30' }]],
+    ['v2', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+    // moved, but not into an offered time: not a real accept of this offer
+    ['v3', [{ created_at: '2026-10-01T20:00:00Z', new_date: '2026-10-09', new_window: '10:00-11:00' }]],
+  ]);
+  const would = (date, start) => JSON.stringify({ kind: 'move_visit', date, start });
+  const decisions = [
+    { sms_offer_id: 'o1', outcome: 'would_move', would_have: would('2026-10-07', '14:00') },
+    // o2's real accept went to staff: missed
+    { sms_offer_id: 'o2', outcome: 'staff', would_have: would('2026-10-06', '10:00') },
+  ];
+  expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 2, caught: 1 });
+});

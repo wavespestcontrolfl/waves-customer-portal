@@ -45,6 +45,11 @@ const DECIDE_TIMEOUT_MS = 30000;
 // A visit snapshot taken this long after the send (a backfilled offer) may
 // already miss a change: it proves nothing about the visit at send time.
 const SNAPSHOT_MAX_LAG_MS = 10 * 60000;
+// The snapshot is read just after the send, so an edit landing between the
+// two would be in it as if the offer described it. Any change to the visit
+// row from shortly before the send until the snapshot was read is treated as
+// possibly that race: refused, whatever the change was.
+const SEND_RACE_MARGIN_MS = 2 * 60000;
 const KIND_LABEL = Object.freeze({ move_visit: 'to move their upcoming visit', book_estimate: 'to book their quoted service', book_new: 'to book a new visit' });
 
 // Structured output: the model can only answer in this shape. slot_number is
@@ -229,6 +234,7 @@ function evaluateDecision({ offer, slot = null, decision, inboundBody, customer,
       // or status change since means the offer no longer describes it.
       if (!snapshot?.taken_at) refusals.push('no_visit_snapshot');
       else if (new Date(snapshot.taken_at).getTime() - new Date(offer.sent_at).getTime() > SNAPSHOT_MAX_LAG_MS) refusals.push('visit_snapshot_late');
+      else if (!snapshot.updated_at || new Date(snapshot.updated_at).getTime() >= new Date(offer.sent_at).getTime() - SEND_RACE_MARGIN_MS) refusals.push('visit_changed_near_send');
       else if (!sameVisitShape(visitShape(snapshot), visitShape(visit))) refusals.push('visit_changed_since_offer');
       if (visitAfter !== undefined && !sameVisitShape(visitShape(visit), visitShape(visitAfter))) refusals.push('visit_changed_during_decide');
       const from = visitShape(visit);
@@ -313,10 +319,6 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
     const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id');
     if (already) return { recorded: false, reason: 'already_decided', id: already.id };
-    const who = customer || (offers[0].customer_id
-      ? await dbh('customers').where({ id: offers[0].customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS)
-      : null);
-    if (!who) return { recorded: false, reason: 'no_customer' };
 
     const thread = await loadThread(dbh, phone, inbound);
     const { ROUTES } = require('../config/models');
@@ -342,6 +344,15 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     const pick = resolvePick(offers, decision);
     const offer = pick?.offer || offers[0];
     const slot = pick?.slot || null;
+    // Who the decision is about: the customer of the offer the reply was
+    // judged against (a household phone can hold offers for two records).
+    // The webhook's primary-phone match is reused only when it is that
+    // customer; either way the sender must be on that customer's file.
+    const who = (customer && offer.customer_id && String(customer.id) === String(offer.customer_id))
+      ? customer
+      : ((offer.customer_id ? await dbh('customers').where({ id: offer.customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS) : null)
+        // No customer on the offer: still recorded, and refused as a mismatch.
+        || customer || { id: null });
 
     let visit = null;
     let visitAfter;
@@ -372,7 +383,7 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     const row = {
       sms_offer_id: offer.id,
       inbound_sms_log_id: inboundSmsLogId,
-      customer_id: who.id,
+      customer_id: who.id || null,
       mode: 'shadow',
       model: result?.servedModel || route?.model || null,
       prompt_version: PROMPT_VERSION,
@@ -398,8 +409,64 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
   }
 }
 
+// The AI assistant line answers its own texts; the webhook skips it too.
+const AI_NUMBER_DIGITS = ['18559260203', '8559260203'];
+const SWEEP_MIN_AGE_MS = 2 * 60000;
+const SWEEP_LOOKBACK_MS = 48 * 3600000;
+const SWEEP_BATCH = 20;
+
+/**
+ * Replies the webhook could not decide because their offer was not recorded
+ * yet (the customer answered before the post-send ledger write committed, or
+ * while it waited for the ledger backfill): every customer text from the last
+ * 48h, at least two minutes old, sent to a Waves location line, with no
+ * decision row, from a phone that held an offer when it arrived. Each goes
+ * through runShadowDecision, which is idempotent per text. Runs right after
+ * the offer backfill on its cron. Never throws.
+ */
+async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShadowDecision } = {}) {
+  if (!decideLive()) return { scanned: 0, recorded: 0, reason: 'gate_off' };
+  let rows;
+  try {
+    const nowMs = new Date(now).getTime();
+    rows = await dbh('sms_log as sl')
+      .where('sl.direction', 'inbound')
+      .where('sl.status', 'received')
+      .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
+      .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))
+      .whereRaw("sl.metadata->>'source' = 'location'")
+      .whereRaw(`REGEXP_REPLACE(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g') NOT IN (${AI_NUMBER_DIGITS.map(() => '?').join(', ')})`, AI_NUMBER_DIGITS)
+      .whereNotExists(function decided() {
+        this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');
+      })
+      .whereExists(function offered() {
+        this.select(dbh.raw('1')).from('sms_offers as o')
+          .whereRaw("o.phone_last10 = RIGHT(REGEXP_REPLACE(COALESCE(sl.from_phone, ''), '[^0-9]', '', 'g'), 10)")
+          .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
+          .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
+      })
+      .orderBy('sl.created_at', 'asc')
+      .limit(SWEEP_BATCH)
+      .select('sl.id', 'sl.from_phone', 'sl.message_body');
+  } catch (err) {
+    logger.warn(`[sms-scheduling-decide] reply sweep scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return { scanned: 0, recorded: 0, errors: 1, reason: 'error' };
+  }
+  const { isSmsReaction } = require('./sms-intent');
+  let recorded = 0;
+  let errors = 0;
+  for (const r of rows) {
+    if (!String(r.message_body || '').trim() || isSmsReaction(r.message_body)) continue;
+    const result = await run({ customer: null, inboundBody: r.message_body, inboundSmsLogId: r.id, fromPhone: r.from_phone, now, dbh });
+    if (result?.recorded) recorded += 1;
+    else if (result?.reason === 'error') errors += 1;
+  }
+  return { scanned: rows.length, recorded, errors };
+}
+
 module.exports = {
   decideLive,
+  sweepUndecidedReplies,
   runShadowDecision,
   evaluateDecision,
   readDecision,

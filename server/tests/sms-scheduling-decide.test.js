@@ -21,7 +21,7 @@ const OFFER = {
   id: 'offer-1', kind: 'move_visit', customer_id: 'cust-1', scheduled_service_id: VISIT_ID,
   estimate_id: null, service_key: null, slots: SLOTS, sent_at: new Date('2026-10-02T13:00:00Z'),
   // The visit as it stood when the offer went out (taken a second after the send).
-  visit_snapshot: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', taken_at: '2026-10-02T13:00:01Z' },
+  visit_snapshot: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', updated_at: '2026-09-28T12:00:00Z', taken_at: '2026-10-02T13:00:01Z' },
 };
 const VISIT = {
   id: VISIT_ID, customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-05',
@@ -100,6 +100,8 @@ describe('evaluateDecision', () => {
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, date: '2026-10-04' } } }],
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, status: 'pending' } } }],
     ['no_visit_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
+    ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: '2026-10-02T13:00:00.500Z' } } }],
+    ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: null } } }],
     ['visit_snapshot_late', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, taken_at: '2026-10-02T14:00:00Z' } } }],
     ['visit_changed_during_decide', { visitAfter: { ...VISIT, scheduled_date: '2026-10-09' } }],
     ['visit_changed_during_decide', { visitAfter: null }],
@@ -183,6 +185,35 @@ describe('runShadowDecision', () => {
     const dbh = jest.fn(() => { throw new Error('connection lost'); });
     await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'x', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', dbh, llm: { dispatch: jest.fn() } }))
       .resolves.toEqual({ recorded: false, reason: 'error' });
+  });
+});
+
+describe('sweepUndecidedReplies', () => {
+  test('gate off: nothing is read', async () => {
+    const dbh = jest.fn();
+    await expect(decide.sweepUndecidedReplies({ dbh })).resolves.toMatchObject({ scanned: 0, reason: 'gate_off' });
+    expect(dbh).not.toHaveBeenCalled();
+  });
+
+  test('gate on: each waiting reply is decided, a tapback is skipped, and errors are counted', async () => {
+    process.env[GATE] = 'true';
+    const rows = [
+      { id: 'in-1', from_phone: '+19415550100', message_body: 'Tuesday works' },
+      { id: 'in-2', from_phone: '+19415550100', message_body: 'Liked \u201cWe can do Tuesday\u201d' },
+      { id: 'in-3', from_phone: '+19415550101', message_body: 'Wednesday please' },
+    ];
+    const builder = new Proxy({}, {
+      get(_, m) {
+        if (m === 'then') return (resolve) => resolve(rows);
+        return () => builder;
+      },
+    });
+    const dbh = jest.fn(() => builder);
+    dbh.raw = jest.fn();
+    const run = jest.fn(async ({ inboundSmsLogId }) => (inboundSmsLogId === 'in-3' ? { recorded: false, reason: 'error' } : { recorded: true }));
+    await expect(decide.sweepUndecidedReplies({ dbh, run, now: NOW })).resolves.toEqual({ scanned: 3, recorded: 1, errors: 1 });
+    expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual(['in-1', 'in-3']);
+    expect(run.mock.calls[0][0]).toMatchObject({ customer: null, inboundBody: 'Tuesday works', fromPhone: '+19415550100' });
   });
 });
 

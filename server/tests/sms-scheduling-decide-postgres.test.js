@@ -49,6 +49,7 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const [inbound] = await trx('sms_log').insert({
       customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
       message_body: 'Tuesday works', status: 'received', created_at: new Date('2040-03-01T14:59:00Z'),
+      metadata: JSON.stringify({ source: 'location' }),
     }).returning('id');
     return { customerId, offerId: offer.id || offer, inboundId: inbound.id || inbound };
   }
@@ -106,6 +107,17 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(llm.dispatch.mock.calls[0][1].text).toContain('Tuesday, March 6');
     expect(llm.dispatch.mock.calls[0][1].text).not.toContain('Friday, March 9');
     expect(await trx('sms_offer_decisions').where({ id: result.id }).first('sms_offer_id')).toEqual({ sms_offer_id: offerId });
+  }));
+
+  test('a reply that arrived before its offer was recorded is decided by the sweep, once', () => inTrx(async (trx) => {
+    const { inboundId } = await seed(trx);
+    const llm = { dispatch: jest.fn(async () => ({ ok: true, json: { action: 'accept_slot', slot_number: 1, customer_quote: 'Tuesday works', confidence: 'high' } })) };
+    const run = (args) => decide.runShadowDecision({ ...args, llm, slotRecheck: async () => ({ ok: true }) });
+    const later = new Date('2040-03-01T15:10:00Z');
+    const first = await decide.sweepUndecidedReplies({ now: later, dbh: trx, run });
+    expect(first).toMatchObject({ recorded: 1, errors: 0 });
+    expect(await trx('sms_offer_decisions').where({ inbound_sms_log_id: inboundId }).count('* as n').first()).toMatchObject({ n: '1' });
+    expect(await decide.sweepUndecidedReplies({ now: later, dbh: trx, run })).toMatchObject({ scanned: 0 });
   }));
 
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {

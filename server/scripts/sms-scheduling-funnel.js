@@ -51,7 +51,8 @@ function printReport(since, until, f) {
       `  Decide step (shadow) decisions     ${f.decisions.total}`,
       `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
       `    refused because                  ${fmt(f.decisions.refusals)}`,
-      `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (logged moves only)`,
+      `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
+      `    real accepts it caught           ${f.decisions.recall.caught} of ${f.decisions.recall.real_accepts} (recall: offers whose visit moved into an offered time <48h)`,
     );
   }
   console.log(lines.join('\n'));

@@ -198,9 +198,14 @@ function hhmmOf(value) {
 /** The visit's date, window and status now; null fields when it is gone. */
 async function visitSnapshot(dbh, scheduledServiceId) {
   const v = await dbh('scheduled_services').where({ id: scheduledServiceId })
-    .first('scheduled_date', 'window_start', 'window_end', 'status');
+    .first('scheduled_date', 'window_start', 'window_end', 'status', 'updated_at');
   const date = v?.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : (v?.scheduled_date ? String(v.scheduled_date).slice(0, 10) : null);
-  return { date, start: hhmmOf(v?.window_start), end: hhmmOf(v?.window_end), status: v?.status || null, taken_at: new Date().toISOString() };
+  // updated_at lets the decide step refuse a snapshot that may hold an edit
+  // made around the send (after the text went out, before this read).
+  return {
+    date, start: hhmmOf(v?.window_start), end: hhmmOf(v?.window_end), status: v?.status || null,
+    updated_at: v?.updated_at ? new Date(v.updated_at).toISOString() : null, taken_at: new Date().toISOString(),
+  };
 }
 
 /**
