@@ -1184,6 +1184,9 @@ async function sweepUnenrichedProperties({ limit, stalePendingCools = false } = 
 // a retry never buys past the nightly cap.
 const RETRY_BUDGET_WINDOW_HOURS = 12;
 async function backfillBudgetLeft() {
+  // PROPERTY_LOOKUP_CACHE_DISABLED turns the ledger's writes off, so nothing
+  // the killed run bought was recorded: no figure, no retry spend.
+  if (require('./property-lookup/lookup-cache').isCacheDisabled()) return 0;
   const res = await db('property_lookups')
     .whereRaw(`last_attempt_at > NOW() - INTERVAL '${RETRY_BUDGET_WINDOW_HOURS} hours'`)
     .count({ n: '*' })

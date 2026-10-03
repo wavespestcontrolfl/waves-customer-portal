@@ -887,6 +887,17 @@ describe('sweepUnenrichedPropertiesAfterKill (deploy-kill retry keeps the nightl
     expect(performPropertyLookup).not.toHaveBeenCalled();
   });
 
+  test('ledger writes switched off (PROPERTY_LOOKUP_CACHE_DISABLED): the retry buys nothing', async () => {
+    ledgerCount(0);
+    process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
+    try {
+      expect(await sweepUnenrichedPropertiesAfterKill()).toEqual({ skipped: 'budget_spent' });
+      expect(performPropertyLookup).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.PROPERTY_LOOKUP_CACHE_DISABLED;
+    }
+  });
+
   test('an unreadable ledger throws: no budget figure, no spend', async () => {
     ledgerCount(new Error('ledger down'));
     await expect(sweepUnenrichedPropertiesAfterKill()).rejects.toThrow('ledger down');

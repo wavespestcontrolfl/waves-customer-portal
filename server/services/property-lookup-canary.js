@@ -243,26 +243,31 @@ async function loadPriorCounts(keys) {
   }
 }
 
-// Persist the post-run counter + last status/detail per check (upsert). Best
-// effort: a write failure is logged, never fatal — the canary's job is the
-// lookup, not the bookkeeping. Detail stays county-only (PII rule).
+// Persist the post-run counter + last status/detail per check (upsert), all
+// checks in ONE transaction: the deploy-kill retry reads "any state row since
+// the run started" as "this run finished its bookkeeping"
+// (canaryStateWrittenSince), so a kill mid-write must leave no row behind.
+// Best effort: a write failure is logged, never fatal — the canary's job is
+// the lookup, not the bookkeeping. Detail stays county-only (PII rule).
 async function persistCheckStates(checks, nextCounts) {
-  for (const check of checks) {
-    try {
-      await db('property_lookup_canary_state')
-        .insert({
-          check_key: check.key,
-          consecutive_failures: Number(nextCounts[check.key] || 0),
-          last_status: check.status,
-          last_detail: check.details.join('; ') || null,
-          last_run_at: db.fn.now(),
-          updated_at: db.fn.now(),
-        })
-        .onConflict('check_key')
-        .merge();
-    } catch (err) {
-      logger.warn(`[property-lookup-canary] state persist failed for ${check.key}: ${err.message}`);
-    }
+  try {
+    await db.transaction(async (trx) => {
+      for (const check of checks) {
+        await trx('property_lookup_canary_state')
+          .insert({
+            check_key: check.key,
+            consecutive_failures: Number(nextCounts[check.key] || 0),
+            last_status: check.status,
+            last_detail: check.details.join('; ') || null,
+            last_run_at: db.fn.now(),
+            updated_at: db.fn.now(),
+          })
+          .onConflict('check_key')
+          .merge();
+      }
+    });
+  } catch (err) {
+    logger.warn(`[property-lookup-canary] state persist failed: ${err.message}`);
   }
 }
 

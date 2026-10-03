@@ -49,6 +49,8 @@ jest.mock('../models/db', () => {
   }
   qb.fn = { now: () => 'NOW()' };
   qb.raw = (s) => ({ __raw: s });
+  // persistCheckStates writes every check in one transaction.
+  qb.transaction = async (fn) => fn(qb);
   return qb;
 });
 
