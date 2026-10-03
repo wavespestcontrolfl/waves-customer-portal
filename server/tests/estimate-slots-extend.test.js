@@ -377,12 +377,17 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
   test.each([
     ['isCommercialAutoEstimate(row)', 'commercialManualScheduling: true'],
     ['isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))', 'invoiceOnlyAcceptance: true'],
-    ['estimateTrenchingReviewRequired(parseEstimateData(row))', 'TRENCHING_REVIEW_409'],
     // B18 park: judged on the LOCKED row too (same predicate), after the existing review refusals.
     ['lockedContactReviewRefusal(row, trx, { skipOnBusy: true })', 'lockedContactReviewRefusal'],
   ])('%s is refused before the service call', (guard, body) => {
     expect(guardBlock).toContain(guard);
     expect(guardBlock).toContain(body);
+  });
+
+  test('trenching review is decided by the ONE blocking-state call (no inline shortcut ahead of it: quote_required outranks it)', () => {
+    expect(guardBlock).not.toContain('estimateTrenchingReviewRequired(');
+    expect(guardBlock).not.toContain('TRENCHING_REVIEW_409');
+    expect(guardBlock.indexOf('isRodentGuaranteeOnlyEstimate(row')).toBeLessThan(guardBlock.indexOf('lockedContactReviewRefusal(row, trx'));
   });
 
   test('the guards run after the token/uuid gates and before any extend', () => {

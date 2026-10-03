@@ -361,16 +361,8 @@ async function slotBrowseRefusal(estimate) {
       },
     };
   }
-  if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
-    return {
-      status: 200,
-      body: {
-        primary: [], expander: [], availableSlots: [], summary: null,
-        reviewBeforeBooking: true,
-        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
-      },
-    };
-  }
+  // Trenching review, quote_required and contact_review are ALL decided by the ONE blocking-state call (precedence:
+  // quote_required, then trenching, then contact_review), never by an inline shortcut ahead of it.
   return slotBlockingRefusal(estimate, {}, { browse: true });
 }
 
@@ -555,14 +547,8 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'No appointment is needed — this renewal is accepted with an invoice.',
       });
     }
-    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        reviewBeforeBooking: true,
-        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
-      });
-    }
     {
+      // Trenching review included: the ONE blocking-state call decides (see slotBrowseRefusal).
       const blocked = await slotBlockingRefusal(estimate, {}, { browse: true });
       if (blocked) return res.status(blocked.status).json(blocked.body);
     }
@@ -661,10 +647,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         invoiceOnlyAcceptance: true,
       });
     }
-    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
-      return res.status(409).json(TRENCHING_REVIEW_409);
-    }
     {
+      // Trenching review included: the ONE blocking-state call decides (quote_required outranks it).
       const blocked = await slotBlockingRefusal(estimate, {});
       if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
     }
@@ -680,7 +664,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
         revalidateEstimate: async (row, trx) => {
-          if (estimateTrenchingReviewRequired(parseEstimateData(row))) return { status: 409, body: TRENCHING_REVIEW_409 };
           return lockedContactReviewRefusal(row, trx);
         },
       });
@@ -1151,9 +1134,6 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
             invoiceOnlyAcceptance: true,
           },
         };
-      }
-      if (estimateTrenchingReviewRequired(parseEstimateData(row))) {
-        return { status: 409, body: TRENCHING_REVIEW_409 };
       }
       // The locked row (the service re-runs this under the estimate's row lock) carries the phone columns too.
       return lockedContactReviewRefusal(row, trx, { skipOnBusy: true });

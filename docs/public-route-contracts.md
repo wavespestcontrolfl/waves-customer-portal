@@ -1702,6 +1702,9 @@ answers:
   extend (the extend recheck runs again on the locked row), the texting scheduler's slot gate and the
   abandoned-payment-step reminder recheck all call it, so every surface reports the same blocking state
   (an estimate that is already quote-required or trenching-review gets that refusal and no phone alert). The slot routes
+  keep no inline trenching shortcut ahead of that call: quote_required outranks trenching review on `available-slots`, `find-slots`,
+  `reserve` and `extend` and their locked rechecks, and a trenching-only estimate gets exactly the bodies it always did
+  (a pricing failure while resolving the quote requirement still reports trenching). The slot routes
   answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
   is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
   the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
@@ -1747,8 +1750,10 @@ answers:
   observes the park. `GET /data` runs the same two side effects for a customer view of a parked estimate (the page
   tells the customer a specialist will follow up); staff previews, PDF render passes, slot reads, the texting
   scheduler's gate and the reminder recheck do not. The `/data` composer is a PURE READ unless its caller passes the explicit
-  `runParkSideEffects` opt-in, which only the public customer `GET /:token/data` handler sets (not for a draft/staff
-  preview or a PDF/render pass): the Intelligence Bar's estimate projection shows the same review state and raises no alert and
+  `runParkSideEffects` opt-in, which only the public customer `GET /:token/data` handler sets, and only for a request the view counter
+  (`shouldCountView`) treats as a real customer view - not a draft/staff preview, a PDF/render pass, a bot, an admin-marked
+  (`waves_admin`) or admin-IP read (the page's own `?refresh=1` re-fetch is NOT excluded: a park can arise mid-sitting, and the alert is
+  deduped and the release idempotent): the Intelligence Bar's estimate projection shows the same review state and raises no alert and
   deletes no hold. The alert text is true for every path that raises it ("The phone on their estimate is another
   customer's, so self-booking is held"). The bulk hold release is judged on the estimate as it is NOW: one short transaction
   locks the estimate row FOR UPDATE (the row, and the order - estimate row, then its holds - `reserveSlot` and

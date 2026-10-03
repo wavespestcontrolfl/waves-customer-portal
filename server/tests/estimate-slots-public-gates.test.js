@@ -410,8 +410,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-parked', revalidateEstimate: expect.any(Function) }));
   });
 
-  test('the reserve predicate also carries the existing trenching refusal and passes a clean row', async () => {
-    const { estimateTrenchingReviewRequired } = require('../routes/estimate-public');
+  test('the reserve predicate carries the trenching refusal (from the one helper) and passes a clean row', async () => {
     currentEstimate = PARKED_ESTIMATE;
     let predicate;
     slotReservation.reserveSlot.mockImplementationOnce(async (args) => { predicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
@@ -419,8 +418,69 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     expect(ok.status).toBe(201);
     estimatePublicBlockingState.mockResolvedValue(null);
     await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toBeNull();
-    estimateTrenchingReviewRequired.mockReturnValueOnce(true);
+    estimatePublicBlockingState.mockResolvedValueOnce({ state: 'termite_trenching_review' });
     await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toMatchObject({ status: 409, body: { reason: 'termite_trenching_review' } });
+  });
+
+  describe('trenching review is decided by the ONE blocking-state call on every slot route, byte-identical to main for a trenching-only estimate', () => {
+    const TRENCH = { state: 'termite_trenching_review' };
+    const TRENCH_BROWSE = {
+      primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true,
+      message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+    };
+    const TRENCH_409 = {
+      error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit \u2014 this quote can\u2019t be booked online.',
+      reviewBeforeBooking: true, reason: 'termite_trenching_review',
+    };
+    const HOLD = '11111111-1111-4111-8111-111111111111';
+    afterEach(() => estimatePublicBlockingState.mockResolvedValue(null));
+
+    test('trenching-only: available-slots / find-slots 200 shape, reserve / extend 409 body, locked predicates - exactly the bodies main answers', async () => {
+      const { refuseParkedWrite } = require('../routes/estimate-public');
+      refuseParkedWrite.mockClear();
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValue(TRENCH);
+      process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(200);
+      expect(await browse.json()).toEqual(TRENCH_BROWSE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 200) expect(await found.json()).toEqual(TRENCH_BROWSE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(TRENCH_409);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect(extended.status).toBe(409);
+      expect(await extended.json()).toEqual(TRENCH_409);
+      expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+      expect(refuseParkedWrite).not.toHaveBeenCalled(); // no park side effects for a non-contact state
+      const { lockedContactReviewRefusal } = require('../routes/estimate-slots-public')._internals;
+      await expect(lockedContactReviewRefusal({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) })).resolves.toEqual({ status: 409, body: TRENCH_409 });
+    });
+
+    test('quote-required AND trenching: quote_required wins on every route (the inline trenching shortcut no longer runs ahead of it)', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValue({ state: 'quote_required' });
+      const INACTIVE = { error: 'Estimate is no longer active' };
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(409);
+      expect(await browse.json()).toEqual(INACTIVE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(INACTIVE);
+      const extended = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' });
+      expect(extended.status).toBe(409);
+      expect(await extended.json()).toEqual(INACTIVE);
+      const found = await post('find-slots', { query: 'next week please' });
+      if (found.status === 409) expect(await found.json()).toEqual(INACTIVE);
+      // Even with the (mocked) legacy predicate saying trenching: the route no longer consults it.
+      require('../routes/estimate-public').estimateTrenchingReviewRequired.mockReturnValue(true);
+      try {
+        const again = await fetch(`${base}/${TOKEN}/available-slots`);
+        expect(again.status).toBe(409);
+        expect(await again.json()).toEqual(INACTIVE);
+      } finally { require('../routes/estimate-public').estimateTrenchingReviewRequired.mockReturnValue(false); }
+    });
   });
 
   describe('a replace-payment-method request on the park path retires the submitted intent first', () => {

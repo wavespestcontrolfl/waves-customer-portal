@@ -79,7 +79,7 @@ function makeEstimate(overrides = {}) {
   return {
     id: `est-parked-data-${tokenSeq}`,
     token: `parkeddatatoken${tokenSeq}`,
-    status: 'sent', sent_at: null, viewed_at: null,
+    status: 'sent', sent_at: '2026-09-01T00:00:00.000Z', viewed_at: null,
     expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     customer_id: null,
     customer_name: 'Pat Tester', customer_phone: '(941) 555-0123', customer_email: 'pat@example.com',
@@ -94,7 +94,7 @@ function makeEstimate(overrides = {}) {
   };
 }
 
-async function getData(estimate) {
+async function getData(estimate, { headers = {}, query = '' } = {}) {
   estimateRow = estimate;
   const app = express();
   app.use(express.json());
@@ -102,7 +102,7 @@ async function getData(estimate) {
   app.use((err, _req, res, _next) => { res.status(err.status || 500).json({ error: err.message }); });
   const server = app.listen(0);
   try {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/estimates/${estimate.token}/data`);
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/estimates/${estimate.token}/data${query}`, { headers });
     return { status: res.status, text: await res.text() };
   } finally {
     server.close();
@@ -233,6 +233,53 @@ describe('the composer is a pure read unless a caller opts in (the Intelligence 
     await composeEstimateDataPayload(est, { runParkSideEffects: true });
     expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('park side effects run only for a request the view counter treats as a real customer view (r7)', () => {
+  const jwt = require('jsonwebtoken');
+  const config = require('../config');
+  const sentAt = '2026-09-01T00:00:00.000Z';
+  const adminMarker = () => `waves_admin=${encodeURIComponent(jwt.sign({ kind: 'admin_marker' }, config.jwt.secret))}`;
+
+  test('an admin-marked read and a bot read show the review state but file no alert and release no hold; a plain customer view does both', async () => {
+    phoneCandidates = [BOB];
+    const staff = await getData(makeEstimate({ sent_at: sentAt }), { headers: { Cookie: adminMarker() } });
+    expect(ctaOf(staff)).toMatchObject({ reviewReason: 'contact_review' });
+    const bot = await getData(makeEstimate({ sent_at: sentAt }), { headers: { 'User-Agent': 'Googlebot/2.1' } });
+    expect(ctaOf(bot)).toMatchObject({ reviewReason: 'contact_review' });
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+    await getData(makeEstimate({ sent_at: sentAt }), { headers: { 'User-Agent': 'Mozilla/5.0 (iPhone)' } });
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+  });
+
+  test('the page\'s own internal refresh (?refresh=1 of a real customer) still runs them (deduped and idempotent): a park that arises mid-sitting is covered', async () => {
+    phoneCandidates = [BOB];
+    await getData(makeEstimate({ sent_at: sentAt, viewed_at: sentAt }), { headers: { 'User-Agent': 'Mozilla/5.0 (iPhone)' }, query: '?refresh=1' });
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the one helper decides trenching vs quote_required (r7: no ordering dependence)', () => {
+  const { estimatePublicBlockingState } = estimatePublicRouter;
+  const trenchingData = { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } };
+  test('trenching-only is termite_trenching_review; trenching AND quote-required is quote_required; a pricing failure still reports trenching, but never un-parks a parked estimate', async () => {
+    const trench = makeEstimate({ estimate_data: trenchingData });
+    expect((await estimatePublicBlockingState(trench, { estData: trenchingData }))?.state).toBe('termite_trenching_review');
+    const both = { ...trenchingData, proposal: { enabled: true } };
+    expect((await estimatePublicBlockingState(makeEstimate({ estimate_data: both }), { estData: both }))?.state).toBe('quote_required');
+  });
+
+  test('a pricing failure during the lazy quote lookup still reports trenching (the slot routes used to refuse it with no pricing work)', async () => {
+    // The estimate row's data cannot be read by the pricing build (the caller supplied the parsed data separately).
+    const broken = makeEstimate();
+    Object.defineProperty(broken, 'estimate_data', { get() { throw new Error('pricing input unreadable'); } });
+    expect((await estimatePublicBlockingState(broken, { estData: trenchingData }))?.state).toBe('termite_trenching_review');
+    phoneCandidates = [BOB];
+    await expect(estimatePublicBlockingState(broken, { estData: {} })).rejects.toThrow('pricing input unreadable');
   });
 });
 

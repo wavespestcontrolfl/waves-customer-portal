@@ -644,7 +644,17 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
   // same resolver /data uses), and only when one of the review states below would otherwise be reported, so the
   // common clean estimate costs nothing extra. Quote-required wins over both.
   let quote = quoteRequirement;
-  if (quote === undefined) quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);
+  if (quote === undefined) {
+    try {
+      quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);
+    } catch (err) {
+      // A trenching-review estimate is refused either way and the slot routes used to refuse it with no pricing work at
+      // all: a pricing failure must not turn that refusal into an error. A parked estimate still fails closed.
+      if (!trenching) throw err;
+      logger.warn(`[estimate-public] quote requirement lookup failed for trenching-review estimate ${estimate.id}: ${err.message}`);
+      quote = null;
+    }
+  }
   if (quote?.quoteRequired) return { state: 'quote_required' };
   if (trenching) return { state: 'termite_trenching_review' };
   return { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId };
@@ -30228,8 +30238,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       isInternalRefresh,
       customerView: customerViewEligible,
       includeConsultationOffer: true,
-      // A real customer view only: never a draft/staff preview or a PDF/render pass.
-      runParkSideEffects: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass,
+      // A real customer view only, by the SAME verdict the view counter uses (shouldCountView: sent, not expired, no bot
+      // UA, no admin marker, no admin IP), and never a draft/staff preview or a PDF/render pass. An INTERNAL REFRESH
+      // (the page's own ?refresh=1 re-fetch) is deliberately NOT excluded the way the counter excludes it: the park can
+      // arise mid-sitting (staff edit the phone while a tab is open), the re-fetch after that tab's blocked action is
+      // what shows the review card, and the alert (deduped per estimate) and the locked hold release are idempotent.
+      runParkSideEffects: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && shouldCountView(req, ip, estimate),
     })));
   } catch (err) { next(err); }
 });
