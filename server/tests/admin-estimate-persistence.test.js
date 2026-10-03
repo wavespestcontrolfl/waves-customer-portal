@@ -49,7 +49,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null, contactCustomers = [] }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null, contactCustomers = () => [], phoneKeyFree = true }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -61,10 +61,11 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     // 503s the save by design). leftJoin serves the canonical catalog join
     // the waiver read runs regardless of the auto-tier gate (r79 P1).
     columnInfo: async () => ({ is_recurring: {} }),
-    // The save-time contact link's lookup (customers by typed phone / email).
+    // The save-time contact link's lookup (customers by typed phone). Read
+    // per call, so a test can change who is on the phone between the first
+    // read and the recheck inside the write transaction.
     whereNull() {
-      const rows = table === 'customers' ? contactCustomers : [];
-      const chain = { whereRaw: () => chain, limit: () => chain, select: async () => rows };
+      const chain = { whereRaw: () => chain, limit: () => chain, select: async () => (table === 'customers' ? contactCustomers() : []) };
       return chain;
     },
     whereNotIn() { return this; },
@@ -130,7 +131,9 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     },
   });
   trx.fn = { now: () => 'NOW' };
-  trx.raw = (sql) => sql;
+  // The contact link's phone key is tried, never waited on.
+  trx.raw = (sql) => (/pg_try_advisory_xact_lock/.test(String(sql)) ? { rows: [{ locked: phoneKeyFree }] } : sql);
+  trx.transaction = async (callback) => callback(trx);
 
   return {
     // Mirror real knex: callable as db(table) for direct reads (customer /
@@ -895,33 +898,66 @@ describe('admin estimate persistence', () => {
   // Owner 2026-10-03: an estimate saved with a customer's own phone but no
   // customer picked stayed unlinked and was missing from that customer's list.
   describe('save-time contact link', () => {
-    const create = (contactCustomers) => {
-      const fixture = makeDatabase({ contactCustomers, customer: contactCustomers[0] });
+    const LEAD_CUSTOMER = { id: 'cust-lead', first_name: 'Van', last_name: 'Lee', phone: '+19415550101' };
+    const create = ({ customers = () => [LEAD_CUSTOMER], body = {}, ...db } = {}) => {
+      const fixture = makeDatabase({ contactCustomers: customers, customer: LEAD_CUSTOMER, ...db });
       return createOrReuseAdminEstimate({
         database: fixture.database,
-        body: { ...baseBody, leadId: undefined },
+        body: { ...baseBody, leadId: undefined, ...body },
         technicianId: 'tech-1',
         now: () => new Date('2026-10-03T12:00:00.000Z'),
         randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
-      }).then((result) => ({ result, row: fixture.inserts.find((i) => i.table === 'estimates').row }));
+      }).then((result) => ({ result, row: fixture.inserts.find((i) => i.table === 'estimates')?.row, fixture }));
     };
 
     test('a new estimate is saved on the one customer its typed phone belongs to', async () => {
-      const { result, row } = await create([{ id: 'cust-lead', first_name: 'Van', last_name: 'Lee', phone: '+19415550101' }]);
+      const { result, row } = await create();
       expect(row.customer_id).toBe('cust-lead');
       expect(result.memberLinkageWarning).toBeNull();
     });
 
     test('a member is not linked; the save returns the warning instead', async () => {
-      const { result, row } = await create([{ id: 'cust-member', first_name: 'Van', last_name: 'Lee', phone: '+19415550101', waveguard_tier: 'Gold', monthly_rate: 90 }]);
+      const { result, row } = await create({ customers: () => [{ ...LEAD_CUSTOMER, id: 'cust-member', waveguard_tier: 'Gold', monthly_rate: 90 }] });
       expect(row.customer_id).toBeNull();
       expect(result.memberLinkageWarning).toMatchObject({ customerId: 'cust-member', customerName: 'Van Lee' });
     });
 
-    test('no customer on the phone or email: saved unlinked, as before', async () => {
-      const { result, row } = await create([]);
+    test('no customer on the phone: saved unlinked, as before', async () => {
+      const { result, row } = await create({ customers: () => [] });
       expect(row.customer_id).toBeNull();
       expect(result.memberLinkageWarning).toBeNull();
+    });
+
+    // Codex r1 on #5863: the verdict is taken again inside the write transaction.
+    test('a second customer minted on the phone before the insert leaves the row unlinked', async () => {
+      let reads = 0;
+      const { row } = await create({ customers: () => ((reads += 1) === 1 ? [LEAD_CUSTOMER] : [LEAD_CUSTOMER, { ...LEAD_CUSTOMER, id: 'cust-second' }]) });
+      expect(row.customer_id).toBeNull();
+    });
+
+    test('a customer writer holding the phone key leaves the row unlinked', async () => {
+      const { row } = await create({ phoneKeyFree: false });
+      expect(row.customer_id).toBeNull();
+    });
+
+    test('a lead that already belongs to another customer is not overridden', async () => {
+      const { row } = await create({ body: { leadId: 'lead-1' }, lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: null, customer_id: 'cust-other' } });
+      expect(row.customer_id).toBeNull();
+    });
+
+    test('a POST that reuses the lead\'s existing draft never links it: only a new row is linked', async () => {
+      const { fixture } = await create({
+        body: { leadId: 'lead-1' },
+        lead: { id: 'lead-1', status: 'new', phone: '9415550101', estimate_id: 'estimate-draft' },
+        estimate: { id: 'estimate-draft', status: 'draft', token: 'existing-token', customer_id: null, customer_phone: '(941) 555-0101' },
+      });
+      expect(fixture.inserts.filter((i) => i.table === 'estimates')).toEqual([]);
+      expect(fixture.updates.find((u) => u.table === 'estimates').patch.customer_id).toBeNull();
+    });
+
+    test('a grouped "add another property" sibling keeps its anchor\'s identity: not linked', async () => {
+      const { row } = await create({ body: { estimateGroupId: '11111111-1111-4111-8111-111111111111' } }).catch((err) => ({ row: { customer_id: null, refused: err.message } }));
+      expect(row.customer_id).toBeNull();
     });
   });
 

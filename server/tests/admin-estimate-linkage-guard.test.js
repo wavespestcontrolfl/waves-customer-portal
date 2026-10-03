@@ -113,7 +113,7 @@ describe('detectUnlinkedMemberAddress', () => {
 
 // resolveContactLinkedCustomer — the save-time contact link (owner
 // 2026-10-03): a new estimate with no customer picked links to the ONE live
-// customer its typed phone (else its typed email) belongs to, unless that
+// customer its typed phone belongs to, unless that
 // link would change the price. A wrong link moves a quote onto another
 // account, so every refusal below is pinned. Identities are synthetic.
 describe('resolveContactLinkedCustomer', () => {
@@ -151,22 +151,18 @@ describe('resolveContactLinkedCustomer', () => {
     expect(link).toMatchObject({ customer: { id: 'cust-2001' }, changesPrice: false });
   });
 
-  test('the email links only when no customer has the typed phone', async () => {
-    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '941-555-0199', customerEmail: ' Robin@Example.com ' }))
-      .toMatchObject({ customer: { id: 'cust-2001' } });
-    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerEmail: 'robin@example.com' }))
-      .toMatchObject({ customer: { id: 'cust-2001' } });
-  });
-
-  test('two customers on the phone link nobody, and the email never breaks that tie', async () => {
+  test('two customers on the phone link nobody, and an email match never links', async () => {
     expect(await resolveContactLinkedCustomer(contactDb([LEAD, HOUSEMATE]), { customerPhone: '+19415550142', customerEmail: 'robin@example.com' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '941-555-0199', customerEmail: 'robin@example.com' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerEmail: 'robin@example.com' })).toBeNull();
   });
 
   test('links nothing with a customer already picked, no contact, a placeholder phone, an unknown contact or a deleted customer', async () => {
     expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerId: 'cust-9', customerPhone: '+19415550142' })).toBeNull();
     expect(await resolveContactLinkedCustomer(contactDb([LEAD]), {})).toBeNull();
-    expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, phone: '+17378742833' }]), { customerPhone: '+17378742833' })).toBeNull();
-    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+19415550100', customerEmail: 'nobody@example.com' })).toBeNull();
+    // A carrier placeholder is nobody's number, whatever email rides with it (Codex r1 on #5863).
+    expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, phone: '+17378742833' }]), { customerPhone: '+17378742833', customerEmail: 'robin@example.com' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+19415550100' })).toBeNull();
     expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, deleted_at: new Date() }]), { customerPhone: '+19415550142' })).toBeNull();
   });
 

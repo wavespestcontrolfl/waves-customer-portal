@@ -2177,48 +2177,38 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
 
 // Save-time contact link (owner 2026-10-03): a NEW estimate saved with no
 // customer picked in Customer Lookup is linked to the one customer its typed
-// phone belongs to — or, when no customer has that phone, the one its typed
-// email belongs to. Before this the row stayed unlinked even with both
-// contact fields equal to a customer's own, so it was missing from that
-// customer's estimate list. The accept path and the promise lane already
-// read the same contact match (matchAcceptCustomerByPhone, estimateSentTo).
+// phone belongs to. Before this the row stayed unlinked even with its phone
+// equal to a customer's own, so it was missing from that customer's estimate
+// list. The accept path and the promise lane already read the same phone
+// match (matchAcceptCustomerByPhone, estimateSentTo).
 //
-// One live customer only: two customers sharing the phone (or the email) is
-// ambiguous and links nothing. And never where the link would change the
-// price: a linked member, or a customer with existing qualifying services,
-// prices with the combined tier and the setup waiver, so that customer is
-// handed back as a warning for the operator to link (the same response-only
-// warning detectUnlinkedMemberAddress returns) instead of being linked
-// without anyone seeing the price move. Create only — a revise never moves a
-// saved row between accounts. Read-only and fail-soft: any lookup failure
-// leaves the estimate unlinked, as before.
+// One live customer only: two customers sharing the phone is ambiguous and
+// links nothing. And never where the link would change the price: a linked
+// member, or a customer with existing qualifying services, prices with the
+// combined tier and the setup waiver, so that customer is handed back as a
+// warning for the operator to link (the same response-only warning
+// detectUnlinkedMemberAddress returns) instead of being linked without
+// anyone seeing the price move. Because a link is only ever made where it
+// changes no price, it is applied to the row at INSERT (confirmContactLink)
+// and never fed into pricing or the write payload: a draft the save reuses,
+// a revise, and a grouped "add another property" sibling (whose identity
+// must equal its anchor's) are never touched. Read-only and fail-soft: any
+// lookup failure leaves the estimate unlinked, as before.
 async function resolveContactLinkedCustomer(database, body = {}) {
   try {
     if (body.customerId) return null;
-    const oneLive = async (scope) => {
-      const rows = await scope(database('customers').whereNull('deleted_at')).limit(2).select('*');
-      return rows.length === 1 ? rows[0] : null;
-    };
     const digits = String(body.customerPhone || '').replace(/\D/g, '');
-    const email = String(body.customerEmail || '').trim().toLowerCase();
-    let customer = null;
-    let phoneOnFile = false;
     // A carrier placeholder ("restricted", "anonymous") is nobody's number.
-    if (digits.length >= 10 && !require('./external-phone').isSentinelPhone(body.customerPhone)) {
-      const byPhone = (q) => q.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
-      customer = await oneLive(byPhone);
-      // Two or more customers on the phone: ambiguous, and the email must not
-      // pick one of them (or anyone else) over the phone's verdict.
-      phoneOnFile = !customer && (await byPhone(database('customers').whereNull('deleted_at')).limit(1).select('id')).length > 0;
-    }
-    if (!customer && !phoneOnFile && email) {
-      customer = await oneLive((q) => q.whereRaw('LOWER(TRIM(email)) = ?', [email]));
-    }
-    if (!customer) return null;
+    if (digits.length < 10 || require('./external-phone').isSentinelPhone(body.customerPhone)) return null;
+    const rows = await database('customers').whereNull('deleted_at')
+      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)])
+      .limit(2).select('*');
+    if (rows.length !== 1) return null;
+    const customer = rows[0];
     const evidence = await resolveCustomerQualifyingEvidence(database, {
       customerId: customer.id,
       address: body.address || null,
-      groupedEstimate: !!(body.groupWithEstimateId || body.estimateGroupId),
+      groupedEstimate: false,
       logger,
     });
     const changesPrice = (customer.active !== false && isMembershipCustomerRow(customer))
@@ -2230,13 +2220,41 @@ async function resolveContactLinkedCustomer(database, body = {}) {
   }
 }
 
+// The link as the insert may write it: judged again INSIDE the write
+// transaction, under the phone key every phone-fenced customer writer takes
+// (customer-comms-lock.js lockSmsPhone: quick-add, the customer create
+// route), so a second customer minted on this phone since the first read
+// cannot be missed. The key is only TRIED — this transaction already holds
+// row and advisory locks, and lockSmsPhone's order is phone first — and a
+// busy key, a changed verdict or a lead that already belongs to another
+// customer all leave the row unlinked. Run in a savepoint so a failed read
+// never poisons the save.
+async function confirmContactLink(trx, contactLink, { body, linkedLeadId }) {
+  if (!contactLink || contactLink.changesPrice) return null;
+  try {
+    return await trx.transaction(async (sp) => {
+      if (!(await require('../utils/customer-comms-lock').tryLockSmsPhone(sp, body.customerPhone))) return null;
+      const again = await resolveContactLinkedCustomer(sp, body);
+      if (!again || again.changesPrice || String(again.customer.id) !== String(contactLink.customer.id)) return null;
+      if (linkedLeadId) {
+        const lead = await sp('leads').where({ id: linkedLeadId }).first('customer_id');
+        if (lead?.customer_id && String(lead.customer_id) !== String(again.customer.id)) return null;
+      }
+      return again.customer.id;
+    });
+  } catch (err) {
+    logger.warn(`[admin-estimate] contact link skipped at insert: ${err.message}`);
+    return null;
+  }
+}
+
 function contactLinkWarning(customer) {
   const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'an existing customer';
   return {
     customerId: customer.id,
     customerName: name,
     waveguardTier: customer.waveguard_tier || null,
-    message: `This phone or email belongs to ${name}'s account${customer.waveguard_tier ? ` (WaveGuard ${customer.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — their existing-service pricing was not applied. Link the customer in Customer Lookup and re-save.`,
+    message: `This phone belongs to ${name}'s account${customer.waveguard_tier ? ` (WaveGuard ${customer.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — their existing-service pricing was not applied. Link the customer in Customer Lookup and re-save.`,
   };
 }
 
@@ -2257,13 +2275,9 @@ async function createOrReuseAdminEstimate({
     throw errorWithStatus('Invalid draft identifier.', 400);
   }
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
-  // Linked BEFORE pricing and the write payload, so the row is built exactly
-  // as if the operator had picked this customer in Customer Lookup.
+  // Read before pricing only to decide the warning; the link itself is
+  // written at the insert below (confirmContactLink), never into pricing.
   const contactLink = await resolveContactLinkedCustomer(database, body);
-  if (contactLink && !contactLink.changesPrice) {
-    body = { ...body, customerId: contactLink.customer.id };
-    logger.info(`[admin-estimate] new estimate linked to customer ${contactLink.customer.id} by its typed contact`);
-  }
   const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
@@ -2302,7 +2316,11 @@ async function createOrReuseAdminEstimate({
         if (String(prior.created_by_technician_id) !== String(technicianId)
             || !isDeepStrictEqual(priorData.inputs, parseStoredEstimateData(writeFields.estimate_data)?.inputs)
             || ['customer_id', 'address', 'customer_name', 'customer_phone', 'customer_email', 'notes', 'show_one_time_option', 'bill_by_invoice']
-              .some((key) => (prior[key] ?? null) !== (writeFields[key] ?? null))) {
+              // A retried create whose first attempt took the contact link
+              // (confirmContactLink) still sends no customer: same inputs.
+              .some((key) => (prior[key] ?? null) !== (writeFields[key] ?? null)
+                && !(key === 'customer_id' && !writeFields.customer_id && contactLink
+                  && String(prior.customer_id) === String(contactLink.customer.id)))) {
           throw errorWithStatus('This draft was already saved with different inputs. Reopen it before making changes.', 409);
         }
         return { estimate: prior, reused: true, memberLinkageWarning };
@@ -2488,8 +2506,13 @@ async function createOrReuseAdminEstimate({
     }
 
     const token = randomBytes(16).toString('hex');
+    // Only a genuinely new, ungrouped, unlinked row takes the contact link.
+    const contactCustomerId = !writeFields.customer_id && !writeFields.estimate_group_id
+      ? await confirmContactLink(trx, contactLink, { body, linkedLeadId })
+      : null;
     const [created] = await trx('estimates').insert({
       ...writeFields,
+      ...(contactCustomerId ? { customer_id: contactCustomerId } : {}),
       ...(clientDraftId ? { id: clientDraftId } : {}),
       created_by_technician_id: technicianId,
       token,
