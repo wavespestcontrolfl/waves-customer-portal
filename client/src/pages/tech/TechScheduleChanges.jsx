@@ -96,7 +96,9 @@ function summaryOf(changes, total = changes.length) {
   // shows it: a capped sample never speaks for the whole backlog.
   const complete = changes.length > 0 && changes.length >= total;
   const allAuto = complete && changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
-  const title = allAuto ? `Auto-dispatch moved ${plural(n, 'visit')}` : plural(n, 'schedule change');
+  // "visits" counts appointments: one moved on two runs is one visit.
+  const visits = new Set(changes.map((c) => String(c.payload?.visit_id ?? c.id))).size;
+  const title = allAuto ? `Auto-dispatch moved ${plural(visits, 'visit')}` : plural(n, 'schedule change');
   const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
   const days = changes.map((c) => c.payload?.date).filter(Boolean).sort();
   const counts = { EARLIER: 0, LATER: 0 };
@@ -219,6 +221,9 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
   const summary = useMemo(() => summaryOf(later, feed.laterTotal), [later, feed.laterTotal]);
 
   const dismissOne = async (change) => {
+    // A read already in flight predates this change: it must not put the
+    // card back (Codex #5786 P2).
+    latest.current += 1;
     setBusy(true);
     setError(null);
     try {
@@ -232,6 +237,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
   };
 
   const clearAll = async () => {
+    latest.current += 1;
     setBusy(true);
     setError(null);
     try {

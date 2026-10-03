@@ -642,7 +642,17 @@ const HELD_CLAIM_LEASE_MS = 10 * 60 * 1000;
 // already cleared is not counted: they saw it. The summary gate decided at
 // hold time; only the notifications kill switch stops a held batch.
 async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
-  if (!enabled()) return { pushed: 0 };
+  if (!enabled()) {
+    // The notifications kill switch DROPS held batches (no push now, none
+    // later when it comes back on) — the same outcome as a per-visit push
+    // under it (Codex #5786 P2).
+    await db('tech_notifications')
+      .whereIn('type', Object.values(TYPE_BY_KIND))
+      .whereRaw("payload->>'push_held_run' IS NOT NULL")
+      .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
+      .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
+    return { pushed: 0 };
+  }
   const now = new Date();
   const claimed = await db('tech_notifications')
     .whereIn('type', Object.values(TYPE_BY_KIND))

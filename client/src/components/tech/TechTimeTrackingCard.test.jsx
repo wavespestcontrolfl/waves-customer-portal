@@ -65,4 +65,19 @@ describe('TechTimeTrackingCard', () => {
     window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     expect(await screen.findByRole('button', { name: 'Clock out' })).toBeInTheDocument();
   });
+
+  it('only the newest status read lands: an older read arriving last never puts back the old controls', async () => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => pending.push(r))));
+    render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
+    window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+    const body = (clockedIn) => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } });
+    // the newer read (after the timer started) answers first, the older one last
+    pending[1](body(true));
+    expect(await screen.findByRole('button', { name: 'Clock out' })).toBeInTheDocument();
+    pending[0](body(false));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole('button', { name: 'Clock out' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Clock in' })).not.toBeInTheDocument();
+  });
 });

@@ -234,6 +234,34 @@ describe('TechScheduleChanges', () => {
     expect(onReady).not.toHaveBeenCalledWith(true);
   });
 
+  it('counts visits, not cards: one appointment moved on two runs is one visit', async () => {
+    const again = { ...FAR_B, id: '00000000-0000-4000-8000-000000000011', payload: { ...FAR_A.payload, visit_id: FAR_A.payload.visit_id, previous_when: 'Tue Dec 15, 9–10 AM', when: 'Wed Dec 16, 9–10 AM', previous_date: '2026-12-15', date: '2026-12-16' } };
+    stubApi([FAR_A, again]);
+    await renderChanges();
+    expect(await screen.findByTestId('schedule-changes-summary')).toHaveTextContent('Auto-dispatch moved 1 visit');
+  });
+
+  it('a read already in flight when the tech clears a card never puts it back', async () => {
+    let release;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+      if (init.method) return { ok: true, json: async () => ({ success: true }) };
+      reads += 1;
+      const body = { changes: [SOON], later_total: 0, as_of: AS_OF };
+      if (reads === 1) return { ok: true, json: async () => body };
+      return new Promise((r) => { release = () => r({ ok: true, json: async () => body }); });
+    }));
+    await renderChanges();
+    await screen.findByTestId('schedule-change-soon');
+    // a poll starts (window focus) and hangs, then the tech clears the card
+    await act(async () => { window.dispatchEvent(new Event('focus')); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByTestId('schedule-change-soon')).not.toBeInTheDocument();
+    await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByTestId('schedule-change-soon')).not.toBeInTheDocument();
+  });
+
   it('renders nothing when there are no schedule changes', async () => {
     stubApi([]);
     await renderChanges();

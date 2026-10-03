@@ -50,7 +50,9 @@ function cardsTable() {
           for (const r of held) r.payload.push_claimed_at = 'now';
           return held.map((r) => ({ id: r.id, technician_id: r.technician_id }));
         }
-        const rows = cardRows.filter((r) => idFilter && idFilter.includes(String(r.id)));
+        const rows = idFilter
+          ? cardRows.filter((r) => idFilter.includes(String(r.id)))
+          : cardRows.filter((r) => r.payload.push_held_run && (!runFilter || r.payload.push_held_run === runFilter));
         for (const r of rows) {
           delete r.payload.push_claimed_at;
           if (sql.includes("- 'push_held_run'")) delete r.payload.push_held_run;
@@ -516,11 +518,14 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit' }));
   });
 
-  test('the notifications kill switch off drops the held summary', async () => {
+  test('the notifications kill switch off DROPS the held batch: no push now, none when it comes back on (Codex #5786 P2)', async () => {
     notices._test.setCurrentAutoDispatchRun('r');
     await move('auto_dispatch');
     delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
     expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
+    process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+    expect(await notices.beginAutoDispatchRun('later')).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 

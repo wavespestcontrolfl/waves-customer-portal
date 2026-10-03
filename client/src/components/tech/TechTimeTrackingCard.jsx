@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 
@@ -102,14 +102,22 @@ export default function TechTimeTrackingCard({ nextStop, variant = 'legacy' }) {
   const [busy, setBusy] = useState('');
   const [feedback, setFeedback] = useState(null);
 
+  // Only the newest status read may land: an older one arriving last would
+  // put back the pre-change controls (Codex #5786 P2).
+  const latest = useRef(0);
   const load = useCallback(async () => {
+    const mine = latest.current + 1;
+    latest.current = mine;
     try {
-      setStatus(await request('/status'));
+      const next = await request('/status');
+      if (latest.current !== mine) return;
+      setStatus(next);
       setFeedback((value) => value?.isError ? null : value);
     } catch (error) {
+      if (latest.current !== mine) return;
       setFeedback({ text: error.message, isError: true });
     } finally {
-      setLoading(false);
+      if (latest.current === mine) setLoading(false);
     }
   }, []);
 
