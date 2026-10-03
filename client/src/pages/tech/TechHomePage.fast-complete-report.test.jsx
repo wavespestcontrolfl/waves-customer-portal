@@ -7,17 +7,17 @@
 // routing; a closed visit stays on the recap editor either way.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn() }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn(), listAttempts: vi.fn(), prune: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../lib/completion-resume-store', () => ({
   getFastCompletionAttempt: mocks.getAttempt,
-  listFastCompletionAttempts: async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }),
-  pruneFastCompletionAttempts: () => Promise.resolve(0),
+  listFastCompletionAttempts: (...args) => mocks.listAttempts(...args),
+  pruneFastCompletionAttempts: (...args) => mocks.prune(...args),
   pruneRecapClipDrafts: () => Promise.resolve(0),
 }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
@@ -70,6 +70,10 @@ function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
 beforeEach(() => {
   mocks.navigationBusy.mockClear();
   mocks.attempts.clear();
+  mocks.listAttempts.mockReset();
+  mocks.listAttempts.mockImplementation(async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }));
+  mocks.prune.mockReset();
+  mocks.prune.mockResolvedValue(0);
   mocks.getAttempt.mockReset();
   mocks.getAttempt.mockImplementation(async (serviceId, operatorId) => ({
     available: true,
@@ -220,4 +224,67 @@ it('two off-route saved completions show when each was saved and what it holds (
   expect(within(picker).getByText(/^Saved completion · Oct 1, 9:05\sAM$/)).toBeInTheDocument();
   expect(within(picker).getByText(/^saved on this device · Taurus SC · Perimeter/)).toBeInTheDocument();
   expect(within(picker).getByText(/^saved on this device · Advion WDG · Kitchen/)).toBeInTheDocument();
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+
+it('an unreadable re-scan keeps the saved completions this device listed, and says so (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  // Opening the sheet scans again, and this time the device cannot be read.
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  fireEvent.click(recover);
+  await screen.findByTestId('sheet');
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(1));
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Recover Completion/ })).toBeInTheDocument();
+});
+
+it('after a failed read, a tap on the tool scans again (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  await screen.findByTestId('sheet');
+  const tool = await screen.findByRole('button', { name: /Recover Completion.*Could not read the completion saved on this device/ });
+  // The device reads again.
+  mocks.listAttempts.mockImplementation(async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }));
+  const scans = mocks.listAttempts.mock.calls.length;
+  fireEvent.click(tool);
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(scans));
+  await waitFor(() => expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument());
+});
+
+it('a device that cannot store saved completions at all stays quiet (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  rows = [];
+  mount();
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument();
+});
+
+it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+it('a technician lets a saved retry go at the server\'s 7-day window: off the list, and swept (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('old', { body: { idempotencyKey: 'old-key', reportDraftBase: {} }, summary: 'Old report', storedAt: Date.now() - 8 * DAY });
+  mocks.attempts.set('recent', { body: { idempotencyKey: 'recent-key', reportDraftBase: {} }, summary: 'Recent report', storedAt: Date.now() - 2 * DAY });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await sheetService()).toMatchObject({ id: 'recent' });
+  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), 7 * DAY);
 });

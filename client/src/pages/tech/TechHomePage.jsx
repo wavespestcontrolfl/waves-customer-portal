@@ -259,6 +259,12 @@ function withoutRecoveryAttempt(scan, serviceId) {
   return { ...scan, attempts };
 }
 const RECOVERY_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
+// A technician reaches a visit for 7 days after it (TECH_ACCESS_WINDOW_DAYS,
+// server/services/technician-visit-scope.js): a saved retry older than that
+// can only be refused, so a technician's device lets it go then. Office roles,
+// which the server does not limit, keep the store's own retention (GitHub
+// Codex P2 on 458cc517e5).
+const TECH_RETRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
 function fastCompletionRecoveryKind(attempt) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
@@ -500,6 +506,11 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastRecoveryScan, setFastRecoveryScan] = useState(() => ({ operatorId: null, attempts: new Map() }));
   const reportRouteSeq = useRef(0);
   const [recoveryReadNotice, setRecoveryReadNotice] = useState('');
+  // Bumped by a tap while the device read failed: the tap scans again.
+  const [recoveryScanTick, setRecoveryScanTick] = useState(0);
+  // The services this device's last scan holds a saved attempt for, as a tap
+  // reads them.
+  const knownRecoveryIds = useRef(new Set());
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -608,7 +619,9 @@ export default function TechHomePage({ section = 'today' }) {
   // stays in this page never runs the admin schedule's full sweep.
   useEffect(() => {
     pruneRecapClipDrafts().catch(() => {});
-    pruneFastCompletionAttempts().catch(() => {});
+    (currentRole === 'technician'
+      ? pruneFastCompletionAttempts(Date.now(), TECH_RETRY_HORIZON_MS)
+      : pruneFastCompletionAttempts()).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -727,11 +740,26 @@ export default function TechHomePage({ section = 'today' }) {
   useEffect(() => {
     let active = true;
     listFastCompletionAttempts(staffIdForDevice).then((result) => {
-      if (active) setFastRecoveryScan({ operatorId: staffIdForDevice,
-        attempts: new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt])) });
+      if (!active) return;
+      // An unreadable device keeps the last list this operator had: a passing
+      // storage failure must not drop saved completions. When that list held
+      // any, it says so and the next tap scans again; a device that cannot
+      // store them at all (a private window) has none to lose and stays quiet
+      // (GitHub Codex P2 on 458cc517e5).
+      if (!result.available) {
+        setFastRecoveryScan((scan) => (scan.operatorId === staffIdForDevice ? scan : { operatorId: staffIdForDevice, attempts: new Map() }));
+        if (knownRecoveryIds.current.size) setRecoveryReadNotice(RECOVERY_READ_NOTICE);
+        return;
+      }
+      // A technician's retry past the server's window is gone from the list
+      // (an attempt with no stored time is kept).
+      const horizon = currentRole === 'technician' ? Date.now() - TECH_RETRY_HORIZON_MS : -Infinity;
+      const live = result.attempts.filter((attempt) => !(Number(attempt.storedAt) <= horizon));
+      setFastRecoveryScan({ operatorId: staffIdForDevice, attempts: new Map(live.map((attempt) => [attempt.serviceId, attempt])) });
+      setRecoveryReadNotice((notice) => (notice === RECOVERY_READ_NOTICE ? '' : notice));
     });
     return () => { active = false; };
-  }, [schedule, staffIdForDevice, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
+  }, [schedule, staffIdForDevice, currentRole, recoveryScanTick, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
   // Once this operator's device has been scanned, its attempts stand while a
   // later route refresh or sheet close re-scans: keying the scan to the
   // schedule object made every refresh disable the completion buttons for a
@@ -741,6 +769,7 @@ export default function TechHomePage({ section = 'today' }) {
   const recoveryScanCurrent = fastRecoveryScan.operatorId === staffIdForDevice;
   const fastRecoveryAttempts = recoveryScanCurrent ? fastRecoveryScan.attempts : new Map();
   const fastRecoveryServiceIds = new Set(fastRecoveryAttempts.keys());
+  knownRecoveryIds.current = fastRecoveryServiceIds;
   const fastRecoveryCheckPending = !!staffIdForDevice && !recoveryScanCurrent;
   const completed = myServices.filter((s) => s.status === 'completed').length;
   const total = myServices.length;
@@ -993,13 +1022,19 @@ export default function TechHomePage({ section = 'today' }) {
       else setFastCompleteService(recoveryService);
       return;
     }
+    // A saved attempt this device knows of that cannot be read now: a fresh
+    // completion here would race the saved one (its photos and report), so
+    // nothing opens until it reads; the device says so (GitHub Codex P2s on
+    // 102b99cb1b and 458cc517e5).
+    if (result.available === false && (service.fastCompletionRecoveryOnly || knownRecoveryIds.current.has(String(service.id)))) {
+      setRecoveryReadNotice(RECOVERY_READ_NOTICE);
+      return;
+    }
     if (service.fastCompletionRecoveryOnly) {
-      // The tap's own read is the word on this device: a read that found no
-      // saved attempt (another tab discarded or finished it) drops the stale
-      // entry; an unreadable device says so on the tool (GitHub Codex P2 on
+      // The tap's own read found no saved attempt (another tab discarded or
+      // finished it): the stale entry leaves the list (GitHub Codex P2 on
       // 102b99cb1b).
-      if (result.available === false) setRecoveryReadNotice(RECOVERY_READ_NOTICE);
-      else setFastRecoveryScan((scan) => withoutRecoveryAttempt(scan, service.id));
+      setFastRecoveryScan((scan) => withoutRecoveryAttempt(scan, service.id));
       return;
     }
     if (fieldWorkspace && TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
@@ -1008,12 +1043,15 @@ export default function TechHomePage({ section = 'today' }) {
     else openProjectOrLane(service);
   }, [fieldWorkspace, staffIdForDevice, openTypedVisit, openPestCompletion, openProjectOrLane]);
   const handleProjectQuickAction = useCallback(() => {
+    if (recoveryReadNotice) setRecoveryScanTick((tick) => tick + 1);
+    // With nothing to open, a tap after a failed read only scans again.
+    if (projectServices.length === 0) return;
     if (projectServices.length === 1) {
       openServiceReport(projectServices[0]);
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openServiceReport]);
+  }, [projectServices, openServiceReport, recoveryReadNotice]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -1029,7 +1067,7 @@ export default function TechHomePage({ section = 'today' }) {
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
-    { label: completionRoutesLoading ? 'Checking Saved Completions…' : soleRecovery ? 'Recover Completion' : 'Project Report', description: recoveryReadNotice || (soleRecovery ? 'Retry the unfinished completion saved on this device' : 'Open the existing service report workflow'), icon: 'project', disabled: completionRoutesLoading || projectServices.length === 0, onClick: handleProjectQuickAction },
+    { label: completionRoutesLoading ? 'Checking Saved Completions…' : soleRecovery ? 'Recover Completion' : 'Project Report', description: recoveryReadNotice || (soleRecovery ? 'Retry the unfinished completion saved on this device' : 'Open the existing service report workflow'), icon: 'project', disabled: completionRoutesLoading || (projectServices.length === 0 && !recoveryReadNotice), onClick: handleProjectQuickAction },
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
@@ -1054,7 +1092,7 @@ export default function TechHomePage({ section = 'today' }) {
       {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice || recoveryReadNotice} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
@@ -1131,12 +1169,12 @@ export default function TechHomePage({ section = 'today' }) {
       <TechTimeTrackingCard nextStop={nextStop} />
       <TechFollowThroughCards />
 
-      {routeNotice && !scheduleError && (
+      {(routeNotice || recoveryReadNotice) && !scheduleError && (
         <div role="status" style={{
           background: '#f59e0b22', border: '1px solid #f59e0b', color: '#fbbf24',
           borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
         }}>
-          <div style={{ marginBottom: 8 }}>{routeNotice}</div>
+          <div style={{ marginBottom: 8 }}>{routeNotice || recoveryReadNotice}</div>
           <button type="button" onClick={fetchSchedule} disabled={refreshing} style={{
             border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
             borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.6 : 1,
