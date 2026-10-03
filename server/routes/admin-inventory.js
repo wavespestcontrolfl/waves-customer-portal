@@ -2933,16 +2933,33 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
     const body = req.body || {};
-    const result = await inventoryOperations.createRestockRequest(req.params.productId, {
-      requestedQuantity: body.requestedQuantity, unit: body.unit,
+    const isAdminCaller = req.techRole === 'admin';
+    // A technician asks from a job card: the request names one of their own
+    // current visits, and carries only what the job-card button sends
+    // (quantity, unit, reason). The planning fields are the office forecast
+    // tool's and are ignored, the priority is fixed, and the request always
+    // dedupes against the live one (codex #5683 r3, #5733 r2).
+    if (!isAdminCaller) {
+      const visitId = typeof body.scheduledServiceId === 'string' ? body.scheduledServiceId.trim() : '';
+      const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+      const owned = UUID_RE.test(visitId)
+        ? await technicianCurrentVisitFilter(
+          { techRole: 'technician', technicianId: req.technicianId },
+          db('scheduled_services').where('scheduled_services.id', visitId),
+        ).first('scheduled_services.id')
+        : null;
+      if (!owned) return res.status(403).json({ error: 'Restock requests are sent from one of your own visits' });
+    }
+    const officeFields = isAdminCaller ? {
       priority: String(body.priority || 'high').toLowerCase(),
-      // Only the office may force a second open request for a product: a
-      // technician's request always dedupes against the live one, so repeated
-      // posts cannot pile up requests (codex #5683 r3).
-      allowDuplicate: req.techRole === 'admin' ? body.allowDuplicate : false,
-      neededBy: body.neededBy, reason: body.reason, targetStock: body.targetStock,
+      allowDuplicate: body.allowDuplicate,
+      neededBy: body.neededBy, targetStock: body.targetStock,
       forecastDays: body.forecastDays, committedDemand: body.committedDemand,
       projectedRemaining: body.projectedRemaining, firstShortDate: body.firstShortDate,
+    } : { priority: 'high', allowDuplicate: false };
+    const result = await inventoryOperations.createRestockRequest(req.params.productId, {
+      requestedQuantity: body.requestedQuantity, unit: body.unit, reason: body.reason,
+      ...officeFields,
     }, { actorId: req.technicianId, actorName: req.technician?.name || null, source: 'waveguard_inventory_forecast' });
     res.json({ success: true, existing: result.existing, restockRequest: result.restockRequest });
   } catch (err) {
