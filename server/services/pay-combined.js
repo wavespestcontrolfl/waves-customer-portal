@@ -663,7 +663,7 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
  * verified or released; money in flight is never touched — the settle
  * paths keep their own ownership guards for it.
  */
-async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds, { invalidateVisitIds = null, pending = null, linkedOnly = false } = {}) {
+async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds, { invalidateVisitIds = null, pending = null } = {}) {
   const ids = (scheduledServiceIds || []).filter(Boolean);
   if (!ids.length) return { released: 0, inFlight: 0 };
   // Serialize with combined /setup (codex r9 P1): the same per-customer
@@ -697,9 +697,7 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
   // is invalidated by the same move: its pre-issued client secret could still be confirmed with
   // Stripe directly. `invalidateVisitIds` narrows that to the visits whose Bill-To really changes.
   await markLinkedSingleInvoiceSessions(database, rows, { scheduledServiceIds: invalidateVisitIds || ids }, pending);
-  // linkedOnly: the edit does not assign a payer (it may reveal one), so only the invoices it
-  // actually MOVES to a payer lose their checkout; the combined sessions are left alone.
-  return releaseWholeOrNothing(database, [linkedOnly ? rows.filter((r) => r.invalidatesSingleInvoice) : rows]);
+  return releaseWholeOrNothing(database, [rows]);
 }
 
 // Flag the rows whose own single-invoice PaymentIntent the Bill-To change invalidates: the visit-linked

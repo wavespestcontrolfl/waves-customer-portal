@@ -2233,10 +2233,15 @@ const StripeService = {
     let chargeCreditAppliedTotal = chargeOriginalCreditApplied;
     try {
       await db.transaction(async (trx) => {
-        // The visit row BEFORE the invoice row, the order every Bill-To writer takes (customer, visit,
-        // payer, invoice): the visit lock the self-pay check takes further down used to come second,
-        // so a charge holding the invoice and a payer edit holding the visit each waited on the other.
-        // Same lock, same visit, only earlier; the later FOR UPDATE on it is then a no-op.
+        // The order every Bill-To writer takes (customer, visit, payer, invoice): the customer row the
+        // Auto Pay check locks and the visit row the self-pay check locks both used to come AFTER the
+        // invoice row, so a charge holding the invoice and a payer edit holding the customer or visit
+        // each waited on the other. Same locks, same rows, only earlier; the later FOR UPDATEs on them
+        // are no-ops. (Callers passing both options - completion-balance-sweep, recurring-card-on-file,
+        // estimate-public's accept charge - all reach this one transaction, so they share the order.)
+        if (requireAutopayForCustomerId != null) {
+          await trx('customers').where({ id: requireAutopayForCustomerId }).forUpdate().first('id');
+        }
         if (requireSelfPayScheduledServiceId != null) {
           await trx('scheduled_services').where({ id: requireSelfPayScheduledServiceId }).forUpdate().first('id');
         }

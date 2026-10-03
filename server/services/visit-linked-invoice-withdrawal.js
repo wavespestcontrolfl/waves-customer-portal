@@ -107,9 +107,14 @@ async function readOwnerState(database, invoice, visitId, { lock, pending }) {
   // A visit of another customer is ignored by the resolver.
   const visit = visitRow && String(visitRow.customer_id) === String(invoice.customer_id) ? visitRow : null;
   const held = [...new Set([visitRow?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
-  if (lock && held.length) await database('payers').whereIn('id', held).orderBy('id').forShare().select('id');
-  const looked = [...new Set([...held, pending?.visitPatch?.payer_id, pending?.customerPatch?.payer_id, pending?.payerPatch?.id]
-    .filter(Boolean).map(String))];
+  const pendingPayerIds = [pending?.visitPatch?.payer_id, pending?.customerPatch?.payer_id, pending?.payerPatch?.id]
+    .filter(Boolean).map(String);
+  const looked = [...new Set([...held, ...pendingPayerIds])];
+  // The payer rows the answer depends on - the ones referenced now AND the ones the pending write is
+  // about to reference - are taken FOR SHARE (one ordered statement) BEFORE their active flag is read,
+  // so a concurrent deactivation waits for this transaction and cannot change the answer between the
+  // plan (the fence, the checkout cancel) and the write.
+  if (lock && looked.length) await database('payers').whereIn('id', looked).orderBy('id').forShare().select('id');
   const activeBefore = new Set(looked.length
     ? (await database('payers').whereIn('id', looked).select('id', 'active')).filter((p) => p.active !== false).map((p) => String(p.id))
     : []);
@@ -169,6 +174,23 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
       stripePaymentIntentId: row.stripe_payment_intent_id, scheduledSendError: row.scheduled_send_error,
       beforeOwner, afterOwner, moved,
     });
+  }
+  return out;
+}
+
+// The VISIT's own effective owner before and after a pending Bill-To write, the one answer the job
+// route keys its whole pipeline on (the combined-packet release and withdrawal as well as the
+// visit-linked invoices'): did who pays for these visits move, and to a payer?
+async function visitOwnerTransitions(database, visitIds, { pending = null, lock = false } = {}) {
+  const ids = [...new Set((visitIds || []).filter(Boolean).map(String))].sort();
+  if (!ids.length) return [];
+  const visits = await database('scheduled_services').whereIn('id', ids).orderBy('id').select('id', 'customer_id');
+  const out = [];
+  for (const visit of visits) {
+    const { state, activeBefore, activeAfter } = await readOwnerState(database, { customer_id: visit.customer_id }, visit.id, { lock, pending });
+    const beforeOwner = ownerOf(state, activeBefore);
+    const afterOwner = pending ? ownerOf(withPending(state, { visitId: visit.id, customerId: visit.customer_id }, pending), activeAfter) : undefined;
+    out.push({ visitId: visit.id, beforeOwner, afterOwner, moved: pending ? beforeOwner !== afterOwner : true });
   }
   return out;
 }
@@ -267,7 +289,9 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
 // invoice moves to a payer. Their client secrets must stop working, because a customer can confirm a
 // pre-issued secret straight with Stripe, past every pay-page check.
 async function linkedSessionInvoiceIds(database, scope = {}, { pending = null } = {}) {
-  const transitions = await ownerTransitions(database, scope, { mode: 'pre', pending, stamped: 'unstamped' });
+  // Inside a writer transaction the ownership rows (the pending payer included) are held FOR SHARE
+  // before the answer that cancels a checkout is read.
+  const transitions = await ownerTransitions(database, scope, { mode: 'pre', pending, lock: database.isTransaction === true, stamped: 'unstamped' });
   return new Set(transitions
     .filter((t) => t.moved && t.stripePaymentIntentId && t.afterOwner !== null)
     .map((t) => String(t.invoiceId)));
@@ -310,4 +334,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
   return false;
 }
 
-module.exports = { lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { visitOwnerTransitions, lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

@@ -592,6 +592,72 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     }
   });
 
+  test('clearing a visit payer that reveals the customer default releases the combined packet checkout and withdraws the packet invoice (one moved-to-a-payer answer)', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const inactiveOwn = await payer(false);
+    const activeDefault = await payer(true);
+    const f = await fixture({ link: 'record', visitPayerId: inactiveOwn, customerPayerId: activeDefault });
+    // The visit's completion went out as a combined-visit packet whose invoice rides a live combined PaymentIntent.
+    const techId = randomUUID();
+    const serviceVisitId = randomUUID();
+    const packetId = randomUUID();
+    await mockPg('technicians').insert({ id: techId, name: 'Fixture Technician', role: 'technician', active: true });
+    await mockPg('service_visits').insert({ id: serviceVisitId, customer_id: f.customerId, technician_id: techId, scheduled_date: f.date, window_start: '09:00', window_end: '11:00', status: 'closing', stop_base_key: `fixture:${f.customerId}:${f.date}`, created_by: 'test' });
+    await mockPg('scheduled_services').where({ id: f.visitId }).update({ visit_id: serviceVisitId });
+    await mockPg('visit_completion_packets').insert({ id: packetId, visit_id: serviceVisitId, idempotency_key: randomUUID(), request_hash: 'a'.repeat(64), payload: JSON.stringify({ items: [{ serviceId: f.visitId, body: {} }] }), status: 'done' });
+    await mockPg('visit_completion_packet_items').insert({ packet_id: packetId, scheduled_service_id: f.visitId, service_record_id: f.recordId, derived_idempotency_key: randomUUID(), status: 'done' });
+    const packetInvoice = randomUUID();
+    await mockPg('invoices').insert({ id: packetInvoice, customer_id: f.customerId, invoice_number: `FIX-${packetInvoice.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 120, visit_completion_packet_id: packetId, stripe_payment_intent_id: 'pi_packet_combo' });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: { combined_allocation: `${packetInvoice}:12000` } }));
+
+    // The route's pipeline, keyed on one answer: did this visit move to a payer?
+    const pending = { visitPatch: { visitIds: [f.visitId], payer_id: null } };
+    const moves = await Linked.visitOwnerTransitions(mockPg, [f.visitId], { pending, lock: true });
+    expect(moves).toEqual([{ visitId: f.visitId, beforeOwner: null, afterOwner: String(activeDefault), moved: true }]);
+    expect(moves.some((m) => m.moved && m.afterOwner)).toBe(true);
+    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: f.visitId }, mockPg, { pending })).toBe(false);
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [f.visitId], { invalidateVisitIds: [f.visitId], pending }))
+      .toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).toHaveBeenCalledWith('pi_packet_combo');
+    await mockPg('scheduled_services').where({ id: f.visitId }).update({ payer_id: null });
+    await Packets.reconcileWithdrawnPacketInvoices(mockPg, { scheduledServiceId: f.visitId });
+    expect(await Packets.withdrawPacketInvoicesForOwner(mockPg, { scheduledServiceId: f.visitId })).toContain(packetInvoice);
+    expect(await invoiceRow(packetInvoice)).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: expect.stringMatching(new RegExp(`^payer_billed:${activeDefault}`)) });
+  });
+
+  test('the fence takes the PENDING payer row FOR SHARE before it reads its active flag, so a concurrent deactivation waits (committed fixture, second connection)', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const customerId = randomUUID();
+    const visitId = randomUUID();
+    const recordId = randomUUID();
+    const invoiceId = randomUUID();
+    const date = etDateString();
+    const [payerRow] = await database('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Pending', phone: '+12025550133', email: `${customerId}@example.invalid` });
+    await database('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
+    await database('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: visitId, service_type: 'Fixture General Pest Control', service_date: date });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 50, service_record_id: recordId, stripe_payment_intent_id: 'pi_pending_lock' });
+    const writer = await database.transaction();
+    try {
+      // Nothing references the payer yet: only the pending write names it.
+      const pending = { visitPatch: { visitIds: [visitId], payer_id: payerRow.id } };
+      expect(await Linked.linkedSessionInvoiceIds(writer, { scheduledServiceIds: [visitId] }, { pending })).toEqual(new Set([String(invoiceId)]));
+      const deactivation = await database.transaction();
+      try {
+        await expect(deactivation('payers').where({ id: payerRow.id }).forUpdate().noWait().first('id')).rejects.toMatchObject({ code: '55P03' });
+      } finally { await deactivation.rollback(); }
+    } finally {
+      await writer.rollback();
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('service_records').where({ id: recordId }).del();
+      await database('scheduled_services').where({ id: visitId }).del();
+      await database('customers').where({ id: customerId }).del();
+      await database('payers').where({ id: payerRow.id }).del();
+    }
+  });
+
   test('inside a writer transaction the fence holds the candidate invoice and ownership rows to commit (committed fixture, second connection)', async () => {
     // The fixture must be committed for a second connection to see and lock it.
     const customerId = randomUUID();

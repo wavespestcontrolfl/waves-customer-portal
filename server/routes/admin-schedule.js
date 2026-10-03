@@ -14401,6 +14401,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const seriesBillToTouched = payerFieldsTouched || updates.po_number !== undefined;
         let rewrittenChildIds = [];
         let ownerPending = null;
+        // Did who pays for this visit (or a child) move TO A PAYER? One answer, from the pending write
+        // laid over the resolver's own order (visit payer, self-pay pin, customer default, active flag),
+        // drives the packet pipeline AND the visit-linked one - not which fields were submitted. It covers
+        // a cleared visit payer that reveals the customer default as much as an assignment.
+        let movedToPayer = false;
         if (seriesBillToTouched) {
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
           try {
@@ -14416,6 +14421,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
             },
           };
+          movedToPayer = (await require('../services/visit-linked-invoice-withdrawal')
+            .visitOwnerTransitions(trx, [req.params.id, ...rewrittenChildIds], { pending: ownerPending, lock: true }))
+            .some((move) => move.moved && move.afterOwner);
           // (The combined advisory lock for this customer was taken above, before any ownership row,
           // and the visit and its children were locked just before this - both Bill-To writers share that order.)
           if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
@@ -14432,23 +14440,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             });
           }
         }
-        const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
-          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
-        if (payerFieldsTouched) {
+        if (movedToPayer) {
           const fencedVisitIds = [req.params.id, ...rewrittenChildIds];
-          if (activatesPayer) {
-            // Combined pay-page sessions are fenced on every child, rewritten or not.
-            try {
-              const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
-              for (const childId of childIds) if (!fencedVisitIds.includes(childId)) fencedVisitIds.push(childId);
-            } catch { /* no children / column absent */ }
-          }
+          // Combined pay-page sessions are fenced on every child, rewritten or not.
+          try {
+            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
+            for (const childId of childIds) if (!fencedVisitIds.includes(childId)) fencedVisitIds.push(childId);
+          } catch { /* no children / column absent */ }
           const visitRelease = await require('../services/pay-combined')
             .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds, {
               invalidateVisitIds: [req.params.id, ...rewrittenChildIds],
               pending: ownerPending,
-              // An edit that does not assign a payer only loses the checkouts of invoices it moves.
-              linkedOnly: !activatesPayer,
             });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
@@ -14603,10 +14605,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // The opposite transition (a job payer assigned, an override
           // cleared) withdraws the self-pay combined-visit invoice this job
           // now owes to AP, including one already with the homeowner.
-          if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
-          // An edit that clears a payer can reveal the next level's: whatever moved to a payer is
-          // withdrawn (the assigning case above already ran it).
-          else await require('../services/visit-linked-invoice-withdrawal').withdrawLinkedInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
+          // The packet withdrawal (and the visit-linked one it runs) follows the same moved-to-a-payer answer.
+          if (movedToPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
         }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call

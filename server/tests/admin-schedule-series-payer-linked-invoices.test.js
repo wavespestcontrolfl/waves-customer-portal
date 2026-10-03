@@ -58,6 +58,7 @@ jest.mock('../services/visit-linked-invoice-withdrawal', () => ({
   withdrawLinkedInvoicesForOwner: jest.fn().mockResolvedValue([]),
   reconcileLinkedInvoices: jest.fn().mockResolvedValue(0),
   linkedVisitIdsForCustomers: jest.fn().mockResolvedValue([]),
+  visitOwnerTransitions: jest.fn().mockResolvedValue([{ visitId: 'svc-1', beforeOwner: null, afterOwner: '7', moved: true }]),
 }));
 jest.mock('../services/visit-completion-packets', () => ({
   ...jest.requireActual('../services/visit-completion-packets'),
@@ -140,6 +141,7 @@ function setup(parentPayerId = null) {
 
 beforeEach(() => { jest.clearAllMocks(); setup(); });
 const PayCombined = require('../services/pay-combined');
+const Packets = require('../services/visit-completion-packets');
 
 test('series Bill-To change fences, and withdraws for, only the children it rewrites (pending / confirmed), not completed ones', async () => {
   const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
@@ -160,22 +162,39 @@ test('a send in flight on a rewritten child refuses the series Bill-To change wi
   expect(Linked.withdrawLinkedInvoicesForOwner).not.toHaveBeenCalled();
 });
 
-test('clearing a series payer that reveals the customer default still fences, invalidates and withdraws for the invoices that move (no truthy payer id needed)', async () => {
-  setup(7); // the parent names payer 7 today; the edit clears it
+test('clearing a series payer that reveals the customer default runs the packet AND the linked pipelines from the same moved-to-a-payer answer', async () => {
+  setup(7); // the parent names an inactive payer 7 today; the edit clears it and the active default takes over
+  Linked.visitOwnerTransitions.mockResolvedValueOnce([
+    { visitId: 'svc-1', beforeOwner: null, afterOwner: '9', moved: true },
+    { visitId: 'child-pending', beforeOwner: null, afterOwner: '9', moved: true },
+  ]);
   const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: null }),
   });
   expect(res.status).toBe(200);
   const pending = { visitPatch: { visitIds: ['svc-1', 'child-pending'], payer_id: null } };
+  expect(Linked.visitOwnerTransitions).toHaveBeenCalledWith(expect.anything(), ['svc-1', 'child-pending'], { pending, lock: true });
   // Fenced and checkout-invalidated on the pending write, not on a submitted payer id.
   expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] }, { pending });
+  // The combined packet checkout is released (no linked-only narrowing)...
   expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).toHaveBeenCalledWith(
     expect.anything(), expect.arrayContaining(['svc-1', 'child-pending']),
-    expect.objectContaining({ linkedOnly: true, pending, invalidateVisitIds: ['svc-1', 'child-pending'] }),
+    expect.objectContaining({ pending, invalidateVisitIds: ['svc-1', 'child-pending'] }),
   );
-  // Withdrawn after the write: the visit itself and the rewritten children.
-  expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceId: 'svc-1' });
+  expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mock.calls[0][2]).not.toHaveProperty('linkedOnly');
+  // ...the packet withdrawal runs for the visit, and the linked one for the rewritten children.
+  expect(Packets.withdrawPacketInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceId: 'svc-1' });
   expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] });
+});
+
+test('a payer edit that moves nobody to a payer (an inactive payer assigned) releases and withdraws nothing', async () => {
+  Linked.visitOwnerTransitions.mockResolvedValueOnce([{ visitId: 'svc-1', beforeOwner: null, afterOwner: null, moved: false }]);
+  const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
+  });
+  expect(res.status).toBe(200);
+  expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).not.toHaveBeenCalled();
+  expect(Packets.withdrawPacketInvoicesForOwner).not.toHaveBeenCalled();
 });
 
 test('a PO-only series edit propagates the PO and runs no Bill-To pipeline for the children', async () => {
