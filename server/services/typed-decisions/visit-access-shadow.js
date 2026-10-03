@@ -128,6 +128,9 @@ function redactForState(text) {
 // five four five"): a text sent within this long after an access-bearing one
 // is withheld with it.
 const ACCESS_FOLLOW_UP_MS = 15 * 60 * 1000;
+// And a reply to a Waves text that asked about access can come much later:
+// every customer text within this long after such a Waves text is withheld.
+const ACCESS_REPLY_MS = 24 * 60 * 60 * 1000;
 const FOLLOW_UP_MARKER = '[follow-up to an access detail withheld]';
 
 function dayString(value) {
@@ -222,22 +225,30 @@ async function buildVisitAccessState(svc, dbh) {
   const lastDay = [lastCompleted && dayString(lastCompleted.scheduled_date), lastLine && dayString(lastLine.service_date)].filter(Boolean).sort().pop() || null;
   const lastLineDay = lastDay ? require('../../utils/datetime-et').parseETDateTime(`${lastDay}T00:00`) : null;
   const floor = lastLineDay && lastLineDay > capFloor ? lastLineDay : capFloor;
+  // Both directions are read, but only the customer's own texts enter the
+  // state: a Waves text is there solely so a reply to an access question
+  // ("What is your gate password?" / "sesame") is withheld with it.
   const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
-    .where('direction', 'inbound')
+    .whereIn('direction', ['inbound', 'outbound'])
     .where('created_at', '>=', floor)
     .where('created_at', '<', cutoff)
     .orderBy('created_at', 'desc')
-    .limit(24)
-    .select('created_at', 'message_body', 'message_type');
+    .limit(80)
+    .select('created_at', 'direction', 'message_body', 'message_type');
   // Oldest first, so a text that follows an access-bearing one is seen as such.
-  let accessAt = null;
+  let withholdUntil = 0;
   const recentTexts = texts
     .filter((row) => row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body))
     .reverse()
     .map((row) => {
       const at = new Date(row.created_at).getTime();
-      if (mentionsAccess(row.message_body)) { accessAt = at; return redactForState(row.message_body); }
-      if (accessAt !== null && at - accessAt <= ACCESS_FOLLOW_UP_MS) { accessAt = at; return FOLLOW_UP_MARKER; }
+      const access = mentionsAccess(row.message_body);
+      if (row.direction !== 'inbound') {
+        if (access) withholdUntil = Math.max(withholdUntil, at + ACCESS_REPLY_MS);
+        return null;
+      }
+      if (access) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return redactForState(row.message_body); }
+      if (at <= withholdUntil) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return FOLLOW_UP_MARKER; }
       return compact(redactForState(row.message_body), TEXT_CHARS);
     })
     .filter(Boolean)

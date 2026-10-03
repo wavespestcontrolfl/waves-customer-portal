@@ -229,6 +229,18 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state.last_tech_notes).toBeNull();
   });
 
+  test('a reply to a Waves text that asked about access is withheld; the Waves text itself never enters the state', async () => {
+    await text('What is your gate password?', '2026-10-03T15:00:00Z', { direction: 'outbound', status: 'delivered' });
+    await text('sesame', '2026-10-03T19:00:00Z');
+    await text('Your visit is set for Tuesday', '2026-10-01T15:00:00Z', { direction: 'outbound', status: 'delivered' });
+    await text('Great, the cat stays inside', '2026-10-01T15:05:00Z');
+    const visitId = await visit();
+    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    expect(built.state.recent_texts).not.toMatch(/sesame|password|Your visit is set/);
+    expect(built.state.recent_texts).toContain('[follow-up to an access detail withheld]');
+    expect(built.state.recent_texts).toContain('Great, the cat stays inside');
+  });
+
   test('the access fields never leave as written, whatever they say', async () => {
     await database('property_preferences').insert({ customer_id: customerId, access_notes: 'sesame', side_gate_access: 'bluebird' });
     const visitId = await visit();
