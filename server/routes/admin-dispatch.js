@@ -6344,13 +6344,23 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
 // fields.
 //
 // Admin-only (matches /board and /jobs/:id).
+const ALERT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 router.get('/alerts', requireAdmin, async (req, res, next) => {
   try {
     const unresolved = req.query.unresolved !== 'false';
     const requestedLimit = parseInt(req.query.limit, 10);
+    // Optional single-visit view (the open board asks about ONE job after a
+    // visit update): the same query and spray-hold filter, scoped to that job,
+    // so the answer is complete by construction. A malformed id is a 400, never
+    // a Postgres 22P02. Without job_id nothing below changes.
+    const jobIdParam = req.query.job_id;
+    if (jobIdParam !== undefined && (typeof jobIdParam !== 'string' || !ALERT_JOB_ID_RE.test(jobIdParam))) {
+      return res.status(400).json({ error: 'job_id must be a UUID' });
+    }
+    const jobScope = jobIdParam || null;
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 1), 200)
-      : 50;
+      : (jobScope ? 200 : 50);
 
     // Built per call so a refill can re-run it with the stale ids excluded.
     const buildQuery = (excludedIds = []) => {
@@ -6389,6 +6399,7 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         .limit(limit);
 
       if (unresolved) q.whereNull('a.resolved_at');
+      if (jobScope) q.where('a.job_id', jobScope);
       if (excludedIds.length) q.whereNotIn('a.id', excludedIds);
       return q;
     };

@@ -30,10 +30,10 @@ const altGranular = { id: 'p-gran', name: 'Sample Granular', label_verified_at: 
 const fertilizer = { id: 'p-fert', name: 'Sample Fertilizer', label_verified_at: label, max_wind_mph: 15, application_method: 'granular' };
 const addonProduct = { id: 'p-addon', name: 'Sample Add-on', label_verified_at: label, max_wind_mph: 5, application_method: 'liquid' };
 
-function forecast({ rain = {}, wind = 6, temp = 78, prob = 0 } = {}) {
+function forecast({ rain = {}, wind = 6, temp = 78, prob = 0, base = ARRIVAL } = {}) {
   const rows = [];
   for (let i = 0; i < 36; i += 1) {
-    const at = new Date(ARRIVAL.getTime() + i * HOUR);
+    const at = new Date(base.getTime() + i * HOUR);
     rows.push({
       time: at.toISOString(), at: at.toISOString(),
       precipitation_in: rain[i] ?? 0,
@@ -487,6 +487,70 @@ describe('hourly backstop runs: only upcoming visits, never a re-card', () => {
     expect(body).toMatch(/LawnPredaySprayCheck\.enabled\(\)\) return/);
     expect(body).toMatch(/runExclusive\('lawn-preday-spray-check'/);
     expect(body).toMatch(/timezone: 'America\/New_York'/);
+  });
+});
+
+describe('one arrival drives the check, the forecast request, the card text and the schedule test', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  const { sprayArrival } = require('../services/job-card');
+  const etInstant = (hhmm) => new Date(`2026-10-03T${String(Number(hhmm.slice(0, 2)) + 4).padStart(2, '0')}:${hhmm.slice(3)}:00Z`);
+
+  test('sprayArrival: an upcoming visit starts at its window (or noon when none), never now; a window already begun starts now', () => {
+    expect(sprayArrival(DAY, etInstant('05:41'), '14:00:00')).toEqual({ arrival: etInstant('14:00'), arrivalSource: 'window' });
+    expect(sprayArrival(DAY, etInstant('05:41'), null)).toEqual({ arrival: etInstant('12:00'), arrivalSource: 'noon' });
+    const now = etInstant('13:41');
+    expect(sprayArrival(DAY, now, '13:00:00')).toEqual({ arrival: now, arrivalSource: 'now' });
+    expect(sprayArrival(DAY, now, null)).toEqual({ arrival: now, arrivalSource: 'now' });
+  });
+
+  async function run({ hhmm, windowStart, windowEnd = null, wind = 30 }) {
+    const now = etInstant(hhmm);
+    const { arrival, arrivalSource } = sprayArrival(DAY, now, windowStart);
+    const alerts = [];
+    const d = deps({
+      ctx: ctxFor([baseLine(herbicide)], { windowStart, arrival, arrivalSource }),
+      fc: forecast({ wind, base: new Date(Math.floor(arrival.getTime() / HOUR) * HOUR) }),
+      alerts,
+    });
+    const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: windowStart, window_end: windowEnd }];
+    await Sweep.runSweep({ dbh: fakeDb({ alerts, visits }), now, deps: d });
+    return { alerts, d, arrival };
+  }
+
+  test('morning run for a 2 PM visit: the interval starts at 2:00 PM, and the card and the forecast request say the same', async () => {
+    const { alerts, d, arrival } = await run({ hhmm: '05:41', windowStart: '14:00:00' });
+    expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 30 mph in the 4 h after the 2:00 PM arrival /);
+    expect(d.fetchForecast.mock.calls[0][0].from).toBe(etInstant('14:00').getTime());
+    expect(arrival).toEqual(etInstant('14:00'));
+    expect(alerts[0].payload).toMatchObject({ window_start: '14:00:00', interval_from: 'window', interval_start: etInstant('14:00').toISOString() });
+  });
+
+  test('a 1:41 PM run for a 1-3 PM window (already begun): the interval starts now and the card says so, never naming 1:00 PM', async () => {
+    const { alerts, d } = await run({ hhmm: '13:41', windowStart: '13:00:00', windowEnd: '15:00:00' });
+    expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 30 mph in the 4 h from now /);
+    expect(alerts[0].payload.lines[0]).not.toMatch(/1:00 PM|arrival/);
+    // Hourly rows: the request starts at the top of the hour holding "now"; the booked window stays the card's identity.
+    expect(d.fetchForecast.mock.calls[0][0].from).toBe(etInstant('13:00').getTime());
+    expect(alerts[0].payload).toMatchObject({ window_start: '13:00:00', interval_from: 'now', interval_start: etInstant('13:41').toISOString() });
+  });
+
+  test('a visit with no window: noon is used for the weather AND named on the card', async () => {
+    const { alerts, d } = await run({ hhmm: '05:41', windowStart: null });
+    expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 30 mph in the 4 h after 12:00 PM \(no arrival window booked\) /);
+    expect(d.fetchForecast.mock.calls[0][0].from).toBe(etInstant('12:00').getTime());
+    expect(alerts[0].payload).toMatchObject({ window_start: null, interval_from: 'noon' });
+  });
+
+  test('rain inches are summed from the same start the card names', async () => {
+    const now = etInstant('13:41');
+    const alerts = [];
+    const base = etInstant('13:00');
+    // Rain lands in the slot stamped 15:00 (the hour 14-15): inside the 6 h from now.
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)], { windowStart: '13:00:00', arrival: now, arrivalSource: 'now' }), fc: forecast({ rain: { 2: 0.3 }, prob: 80, base }), alerts });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts, visits: [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '13:00:00' }] }), now, deps: d });
+    expect(alerts[0].payload.lines[0]).toMatch(/0\.3 in of rain forecast in the 6 h from now/);
   });
 });
 

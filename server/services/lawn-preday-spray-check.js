@@ -102,9 +102,9 @@ const intervalLabel = (hours) => (hours < 1 ? `${Math.round(hours * 60)} min` : 
 // One held product → its card line. `reason` is buildSprayCheck's own text
 // ("under 50°F", "over 90°F", "wind over 15 mph", "rain likely inside 6 h"),
 // joined with ", "; each piece is restated with the measured forecast number.
-function describeHold({ product, reason, limits, forecast, rows, arrivalMs, arrivalLabel, windowHours }) {
+function describeHold({ product, reason, limits, forecast, rows, arrivalMs, arrivalAnchor, windowHours }) {
   const parts = [];
-  const after = arrivalLabel ? `after the ${arrivalLabel} arrival` : 'after the planned arrival';
+  const after = arrivalAnchor;
   for (const piece of String(reason || '').split(', ')) {
     if (piece.startsWith('rain')) {
       const hours = limits.rainFreeHours;
@@ -145,7 +145,12 @@ function holdsForVisit({ ctx, forecast }) {
   const primaryLines = ctx.lines.filter((l) => !l.source && l.selected !== false);
   if (!primaryLines.length || forecast?.status !== 'ok') return [];
   const rows = forecast.hourly || [];
-  const arrivalLabel = timeLabel(ctx.windowStart);
+  // What the card says the intervals start from, matching exactly the arrival
+  // the spray check and the forecast request used (job-card sprayArrival).
+  const arrivalSource = ctx.arrivalSource || (ctx.windowStart ? 'window' : 'noon');
+  const arrivalAnchor = arrivalSource === 'now' ? 'from now'
+    : arrivalSource === 'noon' ? 'after 12:00 PM (no arrival window booked)'
+      : `after the ${timeLabel(ctx.windowStart)} arrival`;
   const sprayCheck = JobCard.buildSprayCheck({
     products: [...new Map(ctx.lines.map((l) => [l.product.id, l.product])).values()],
     hourly: hourlyForSprayCheck(rows),
@@ -167,7 +172,7 @@ function holdsForVisit({ ctx, forecast }) {
       forecast: sprayCheck.forecast,
       rows,
       arrivalMs,
-      arrivalLabel,
+      arrivalAnchor,
       windowHours: sprayCheck.windowHours,
     });
     if (!described) continue;
@@ -226,7 +231,10 @@ async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
   const payload = {
     source: SOURCE,
     for_date: day,
+    // The BOOKED window: the visit identity cardStillValid and the dedupe compare.
     window_start: ctx.windowStart || null,
+    interval_start: ctx.arrival.toISOString(),
+    interval_from: ctx.arrivalSource || (ctx.windowStart ? 'window' : 'noon'),
     lines: cardLines(holds),
     holds: holds.map((h) => ({
       product_id: h.productId,

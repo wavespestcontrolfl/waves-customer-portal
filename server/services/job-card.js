@@ -1893,6 +1893,24 @@ function sprayLimitsFor(product, labelSource) {
 }
 
 /**
+ * THE arrival rule for the pre-day spray check; one value drives the spray
+ * check's windows, the forecast request, the time the card prints and
+ * "still upcoming". For an upcoming visit the interval starts at the arrival
+ * window's start ('window'), or at the noon fallback when none is booked
+ * ('noon'); never at "now". If that start has already passed (the window has
+ * begun but not ended, so the technician could arrive any minute) it starts
+ * at now ('now'), and the card says "from now" instead of naming a past time.
+ * (The card payload's window_start stays the BOOKED window: it is the visit
+ * identity cardStillValid and the dedupe compare, not the interval start.)
+ */
+function sprayArrival(scheduledDate, now, windowStart) {
+  const start = serviceStartInstant(scheduledDate, windowStart);
+  const booked = /^\d{2}:\d{2}/.test(String(windowStart || ''));
+  if (start && start.getTime() > now.getTime()) return { arrival: start, arrivalSource: booked ? 'window' : 'noon' };
+  return { arrival: now, arrivalSource: 'now' };
+}
+
+/**
  * The visit's planned product lines and the arrival instant its spray check
  * is judged from, WITHOUT a forecast: the pre-day sweep supplies its own
  * hourly series. Read-only (no row locks on the visit). Null when the visit
@@ -1909,7 +1927,7 @@ async function loadVisitSprayContext(serviceId, { dbh = db, deps = {}, now = new
     scheduledDate: facts.scheduledDate,
     windowStart: facts.windowStart,
     coords: facts.coords?.lat != null ? facts.coords : null,
-    arrival: serviceDayInstant(facts.scheduledDate, now, facts.windowStart),
+    ...sprayArrival(facts.scheduledDate, now, facts.windowStart),
     lines,
     labelSources: await checkReviewedWeatherSources(lines.map((l) => l.product)),
   };
@@ -1927,6 +1945,7 @@ module.exports = {
   buildSprayCheck,
   sprayLimitsFor,
   loadVisitSprayContext,
+  sprayArrival,
   loadCatalog,
   isTankMixable,
   buildMixAmount,

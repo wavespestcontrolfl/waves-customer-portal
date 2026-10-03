@@ -63,9 +63,6 @@ export const TECH_OUT_ALERTS_EVENT = 'waves:tech-out-alerts-changed';
 const REHYDRATE_ON_RECEIPT_TYPES = new Set(['visit_not_closed_out', 'lawn_spray_hold']);
 const TECH_OUT_ALERT_TYPE = 'tech_out_overflow';
 const SPRAY_HOLD_TYPE = 'lawn_spray_hold';
-// The queue read's default page (server GET /alerts, no limit param): a read
-// shorter than this holds every open card, so a card it omits is no longer open.
-const QUEUE_PAGE_LIMIT = 50;
 // Updates for one visit come in bursts (a drag, a bulk move): one re-read.
 const SPRAY_REREAD_DEBOUNCE_MS = 400;
 
@@ -144,7 +141,7 @@ export function useDispatchAlerts() {
 
   // Read the open queue and merge it into state (the mount, and again after a
   // card decision). `isCancelled`: the mount's unmount guard.
-  const hydrate = useCallback(async (isCancelled = () => false, { reconcileJobs = null } = {}) => {
+  const hydrate = useCallback(async (isCancelled = () => false) => {
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
       { headers: adminAuthHeaders() }
@@ -154,16 +151,29 @@ export function useDispatchAlerts() {
     if (isCancelled()) return;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
-    // A spray hold whose visit was edited is dropped (and superseded) by this
-    // read; the supersede's resolved broadcast normally removes it, but a
-    // failed write or a lost packet must not leave it on screen. Only when the
-    // read was a whole queue (a short page), so an omission means "not open".
-    if (reconcileJobs && fetched.length < QUEUE_PAGE_LIMIT) {
-      const open = new Set(fetched.map((a) => a.id));
-      const gone = alertsRef.current
-        .filter((a) => a.type === SPRAY_HOLD_TYPE && reconcileJobs.has(a.job_id) && !open.has(a.id))
-        .map((a) => a.id);
-      if (gone.length) markResolved(gone);
+  }, []);
+
+  // After a visit update, ask the server about THAT visit: the job-scoped
+  // unresolved view is complete by construction and runs the same validity
+  // filter (and supersede) as the queue read. No open spray hold back = remove
+  // the loaded one; one back = replace the loaded one with it (its window may
+  // have changed). Nothing else on the board is touched.
+  const refreshJobSprayCards = useCallback(async (jobId) => {
+    const res = await fetch(
+      `${API_BASE}/admin/dispatch/alerts?unresolved=true&job_id=${encodeURIComponent(jobId)}`,
+      { headers: adminAuthHeaders() }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const open = (Array.isArray(data.alerts) ? data.alerts : [])
+      .filter((a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !a.resolved_at);
+    const openIds = new Set(open.map((a) => a.id));
+    const stale = alertsRef.current
+      .filter((a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !openIds.has(a.id))
+      .map((a) => a.id);
+    if (stale.length) markResolved(stale);
+    if (open.length) {
+      setAlerts((prev) => mergeHydration(prev.filter((a) => !(a.type === SPRAY_HOLD_TYPE && a.job_id === jobId && !openIds.has(a.id))), open, resolvedIdsRef.current));
     }
   }, [markResolved]);
 
@@ -240,9 +250,9 @@ export function useDispatchAlerts() {
       sprayJobs.add(jobId);
       clearTimeout(sprayTimer);
       sprayTimer = setTimeout(() => {
-        const reconcileJobs = new Set(sprayJobs);
+        const jobs = [...sprayJobs];
         sprayJobs.clear();
-        hydrate(() => false, { reconcileJobs }).catch(() => {});
+        for (const jobId of jobs) refreshJobSprayCards(jobId).catch(() => {});
       }, SPRAY_REREAD_DEBOUNCE_MS);
     }
 
@@ -257,7 +267,7 @@ export function useDispatchAlerts() {
       clearTimeout(sprayTimer);
       socket.disconnect();
     };
-  }, [hydrate, markResolved]);
+  }, [hydrate, markResolved, refreshJobSprayCards]);
 
   // ---- resolve action ----
   // Optimistic removal: drop the row locally on success and let the

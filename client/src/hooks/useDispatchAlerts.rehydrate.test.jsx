@@ -56,35 +56,58 @@ describe('a bare dispatch:alert broadcast is rehydrated for cards that need the 
   });
 });
 
-describe('an open queue re-reads when a visit with a loaded spray hold updates', () => {
+describe('a visit update asks the server about THAT visit (job-scoped read)', () => {
   const sprayCard = {
     id: 'spray-1', type: 'lawn_spray_hold', severity: 'warn', tech_id: null, job_id: 'job-1', created_at: '2026-10-03T10:00:00Z', resolved_at: null,
     customer_first_name: 'Test', customer_last_name: 'Customer', service_type: 'Lawn Care Visit',
     payload: { for_date: '2026-10-03', window_start: '09:00:00', lines: ['Sample Herbicide: hold.'] },
   };
   const otherCard = { id: 'late-1', type: 'missed_photo', severity: 'info', tech_id: null, job_id: 'job-2', created_at: '2026-10-03T09:00:00Z', payload: {} };
+  const jobUrls = () => fetch.mock.calls.map(([url]) => url).filter((u) => u.includes('job_id='));
 
-  async function mountWithCards() {
+  async function mountWithCards(initial = [sprayCard, otherCard]) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ alerts: [sprayCard, otherCard] }) });
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ alerts: initial }) });
     const hook = renderHook(() => useDispatchAlerts());
-    await vi.waitFor(() => expect(hook.result.current.alerts).toHaveLength(2));
+    await vi.waitFor(() => expect(hook.result.current.alerts).toHaveLength(initial.length));
     return hook;
   }
+  const answer = (alerts) => fetch.mockResolvedValue({ ok: true, json: async () => ({ alerts }) });
   afterEach(() => { vi.useRealTimers(); });
 
-  it('a job_update for that job re-reads once and the superseded card disappears (even if the resolved packet is lost)', async () => {
+  it('the stale card is removed when the job-scoped read has no open spray hold, and nothing else is touched', async () => {
     const { result } = await mountWithCards();
-    // The read drops the edited visit's card (the server superseded it) and keeps the rest.
-    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ alerts: [otherCard] }) });
-    await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1', scheduled_date: '2026-10-08', window_start: '10:00:00' }); });
+    answer([]);
+    await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1', scheduled_date: '2026-10-08' }); });
     expect(fetch).toHaveBeenCalledTimes(1); // debounced: nothing yet
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(jobUrls()).toEqual([expect.stringContaining('/admin/dispatch/alerts?unresolved=true&job_id=job-1')]);
     expect(result.current.alerts.map((a) => a.id)).toEqual(['late-1']);
   });
 
-  it('a job_update for another job, or without a job id, triggers no read', async () => {
+  it('a changed card replaces the loaded one', async () => {
+    const { result } = await mountWithCards();
+    const fresh = { ...sprayCard, id: 'spray-2', payload: { ...sprayCard.payload, window_start: '14:00:00', lines: ['Sample Herbicide: hold. New window.'] } };
+    answer([fresh]);
+    await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1' }); await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.alerts.map((a) => a.id).sort()).toEqual(['late-1', 'spray-2']);
+    expect(result.current.alerts.find((a) => a.id === 'spray-2').payload.window_start).toBe('14:00:00');
+  });
+
+  it('a long queue (50+ other alerts) no longer matters: the answer is about the job, not the page', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `x-${i}`, type: 'missed_photo', severity: 'info', tech_id: null, job_id: `other-${i}`, created_at: `2026-10-03T08:${String(i).padStart(2, '0')}:00Z`, payload: {} }));
+    const { result } = await mountWithCards([sprayCard, ...many]);
+    answer([sprayCard]); // still valid
+    await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1' }); await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.alerts.some((a) => a.id === 'spray-1')).toBe(true);
+    expect(result.current.alerts).toHaveLength(61);
+    answer([]);
+    await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1' }); await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.alerts.some((a) => a.id === 'spray-1')).toBe(false);
+    expect(result.current.alerts).toHaveLength(60);
+  });
+
+  it('a job_update for another job or without a job id triggers no read', async () => {
     await mountWithCards();
     await act(async () => {
       socketHandlers['dispatch:job_update']({ job_id: 'job-2' });
@@ -95,21 +118,20 @@ describe('an open queue re-reads when a visit with a loaded spray hold updates',
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('a burst of updates for the job is one read', async () => {
+  it('a burst of updates for the job is one request', async () => {
     await mountWithCards();
-    fetch.mockResolvedValue({ ok: true, json: async () => ({ alerts: [sprayCard, otherCard] }) });
+    answer([sprayCard]);
     await act(async () => {
       for (let i = 0; i < 5; i += 1) socketHandlers['dispatch:job_update']({ job_id: 'job-1' });
       await vi.advanceTimersByTimeAsync(1000);
     });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(jobUrls()).toHaveLength(1);
   });
 
-  it('a card the re-read still returns (a valid visit) stays', async () => {
+  it('a failed job-scoped read leaves the board as it was', async () => {
     const { result } = await mountWithCards();
-    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ alerts: [sprayCard, otherCard] }) });
+    fetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
     await act(async () => { socketHandlers['dispatch:job_update']({ job_id: 'job-1' }); await vi.advanceTimersByTimeAsync(500); });
     expect(result.current.alerts.map((a) => a.id).sort()).toEqual(['late-1', 'spray-1']);
   });
 });
-
