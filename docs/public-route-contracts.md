@@ -2307,7 +2307,10 @@ skipped, no booking here falls back to the visit's own plan cadence estimate, a
 visit that cannot be tied to a property uses the customer-wide booking only on a
 proven single-premises account, and otherwise the key is absent. The copy's
 by-next-visit sentence is timed from that same visit, counted from the selected
-assessment's date. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
+assessment's date, and the frozen entry records that visit's day
+(`nextVisitIso`, with each printed sentence in `expectSentences`): when a later
+render shows a different day (a reschedule) the gap-timed sentence is left out
+of `whatToExpect` and the rest of the frozen copy stands. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an

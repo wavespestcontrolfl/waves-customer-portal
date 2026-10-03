@@ -5645,6 +5645,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // one the "Next visit" line shows), for the copy's by-next-visit
       // sentence; null = unknown, and no such sentence is chosen.
       let lawnCopyGapDays = null;
+      // The calendar day of that next visit: frozen with the copy, so a later
+      // reschedule drops the sentence that was timed for the old date.
+      let lawnCopyNextVisitIso = null;
       const daysFromVisit = (iso) => {
         if (!lawnCopyVisitDate || !iso) return null;
         const gap = Math.round((Date.parse(`${iso}T12:00:00Z`) - Date.parse(`${lawnCopyVisitDate}T12:00:00Z`)) / 86400000);
@@ -5695,7 +5698,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
             if (scopedNext) {
               const raw = nextRow.scheduled_date;
-              lawnCopyGapDays = daysFromVisit(raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10));
+              lawnCopyNextVisitIso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+              lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
             }
           } else if (svcIso && !(scopedNext && scopedNext.state === 'unknown')) {
             // An unknown property match shows nothing: a cadence estimate beside
@@ -5711,8 +5715,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               else if (/weekly/.test(t)) weeks = 1;
             }
             if (weeks) {
-              // No booking at this property: the plan cadence is this visit's own.
-              if (scopedNext) lawnCopyGapDays = weeks * 7;
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
               // Report tokens are permanent — only surface an ESTIMATED next visit when
@@ -5720,6 +5722,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               // date as the "next visit".
               if (est.getTime() > Date.now()) {
                 nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
+                // No booking at this property: the SHOWN estimate times the
+                // copy, counted from the selected assessment's date.
+                if (scopedNext) {
+                  lawnCopyNextVisitIso = est.toISOString().slice(0, 10);
+                  lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
+                }
               }
             }
           }
@@ -5747,7 +5755,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
-            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays },
+            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso },
             // Never CREATE the first-writer-wins entry from a degraded read
             // (any input read that failed is in readFailures) or from
             // unverifiable treatment data; a stored entry still replays first.

@@ -106,7 +106,7 @@ function buildWatching(reportV2) {
 // printed word for word. A sentence that would pass the cap is skipped whole.
 function buildWhatToExpect(reportV2, ctx, deps) {
   const products = productsOf(reportV2);
-  if (!products.length) return { text: null, rows: [] };
+  if (!products.length) return { text: null, rows: [], sentences: [] };
   const build = deps.buildExpectations || buildLawnExpectations;
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
@@ -122,6 +122,9 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
   const pieces = [];
   const picked = [];
+  // Each printed sentence, in order, with whether it was timed from the gap to
+  // the next visit (a row judged by absence words its line without one).
+  const sentences = [];
   let words = 0;
   for (const row of rows) {
     if (picked.length >= MAX_EXPECT_ROWS) break;
@@ -134,10 +137,11 @@ function buildWhatToExpect(reportV2, ctx, deps) {
       words += w;
       pieces.push(sentence.text.trim());
       keys.push(key);
+      sentences.push({ key, text: sentence.text.trim(), gapBased: key === 'byNextVisit' && !row.judgedByAbsence });
     }
     if (keys.length) picked.push({ id: row.id, keys });
   }
-  return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
+  return { text: pieces.length ? pieces.join(' ') : null, rows: picked, sentences };
 }
 
 /**
@@ -150,19 +154,21 @@ function buildWhatToExpect(reportV2, ctx, deps) {
  */
 function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
-  if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [] };
+  if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
   fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
+  let expectSentences = [];
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
+    expectSentences = expect.sentences;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows };
+  return { fields, expectRows, expectSentences };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -171,6 +177,20 @@ function cleanFields(fields) {
   const out = emptyFields();
   for (const f of FIELD_NAMES) out[f] = clean(src[f]);
   return out;
+}
+
+// A frozen entry's fields for THIS render. Everything replays as frozen except
+// a sentence timed from the gap to the next visit: when the visit the report
+// now shows is on another day (a reschedule, or the booking is gone), that
+// sentence was timed for a date the page no longer shows, so it is left out
+// (never re-chosen: the rest of the frozen copy stands).
+function replayFields(entry, ctx = {}) {
+  const fields = cleanFields(entry.fields);
+  const sentences = Array.isArray(entry.expectSentences) ? entry.expectSentences : null;
+  if (!sentences || !sentences.some((s) => s && s.gapBased)) return fields;
+  if ((entry.nextVisitIso || null) === (ctx.nextVisitIso || null)) return fields;
+  const kept = sentences.filter((s) => s && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
+  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null };
 }
 
 /** One assessment's frozen entry out of a record's structured_notes, or null. */
@@ -239,7 +259,7 @@ async function resolveLawnCopyV6ForRender({
   structuredNotes, serviceRecordId, assessmentId, reportV2, ctx = {}, degraded = false, knex, deps = {},
 } = {}) {
   const stored = storedLawnCopyV6For(structuredNotes, assessmentId);
-  if (stored) return { copy: cleanFields(stored.fields), unfrozen: false };
+  if (stored) return { copy: replayFields(stored, ctx), unfrozen: false };
   if (!assessmentId || !serviceRecordId || !knex) return { copy: null, unfrozen: true };
   // A freeze may only be CREATED from a complete, healthy read (first writer
   // wins: a degraded entry could never be repaired).
@@ -253,10 +273,13 @@ async function resolveLawnCopyV6ForRender({
     frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
     fields: built.fields,
     expectRows: built.expectRows,
+    // What the by-next-visit sentences were timed for (replayFields).
+    expectSentences: built.expectSentences,
+    nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
   if (!frozen) return { copy: cleanFields(built.fields), unfrozen: true };
-  return { copy: cleanFields(frozen.fields), unfrozen: false };
+  return { copy: replayFields(frozen, ctx), unfrozen: false };
 }
 
 module.exports = {

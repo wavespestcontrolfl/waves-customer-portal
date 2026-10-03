@@ -123,6 +123,66 @@ describe('resolveLawnCopyV6ForRender', () => {
     expect(deps.buildExpectations).not.toHaveBeenCalled();
   });
 
+  describe('a frozen by-next-visit sentence follows the visit the report shows', () => {
+    const stored = (over = {}) => ({
+      v: 1, assessmentId: 'a1', nextVisitIso: '2026-11-11',
+      fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: 'Weeds curl and fade. Most should be gone by your next visit.', watching: null },
+      expectSentences: [
+        { key: 'visibleChange', text: 'Weeds curl and fade.', gapBased: false },
+        { key: 'byNextVisit', text: 'Most should be gone by your next visit.', gapBased: true },
+      ],
+      ...over,
+    });
+    const replay = (entry, nextVisitIso) => resolveLawnCopyV6ForRender({
+      structuredNotes: { lawnCopyV6: { a1: entry } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso },
+    }).then((r) => r.copy.whatToExpect);
+
+    test('same visit day: replays byte for byte', async () => {
+      expect(await replay(stored(), '2026-11-11')).toBe('Weeds curl and fade. Most should be gone by your next visit.');
+    });
+
+    test('the visit was rescheduled (or is gone): the timed sentence is left out, the rest stands', async () => {
+      expect(await replay(stored(), '2026-10-20')).toBe('Weeds curl and fade.');
+      expect(await replay(stored(), null)).toBe('Weeds curl and fade.');
+    });
+
+    test('a by-next-visit line that is not timed from the gap (a row judged by absence) always stays', async () => {
+      const entry = stored({
+        fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: 'Nothing changes visibly. By your next visit, success is damage that never showed up.', watching: null },
+        expectSentences: [
+          { key: 'visibleChange', text: 'Nothing changes visibly.', gapBased: false },
+          { key: 'byNextVisit', text: 'By your next visit, success is damage that never showed up.', gapBased: false },
+        ],
+      });
+      expect(await replay(entry, '2026-10-20')).toBe(entry.fields.whatToExpect);
+    });
+
+    test('an entry frozen before this field existed replays as frozen', async () => {
+      const legacy = stored({ expectSentences: undefined, nextVisitIso: undefined });
+      expect(await replay(legacy, '2026-10-20')).toBe(legacy.fields.whatToExpect);
+    });
+
+    test('a build marks only gap-timed sentences, and the freeze records the visit day', async () => {
+      const deps = {
+        buildExpectations: () => ({ rows: [
+          { id: 'r1', approved: true, judgedByAbsence: false, sentences: [{ key: 'visibleChange', text: 'Weeds curl.' }, { key: 'byNextVisit', text: 'Gone by your next visit.' }] },
+          { id: 'r2', approved: true, judgedByAbsence: true, sentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.' }] },
+        ] }),
+      };
+      const built = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
+      expect(built.expectSentences).toEqual([
+        { key: 'visibleChange', text: 'Weeds curl.', gapBased: false },
+        { key: 'byNextVisit', text: 'Gone by your next visit.', gapBased: true },
+        { key: 'byNextVisit', text: 'Little to see by your next visit.', gapBased: false },
+      ]);
+      const { knex, chain } = knexStub(1);
+      await resolveLawnCopyV6ForRender({ structuredNotes: {}, serviceRecordId: 's1', assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitGapDays: 42, nextVisitIso: '2026-11-11' }, knex, deps });
+      const written = JSON.parse(chain.update.mock.calls[0][0].structured_notes.bindings[0]).a1;
+      expect(written.nextVisitIso).toBe('2026-11-11');
+      expect(written.expectSentences).toHaveLength(3);
+    });
+  });
+
   test('a degraded read creates no freeze and carries nothing', async () => {
     const { knex, chain } = knexStub(1);
     const out = await resolveLawnCopyV6ForRender({ structuredNotes: {}, serviceRecordId: 's1', assessmentId: 'a1', reportV2: reportV2(), degraded: true, knex });

@@ -420,6 +420,25 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       });
     });
 
+    test('a cadence estimate already in the past shows no next visit and times nothing', async () => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        const old = { ...CUR, service_date: '2026-07-01', visit_date: '2026-07-01' };
+        history.installedForVisit.mockResolvedValue(old);
+        const svc = { ...service(records()['svc-cur'].structured_notes), service_type: 'Lawn Care every 6 weeks', service_date: '2026-07-01' };
+        const { data } = await render(records(), {
+          lawn_assessments: [old],
+          scheduled_services: [{ id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-07-01', status: 'completed', service_type: 'Lawn Care every 6 weeks', ...HOME_A }],
+        }, svc);
+        expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+        expect(spy.mock.calls[0][0].ctx).toMatchObject({ nextVisitGapDays: null, nextVisitIso: null });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('a next visit with no property evidence: no gap', async () => {
       expect(await gapFor({})).toBeNull();
     });
