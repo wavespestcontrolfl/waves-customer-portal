@@ -63,8 +63,13 @@ test('an undelivered rate review notice is a 404, never counted or flipped to vi
   expect(mockRows.updates).toEqual([]);
 });
 
-test('an uncertain send renders its frozen words; the view is counted but never flips the status', async () => {
+test('an uncertain send with no provider handoff recorded is the generic 404 (nothing was handed over)', async () => {
   mockRows.notice = { ...base, rate_review_row_id: 'r1', sent_at: null, status: 'send_uncertain', metadata: { pending_letter: { letter } } };
+  expect((await get(TOKEN)).status).toBe(404);
+});
+
+test('an uncertain send that recorded its provider handoff renders its frozen words; the view is counted but never flips the status', async () => {
+  mockRows.notice = { ...base, rate_review_row_id: 'r1', sent_at: null, status: 'send_uncertain', metadata: { pending_letter: { letter, handoff_at: '2026-11-01T15:00:00.000Z' } } };
   const { status, body } = await get(TOKEN);
   expect(status).toBe(200);
   expect(body.review).toMatchObject({ delivered: false, costBlock: 'Costs went up.' });
