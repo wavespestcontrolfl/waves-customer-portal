@@ -4386,6 +4386,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 5:19AM ET — Lawn pre-day spray check (lawn report rebuild P32). Runs
+  // the job card's spray check on today's lawn visits' planned primary
+  // products against the property forecast; a hold writes one quiet
+  // lawn_spray_hold card to the Dispatch Action Queue per visit per day.
+  // Staff-facing only: no bell, no customer message, no visit moved. DARK
+  // unless GATE_LAWN_PREDAY_SPRAY_CHECK=true — checked here too so the dark
+  // path never takes the runExclusive advisory lock. Same minute as the
+  // brief sweep's primary pass; this one is a few forecast reads, no LLM.
+  // =========================================================================
+  cron.schedule('19 5 * * *', async () => {
+    const LawnPredaySprayCheck = require('./lawn-preday-spray-check');
+    if (!LawnPredaySprayCheck.enabled()) return;
+    logger.info('Running: lawn pre-day spray check');
+    try {
+      await runExclusive('lawn-preday-spray-check', async () => {
+        const result = await LawnPredaySprayCheck.runSweep();
+        if (result.skipped === true) {
+          logger.info(`Lawn pre-day spray check inert: ${result.reason}`);
+        } else {
+          logger.info(`Lawn pre-day spray check done: ${result.carded} carded, ${result.held} held, ${result.checked} checked, ${result.duplicate} already carded, ${result.unavailable} unavailable, ${result.failed} failed of ${result.considered}${result.deadline ? ' (stopped at the time budget)' : ''}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Lawn pre-day spray check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('5 10 * * *', async () => {
     logger.info('Running: pre-visit balance reminders');
     try {

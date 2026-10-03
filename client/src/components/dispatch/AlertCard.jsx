@@ -378,6 +378,29 @@ function NotClosedOutBody({ alert }) {
   );
 }
 
+// 'lawn_spray_hold' — the 5:19 AM pre-day spray check (services/lawn-preday-spray-check.js):
+// a planned primary product the job card's spray check says to hold at the
+// property. The generator writes the finished sentences (measured forecast
+// numbers and the plan's alternative or a move) into payload.lines; this body
+// only prints them. Advisory: no decision buttons, nothing is sent or moved.
+function LawnSprayHoldBody({ alert }) {
+  const lines = Array.isArray(alert.payload?.lines) ? alert.payload.lines : [];
+  const customer = customerLine(alert);
+  const windowLabel = formatRawWindow(alert.window_start || alert.payload?.window_start, alert.window_end);
+  const who = [customer, alert.service_type].filter(Boolean).join(' · ');
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      {who && (
+        <div>
+          <span className="font-medium">{who}</span>
+          {windowLabel ? <span className="text-ink-secondary"> ({windowLabel})</span> : null}
+        </div>
+      )}
+      {lines.map((line) => <p key={line}>{line}</p>)}
+    </div>
+  );
+}
+
 const NOT_CLOSED_OUT_TYPE = 'visit_not_closed_out';
 
 const TYPE_RENDERERS = {
@@ -387,6 +410,7 @@ const TYPE_RENDERERS = {
   missed_photo: MissedPhotoBody,
   moa_violation: MoaViolationBody,
   schedule_route_quality: RouteQualityBody,
+  lawn_spray_hold: LawnSprayHoldBody,
   tech_out_overflow: TechOutOverflowBody,
 };
 
@@ -395,6 +419,7 @@ const TYPE_RENDERERS = {
 const PRETTY_HEADER_LABEL = {
   [NOT_CLOSED_OUT_TYPE]: 'Visit not closed out',
   schedule_route_quality: 'Route needs review',
+  lawn_spray_hold: 'Spray check: hold',
   tech_out_overflow: 'Needs a decision',
 };
 

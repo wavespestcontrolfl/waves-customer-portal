@@ -1882,6 +1882,39 @@ async function standardOrderFor(productId, { dbh = db } = {}) {
   return { name: product.name, quantity: order.quantity, unit: order.unit || product.inventory_unit || product.rate_unit || null };
 }
 
+/**
+ * The label limits the spray check judges one product against (the reviewed
+ * label evidence when it applies, else the catalog columns): the same pick
+ * buildSprayCheck makes, so a caller can show the limit a verdict was judged
+ * on without re-deriving it.
+ */
+function sprayLimitsFor(product, labelSource) {
+  return reviewedWeather(product, labelSource)?.limits || productLimits(product);
+}
+
+/**
+ * The visit's planned product lines and the arrival instant its spray check
+ * is judged from, WITHOUT a forecast: the pre-day sweep supplies its own
+ * hourly series. Read-only (no row locks on the visit). Null when the visit
+ * is gone. `catalog` lets a sweep load the product catalog once.
+ */
+async function loadVisitSprayContext(serviceId, { dbh = db, deps = {}, now = new Date(), catalog = null } = {}) {
+  const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: false });
+  if (!facts) return null;
+  const protocols = deps.protocols || require('../config/protocols.json');
+  const { lines } = await resolveVisitLines({ facts, protocols, catalog: catalog || await loadCatalog(dbh), dbh, deps, now });
+  return {
+    serviceId: facts.serviceId,
+    isLawn: facts.isLawn,
+    scheduledDate: facts.scheduledDate,
+    windowStart: facts.windowStart,
+    coords: facts.coords?.lat != null ? facts.coords : null,
+    arrival: serviceDayInstant(facts.scheduledDate, now, facts.windowStart),
+    lines,
+    labelSources: await checkReviewedWeatherSources(lines.map((l) => l.product)),
+  };
+}
+
 module.exports = {
   standardOrderFor,
   jobCardEnabled,
@@ -1892,6 +1925,10 @@ module.exports = {
   buildTemplateParagraph,
   paragraphForVisit,
   buildSprayCheck,
+  sprayLimitsFor,
+  loadVisitSprayContext,
+  loadCatalog,
+  isTankMixable,
   buildMixAmount,
   tankFromCalibrations,
   resolveVisitProducts,

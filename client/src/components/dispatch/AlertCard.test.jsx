@@ -274,3 +274,21 @@ describe('visit not closed out card', () => {
     expect(screen.queryByRole('button', { name: 'Not a miss' })).toBeNull();
   });
 });
+
+describe('lawn_spray_hold (pre-day spray check)', () => {
+  const alert = {
+    id: 'spray-1', type: 'lawn_spray_hold', severity: 'warn', created_at: new Date().toISOString(), job_id: 'job-1',
+    customer_first_name: 'Test', customer_last_name: 'Customer', service_type: 'Lawn Care Visit', window_start: '09:00:00', window_end: '11:00:00',
+    payload: { source: 'lawn_preday_spray_check', for_date: '2026-10-03', window_start: '09:00:00',
+      lines: ['Sample Herbicide: hold. 0.42 in of rain forecast in the 6 h after the 9:00 AM arrival. Move the visit to a clearer window.'] },
+  };
+
+  it('prints the finished sentences with the visit, and offers Open job and Resolve only', () => {
+    render(<AlertCard alert={alert} onResolve={vi.fn()} onOpenJob={vi.fn()} />);
+    expect(screen.getByText('Spray check: hold')).toBeTruthy();
+    expect(screen.getByText('Test C. · Lawn Care Visit')).toBeTruthy();
+    expect(screen.getByText(/0\.42 in of rain forecast/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open job' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Resolve' })).toBeTruthy();
+  });
+});
