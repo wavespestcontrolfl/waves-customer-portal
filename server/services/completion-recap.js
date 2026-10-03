@@ -398,19 +398,16 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 //     where the text writes it capitalized in the middle of a sentence. A
 //     lowercase or sentence-opening use ("Suspend watering for 24 hours",
 //     "keep your distance") is ordinary wording and passes.
-// The same rule decides whether the PROMPT mentions a product (a note saying
-// "the customer asked about <product>"): a row the prompt names that way is
-// returned in mentionedNames and joins the visit's own full screen, so its
-// other aliases ("T-Rex traps") are caught too. A note that only uses a
-// brand's word in its ordinary sense ("suspend treatment") names nothing.
 // In an all-capitals line every word is capitalized, so a brand word inside
 // it is caught and an ordinary use there ("PLEASE SUSPEND WATERING") is too.
+// A product the prompt itself names is the caller's to add to the visit's
+// own full screen (extraNames), as before this screen existed.
 // Known limit, accepted: a brand word the prompt never names that opens a
 // sentence, or is written lowercase, is not caught by this screen.
 const REPORT_SECTION_HEADINGS = new Set([
   'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE DID AND WHY', 'WHAT TO EXPECT', 'WHATS NEXT',
 ]);
-function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
+function buildCatalogBrandScreen(rows, genericTokens) {
   const tokensOf = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const generic = new Set(genericTokens);
   for (const row of rows) {
@@ -491,14 +488,11 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
   const names = (entry, read) => entry.phrases.some((phrase) => read.normHay.includes(phrase))
     || entry.collapsed.some((word) => read.wordSet.has(word))
     || (entry.brand !== null && read.midSentenceCapitalized.has(entry.brand));
-  const prompt = mentionedText ? readText(mentionedText) : null;
-  const mentionedNames = prompt ? entries.filter((entry) => names(entry, prompt)).map((entry) => entry.name) : [];
-  const screen = (text) => {
+  return (text) => {
     if (!text) return false;
     const read = readText(text);
     return entries.some((entry) => names(entry, read));
   };
-  return { screen, mentionedNames };
 }
 
 // Builds a screen(text) predicate for THIS visit's recorded products.
@@ -509,12 +503,10 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
 // too. Chunked by 10 so safeProducts' cap never leaves an entry
 // unscreened. Catalog lookup failure keeps the guard strict.
 // wholeCatalog adds the catalog-wide brand screen above; catalogRows lets a
-// caller that already read the catalog pass it in, and mentionedText is the
-// prompt the copy was written from: a catalog product it names joins the
-// full screen like one of the visit's own. A failed catalog read
+// caller that already read the catalog pass it in. A failed catalog read
 // throws: the screen cannot run complete, so the caller fails closed.
 async function buildReportTradeNameScreen({
-  products = [], extraNames = [], db = null, wholeCatalog = false, catalogRows = null, mentionedText = '',
+  products = [], extraNames = [], db = null, wholeCatalog = false, catalogRows = null,
 } = {}) {
   const list = Array.isArray(products) ? products.filter(Boolean) : [];
   let hydrated = list;
@@ -557,21 +549,17 @@ async function buildReportTradeNameScreen({
     }
   }
   let catalogScreen = null;
-  let mentionedCatalogNames = [];
   if (wholeCatalog) {
     let rows = catalogRows;
     if (!Array.isArray(rows)) {
       if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
       rows = await savepointRead(db, (k) => k('products_catalog').select('name', 'display_name', 'active_ingredient'));
     }
-    const built = buildCatalogBrandScreen(Array.isArray(rows) ? rows : [], genericTokens, mentionedText);
-    catalogScreen = built.screen;
-    mentionedCatalogNames = built.mentionedNames;
+    catalogScreen = buildCatalogBrandScreen(Array.isArray(rows) ? rows : [], genericTokens);
   }
   const seen = new Set();
   const guarded = [
     ...extraNames.map((name) => ({ name })),
-    ...mentionedCatalogNames.map((name) => ({ name })),
     ...hydrated,
   ].filter((p) => {
     const key = String(p?.name || '').toLowerCase().trim();

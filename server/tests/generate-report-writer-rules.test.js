@@ -288,7 +288,7 @@ test('gate on: an ordinary word inside a catalog name does not reject the copy',
   const withTraps = CLEAN_V2.replace('Ghost ants were trailing', 'We checked the snap traps in the garage. Ghost ants were trailing');
   mockProvider.mockImplementationOnce(async () => ({ ok: true, text: withTraps }));
   const res = mkRes();
-  await handler(mkReq({ serviceNotes: 'Treated the thresholds and checked the snap traps (ordinary word case).' }), res);
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds and checked the garage (ordinary word case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(1);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: withTraps }));
 });

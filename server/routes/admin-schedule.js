@@ -25837,13 +25837,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
-    // visit's: every catalog product is screened by its brand word or its
-    // name as a phrase (wholeCatalog, in the shared builder), so a name the
-    // model brings from its own knowledge is caught, and a brand the prompt
-    // itself mentions (a note saying "the customer asked about <product>")
-    // is caught in any case, without an ordinary word inside a catalog name
-    // ("snap", "trap") rejecting plain copy.
+    // visit's: a catalog product the prompt itself mentions (a note saying
+    // "the customer asked about <product>") joins the trade-name screen in
+    // full, and every other catalog product is screened by its brand word
+    // or its name as a phrase (wholeCatalog, in the shared builder), so a
+    // name the model brings from its own knowledge is caught without an
+    // ordinary word inside an unmentioned catalog name ("snap", "trap")
+    // rejecting plain copy.
     let catalogRows = null;
+    const mentionedCatalogNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
@@ -25852,6 +25854,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         for (const row of catalogRows) {
           const named = Boolean(row?.name)
             && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
+          if (named) mentionedCatalogNames.push(row.name);
           // Its actives too: a draft must not swap the named product for
           // its active ingredient; and an active the prompt names on its own
           // ("azoxystrobin" in a note) is screened even with no product name.
@@ -25871,11 +25874,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
         wholeCatalog: writerRulesOn,
         catalogRows,
-        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
