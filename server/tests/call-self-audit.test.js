@@ -619,6 +619,17 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     expect(calls).toContainEqual(['transcription_status', 'rejected']);
   });
 
+  test('runs even when the self-audit itself is off or has no Anthropic client: it has its own gate and needs neither', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation((name) => name !== 'callSelfAudit');
+    try {
+      vmDb({ rows: [VM({ id: 'vm-1' })] });
+      const res = await runSelfAudit();
+      expect(res).toMatchObject({ skipped: 'gate_off', voicemails: { asked: 1, recorded: 1 } });
+      expect(asksFor('voicemail.v1')).toHaveLength(1);
+    } finally { isEnabled.mockImplementation(() => true); }
+  });
+
   test('a read failure is logged, never thrown', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });

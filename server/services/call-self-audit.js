@@ -426,12 +426,17 @@ function stratifySample({ inbound = [], outbound = [], size = SAMPLE_SIZE } = {}
 }
 
 async function runSelfAudit(depsIn = {}) {
-  if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off' };
+  // Every voicemail of the day FIRST: the pass has its own gate
+  // (GATE_TYPED_DECISIONS), needs no Anthropic client and no call sample, so
+  // none of this function's own exits may skip it (Codex #5655 r7). Gate off =
+  // an all-zero tally and no read.
+  const voicemails = await shadowVoicemails();
+  if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off', voicemails };
   // createDeepMessage's contract is (client, params) — the caller owns the
   // Anthropic client (per llm/deep.js). Injectable for tests.
   const deps = { ...depsIn };
   if (!deps.createMessage) {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client' };
+    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client', voicemails };
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 1 });
     // effort: 'medium' — a bounded per-call yes/no/field-diff audit, not deep
     // reasoning; caps Opus 5.5 spend on a short structured verdict.
@@ -459,9 +464,6 @@ async function runSelfAudit(depsIn = {}) {
     sampleDirection(OUTBOUND_DIRECTION_SQL),
   ]);
   const calls = stratifySample({ inbound: inboundRows, outbound: outboundRows, size: SAMPLE_SIZE });
-  // Every voicemail of the day, independent of the call sample (and of whether there is one).
-  const voicemails = await shadowVoicemails();
-
   if (!calls.length) return { sampled: 0, voicemails };
 
   let disagreements = 0; let checkedFields = 0; let spamFalsePositives = 0; let dispositionMismatches = 0; let audited = 0;
