@@ -831,6 +831,14 @@ function safeConditionLabel(rawName, confidence) {
   return label;
 }
 
+// True when a finding name ASSERTS a governed cause (SUMMARY_CAUSE_RE) rather than
+// ruling it out: only the clauses safeConditionLabel keeps as positive are
+// tested, so "Thinning turf; no chinch bugs observed" names none.
+function namesAssertedCause(rawName) {
+  const lower = String(rawName || '').toLowerCase();
+  return !!lower && positiveClauses(lower).positive.some((clause) => SUMMARY_CAUSE_RE.test(clause));
+}
+
 function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   const primary = diagnosis.findings?.find((finding) => finding.name === diagnosis.primary_finding);
   if (!primary) return 'This lawn check is complete. The photos did not show enough detail to call out a specific pest or disease, so keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
@@ -1226,6 +1234,7 @@ module.exports = {
   runQaSafetyCheck,
   scrubCustomerText,
   safeConditionLabel,
+  namesAssertedCause,
   residualDefinitiveClaim,
   spaceJoinedNon,
   stripNegatedRecovery,

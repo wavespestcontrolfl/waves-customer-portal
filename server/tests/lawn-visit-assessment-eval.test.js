@@ -557,6 +557,7 @@ describe('runner', () => {
       photos: calls[0].photos,
       photoZones: ['front', 'back', 'blade_crown', 'hot_edge', 'shade', 'trouble', 'trouble', null],
       visionContext: calls[0].visionContext,
+      shotList: true,
     }));
   });
 
