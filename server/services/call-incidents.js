@@ -84,16 +84,20 @@ function providerForModel(model) {
 /**
  * The two-model rule for one finding. `auditorValue` is the auditor's answer
  * for `field` (the finding's new_value); `second` is the second reader's
- * parsed JSON (null = answered but unusable).
+ * parsed JSON (null = answered but unusable). The second reader is asked for
+ * words that support its answer FOR THIS FIELD (`field_excerpt`): that quote,
+ * verified in the transcript, is the evidence. The auditor's single excerpt
+ * backs whatever it judged most important, not necessarily this field, so it
+ * is recorded as a signal and never decides.
  */
 function decideCallFinding({ field, auditorValue, auditorExcerpt, second, transcript }) {
   const auditorExcerptVerified = excerptInTranscript(auditorExcerpt, transcript);
   const secondValue = second && typeof second[field] === 'boolean' ? second[field] : null;
-  const secondExcerptVerified = Boolean(second) && excerptInTranscript(second.excerpt, transcript);
+  const secondExcerptVerified = Boolean(second) && excerptInTranscript(second.field_excerpt, transcript);
   const verdict = { auditorExcerptVerified, secondValue, secondExcerptVerified };
   if (secondValue === null) return { disposition: 'lead', rule: 'second_unusable', ...verdict };
   if (secondValue !== auditorValue) return { disposition: 'lead', rule: 'second_sides_with_production', ...verdict };
-  if (!auditorExcerptVerified || !secondExcerptVerified) return { disposition: 'lead', rule: 'excerpt_unverified', ...verdict };
+  if (!secondExcerptVerified) return { disposition: 'lead', rule: 'excerpt_unverified', ...verdict };
   return { disposition: 'confirmed_mistake', rule: 'two_models', ...verdict };
 }
 
@@ -115,6 +119,7 @@ function parseReaderJson(text) {
  * { ok: false }.
  */
 async function askSecondReader(call, auditorProvider) {
+  // `call` is the candidate row: transcript, direction and the disputed field.
   const { dispatchWithFallback } = require('./llm/call');
   const MODELS = require('../config/models');
   const { AUDIT_PROMPT, callDirectionBlock } = require('./call-self-audit');
@@ -125,7 +130,8 @@ async function askSecondReader(call, auditorProvider) {
     { name: policy.name, primary: leg },
     {
       laneId: 'call_incidents',
-      system: AUDIT_PROMPT,
+      // The auditor's own contract, plus one ask: the words behind THIS field.
+      system: `${AUDIT_PROMPT}\nAlso include "field_excerpt": the exact words from the transcript (at most 25) that support your answer for "${call.field}".`,
       text: `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, TRANSCRIPT_CHARS)}`,
       jsonMode: true,
       maxTokens: 400,
@@ -154,12 +160,17 @@ async function typedSignals(dbi, callId, field) {
  *   auditor_value_missing — the auditor never answered this field as a
  *     boolean (the self-audit stores Boolean(verdict[field]), so a missing
  *     answer reads as "false");
+ *   audit_contract_changed — the finding was written under another audit
+ *     prompt (or before the hash was stored): a second reading under today's
+ *     prompt would not be the same decision;
  *   auditor_provider_unknown — a second reader could share its provider;
  *   transcript_truncated — the call is longer than both readers are shown,
  *     so the disagreement may sit in the part neither read.
  */
 function leadWithoutReading({ row, detail, auditorProvider, auditorValue }) {
+  const { AUDIT_PROMPT_HASH } = require('./call-self-audit');
   if (detail?.verdict?.[row.field] !== auditorValue) return 'auditor_value_missing';
+  if (detail?.audit_prompt_hash !== AUDIT_PROMPT_HASH) return 'audit_contract_changed';
   if (!auditorProvider) return 'auditor_provider_unknown';
   if (String(row.transcription || '').length > TRANSCRIPT_CHARS) return 'transcript_truncated';
   return null;
@@ -181,7 +192,8 @@ async function adjudicateOne({ dbi, row, reader }) {
   // A row whose two values agree is not a disagreement (defensive).
   if (prodValue === auditorValue) return null;
   const detail = typeof row.detail === 'string' ? safeJson(row.detail) : (row.detail || {});
-  const auditorProvider = providerForModel(detail.auditor_model);
+  // Recorded at audit time; the catalog is only a fallback for older rows.
+  const auditorProvider = detail.auditor_provider || providerForModel(detail.auditor_model);
   const skipRule = leadWithoutReading({ row, detail, auditorProvider, auditorValue });
   let reading = { ok: true, provider: null, model: null, answer: null };
   if (!skipRule) {
@@ -270,7 +282,10 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .whereIn('f.category', ['field_drift', 'spam_false_positive'])
     .whereIn('f.field', FIELDS)
     .where('f.created_at', '>=', since)
-    .orderBy('f.created_at', 'asc')
+    // A nightly rotation, not oldest-first: findings whose second reading
+    // keeps failing store nothing and are retried, and must never hold the
+    // batch against newer ones until they age out.
+    .orderByRaw('md5((f.id)::text || ?)', [now.toISOString().slice(0, 10)])
     .limit(batchLimit)
     .select(
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',

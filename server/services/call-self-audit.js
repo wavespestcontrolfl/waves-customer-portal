@@ -33,6 +33,9 @@ const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Co
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.`;
 
+// Identity of the audit contract, stored on every finding.
+const AUDIT_PROMPT_HASH = require('crypto').createHash('sha256').update(AUDIT_PROMPT).digest('hex').slice(0, 16);
+
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
 const INBOUND_DIRECTION_SQL = "COALESCE(direction, '') NOT LIKE 'outbound%'";
 
@@ -276,6 +279,7 @@ async function runSelfAudit(depsIn = {}) {
     // another provider): the call-incident adjudicator needs it to pick a
     // second reader on a DIFFERENT provider.
     let auditorModel = null;
+    let auditorProvider = null;
     try {
       // Blind audit: the model sees ONLY the transcript. Leaking production's
       // status would bias the auditor toward the very label being audited.
@@ -285,6 +289,10 @@ async function runSelfAudit(depsIn = {}) {
         messages: [{ role: 'user', content: `${callDirectionBlock(call.direction)}\nTranscript:\n${call.transcription.slice(0, 5000)}` }],
       });
       auditorModel = res?.model || null;
+      // createDeepMessage's OpenAI backup returns a message with no id; an
+      // Anthropic message always carries one. Recorded at audit time, so the
+      // adjudicator never has to guess the provider from a model id.
+      auditorProvider = res ? (res.id ? 'anthropic' : 'openai') : null;
       const text = (res?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
@@ -323,7 +331,9 @@ async function runSelfAudit(depsIn = {}) {
           old_value: String(prod[f]),
           new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
-          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel }),
+          // The audit contract (prompt hash) and who answered: a second reading
+          // is compared only under the same contract, on another provider.
+          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel, auditor_provider: auditorProvider, audit_prompt_hash: AUDIT_PROMPT_HASH }),
         })
         .onConflict(['call_log_id', 'audit_source', 'category', 'field'])
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])
@@ -365,4 +375,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, AUDIT_PROMPT, productionAnswers };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, AUDIT_PROMPT, AUDIT_PROMPT_HASH, productionAnswers };

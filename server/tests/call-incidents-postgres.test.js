@@ -14,6 +14,7 @@ const { randomUUID } = require('crypto');
 const incidentsMigration = require('../models/migrations/20261002170000_ai_incidents');
 const proposalsMigration = require('../models/migrations/20261002190000_ai_fix_proposals');
 const calls = require('../services/call-incidents');
+const { AUDIT_PROMPT_HASH } = require('../services/call-self-audit');
 
 jest.setTimeout(60000);
 
@@ -21,7 +22,7 @@ const TRANSCRIPT = 'Agent: Waves Pest Control, how can I help?\nCaller: My kitch
 const AUDITOR_EXCERPT = 'Thursday at 2 works, see you then.';
 
 describe('the two-model rule for a call finding', () => {
-  const second = (over = {}) => ({ appointment_agreed: true, excerpt: 'We can be there Thursday between 2 and 4.', ...over });
+  const second = (over = {}) => ({ appointment_agreed: true, excerpt: 'something else', field_excerpt: 'We can be there Thursday between 2 and 4.', ...over });
   const decide = (over = {}) => calls.decideCallFinding({
     field: 'appointment_agreed', auditorValue: true, auditorExcerpt: AUDITOR_EXCERPT, second: second(), transcript: TRANSCRIPT, ...over,
   });
@@ -29,8 +30,11 @@ describe('the two-model rule for a call finding', () => {
   test('confirmed only when the second reader reaches the auditor\'s answer and both excerpts are in the transcript', () => {
     expect(decide()).toMatchObject({ disposition: 'confirmed_mistake', rule: 'two_models' });
     expect(decide({ second: second({ appointment_agreed: false }) })).toMatchObject({ disposition: 'lead', rule: 'second_sides_with_production' });
-    expect(decide({ second: second({ excerpt: 'Caller agreed to Thursday at two pm sharp.' }) })).toMatchObject({ disposition: 'lead', rule: 'excerpt_unverified' });
-    expect(decide({ auditorExcerpt: 'They booked a visit for Friday.' })).toMatchObject({ disposition: 'lead', rule: 'excerpt_unverified' });
+    // The evidence is the second reader's quote FOR THIS FIELD.
+    expect(decide({ second: second({ field_excerpt: 'Caller agreed to Thursday at two pm sharp.' }) })).toMatchObject({ disposition: 'lead', rule: 'excerpt_unverified' });
+    expect(decide({ second: second({ field_excerpt: undefined, excerpt: 'We can be there Thursday between 2 and 4.' }) })).toMatchObject({ disposition: 'lead', rule: 'excerpt_unverified' });
+    // The auditor's one excerpt backs its most important judgment, not this field: a signal only.
+    expect(decide({ auditorExcerpt: 'They booked a visit for Friday.' })).toMatchObject({ disposition: 'confirmed_mistake', auditorExcerptVerified: false });
     expect(decide({ second: null })).toMatchObject({ disposition: 'lead', rule: 'second_unusable' });
     expect(decide({ second: second({ appointment_agreed: 'yes' }) })).toMatchObject({ disposition: 'lead', rule: 'second_unusable' });
   });
@@ -83,12 +87,12 @@ describe('the two-model rule for a call finding', () => {
       id, call_log_id: callId, audit_source: 'self_audit', category: 'field_drift', field: 'appointment_agreed',
       old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'),
       // The self-audit stores the model that actually answered.
-      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }), ...over,
+      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', auditor_provider: 'anthropic', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: true } }), ...over,
     });
     return id;
   };
   const byFinding = (id) => database('ai_incidents').whereRaw("split_part(evidence_id, ':', 1) = ?", [id]).first();
-  const agreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 'scripted', answer: { appointment_agreed: true, is_spam: false, excerpt: 'We can be there Thursday between 2 and 4.' } }));
+  const agreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 'scripted', answer: { appointment_agreed: true, is_spam: false, excerpt: 'x', field_excerpt: 'We can be there Thursday between 2 and 4.' } }));
 
   beforeAll(async () => {
     for (const k of ['GATE_CALL_INCIDENTS', 'GATE_CALL_SELF_AUDIT']) env[k] = process.env[k];
@@ -141,7 +145,7 @@ describe('the two-model rule for a call finding', () => {
     const a = await finding(await call());
     const b = await finding(await call());
     const reader = jest.fn()
-      .mockResolvedValueOnce({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, excerpt: 'We can be there Thursday between 2 and 4.' } })
+      .mockResolvedValueOnce({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, field_excerpt: 'We can be there Thursday between 2 and 4.' } })
       .mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader })).toMatchObject({ adjudicated: 1, byDisposition: { lead: 1 } });
     expect((await database('ai_incidents').select('evidence_id')).map((r) => r.evidence_id.split(':')[0])).toEqual([a]);
@@ -156,7 +160,7 @@ describe('the two-model rule for a call finding', () => {
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ candidates: 0 });
     // A later audit rewrites the same row (here: the deep call fell back).
     await database('call_audit_findings').where({ id }).update({
-      detail: JSON.stringify({ auditor_model: 'gpt-6-luna', verdict: { appointment_agreed: true } }),
+      detail: JSON.stringify({ auditor_model: 'gpt-6-luna', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: true } }),
     });
     const again = await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(again).toMatchObject({ candidates: 1, adjudicated: 1 });
@@ -168,12 +172,12 @@ describe('the two-model rule for a call finding', () => {
   test('a corrected verdict or excerpt on the same model and version is new evidence too', async () => {
     const callId = await call();
     // First audit: the auditor never answered the field (stored "false" is a coercion).
-    const id = await finding(callId, { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {} }) });
-    const disagreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, excerpt: 'We can be there Thursday between 2 and 4.' } }));
+    const id = await finding(callId, { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: {} }) });
+    const disagreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, field_excerpt: 'We can be there Thursday between 2 and 4.' } }));
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing });
     expect((await byFinding(id)).adjudication.rule).toBe('auditor_value_missing');
     // A re-audit answers the field explicitly, same model and version.
-    await database('call_audit_findings').where({ id }).update({ detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: false } }) });
+    await database('call_audit_findings').where({ id }).update({ detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: false } }) });
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing })).toMatchObject({ candidates: 1, adjudicated: 1 });
     // And a replaced excerpt alone is new evidence as well.
     await database('call_audit_findings').where({ id }).update({ transcript_excerpt: 'My kitchen has ants again, can someone come out?' });
@@ -195,21 +199,43 @@ describe('the two-model rule for a call finding', () => {
 
     // The deep call fell back to OpenAI: the reader is asked to avoid OpenAI,
     // and a reader that answers from OpenAI anyway never confirms.
-    const openaiAudit = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'gpt-6-luna', verdict: { appointment_agreed: true } }) });
+    const openaiAudit = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'gpt-6-luna', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: true } }) });
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(agreeing).toHaveBeenLastCalledWith(expect.objectContaining({ finding_id: openaiAudit }), 'openai');
     expect(await byFinding(openaiAudit)).toMatchObject({ disposition: 'lead', adjudication: expect.objectContaining({ rule: 'same_provider' }) });
 
     agreeing.mockClear();
-    const unknown = await finding(await call(), { detail: JSON.stringify({ verdict: { appointment_agreed: true } }) });
+    const unknown = await finding(await call(), { detail: JSON.stringify({ audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: true } }) });
     // The auditor never answered the field: its stored "false" is a coercion.
-    const unanswered = await finding(await call(), { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {} }) });
+    const unanswered = await finding(await call(), { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: {} }) });
     const long = await finding(await call({ transcription: `${TRANSCRIPT}\n${'Agent: more.\n'.repeat(500)}` }));
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(agreeing).not.toHaveBeenCalled();
     expect((await byFinding(unknown)).adjudication.rule).toBe('auditor_provider_unknown');
     expect((await byFinding(long)).adjudication.rule).toBe('transcript_truncated');
     expect((await byFinding(unanswered)).adjudication.rule).toBe('auditor_value_missing');
+  });
+
+  test('a finding written under another audit prompt stays a lead; the provider recorded at audit time beats the catalog', async () => {
+    const stale = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', auditor_provider: 'anthropic', audit_prompt_hash: 'old-contract', verdict: { appointment_agreed: true } }) });
+    // A model the catalog does not know yet, with its provider recorded.
+    const fresh = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'claude-opus-9-preview', auditor_provider: 'anthropic', audit_prompt_hash: AUDIT_PROMPT_HASH, verdict: { appointment_agreed: true } }) });
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    expect((await byFinding(stale)).adjudication.rule).toBe('audit_contract_changed');
+    expect((await byFinding(fresh)).disposition).toBe('confirmed_mistake');
+    expect(agreeing).toHaveBeenCalledTimes(1);
+  });
+
+  test('findings whose reading keeps failing never starve newer ones: the batch rotates nightly', async () => {
+    const ids = [];
+    for (let i = 0; i < 6; i++) ids.push(await finding(await call(), { created_at: new Date(Date.UTC(2026, 9, 1, 7, i)) }));
+    const seen = new Set();
+    const failing = jest.fn(async (row) => { seen.add(row.finding_id); return { ok: false, reason: 'all_providers_failed' }; });
+    for (let day = 3; day <= 12; day++) {
+      await calls.adjudicateCallFindings({ dbi: database, now: new Date(Date.UTC(2026, 9, day, 8, 10)), reader: failing, batchLimit: 2 });
+    }
+    // Ten nights at two a night reach every finding, not the same two each time.
+    expect(seen.size).toBe(6);
   });
 
   test('old findings, other audit sources and unknown fields are not read', async () => {
