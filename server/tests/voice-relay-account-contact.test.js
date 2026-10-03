@@ -89,7 +89,10 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     const noteEstimateFields = jest.fn();
     const out = await executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, requested_service: 'Lawn Care Program' },
       fullTier({ noteEstimateFields, officeOpenNow: () => true }));
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
+    // Account defaults reach the office card only. The lead write gets what the caller stated:
+    // that writer fills empty fields and never replaces them, so a default there could not be corrected.
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: null, email: null, address_line1: null, city: null, zip: null });
     // The call remembers only what the caller SAID: nothing borrowed is noted.
     expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ first_name: null, last_name: null, email: null, address_line1: null, requested_service: 'Lawn Care Program' });
     expect(out).not.toMatch(/still missing/i);
@@ -101,7 +104,8 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     const noteEstimateFields = jest.fn();
     await executeTool('capture_lead', { call_summary: 'Estimate to a different email.', estimate_requested: true, email: 'other@example.com' }, fullTier({ noteEstimateFields }));
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: 'Dana' });
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ email: 'other@example.com', first_name: 'Dana' });
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: null });
     expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ locationFromAccount: true, emailFromAccount: false });
     expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: null });
   });
@@ -110,7 +114,8 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     const noteEstimateFields = jest.fn();
     const out = await executeTool('capture_lead', { call_summary: 'Estimate for their rental in Venice.', estimate_requested: true, city: 'Venice' }, fullTier({ noteEstimateFields }));
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ city: 'Venice', address_line1: null, zip: null, first_name: 'Dana', email: 'dana@example.com' });
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ city: 'Venice', address_line1: null, zip: null });
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ city: 'Venice', address_line1: null, zip: null, first_name: 'Dana', email: 'dana@example.com' });
     expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ city: 'Venice', address_line1: null, zip: null });
     expect(out).toMatch(/address/i); // still missing — asked for, not borrowed
     // No new card: the only call is the revise-if-standing one, naming what is missing.
@@ -124,7 +129,7 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     let bag = {};
     const ctx = fullTier({ getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
     await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, ctx);
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ address_line1: null, city: null, zip: null });
     expect(bag.address_line1).toBeUndefined();
     await executeTool('capture_lead', { call_summary: 'Actually for the Venice rental.', estimate_requested: true, city: 'Venice' }, ctx);
     expect(createLeadFromExtraction.mock.calls[1][0]).toMatchObject({ city: 'Venice', address_line1: null });

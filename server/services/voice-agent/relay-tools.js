@@ -961,8 +961,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // account default is applied: the store only adds, so a name, email or
       // address borrowed from the account and kept there would later pass for
       // something the caller stated — and survive their correction.
+      const statedFields = { ...estimateFields };
       if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields({ ...estimateFields, ...(emailUnreadable && !estimateFields.email ? { email_unreadable: 'true' } : {}) });
+        ctx.noteEstimateFields({ ...statedFields, ...(emailUnreadable && !statedFields.email ? { email_unreadable: 'true' } : {}) });
       }
       // A written estimate for a customer already on file needs nothing asked
       // twice: whatever the caller has not given on this call comes from their
@@ -993,8 +994,13 @@ async function executeTool(name, input = {}, ctx = {}) {
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
+      // Only what the caller STATED: the lead writer fills empty fields and
+      // never replaces them, so an account default written there could not
+      // be corrected later on the call. The account's own record already
+      // holds those; they count toward a deliverable request and show,
+      // labelled, on the office card.
       for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
-        if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
+        if (!extracted[k] && statedFields[k]) extracted[k] = statedFields[k];
       }
       const estimateMissing = estimateRequested
         ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
