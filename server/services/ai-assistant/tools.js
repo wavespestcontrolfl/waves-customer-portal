@@ -491,7 +491,10 @@ function reserviceSurfaceOpen({ secondaryProperty }) {
 // A re-service already open in the line: its date and window for the model,
 // and a button to move it only when the reschedule page would accept it.
 async function bookedReserviceResult(customerId, line, booked, actions) {
-  const token = /^\/reschedule\/([A-Za-z0-9_-]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
+  // The reschedule route's own token format: any other token is a 404 there.
+  const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
+  const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return bookedReserviceFacts(line, booked, false);
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
     logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
@@ -505,6 +508,10 @@ async function bookedReserviceResult(customerId, line, booked, actions) {
       href: booked.rescheduleUrl,
     });
   }
+  return bookedReserviceFacts(line, booked, movable);
+}
+
+function bookedReserviceFacts(line, booked, movable) {
   return {
     offered: false,
     already_booked: { date: longDateLabel(booked.date), window: arrivalWindowRange(String(booked.windowStart || '')) || 'TBD' },
@@ -519,13 +526,26 @@ async function bookedReserviceResult(customerId, line, booked, actions) {
 // reports nothing): isActivePestReport (the SMS flow's own predicate) for
 // pest; for lawn, isActiveLawnReport (weeds back, turf in bad shape, a lawn
 // treatment not working) or a turf insect the pest test catches.
+// The NEWEST message that reports anything decides, so "yes please" after
+// a report still counts and an older report never overrides a newer one.
 function reportRefusal(customerWords, line) {
   const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport, isActiveLawnReport } = require('../reservice-scheduler');
   const words = (Array.isArray(customerWords) ? customerWords : []).map((w) => String(w || '')).filter(Boolean);
-  if (words.some((w) => reportedReserviceExcludedSpecialty(w))) return RESERVICE_SPECIALTY;
-  const active = (w) => isActivePestReport(w) || (line === 'lawn' && isActiveLawnReport(w));
-  if (!words.some((w) => active(w) && reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
-  return null;
+  for (const w of [...words].reverse()) {
+    const specialty = reportedReserviceExcludedSpecialty(w);
+    const pest = isActivePestReport(w);
+    // The lawn check names its own lawn subject, so it is the lawn line's
+    // evidence by itself ("my yard is brown"); the lane reader treats a
+    // plain "yard" as a location.
+    const lawn = isActiveLawnReport(w);
+    if (!specialty && !pest && !lawn) continue;
+    if (specialty) return RESERVICE_SPECIALTY;
+    const inLine = line === 'lawn'
+      ? lawn || (pest && reportedReserviceLanes(w).includes('lawn'))
+      : pest && reportedReserviceLanes(w).includes('pest');
+    return inLine ? null : RESERVICE_HAND_OFF;
+  }
+  return RESERVICE_HAND_OFF;
 }
 
 async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerWords = [] } = {}) {

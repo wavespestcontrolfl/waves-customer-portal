@@ -16,6 +16,10 @@ test.each([
   'the lawn treatment stopped working',
   'chinch bugs are back in the lawn',
   'the chinch bugs are killing my grass',
+  'my yard is brown',
+  'the yard is looking terrible',
+  'the weeds returned',
+  'the grass is brown and not getting better',
 ])('active: %s', (text) => {
   expect(isActiveLawnReport(text)).toBe(true);
 });
@@ -32,6 +36,8 @@ test.each([
   'last year the weeds were all over the lawn',
   'my lawn looks great',
   'ants are back in the yard',
+  'the grass was brown but it is green now',
+  'the lawn was patchy, now it looks good',
   '',
 ])('not active: %s', (text) => {
   expect(isActiveLawnReport(text)).toBe(false);

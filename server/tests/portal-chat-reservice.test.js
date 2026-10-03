@@ -5,7 +5,7 @@
 // and a button the server built.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../routes/reschedule-public', () => ({ _internals: { loadById: jest.fn(), pageEligibility: jest.fn() } }));
+jest.mock('../routes/reschedule-public', () => ({ _internals: { TOKEN_RE: /^[a-f0-9]{64}$/, loadById: jest.fn(), pageEligibility: jest.fn() } }));
 const mockPage = { TOKEN_RE: /^[a-f0-9]{64}$/, pageLaneState: jest.fn(), reserviceLocationReviewRequired: jest.fn() };
 jest.mock('../routes/reservice-public', () => ({ _internals: mockPage }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jest.fn() }));
@@ -35,7 +35,7 @@ const ANTS = ['The ants are back in the kitchen'];
 const WEEDS = ['Weeds are coming back all over the lawn'];
 const PRIMARY = { secondaryProperty: false, customerWords: ANTS };
 const CUSTOMER = { id: 'cust-1', latitude: 27.4, longitude: -82.5 };
-const BOOKED_PEST = { date: '2026-10-09', windowStart: '10:00', serviceType: 'Pest Control Re-Service', rescheduleUrl: '/reschedule/tok_move' };
+const BOOKED_PEST = { date: '2026-10-09', windowStart: '10:00', serviceType: 'Pest Control Re-Service', rescheduleUrl: '/reschedule/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' };
 // The page's verdict: lanes the plan holds (with any open re-service) and the bookable ones.
 const pageState = (lanes, extra = {}) => ({
   customer: CUSTOMER,
@@ -128,14 +128,14 @@ test('a re-service already booked in the line: its date and window, a button to 
 
   const { result, actions } = await offer('pest');
 
-  expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control Re-Service, Oct 9', href: '/reschedule/tok_move' }]);
+  expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control Re-Service, Oct 9', href: '/reschedule/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' }]);
   // The reschedule page's own verdict on that very visit decides the button.
   expect(reschedulePage.loadById).toHaveBeenCalledWith('svc-callback-1');
   expect(result.offered).toBe(false);
   expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
   expect(result.instruction).toMatch(/Do not offer another one/);
   expect(result.instruction).toMatch(/a button to move it is shown/);
-  expect(JSON.stringify(result)).not.toMatch(/tok_move/);
+  expect(JSON.stringify(result)).not.toMatch(/cccccccc/);
 });
 
 test('a re-service booked while the plan covered the line still shows after coverage changed', async () => {
@@ -152,6 +152,7 @@ test.each([
   ['the reschedule page refuses the visit (notice window, grouped, inactive account)', () => { reschedulePage.pageEligibility.mockResolvedValue({ ok: false, reason: 'notice_window' }); }],
   ['the eligibility read fails', () => { reschedulePage.pageEligibility.mockRejectedValue(new Error('db down')); }],
   ['the token names no visit of this customer', () => { bookedRow = undefined; }],
+  ['the booked visit\'s token is not the reschedule route\'s format (a 404 there)', () => { mockOpen.mockResolvedValue({ pest: { ...BOOKED_PEST, rescheduleUrl: '/reschedule/tok_imported' } }); }],
   ['the booked visit has no reschedule link', () => { mockOpen.mockResolvedValue({ pest: { ...BOOKED_PEST, rescheduleUrl: null } }); }],
   ['the booked visit lookup fails', () => { bookedRow = Promise.reject(new Error('db down')); bookedRow.catch(() => {}); }],
 ])('a booked re-service the page would not move: its date, but no button: %s', async (_label, arrange) => {
@@ -234,6 +235,21 @@ describe('the customer\'s own words decide what is covered, not the line the mod
   test('a lawn report never opens a pest offer', async () => {
     const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['weeds all over my lawn'] });
     expect(result.offered).toBe(false);
+  });
+
+  test('the newest report decides: a covered report after a specialty one opens the offer', async () => {
+    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['rats are back in the attic', 'also, the ants are back in the kitchen'] });
+    expect(result.offered).toBe(true);
+  });
+
+  test('the newest report decides: a specialty after a covered report refuses it', async () => {
+    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['the ants are back in the kitchen', 'and I saw a rat in the garage'] });
+    expect(result.instruction).toMatch(/separately priced/);
+  });
+
+  test('a plain yard-condition report opens the lawn offer', async () => {
+    const { result } = await offer('lawn', { secondaryProperty: false, customerWords: ['my yard is brown'] });
+    expect(result.offered).toBe(true);
   });
 
   test('no customer words at all: no offer', async () => {

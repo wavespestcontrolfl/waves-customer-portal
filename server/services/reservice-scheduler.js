@@ -760,7 +760,7 @@ function isActivePestReport(text) {
 // word ("the grass isn't brown", "no weeds") does not count. Turf insects are also caught by the pest test.
 const RESERVICE_LAWN_INVADER = `(?:weeds?|${TURF_INSECT_NOUN_SOURCES.join('|')})`;
 const RESERVICE_LAWN_TURF = '(?:lawn|grass|turf|sod|yard)';
-const RESERVICE_LAWN_SPREAD = '(?:back|again|still|everywhere|all\\s+over|taking\\s+over|(?:coming|came|come|popping|showing|growing)\\s+(?:back|up|in)|spread(?:ing|s)?|keep\\s+(?:coming|growing|popping|spreading)|(?:killing|eating|destroying|damaging|ruining))';
+const RESERVICE_LAWN_SPREAD = '(?:back|again|still|everywhere|return(?:s|ed|ing)?|all\\s+over|taking\\s+over|(?:coming|came|come|popping|showing|growing)\\s+(?:back|up|in)|spread(?:ing|s)?|keep\\s+(?:coming|growing|popping|spreading)|(?:killing|eating|destroying|damaging|ruining))';
 const RESERVICE_LAWN_CONDITION = '(?:brown(?:ing)?|yellow(?:ing)?|dying|dead|dried\\s+(?:out|up)|thin(?:ning)?|bare|patch(?:y|es)|spots|(?:looks?|looking)\\s+(?:bad|rough|terrible|awful|sick|worse|horrible)|getting\\s+worse|not\\s+(?:green|growing))';
 const RESERVICE_LAWN_FAILURE_RE = new RegExp(
   `\\b(?:${RESERVICE_LAWN_TURF}|weeds?|fertili[sz]\\w*)\\s+(?:treatment|application|service|spray(?:ing)?|program|control)s?\\b`
@@ -777,12 +777,24 @@ const RESERVICE_LAWN_NEGATED_RE = new RegExp(
   `\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+(?:${RESERVICE_LAWN_SPREAD}|${RESERVICE_LAWN_CONDITION}|${RESERVICE_LAWN_INVADER})\\b`,
   'i',
 );
+// A later clause saying the lawn has recovered ("but it is green now", "the
+// weeds are under control") resolves an earlier problem clause.
+const RESERVICE_LAWN_RECOVERED_RE = /\b(?:green|fine|healthy|recovered|better|good|under\s+control|cleared\s+up|came\s+back\s+(?:green|nicely))\b/i;
+// "not getting better", "isn't green": a negated recovery resolves nothing.
+const RESERVICE_LAWN_RECOVERY_NEGATED_RE = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+(?:green|fine|healthy|recovered|better|good|under\\s+control|cleared)\\b`, 'i');
 function isActiveLawnReport(text) {
   const { asserted } = reservicePestReportFacts(text);
-  return asserted.some((clause) => !reserviceClauseIsHistorical(clause) && (
+  const problem = (clause) => !reserviceClauseIsHistorical(clause) && (
     RESERVICE_LAWN_FAILURE_RE.test(clause)
     || (!RESERVICE_LAWN_NEGATED_RE.test(clause) && RESERVICE_LAWN_PROBLEM_RES.some((re) => re.test(clause)))
-  ));
+  );
+  const recovered = (clause) => RESERVICE_LAWN_RECOVERED_RE.test(clause) && !RESERVICE_LAWN_RECOVERY_NEGATED_RE.test(clause);
+  let active = false;
+  for (const clause of asserted) {
+    if (problem(clause)) active = true;
+    else if (active && recovered(clause)) active = false;
+  }
+  return active;
 }
 
 // Codex round-24 P2: does the message AFFIRM a term (a hand-off word, an anger word)? A clause that mentions
