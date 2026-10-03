@@ -35,6 +35,13 @@ function normalizeShotZone(zone) {
 const PAIRABLE_SHOT_ZONES = Object.freeze(SHOTS.filter((shot) => shot.pairable).map((shot) => shot.key));
 const NON_PAIRABLE_SHOT_ZONES = Object.freeze(SHOTS.filter((shot) => !shot.pairable).map((shot) => shot.key));
 
+// Shots whose SAME SPOT is identifiable across visits (recheckPairable in the
+// shared JSON), the only ones the paired-photo recheck (P19b) may compare. Not
+// the same set as PAIRABLE_SHOT_ZONES, which drives the report's before/after
+// slider and is untouched: `side` is a slider overview but records no side of
+// the property, so two visits can show opposite sides.
+const RECHECK_PAIRABLE_SHOT_ZONES = Object.freeze(SHOTS.filter((shot) => shot.recheckPairable === true).map((shot) => shot.key));
+
 // Customer-facing label for a stored zone (report photo strip, report payload).
 const SHOT_REPORT_LABELS = Object.freeze(Object.fromEntries(SHOTS.map((shot) => [shot.key, shot.reportLabel])));
 
@@ -194,6 +201,6 @@ function missingShotsText(zones = [], definition = DEFINITION) {
 
 module.exports = {
   PHOTO_VOCABULARY, SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
-  PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
+  PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, RECHECK_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
   normalizeShotZone, isDetailShot, supportsNamedCause, shotGuideText, missingShotsText, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
 };

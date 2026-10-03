@@ -61,6 +61,7 @@
 }
 .tech-visit-title { margin: 0; font-family: 'Montserrat', sans-serif; font-size: 20px; font-weight: 600; }
 .tech-visit-section-title { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.tech-visit-light-card { padding: 12px; border-radius: 12px; background: #ffffff; color: #0f172a; }
 .tech-visit-muted { margin: 4px 0; color: var(--tech-muted); font-size: 14px; overflow-wrap: anywhere; }
 .tech-visit-warning { color: #fca5a5; }
 /* Scrollable middle region — header and footer stay fixed around it so the
