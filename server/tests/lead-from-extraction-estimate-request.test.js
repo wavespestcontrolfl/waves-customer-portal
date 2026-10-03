@@ -74,7 +74,12 @@ describe('a later capture on the same call rewrites the card (#5751)', () => {
     const body = notifyAdmin.mock.calls[0][2];
     expect(body).toContain('No address was given on the call. Service address on the account: 12 Test Street, Bradenton, 34205');
     expect(body).not.toContain('Service address given on the call');
-    expect(optsOf().metadata).toMatchObject({ address_source: 'account', still_missing: [] });
+    expect(body).toContain('Email given on the call: pat@example.com');
+    expect(optsOf().metadata).toMatchObject({ address_source: 'account', email_source: 'call', still_missing: [] });
+    await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: '9 Rental Rd' }, { callSid: 'CA2', emailFromAccount: true });
+    expect(notifyAdmin.mock.calls[1][2]).toContain('No email was given on the call. Email on the account: pat@example.com');
+    expect(notifyAdmin.mock.calls[1][2]).not.toContain('Email given on the call');
+    expect(optsOf().metadata).toMatchObject({ address_source: 'call', email_source: 'account' });
   });
 
   test('a correction that leaves the request incomplete revises the standing card: the old address is gone and the card says what to confirm', async () => {

@@ -473,7 +473,7 @@ async function accountContactFor(ctx = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
   try {
     const db = require('../../models/db');
-    const row = await db('customers').where({ id: ctx.customerId })
+    const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
       .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip');
     return row || null;
   } catch (err) {
@@ -970,6 +970,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // what is genuinely absent there is reported missing below.
       const account = estimateRequested ? await accountContactFor(ctx) : null;
       let locationFromAccount = false;
+      let emailFromAccount = false;
       if (account) {
         for (const k of ['first_name', 'last_name']) {
           if (!estimateFields[k] && nz(account[k])) estimateFields[k] = nz(account[k]);
@@ -984,7 +985,10 @@ async function executeTool(name, input = {}, ctx = {}) {
           for (const k of LOCATION) if (nz(account[k])) estimateFields[k] = nz(account[k]);
           locationFromAccount = true;
         }
-        if (!estimateFields.email && !emailUnreadable && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
+        if (!estimateFields.email && !emailUnreadable && nz(account.email) && isValidEmail(nz(account.email))) {
+          estimateFields.email = nz(account.email);
+          emailFromAccount = true;
+        }
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
@@ -1578,6 +1582,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about — file the estimate-request card, and let the result below tell
       // the model whether the promise may be spoken.
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
+      // A card already standing for this call was revised: the estimate was
+      // promised aloud on the earlier capture and is still owed.
+      let standingCardRevised = false;
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
         // A card an earlier capture on this call queued (complete then, from
@@ -1586,7 +1593,8 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (!leadCreated && leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           if (typeof surfaceEstimateRequestForCustomer === 'function') {
-            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, stillMissing: estimateMissing });
+            const revised = await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount, stillMissing: estimateMissing });
+            standingCardRevised = Boolean(revised && revised.persisted === true);
           }
         }
       } else if (estimateRequested) {
@@ -1595,7 +1603,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1604,7 +1612,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
-      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      // An incomplete correction never withdraws a promise already spoken:
+      // the standing card keeps it, so the session's earlier verdict stands.
+      if (!standingCardRevised) {
+        if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      }
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',

@@ -31,11 +31,12 @@ const SLOTS = [{ date: '2026-07-01', start_label: '9:00 AM' }, { date: '2026-07-
 const fullTier = (over = {}) => ({ from: '+19415550131', callSid: 'CA-acct-1', callerVerified: true, customerId: 'c-1', customerTier: 'full', markCaptured: jest.fn(), ...over });
 
 let customerReads;
+let customerFilter;
 beforeEach(() => {
   jest.clearAllMocks();
   customerReads = 0;
   db.mockImplementation((table) => ({
-    where: () => ({ first: async () => { if (table === 'customers') customerReads += 1; return table === 'customers' ? ACCOUNT : undefined; } }),
+    where: (w) => ({ whereNull: (col) => { customerFilter = { ...w, [col]: null }; return { first: async () => { if (table === 'customers') customerReads += 1; return table === 'customers' ? ACCOUNT : undefined; } }; } }),
   }));
   isEnabled.mockReturnValue(true);
   booking.loadBookingConfig.mockResolvedValue({ advance_days_min: 1, advance_days_max: 14, slot_duration_minutes: 60, day_start: '08:00', day_end: '17:00' });
@@ -75,9 +76,9 @@ describe('availability uses the service address on a full-tier caller\'s account
 
   test('an account with no address on file still asks, and a failed read is "not on file"', async () => {
     booking.resolveBookingCoords.mockResolvedValue({});
-    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ first_name: 'Dana' }) }) }));
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => ({ first_name: 'Dana' }) }) }) }));
     expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Ask the caller for their street address or ZIP/);
-    db.mockImplementation(() => ({ where: () => ({ first: async () => { throw new Error('db down'); } }) }));
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
     expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Ask the caller for their street address or ZIP/);
   });
 });
@@ -92,7 +93,8 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     // The call remembers only what the caller SAID: nothing borrowed is noted.
     expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ first_name: null, last_name: null, email: null, address_line1: null, requested_service: 'Lawn Care Program' });
     expect(out).not.toMatch(/still missing/i);
-    expect(surfaceEstimateRequestForCustomer).toHaveBeenCalled();
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ locationFromAccount: true, emailFromAccount: true });
+    expect(customerFilter).toEqual({ id: 'c-1', deleted_at: null }); // a soft-deleted account is "not on file"
   });
 
   test('what the caller gives on the call wins over the account', async () => {
@@ -100,6 +102,7 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     const noteEstimateFields = jest.fn();
     await executeTool('capture_lead', { call_summary: 'Estimate to a different email.', estimate_requested: true, email: 'other@example.com' }, fullTier({ noteEstimateFields }));
     expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: 'Dana' });
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ locationFromAccount: true, emailFromAccount: false });
     expect(noteEstimateFields.mock.calls[0][0]).toMatchObject({ email: 'other@example.com', first_name: null });
   });
 
@@ -158,15 +161,20 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
   test('an unreadable email given AFTER a capture that used the account email takes it back: email is missing and the standing card is revised', async () => {
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     let bag = {};
-    const ctx = fullTier({ getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
+    const notePromise = jest.fn();
+    const ctx = fullTier({ notePromise, getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
     const first = await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, ctx);
     expect(first).toMatch(/IS on the office queue/);
+    expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true, expect.anything());
     expect(surfaceEstimateRequestForCustomer.mock.calls[0][1]).toMatchObject({ email: 'dana@example.com' });
     expect(bag.email).toBeUndefined(); // borrowed, never remembered as stated
     const second = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true, email: 'dana at work dot' }, ctx);
     expect(second).toMatch(/still missing: email/);
     expect(surfaceEstimateRequestForCustomer.mock.calls[1][1]).toMatchObject({ email: null });
-    expect(surfaceEstimateRequestForCustomer.mock.calls[1][2]).toMatchObject({ stillMissing: ['email'] });
+    // The address is still the account's, and the revise says so.
+    expect(surfaceEstimateRequestForCustomer.mock.calls[1][2]).toMatchObject({ stillMissing: ['email'], locationFromAccount: true, emailFromAccount: false });
+    // The promise already spoken stays owed: the revised card keeps it, so no false verdict overwrites it.
+    expect(notePromise).toHaveBeenCalledTimes(1);
     const third = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true }, ctx);
     expect(third).toMatch(/still missing: email/); // the account email does not come back
   });

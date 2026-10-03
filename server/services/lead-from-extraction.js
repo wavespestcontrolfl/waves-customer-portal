@@ -328,7 +328,8 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
  * later capture on the same call REWRITES it: the card is the obligation, so
  * it must never keep an email or address the caller has since replaced.
  * `opts.locationFromAccount` — the caller gave no location, the address is the
- * account's own (said so on the card, never "given on the call").
+ * account's own (said so on the card, never "given on the call");
+ * `opts.emailFromAccount` — the same for the email.
  * `opts.stillMissing` — a later capture changed the details and left the
  * request undeliverable: revise the standing card only (never file a "send
  * it" card for a request that was never complete).
@@ -368,7 +369,9 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         stillMissing.length
           ? `⚠ The caller then changed the details and the call did not collect everything (still missing: ${stillMissing.map((k) => ESTIMATE_FIELD_WORDS[k] || k).join(', ')}). Confirm with them before sending.`
           : null,
-        extracted.email ? `Email given on the call: ${extracted.email}` : null,
+        extracted.email
+          ? (opts.emailFromAccount ? `No email was given on the call. Email on the account: ${extracted.email}` : `Email given on the call: ${extracted.email}`)
+          : null,
         opts.locationFromAccount && location
           ? `No address was given on the call. Service address on the account: ${location}`
           : (extracted.address_line1
@@ -407,6 +410,7 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
           first_name: extracted.first_name || null,
           last_name: extracted.last_name || null,
           ...fulfilment,
+          email_source: extracted.email ? (opts.emailFromAccount ? 'account' : 'call') : null,
           address_source: location ? (opts.locationFromAccount ? 'account' : 'call') : null,
           still_missing: stillMissing,
           phone: opts.phone || null,
