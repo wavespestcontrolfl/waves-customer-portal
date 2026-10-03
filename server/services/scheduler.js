@@ -1367,6 +1367,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Permit sync failed: ${err.message}`);
     }
+    // Permit detail collection (building facts off each new-home permit's
+    // ACA record page → construction_permit_records). Runs AFTER the report
+    // sync so this week's new permits are candidates, in its own try so a
+    // failed report sync never skips it (and vice versa). Inert unless
+    // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
+    // syncPermitDetails). Slow by design (sequential, >=2 s between
+    // requests, per-run cap + time budget); never runs from a lookup.
+    try {
+      await runExclusive('permit-detail-sync', () =>
+        require('./property-lookup/manatee-permit-detail').syncPermitDetails());
+    } catch (err) {
+      logger.error(`Permit detail sync failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

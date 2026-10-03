@@ -751,5 +751,9 @@ module.exports = {
     hiddenValue,
     mdy,
     REPORTS,
+    // Shared with manatee-permit-detail.js (one ACA HTTP/session helper).
+    fetchWithSession,
+    TransientAcaError,
+    positiveIntEnv,
   },
 };
