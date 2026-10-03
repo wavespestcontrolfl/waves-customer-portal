@@ -30,6 +30,8 @@ jest.mock('../../middleware/admin-auth', () => ({
 jest.mock('../../services/billing-lane', () => ({
   MONTHLY_LANE_SQL: '1=1',
   resolveBillingLane: () => ({ mode: 'monthly_membership', source: 'test' }),
+  // B08: the live stamped membership-dues invoice lookup (charge-now refuses a month one bills) — none here.
+  findLiveStampedDuesInvoice: async () => null,
 }));
 
 const express = require('express');

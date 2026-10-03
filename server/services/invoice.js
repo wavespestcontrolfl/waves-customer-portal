@@ -2085,7 +2085,8 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       annualPrepayBilling: customer?.billing_mode === "annual_prepay",
       customerAutopayActive: false,
       duesCollectedThisMonth: true,
-      hasVisitPrice: v.estimated_price != null && Number(v.estimated_price) > 0,
+      // A display price of at least one cent (the predicate's own "has a price" input, not a charge amount).
+      hasVisitPrice: Number(v.estimated_price) >= 0.01,
       isRecurring: v.is_recurring,
       waveguardTier: customer?.waveguard_tier,
       monthlyRate: customer?.monthly_rate,
