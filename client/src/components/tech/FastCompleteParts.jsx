@@ -7,13 +7,15 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
-import { UNIT_CHOICES } from '../../lib/fast-complete-products';
+import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
+import { isMlUnit } from '../../lib/measure-units';
+import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
-import FastCompleteProductPicker from './FastCompleteProductPicker';
+import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
 import { UiSurface, ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -23,6 +25,38 @@ const TIP_PREVIEW_COUNT = 4;
 // longer line, never trims it.
 const CUSTOM_TIP_MAX_CHARS = 240;
 const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
+
+export const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
+export const methodLabel = (value) => {
+  const text = String(value || '').replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+// A rate goes on the record only in a unit /complete accepts: the server's
+// own list (shared/rate-units.json, read by inventory-units.js), matched
+// trimmed and case-blind as it matches them, less its mL units, which this
+// sheet never shows (owner ruling 2026-09-27) — a rate the tech can't see
+// is not one they confirmed. Any other unit (a catalog oddity such as
+// "percent_solution") leaves the row without a rate rather than have the
+// server refuse the whole visit.
+const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
+export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+
+// A catalog row with the stock on hand a fresh read has for it.
+export function withFreshStock(product, fresh) {
+  const row = fresh.get(String(product.id));
+  return row ? { ...product, inventory_on_hand: row.inventory_on_hand, inventory_unit: row.inventory_unit } : product;
+}
+
+// The photo manager opens over the sheet. While it is up the sheet is inert
+// and hidden from assistive tech, the way the photo manager treats its own
+// marks dialog; `version` moves on each close so the count is read again.
+export function usePhotoManager() {
+  const [state, setState] = useState({ isOpen: false, version: 0 });
+  const open = useCallback(() => setState((prev) => ({ ...prev, isOpen: true })), []);
+  const close = useCallback(() => setState((prev) => ({ isOpen: false, version: prev.version + 1 })), []);
+  return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
+}
 
 export function toggleInSet(set, value) {
   const next = new Set(set);
@@ -185,6 +219,95 @@ export function AmountEntry({ id, row, locked, inputRef, onChange }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// "Edit amounts": every product's amount in its own measure's units, and
+// its rate. A label rate in mL is neither shown nor recorded (owner ruling
+// 2026-09-27): rowRate leaves such a row without a rate unit.
+export function AmountRow({ row, rate, onChange }) {
+  const inputId = useId();
+  const rateId = useId();
+  const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
+  return (
+    <div className="tech-visit-amount-block">
+      <div className="tech-visit-amount-row">
+        <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
+        <Input
+          id={inputId}
+          className="tech-visit-control"
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="any"
+          value={row.totalAmount ?? ''}
+          // amountPicked: the tech's own entry, even when it equals the seeded amount
+          onChange={(e) => onChange({ totalAmount: e.target.value, amountPicked: true })}
+        />
+        <select
+          className="ui-control tech-visit-control"
+          aria-label={`Unit for ${row.name}`}
+          value={row.amountUnit}
+          onChange={(e) => onChange({ amountUnit: e.target.value, amountPicked: true })}
+        >
+          {UNIT_CHOICES[row.dimension].map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </select>
+      </div>
+      {rate.rateUnit ? (
+        <div className="tech-visit-amount-row">
+          <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
+          <Input
+            id={rateId}
+            className="tech-visit-control"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
+            value={rate.rate ?? ''}
+            onChange={(e) => onChange({ rateInput: e.target.value })}
+          />
+          <span className="tech-visit-amount-label">{unitLabel(rate.rateUnit)}</span>
+        </div>
+      ) : null}
+      {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+    </div>
+  );
+}
+
+// A product tile's shell, shared by every sheet's tiles: the name, the detail
+// line under it (an amount, "Tap if applied"), and the zero-stock flag. Each
+// sheet decides its own detail text, the states that dim or mark the tile and
+// its aria attributes (`ariaProps`: pressed for a toggle, expanded for a tile
+// that opens an editor).
+export function ProductTileButton({ tileRef, row, detail, off = false, added = false, editing = false, ariaProps, disabled, onClick }) {
+  const outOfStock = row.active && isOutOfStock(row.product);
+  return (
+    <Button
+      ref={tileRef}
+      type="button"
+      variant="secondary"
+      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
+        'tech-visit-product--off': off,
+        'tech-visit-product--added': added,
+        'tech-visit-product--editing': editing,
+        'tech-visit-product--stock': outOfStock,
+      })}
+      disabled={disabled}
+      onClick={onClick}
+      {...ariaProps}
+    >
+      {/* Two lines on the tile (the amount never wraps apart from its unit);
+          one name for assistive tech: "Taurus SC — 4 fl oz". */}
+      <span className="tech-visit-product-name">{row.name}</span>
+      <span className="sr-only"> — </span>
+      <span className="tech-visit-product-amount">{detail}</span>
+      {outOfStock && (
+        <>
+          {' '}
+          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
+        </>
+      )}
+    </Button>
   );
 }
 

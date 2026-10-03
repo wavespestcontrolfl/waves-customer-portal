@@ -37,7 +37,7 @@ const CONFIRM_FLAGS = { report_rules_review: 'reportRulesConfirmed', promise_mar
 // Only a sheet that renders the prompt (`confirmable`, the report flow) gets
 // the confirm outcome; every other consumer keeps showing the server's
 // message, exactly as before it existed (codex local r19 on #5538).
-function completionFailureOutcome(err, { confirmable = false } = {}) {
+export function completionFailureOutcome(err, { confirmable = false } = {}) {
   const status = Number(err?.status);
   if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
   if (confirmable && status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
@@ -46,7 +46,7 @@ function completionFailureOutcome(err, { confirmable = false } = {}) {
   return 'terminal';
 }
 
-function outcomeMessage(outcome, err) {
+export function outcomeMessage(outcome, err) {
   if (outcome === 'retry') {
     return `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`;
   }
@@ -56,7 +56,7 @@ function outcomeMessage(outcome, err) {
   return err?.message || 'Completion failed';
 }
 
-function genIdempotencyKey() {
+export function genIdempotencyKey() {
   try {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   } catch { /* fall through */ }

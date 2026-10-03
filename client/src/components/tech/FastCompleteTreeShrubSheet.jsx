@@ -48,13 +48,13 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { prepareCompletionPhoto } from '../../lib/completion-photo';
 import { defaultApplicationMethodForLine } from '../../lib/product-rate-prefill';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, measureUnit, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
-  SheetHeader, TipSection, VisitNote, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton, SavedView,
+  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import { Button, ActionFeedback, cn } from '../ui';
@@ -124,10 +124,6 @@ const METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 const DEFAULT_METHOD = 'foliar_spray';
-const methodLabel = (value) => {
-  const text = String(value || '').replace(/_/g, ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
-};
 
 // The approved shot guide: standing on the ground, about a minute for all of
 // them. The first two are the floor.
@@ -1021,33 +1017,19 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
 // A product tile names what goes on the record. A suggestion starts off; a
 // product in the N/P summer blackout says so and cannot be turned on.
 function ProductTile({ row, locked, onClick }) {
-  const outOfStock = row.active && isOutOfStock(row.product);
   let detail = 'Tap if applied';
   if (row.blocked) detail = NP_BLACKOUT_TEXT;
   else if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
-        'tech-visit-product--off': !row.active && !row.blocked,
-        'tech-visit-product--added': row.added && row.active,
-        'tech-visit-product--stock': outOfStock,
-      })}
+    <ProductTileButton
+      row={row}
+      detail={detail}
+      off={!row.active && !row.blocked}
+      added={row.added && row.active}
+      ariaProps={{ 'aria-pressed': row.active }}
       disabled={locked || row.blocked}
-      aria-pressed={row.active}
       onClick={onClick}
-    >
-      <span className="tech-visit-product-name">{row.name}</span>
-      <span className="sr-only"> — </span>
-      <span className="tech-visit-product-amount">{detail}</span>
-      {outOfStock && (
-        <>
-          {' '}
-          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
-        </>
-      )}
-    </Button>
+    />
   );
 }
 

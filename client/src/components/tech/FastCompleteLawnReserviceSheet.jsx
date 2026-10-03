@@ -42,20 +42,18 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, measureUnit, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
-import { WarningIcon } from './FastCompleteProductPicker';
-import { isSendableRateUnit } from './FastCompleteSheet';
 import { prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
-  SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton, SavedView,
+  SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
-import { Button, ActionFeedback, Input, Select, cn } from '../ui';
+import { Button, ActionFeedback, Input, Select } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The typed form's option lists (server/services/project-types.js
@@ -628,32 +626,18 @@ function ProductsSection({ ctx, form, products, locked, other, popover }) {
 
 // A product tile names what goes on the record. A suggestion starts off.
 function ProductTile({ row, locked, onClick }) {
-  const outOfStock = row.active && isOutOfStock(row.product);
   let detail = 'Tap if applied';
   if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
-        'tech-visit-product--off': !row.active,
-        'tech-visit-product--added': row.added && row.active,
-        'tech-visit-product--stock': outOfStock,
-      })}
+    <ProductTileButton
+      row={row}
+      detail={detail}
+      off={!row.active}
+      added={row.added && row.active}
+      ariaProps={{ 'aria-pressed': row.active }}
       disabled={locked}
-      aria-pressed={row.active}
       onClick={onClick}
-    >
-      <span className="tech-visit-product-name">{row.name}</span>
-      <span className="sr-only"> — </span>
-      <span className="tech-visit-product-amount">{detail}</span>
-      {outOfStock && (
-        <>
-          {' '}
-          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
-        </>
-      )}
-    </Button>
+    />
   );
 }
 
