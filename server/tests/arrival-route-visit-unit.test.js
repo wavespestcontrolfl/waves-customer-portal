@@ -147,6 +147,8 @@ describe('who asks for the whole visit', () => {
     const findTime = read('services/scheduling/find-time.js');
     expect(findTime.split('unit: opts.arrivalWindow.unit === true').length - 1).toBe(2);
     expect(findTime.includes('unit: true')).toBe(false);
+    // Both paths skip a technician who cannot do every service on a whole visit.
+    expect(findTime.split('context.target.memberServices').length - 1).toBe(3);
     for (const file of ['routes/booking.js', 'services/slot-reservation.js', 'services/rebooker.js', 'services/rain-out.js', 'services/tech-out-auto-move.js', 'services/scheduling/occupancy.js', 'routes/admin-schedule.js']) {
       expect(read(file).includes('unit: true')).toBe(false);
     }

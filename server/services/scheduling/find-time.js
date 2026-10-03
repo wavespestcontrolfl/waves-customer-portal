@@ -133,6 +133,10 @@ async function findArrivalWindowSlots(opts) {
         unit: opts.arrivalWindow.unit === true,
       });
       if (!context) continue;
+      // A whole visit: the technician must be able to do every service on it
+      // (the capacity path below applies the same filter).
+      if (context.target.memberServices && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
       evaluated += candidates.evaluated;
