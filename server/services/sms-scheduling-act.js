@@ -168,24 +168,58 @@ async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = 
   return false;
 }
 
+/**
+ * A self-booked visit's /book snapshot (the day-cap count and the customer's
+ * confirmation-code page read it) follows the move. Written from the visit's
+ * own row and only while it still holds this move's time, so it can run again
+ * safely and never writes a slot a newer move replaced. Stamped on the
+ * decision when it ran; finishMoveEffects retries one that did not.
+ */
+async function syncSelfBooking({ dbh, decisionId, visitId, target }) {
+  try {
+    await dbh.raw(
+      `UPDATE self_booked_appointments sb
+          SET date = ?::date, start_time = ?, end_time = ?, technician_id = s.technician_id, updated_at = now()
+         FROM scheduled_services s
+        WHERE s.id = ? AND sb.id = s.self_booking_id
+          AND s.scheduled_date = ?::date AND to_char(s.window_start, 'HH24:MI') = ?`,
+      [target.date, target.start, target.end, visitId, target.date, target.start],
+    );
+    await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'snapshot_synced_at') });
+    return true;
+  } catch (err) {
+    logger.warn(`[sms-scheduling-act] self-booking sync failed for ${visitId}: ${errorCode(err)}`);
+    return false;
+  }
+}
+
 const EFFECTS_MIN_AGE_MS = 2 * 60000;
 const EFFECTS_LOOKBACK_MS = 24 * 3600000;
 
 /**
- * Single moves whose notice never started (the process exited right after the
- * move committed): finish them. Runs on the offer-ledger cron, gate on or off,
- * so a kill switch never strands a customer who was already moved. A series
- * move is the series reconciler's. Never throws.
+ * Moves whose after-commit effects never ran (the process exited right after
+ * the move committed): finish them. The /book snapshot for any move; the
+ * notice for a single move (a series move's is the series reconciler's).
+ * Runs on the offer-ledger cron, gate on or off, so a kill switch never
+ * strands a customer who was already moved. Never throws.
  */
 async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {}) {
   let finished = 0;
   try {
     const nowMs = new Date(now).getTime();
-    const rows = await dbh('sms_offer_decisions as d')
+    const due = () => dbh('sms_offer_decisions as d')
       .join('sms_offers as o', 'o.id', 'd.sms_offer_id')
       .where('d.execution_status', 'moved')
       .where('d.executed_at', '>=', new Date(nowMs - EFFECTS_LOOKBACK_MS))
-      .where('d.executed_at', '<=', new Date(nowMs - EFFECTS_MIN_AGE_MS))
+      .where('d.executed_at', '<=', new Date(nowMs - EFFECTS_MIN_AGE_MS));
+    const unsynced = await due().whereRaw("d.execution->>'snapshot_synced_at' IS NULL").limit(20)
+      .select('d.id', 'd.execution', 'o.scheduled_service_id');
+    for (const row of unsynced) {
+      const target = typeof row.execution === 'string' ? JSON.parse(row.execution) : (row.execution || {});
+      if (!row.scheduled_service_id || !target.date || !target.start) continue;
+      await syncSelfBooking({ dbh, decisionId: row.id, visitId: row.scheduled_service_id, target });
+    }
+    const rows = await due()
       .whereRaw("d.execution->>'effects_started_at' IS NULL")
       .whereRaw("COALESCE((d.execution->>'effects_attempts')::int, 0) < ?", [MAX_EFFECT_ATTEMPTS])
       .whereRaw("COALESCE(d.execution->>'series', 'false') <> 'true'")
@@ -205,22 +239,8 @@ async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {})
 
 // After the commit, each effect on its own: a failed sync must not read as a
 // failed move.
-async function afterMove({ dbh, decisionId, svc, date, window, technicianId, result, deps }) {
-  if (svc.self_booking_id) {
-    try {
-      // Only while the visit still holds this move's time: a newer move owns
-      // the snapshot after that.
-      await dbh('self_booked_appointments').where({ id: svc.self_booking_id })
-        .whereExists(function stillAtTarget() {
-          this.select(dbh.raw('1')).from('scheduled_services').where('scheduled_services.id', svc.id)
-            .whereRaw('scheduled_services.scheduled_date = ?::date', [date])
-            .whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [window.start]);
-        })
-        .update({ date, start_time: window.start, end_time: window.end, technician_id: technicianId || null, updated_at: dbh.fn.now() });
-    } catch (err) {
-      logger.warn(`[sms-scheduling-act] self-booking sync failed for ${svc.id}: ${errorCode(err)}`);
-    }
-  }
+async function afterMove({ dbh, decisionId, svc, date, window, result, deps }) {
+  await syncSelfBooking({ dbh, decisionId, visitId: svc.id, target: { date, start: window.start, end: window.end } });
   if (result?.seriesMoveId) {
     // A recurring visit's date move shifted the later visits with it: the
     // shared pass owns the one series text, the reminder sync and the board,
@@ -314,7 +334,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   // no text is sent on an unchecked result.
   const marked = await dbh('sms_offer_decisions').where({ id: decisionId, execution_status: 'moved' }).first('id');
   if (!marked) return refusal('guard_not_run');
-  await afterMove({ dbh, decisionId, svc, date: slot.date, window, technicianId: open.technician_id, result, deps });
+  await afterMove({ dbh, decisionId, svc, date: slot.date, window, result, deps });
   return { executed: true, status: 'moved', ...target, seriesMoveId: result?.seriesMoveId || null };
 }
 

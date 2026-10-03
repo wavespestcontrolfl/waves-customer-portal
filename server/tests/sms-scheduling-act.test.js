@@ -35,7 +35,7 @@ function fakeDb({ claim = true, marked = true } = {}) {
     return q;
   });
   dbh.fn = { now: () => 'now()' };
-  dbh.raw = (sql) => ({ raw: sql });
+  dbh.raw = jest.fn(async (sql) => ({ raw: sql }));
   return { dbh, writes };
 }
 

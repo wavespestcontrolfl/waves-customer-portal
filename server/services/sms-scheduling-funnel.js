@@ -108,9 +108,11 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
  * admin Edit form logs nothing and counts as unmatched (the report says so).
  */
 // reschedule_log.initiated_by values for moves no person asked for.
-// 'sms_offer_ai' is the move executor acting on a decision
-// (sms-scheduling-act.js): its own move is not a person confirming it.
-const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk', 'sms_offer_ai']);
+// The move executor's own moves ('sms_offer_ai', sms-scheduling-act.js) are
+// NOT in this list: the customer asked for them, so they are real accepts for
+// recall. Precision never scores one as staff's confirmation, because a
+// decision the executor moved is left out of that comparison.
+const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk']);
 
 // A logged move of `visitId` into date + start, inside [t0, t0 + 48h].
 function movedInto(movesByVisit, visitId, t0, date, start) {

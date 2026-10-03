@@ -141,6 +141,8 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     expect(reminders.handleReschedule).toHaveBeenCalledWith(s.visitId, '2040-03-06T10:00', { expectSchedule: { date: '2040-03-06', windowStart: '10:00' } });
     const row = await trx('sms_offer_decisions').where({ id: s.decisionId }).first('execution');
     expect(row.execution).toMatchObject({ date: '2040-03-06', start: '10:00' });
+    // The /book snapshot sync ran too (no self-booking here: a no-op that is still stamped).
+    expect(row.execution.snapshot_synced_at).toBeTruthy();
     expect(row.execution.effects_started_at).toBeTruthy();
     expect(row.execution.effects_done_at).toBeTruthy();
     // Claimed once: a second sweep sends nothing.

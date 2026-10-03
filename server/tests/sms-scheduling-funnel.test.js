@@ -162,8 +162,18 @@ test('a would-move the executor carried out is counted as executed and left out 
   const out = summarizeDecisions([row('v1', 'moved'), row('v2', 'refused'), row('v3', null)], new Map(), new Date('2026-10-05T00:00:00Z'));
   expect(out.executed).toEqual({ moved: 1, refused: 1 });
   expect(out).toMatchObject({ would_move_matured: 2, would_move_matched: 0, would_move_unmatched: 2 });
-  // The executor's own logged move never counts as a person's.
-  expect(AUTOMATIC_MOVE_INITIATORS).toContain(require('../services/sms-scheduling-act').INITIATED_BY);
+  // The executor's move is the customer's own request: it stays a real accept for recall.
+  expect(AUTOMATIC_MOVE_INITIATORS).not.toContain(require('../services/sms-scheduling-act').INITIATED_BY);
+});
+
+test("recall counts an accept the executor carried out: its own logged move is a real accept, caught by its would-move", () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const offer = { id: 'o1', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots: [{ date: '2026-10-06', start: '10:00' }] };
+  const decision = { sms_offer_id: 'o1', outcome: 'would_move', execution_status: 'moved', replied_at: '2026-10-01T14:00:00Z', created_at: '2026-10-01T14:00:05Z',
+    would_have: JSON.stringify({ scheduled_service_id: 'v1', date: '2026-10-06', start: '10:00' }) };
+  // The executor's reschedule_log row, seconds after the reply.
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T14:00:08Z', new_date: '2026-10-06', new_window: '10:00-12:00' }]]]);
+  expect(summarizeRecall([offer], [decision], moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 1, caught: 1 });
 });
 
 test('recall counts real accepts (offers whose visit then moved into an offered time) and how many got that would-move', () => {
