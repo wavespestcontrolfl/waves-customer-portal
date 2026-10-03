@@ -4076,14 +4076,15 @@ class SmartRebooker {
         occurrence_property_id: (row && row.property_id) || null,
       });
       const lockedAnchor = siblings.find((r) => String(r.id) === String(serviceId)) || service;
+      // slot AND scope from the one locked anchor read (Codex #5669 r2 pre-push)
       await trx('reschedule_log').insert({
         scheduled_service_id: serviceId,
         customer_id: service.customer_id,
-        original_date: service.scheduled_date,
+        original_date: lockedAnchor.scheduled_date,
         new_date: newDate,
         reason_code: `${reason}_series`,
         initiated_by: initiatedBy,
-        original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+        original_window: lockedAnchor.window_start ? `${lockedAnchor.window_start}-${lockedAnchor.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
         series_move_id: seriesMoveId,
         ...scopeOf(lockedAnchor),
