@@ -49,7 +49,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null, contactCustomers = [] }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -61,6 +61,12 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     // 503s the save by design). leftJoin serves the canonical catalog join
     // the waiver read runs regardless of the auto-tier gate (r79 P1).
     columnInfo: async () => ({ is_recurring: {} }),
+    // The save-time contact link's lookup (customers by typed phone / email).
+    whereNull() {
+      const rows = table === 'customers' ? contactCustomers : [];
+      const chain = { whereRaw: () => chain, limit: () => chain, select: async () => rows };
+      return chain;
+    },
     whereNotIn() { return this; },
     leftJoin() { return this; },
     select: async () => [],
@@ -884,6 +890,39 @@ describe('admin estimate persistence', () => {
     expect(capture.row.estimate_id).toBe('estimate-draft');
     expect(capture.row.source).toBe('estimator_engine');
     expect(JSON.parse(capture.row.baseline_fields).monthly_total).toBe(99);
+  });
+
+  // Owner 2026-10-03: an estimate saved with a customer's own phone but no
+  // customer picked stayed unlinked and was missing from that customer's list.
+  describe('save-time contact link', () => {
+    const create = (contactCustomers) => {
+      const fixture = makeDatabase({ contactCustomers, customer: contactCustomers[0] });
+      return createOrReuseAdminEstimate({
+        database: fixture.database,
+        body: { ...baseBody, leadId: undefined },
+        technicianId: 'tech-1',
+        now: () => new Date('2026-10-03T12:00:00.000Z'),
+        randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+      }).then((result) => ({ result, row: fixture.inserts.find((i) => i.table === 'estimates').row }));
+    };
+
+    test('a new estimate is saved on the one customer its typed phone belongs to', async () => {
+      const { result, row } = await create([{ id: 'cust-lead', first_name: 'Van', last_name: 'Lee', phone: '+19415550101' }]);
+      expect(row.customer_id).toBe('cust-lead');
+      expect(result.memberLinkageWarning).toBeNull();
+    });
+
+    test('a member is not linked; the save returns the warning instead', async () => {
+      const { result, row } = await create([{ id: 'cust-member', first_name: 'Van', last_name: 'Lee', phone: '+19415550101', waveguard_tier: 'Gold', monthly_rate: 90 }]);
+      expect(row.customer_id).toBeNull();
+      expect(result.memberLinkageWarning).toMatchObject({ customerId: 'cust-member', customerName: 'Van Lee' });
+    });
+
+    test('no customer on the phone or email: saved unlinked, as before', async () => {
+      const { result, row } = await create([]);
+      expect(row.customer_id).toBeNull();
+      expect(result.memberLinkageWarning).toBeNull();
+    });
   });
 
   test('creates a new estimate when the lead-linked prior estimate is archived', async () => {

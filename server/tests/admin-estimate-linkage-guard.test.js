@@ -8,7 +8,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 jest.mock('../models/db', () => jest.fn());
 
-const { detectUnlinkedMemberAddress } = require('../services/admin-estimate-persistence');
+const { detectUnlinkedMemberAddress, resolveContactLinkedCustomer } = require('../services/admin-estimate-persistence');
+const existingServices = require('../services/waveguard-existing-services');
 
 function fakeDb({ customers = [], properties = [], propertiesThrow = false } = {}) {
   return (table) => {
@@ -107,5 +108,79 @@ describe('detectUnlinkedMemberAddress', () => {
     expect(await detectUnlinkedMemberAddress(database, {
       address: '4821 Oak Hollow Dr, Palmetto, FL 34221',
     })).toBeNull();
+  });
+});
+
+// resolveContactLinkedCustomer — the save-time contact link (owner
+// 2026-10-03): a new estimate with no customer picked links to the ONE live
+// customer its typed phone (else its typed email) belongs to, unless that
+// link would change the price. A wrong link moves a quote onto another
+// account, so every refusal below is pinned. Identities are synthetic.
+describe('resolveContactLinkedCustomer', () => {
+  const LEAD = { id: 'cust-2001', first_name: 'Robin', last_name: 'Example', phone: '+19415550142', email: 'robin@example.com', waveguard_tier: null, monthly_rate: null };
+  const HOUSEMATE = { ...LEAD, id: 'cust-2002', first_name: 'Sam', email: 'sam@example.com' };
+
+  // customers rows filtered by the phone / email predicate the resolver sends.
+  function contactDb(customers) {
+    return () => {
+      let rows = customers.filter((c) => !c.deleted_at);
+      const builder = {
+        whereNull: () => builder,
+        where: () => builder,
+        whereRaw: (sql, [value]) => {
+          rows = /phone/.test(sql)
+            ? rows.filter((c) => String(c.phone || '').replace(/\D/g, '').slice(-10) === value)
+            : rows.filter((c) => String(c.email || '').trim().toLowerCase() === value);
+          return builder;
+        },
+        limit: (n) => { rows = rows.slice(0, n); return builder; },
+        select: async () => rows,
+        first: async () => rows[0] || null,
+      };
+      return builder;
+    };
+  }
+  let loadKeys;
+  beforeEach(() => {
+    loadKeys = jest.spyOn(existingServices, 'loadExistingQualifyingServiceKeys').mockResolvedValue([]);
+  });
+  afterEach(() => loadKeys.mockRestore());
+
+  test('the typed phone of exactly one customer links it, in any phone format; no price change', async () => {
+    const link = await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '(941) 555-0142', address: '12 Sample St, Bradenton, FL 34202' });
+    expect(link).toMatchObject({ customer: { id: 'cust-2001' }, changesPrice: false });
+  });
+
+  test('the email links only when no customer has the typed phone', async () => {
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '941-555-0199', customerEmail: ' Robin@Example.com ' }))
+      .toMatchObject({ customer: { id: 'cust-2001' } });
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerEmail: 'robin@example.com' }))
+      .toMatchObject({ customer: { id: 'cust-2001' } });
+  });
+
+  test('two customers on the phone link nobody, and the email never breaks that tie', async () => {
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD, HOUSEMATE]), { customerPhone: '+19415550142', customerEmail: 'robin@example.com' })).toBeNull();
+  });
+
+  test('links nothing with a customer already picked, no contact, a placeholder phone, an unknown contact or a deleted customer', async () => {
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerId: 'cust-9', customerPhone: '+19415550142' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), {})).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, phone: '+17378742833' }]), { customerPhone: '+17378742833' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+19415550100', customerEmail: 'nobody@example.com' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(contactDb([{ ...LEAD, deleted_at: new Date() }]), { customerPhone: '+19415550142' })).toBeNull();
+  });
+
+  test('a member, or a customer with existing qualifying services, is handed back to warn about, never linked silently', async () => {
+    const member = await resolveContactLinkedCustomer(contactDb([{ ...LEAD, waveguard_tier: 'Silver', monthly_rate: 80 }]), { customerPhone: '+19415550142' });
+    expect(member).toMatchObject({ customer: { id: 'cust-2001' }, changesPrice: true });
+    loadKeys.mockResolvedValue(['pest_control']);
+    const recurring = await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+19415550142' });
+    expect(recurring.changesPrice).toBe(true);
+  });
+
+  test('a failed lookup leaves the estimate unlinked instead of failing the save', async () => {
+    loadKeys.mockRejectedValue(new Error('db down'));
+    expect(await resolveContactLinkedCustomer(contactDb([LEAD]), { customerPhone: '+19415550142' })).toBeNull();
+    expect(await resolveContactLinkedCustomer(() => { throw new Error('db down'); }, { customerPhone: '+19415550142' })).toBeNull();
   });
 });

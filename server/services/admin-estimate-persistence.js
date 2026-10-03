@@ -2175,6 +2175,71 @@ async function detectUnlinkedMemberAddress(database, body = {}) {
   }
 }
 
+// Save-time contact link (owner 2026-10-03): a NEW estimate saved with no
+// customer picked in Customer Lookup is linked to the one customer its typed
+// phone belongs to — or, when no customer has that phone, the one its typed
+// email belongs to. Before this the row stayed unlinked even with both
+// contact fields equal to a customer's own, so it was missing from that
+// customer's estimate list. The accept path and the promise lane already
+// read the same contact match (matchAcceptCustomerByPhone, estimateSentTo).
+//
+// One live customer only: two customers sharing the phone (or the email) is
+// ambiguous and links nothing. And never where the link would change the
+// price: a linked member, or a customer with existing qualifying services,
+// prices with the combined tier and the setup waiver, so that customer is
+// handed back as a warning for the operator to link (the same response-only
+// warning detectUnlinkedMemberAddress returns) instead of being linked
+// without anyone seeing the price move. Create only — a revise never moves a
+// saved row between accounts. Read-only and fail-soft: any lookup failure
+// leaves the estimate unlinked, as before.
+async function resolveContactLinkedCustomer(database, body = {}) {
+  try {
+    if (body.customerId) return null;
+    const oneLive = async (scope) => {
+      const rows = await scope(database('customers').whereNull('deleted_at')).limit(2).select('*');
+      return rows.length === 1 ? rows[0] : null;
+    };
+    const digits = String(body.customerPhone || '').replace(/\D/g, '');
+    const email = String(body.customerEmail || '').trim().toLowerCase();
+    let customer = null;
+    let phoneOnFile = false;
+    // A carrier placeholder ("restricted", "anonymous") is nobody's number.
+    if (digits.length >= 10 && !require('./external-phone').isSentinelPhone(body.customerPhone)) {
+      const byPhone = (q) => q.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
+      customer = await oneLive(byPhone);
+      // Two or more customers on the phone: ambiguous, and the email must not
+      // pick one of them (or anyone else) over the phone's verdict.
+      phoneOnFile = !customer && (await byPhone(database('customers').whereNull('deleted_at')).limit(1).select('id')).length > 0;
+    }
+    if (!customer && !phoneOnFile && email) {
+      customer = await oneLive((q) => q.whereRaw('LOWER(TRIM(email)) = ?', [email]));
+    }
+    if (!customer) return null;
+    const evidence = await resolveCustomerQualifyingEvidence(database, {
+      customerId: customer.id,
+      address: body.address || null,
+      groupedEstimate: !!(body.groupWithEstimateId || body.estimateGroupId),
+      logger,
+    });
+    const changesPrice = (customer.active !== false && isMembershipCustomerRow(customer))
+      || evidence.tierKeys.length > 0 || evidence.setupWaiverKeys.length > 0;
+    return { customer, changesPrice };
+  } catch (err) {
+    logger.warn(`[admin-estimate] contact link check skipped: ${err.message}`);
+    return null;
+  }
+}
+
+function contactLinkWarning(customer) {
+  const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'an existing customer';
+  return {
+    customerId: customer.id,
+    customerName: name,
+    waveguardTier: customer.waveguard_tier || null,
+    message: `This phone or email belongs to ${name}'s account${customer.waveguard_tier ? ` (WaveGuard ${customer.waveguard_tier})` : ''}, but the estimate isn't linked to a customer — their existing-service pricing was not applied. Link the customer in Customer Lookup and re-save.`,
+  };
+}
+
 async function createOrReuseAdminEstimate({
   database = db,
   body,
@@ -2192,6 +2257,13 @@ async function createOrReuseAdminEstimate({
     throw errorWithStatus('Invalid draft identifier.', 400);
   }
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  // Linked BEFORE pricing and the write payload, so the row is built exactly
+  // as if the operator had picked this customer in Customer Lookup.
+  const contactLink = await resolveContactLinkedCustomer(database, body);
+  if (contactLink && !contactLink.changesPrice) {
+    body = { ...body, customerId: contactLink.customer.id };
+    logger.info(`[admin-estimate] new estimate linked to customer ${contactLink.customer.id} by its typed contact`);
+  }
   const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
@@ -2204,7 +2276,8 @@ async function createOrReuseAdminEstimate({
     requireLivePricing,
   });
   const expiresAt = estimateExpiresAt(now);
-  const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
+  const memberLinkageWarning = (contactLink?.changesPrice ? contactLinkWarning(contactLink.customer) : null)
+    || await detectUnlinkedMemberAddress(database, body);
 
   assertApprovedEstimatePricing(writeFields, expectedEngineResultDigest);
   if (dryRun) return { estimate: { ...writeFields, status: 'draft' }, dryRun: true, memberLinkageWarning,
@@ -3708,6 +3781,7 @@ async function reviseAdminEstimate({
 module.exports = {
   estimateEditVersion,
   detectUnlinkedMemberAddress,
+  resolveContactLinkedCustomer,
   assertLivePestBaseForClientPayload,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
