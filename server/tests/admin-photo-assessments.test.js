@@ -68,7 +68,10 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+const mockGateEnv = jest.fn(() => false);
+jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: (...args) => mockGateEnv(...args) }));
+const mockIdentifyPestV2 = jest.fn();
+jest.mock('../services/photo-id-v2/pest-engine', () => ({ identifyPestV2: (...args) => mockIdentifyPestV2(...args) }));
 jest.mock('../utils/funnel-photos', () => ({ storeFunnelPhotos: jest.fn(async () => {}) }));
 const mockSendEmail = jest.fn(async () => ({ ok: true, messageId: 'msg-1' }));
 jest.mock('../services/assessment-report-email', () => ({
@@ -1575,5 +1578,45 @@ describe('tree & shrub — third assessment type', () => {
       expect((await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] })).status).toBe(503);
       expect(inserts.tree_shrub_identifications).toBeUndefined();
     });
+  });
+});
+
+
+describe('texted pest photos read with the app engine (owner 10-03)', () => {
+  const contract = {
+    contract_version: 'pest_id_v1',
+    identification: { slug: 'german-cockroach', label: 'German cockroach', group: 'roaches', category: 'roach', confidence: 'moderate', contested: false },
+    urgency: 'medium', service: { line: 'pest', key: 'pest_control', label: 'Pest Control' }, observations: ['six legs', 'two dark stripes'],
+  };
+  const v2Ok = { ok: true, v1: { report_contract: contract }, v2: { tier: 'ai_suggestion' }, internal: { legs: ['gemini'] } };
+  beforeEach(() => { mockIdentifyPestV2.mockReset(); mockIdentifyPest.mockReset(); mockGateEnv.mockReset(); });
+
+  test('auto_triage + GATE_PHOTO_ID_V2: one Gemini read (gemini_only), v1-shaped row with the v2 object under report_contract.v2', async () => {
+    mockGateEnv.mockImplementation((name) => name === 'GATE_PHOTO_ID_V2');
+    mockIdentifyPestV2.mockResolvedValue(v2Ok);
+    const out = await assessmentCreate._test.runPestAnalysis([{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }], 'what is this', 'auto_triage');
+    expect(mockIdentifyPestV2).toHaveBeenCalledWith([{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }], { ladder: 'gemini_only' });
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+    expect(JSON.parse(out.insert.report_contract)).toEqual({ ...contract, v2: { tier: 'ai_suggestion' } });
+    expect(out.insert).toMatchObject({ category: 'roach', species_slug: 'german-cockroach', service_line: 'pest', urgency: 'medium', ai_summary: 'six legs two dark stripes' });
+    expect(JSON.parse(out.insert.ai_analysis)).toEqual({ prospect_note: 'what is this', engine: 'v2', internal: { legs: ['gemini'] } });
+  });
+
+  test('a v2 failure is the v1 error, never a silent v1 re-read', async () => {
+    mockGateEnv.mockImplementation((name) => name === 'GATE_PHOTO_ID_V2');
+    mockIdentifyPestV2.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
+    const out = await assessmentCreate._test.runPestAnalysis([{ data: 'aGVsbG8=' }], null, 'auto_triage');
+    expect(out).toEqual({ error: expect.stringContaining('unavailable') });
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+  });
+
+  test('staff-created assessments, and texted photos with the gate off, keep the v1 ladder', async () => {
+    mockIdentifyPest.mockResolvedValue({ ok: false });
+    mockGateEnv.mockImplementation((name) => name === 'GATE_PHOTO_ID_V2');
+    await assessmentCreate._test.runPestAnalysis([{ data: 'aGVsbG8=' }], null, 'admin');
+    mockGateEnv.mockImplementation(() => false);
+    await assessmentCreate._test.runPestAnalysis([{ data: 'aGVsbG8=' }], null, 'auto_triage');
+    expect(mockIdentifyPest).toHaveBeenCalledTimes(2);
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
   });
 });

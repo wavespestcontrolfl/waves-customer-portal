@@ -9477,8 +9477,72 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // EXCLUSIVELY by that gate, so a STALE annual-prepay stamp (left by a
     // best-effort void/refund clear) must NOT suppress here via its amount.
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    // GATE_PAF_PREPAY: an unstamped visit held by a year whose charge waits
+    // for (or failed after) the first visit. Read strictly: a failed read is
+    // UNVERIFIABLE, never "uncovered" — billing the visit here would sit
+    // beside the year's charge. Same not-finalized posture as the setup-fee
+    // check above; the retry decides.
+    // The decision is stamped on the visit the first time it is made
+    // (paf_held_term_id, owner ruling 2026-10-02 "stamp + narrow"): a resumed
+    // closeout, the release, the cancelled-year alert and the first-visit
+    // text all read that stamp, never the live hold, which the year's charge
+    // and activation end.
+    let deferredPrepayCovered = false;
+    // A closeout (fresh or resumed) that is now payer-billed or paid another
+    // way is never held: clear a stamp an earlier run wrote, so it cannot
+    // release the year beside the payer's bill or the other payment (GitHub
+    // Codex #5567 r16, r18).
+    if ((visitIsPayerBilled || svc.prepaid_method) && svc.paf_held_term_id) {
+      await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+      svc.paf_held_term_id = null;
+    }
+    // A quiet backfill closeout never takes the deferred hold: it keeps its
+    // normal open review invoice, since a backfill neither releases the year
+    // nor reaches the cancelled-year handoff (GitHub Codex #5567 r19).
+    if (!visitIsPayerBilled && !svc.prepaid_method && !isBackfillCompletion) {
+      try {
+        // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
+        // (first run, or a visit reopened and completed again, possibly
+        // repriced or moved off the sold coverage) re-decides and rewrites
+        // it (GitHub Codex #5567 r15).
+        if (svc.paf_held_term_id && resumingCommittedCompletion) {
+          deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
+          // The year stopped covering the visit before this resume (voided,
+          // refunded, dispute-suspended): the visit bills normally, so its
+          // stamp goes too, never left to release or recover the year
+          // (GitHub Codex #5567 r17).
+          if (!deferredPrepayCovered) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+            svc.paf_held_term_id = null;
+          }
+        } else {
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
+            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
+          const heldTermId = heldTerm?.id || null;
+          if (String(svc.paf_held_term_id || '') !== String(heldTermId || '')) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: heldTermId });
+            svc.paf_held_term_id = heldTermId;
+          }
+          deferredPrepayCovered = !!heldTerm;
+        }
+      } catch (lookupErr) {
+        logger.error(`[dispatch] deferred annual-prepay check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return ({ status: 503, body: {
+          error: released
+            ? 'The annual prepay check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The annual prepay check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'deferred_prepay_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     const annualPrepayCovered = !visitIsPayerBilled
-      && await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db);
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion }));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
@@ -14673,3 +14737,4 @@ module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportA
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
+module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
