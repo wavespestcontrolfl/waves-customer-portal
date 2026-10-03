@@ -46,9 +46,9 @@ if (evidenceArg) {
     const report = buildEvidence(JSON.parse(require('node:fs').readFileSync(evidenceArg.slice('--build-evidence='.length), 'utf8')));
     const output = process.argv.includes('--json') ? JSON.stringify(report, null, 2) : formatBuildEvidence(report);
     process.stdout.write(`${output}\n`);
-  } catch (err) { console.error(`agents-report: ${err.message}`); process.exit(2); }
-  process.exit(0);
-}
+    process.exitCode = 0;
+  } catch (err) { console.error(`agents-report: ${err.message}`); process.exitCode = 2; }
+} else {
 
 if (!process.env.DATABASE_PUBLIC_URL) {
   console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/agents-report.js');
@@ -238,3 +238,4 @@ async function main() {
 main()
   .then(() => db.destroy())
   .catch((err) => { console.error(`agents-report failed: ${err.message}`); return db.destroy().finally(() => process.exit(1)); });
+}
