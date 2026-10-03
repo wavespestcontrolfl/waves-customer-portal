@@ -195,7 +195,7 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
     const { messageContent: rawMessage = '', sessionId: rawSession = '', conversationId: rawConversation = '' } = Object.assign({}, req.body);
     const messageContent = String(rawMessage || '').trim().slice(0, 4000);
     const sessionId = String(rawSession || '').trim().slice(0, 120);
-    const conversationId = String(rawConversation || '').trim();
+    const conversationId = String(rawConversation || '').trim().toLowerCase();
     const validationError = [
       [!messageContent, 'messageContent required'],
       [!/^(?:|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(conversationId), 'Invalid conversationId'],

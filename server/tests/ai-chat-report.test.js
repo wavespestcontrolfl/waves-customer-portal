@@ -159,7 +159,7 @@ describe('POST /ai/chat/report', () => {
   });
 
   test('a supplied conversation id selects the reported older reply instead of the newer session', async () => {
-    const olderId = '11111111-1111-4111-8111-111111111111';
+    const olderId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const newerId = '22222222-2222-4222-8222-222222222222';
     const rows = [
       { id: olderId, customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123', created_at: '2026-10-01' },
@@ -176,7 +176,7 @@ describe('POST /ai/chat/report', () => {
       const selected = await fetch(`${baseUrl}/ai/chat/report`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ sessionId: 'chat-123', conversationId: olderId, messageContent: 'Older AI reply' }),
+        body: JSON.stringify({ sessionId: 'chat-123', conversationId: olderId.toUpperCase(), messageContent: 'Older AI reply' }),
       });
       expect(selected.status).toBe(200);
       const legacy = await fetch(`${baseUrl}/ai/chat/report`, {
