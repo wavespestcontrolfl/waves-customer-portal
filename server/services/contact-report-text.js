@@ -46,11 +46,21 @@ async function confirmedContacts(customer) {
   return filterRecipientsByOptin(slots, customer.id);
 }
 
+// The customer row the contact rule reads. A secondary profile with no phone
+// of its own takes the account primary's, so the account holder's number in a
+// contact slot is still recognized as the holder's and never texted twice.
+// An unreadable account primary throws (the caller retries).
+async function loadCustomer(customerId) {
+  const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  if (!row) return null;
+  return require('./customer-contact').withAccountPrimaryContact(row, { rethrow: true });
+}
+
 // Record one pending text per confirmed contact. Returns the new row ids.
 // `sourceKey`: `record:<service_records.id>` or `visit:<service_visits.id>`.
 async function queueContactReportTexts({ customerId, sourceKey, reportUrl, scheduledServiceId = null, notBefore = null }) {
   if (!enabled() || !customerId || !sourceKey || !reportUrl) return [];
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  const customer = await loadCustomer(customerId);
   if (!customer) return [];
   const contacts = await confirmedContacts(customer);
   const ids = [];
@@ -116,7 +126,7 @@ async function dispatchContactReportText(id) {
     }
     // The contact list is read again at the send: a contact removed, or one
     // who replied STOP to the opt-in ask since the queue, gets nothing.
-    const customer = await db('customers').where({ id: row.customer_id }).whereNull('deleted_at').first();
+    const customer = await loadCustomer(row.customer_id);
     const stillConfirmed = customer
       && (await confirmedContacts(customer)).some((c) => phoneKey(c.phone) === row.phone_key);
     if (!stillConfirmed) { await settle(row.id, 'suppressed', 'contact_not_confirmed'); return { state: 'suppressed' }; }
@@ -125,7 +135,9 @@ async function dispatchContactReportText(id) {
     const body = await renderSmsTemplate(TEMPLATE_KEY, {
       street_address: await streetAddress(row, customer),
       report_url: row.report_url,
-    }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: row.customer_id });
+      // A template read that fails throws (the row is released for a retry);
+      // only a missing or inactive row reads as off.
+    }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: row.customer_id }, { throwOnError: true });
     if (!body) { await settle(row.id, 'suppressed', 'template_off'); return { state: 'suppressed' }; }
 
     // Stamped under the claim, before the provider can be reached. A claim

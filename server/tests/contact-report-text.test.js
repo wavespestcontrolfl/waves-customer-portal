@@ -127,6 +127,15 @@ describe('queueContactReportTexts', () => {
     expect(filterRecipientsByOptin).toHaveBeenCalledWith(expect.any(Array), 'cust-1');
   });
 
+  test('a secondary profile with no phone: the account primary\'s number in a slot is the holder, never a contact', async () => {
+    // The profile row, then the account primary read (withAccountPrimaryContact).
+    queue('customers',
+      { ...CUSTOMER, phone: null, is_primary_profile: false, account_id: 'acct-1', service_contact2_phone: null, service_contact3_phone: null, service_contact_phone: '941-555-0100' },
+      { id: 'cust-primary', first_name: 'Dana', phone: '+19415550100', email: null });
+    expect(await ContactReportText.queueContactReportTexts({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' })).toEqual([]);
+    expect(opsFor('contact_report_texts')).toHaveLength(0);
+  });
+
   test('an account without the consent stamp queues nothing', async () => {
     queue('customers', { ...CUSTOMER, service_contacts_consent_at: null });
     expect(await ContactReportText.queueContactReportTexts({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' })).toEqual([]);
@@ -146,7 +155,7 @@ describe('dispatchContactReportText', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
     expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'sent' });
     expect(renderSmsTemplate).toHaveBeenCalledWith('contact_report_ready',
-      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object));
+      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object), { throwOnError: true });
     const sent = sendCustomerMessage.mock.calls[0][0];
     expect(sent).toMatchObject({
       channel: 'sms', audience: 'customer', purpose: 'service_completion', to: '(941) 555-0123', customerId: 'cust-1',
@@ -245,6 +254,14 @@ describe('dispatchContactReportText', () => {
     sendCustomerMessage.mockRejectedValue(new Error('socket hang up'));
     expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'error' });
     expect(lastUpdate()).toMatchObject({ status: 'unknown_delivery' });
+  });
+
+  test('a template read that fails releases the row for a retry, never template_off', async () => {
+    queueDispatchReads();
+    renderSmsTemplate.mockRejectedValue(new Error('connection reset'));
+    expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'error' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(lastUpdate()).toMatchObject({ status: 'pending', status_reason: 'dispatch_error' });
   });
 
   test('a failure before the sender releases the row for a retry', async () => {
