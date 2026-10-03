@@ -12,10 +12,11 @@
  *                timing clause (never the AI treatment narrative that later
  *                overwrites the snapshot's copy)
  *   whatToExpect owner-approved expectation rows matched to today's products,
- *                each row's visible-change sentence printed word for word (at most
- *                2 rows, 42 words). No by-next-visit timing: that needs the next
- *                visit at THIS property, which the report's own next-visit line
- *                does not resolve yet (Codex #5604 r2-r5), so it waits.
+ *                each row's visible-change sentence and, when the gap to the next
+ *                lawn visit AT THIS PROPERTY is known, its by-next-visit sentence,
+ *                printed word for word (at most 2 rows, 42 words). The gap comes
+ *                from the same visit the report's "Next visit" line shows
+ *                (report-data lawnNextVisitAtProperty), so they never disagree.
  *   watching     "We are also keeping an eye on <topics>." for the watched issues
  *                the headline does not already name
  *
@@ -42,7 +43,7 @@ const FREEZE_VERSION = 1;
 
 const FIELD_CAPS = { whatToExpect: 42 };
 const MAX_EXPECT_ROWS = 2;
-const EXPECT_SENTENCE_KEY = 'visibleChange';
+const EXPECT_SENTENCE_KEYS = ['visibleChange', 'byNextVisit'];
 const FIELD_NAMES = ['headline', 'whatWeDid', 'whatToExpect', 'watching'];
 const MAX_WATCH_TOPICS = 3;
 
@@ -100,8 +101,9 @@ function buildWatching(reportV2) {
 }
 
 // Approved rows for today's products, in the engine's order; each row's own
-// visible-change sentence, printed word for word. A row without one is
-// skipped; a sentence that would pass the cap is skipped whole.
+// visible-change sentence, then its by-next-visit sentence (the engine only
+// materializes one when the gap is known or the row is judged by absence),
+// printed word for word. A sentence that would pass the cap is skipped whole.
 function buildWhatToExpect(reportV2, ctx, deps) {
   const products = productsOf(reportV2);
   if (!products.length) return { text: null, rows: [] };
@@ -110,6 +112,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
     visitDate: ctx.visitDate || null,
+    nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
@@ -122,13 +125,17 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   let words = 0;
   for (const row of rows) {
     if (picked.length >= MAX_EXPECT_ROWS) break;
-    const sentence = row.sentences.find((s) => s && s.key === EXPECT_SENTENCE_KEY && clean(s.text));
-    if (!sentence) continue;
-    const w = countWords(sentence.text);
-    if (words + w > FIELD_CAPS.whatToExpect) continue;
-    words += w;
-    pieces.push(sentence.text.trim());
-    picked.push({ id: row.id, keys: [sentence.key] });
+    const keys = [];
+    for (const key of EXPECT_SENTENCE_KEYS) {
+      const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
+      if (!sentence) continue;
+      const w = countWords(sentence.text);
+      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      words += w;
+      pieces.push(sentence.text.trim());
+      keys.push(key);
+    }
+    if (keys.length) picked.push({ id: row.id, keys });
   }
   return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
 }
@@ -137,7 +144,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
  * The v6 fields for one visit, from its facts alone.
  *
  * @param {object} reportV2 the deterministic lawn reportV2 (snapshot, treatment, insights)
- * @param {object} ctx { visitDate }
+ * @param {object} ctx { visitDate, nextVisitGapDays }
  * @param {object} deps { buildExpectations? } injectable for tests
  * @returns {{ fields: {headline, whatWeDid, whatToExpect, watching}, expectRows: Array<{id, keys}> }}
  */

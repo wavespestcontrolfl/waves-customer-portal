@@ -298,18 +298,170 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(reconciled(data).reportV2.lead.applied).toBe(first.reportV2.copyV6.whatWeDid);
   });
 
-  test('the copy reads the SELECTED assessment\'s date, not the record\'s service_date (an A→B re-do)', async () => {
-    live();
-    const v6 = require('../services/service-report/lawn-copy-v6');
-    const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
-    try {
+  describe('the next-visit gap counts only for this visit\'s property', () => {
+    // The builder only takes scheduled dates after today's ET date: pin today
+    // (Date only; timers stay real) so the 2027 fixture always qualifies.
+    beforeEach(() => {
+      jest.useFakeTimers({
+        now: new Date('2026-10-02T16:00:00Z'),
+        doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+      });
+    });
+    afterEach(() => { jest.useRealTimers(); });
+    const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
+    const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
+    const gapFor = async (nextStamp, extraRows = [], patch = {}) => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        await render(records(), {
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+            { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...nextStamp },
+            ...extraRows,
+          ],
+          ...patch,
+        });
+        return spy.mock.calls[0][0].ctx.nextVisitGapDays;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+
+    test('the same home: the scheduled date sets the gap', async () => {
+      expect(await gapFor(HOME_A)).toBe(107);
+    });
+
+    test('another home of the same customer: no gap (no by-next-visit sentence), never the other home\'s date', async () => {
+      expect(await gapFor(HOME_B)).toBeNull();
+    });
+
+    test('the gap counts from the SELECTED assessment\'s date, not the record\'s service_date (an A→B re-do)', async () => {
       const redo = { ...CUR, service_date: '2026-10-01', visit_date: '2026-10-01' };
       history.installedForVisit.mockResolvedValue(redo);
-      await render(records(), { lawn_assessments: [redo] });
-      expect(spy.mock.calls[0][0].ctx).toEqual({ visitDate: '2026-10-01' });
-    } finally {
-      spy.mockRestore();
-    }
+      history.historyForReport.mockResolvedValue({ current: redo, rows: [redo], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+      history.historyForAssessment.mockResolvedValue({ current: redo, rows: [redo], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+      expect(await gapFor(HOME_A, [], { lawn_assessments: [redo] })).toBe(106);
+    });
+
+    test('an EARLIER booking at another home is skipped and the later booking at this home sets the gap', async () => {
+      const later = { id: 'ss-later', customer_id: CUSTOMER, scheduled_date: '2027-02-12', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
+      expect(await gapFor(HOME_B, [later])).toBe(135);
+    });
+
+    test('no booking at this home: the gap is this visit\'s own plan cadence', async () => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        const svc = { ...service(records()['svc-cur'].structured_notes), service_type: 'Lawn Care every 6 weeks' };
+        await render(records(), {
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care every 6 weeks', ...HOME_A },
+            { id: 'ss-other', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care every 6 weeks', ...HOME_B },
+          ],
+        }, svc);
+        expect(spy.mock.calls[0][0].ctx.nextVisitGapDays).toBe(42);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    describe('the "Next visit" line shows the same visit the copy is timed from', () => {
+      const visitRows = (nextStamp, extra = []) => ({
+        scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+          { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...nextStamp },
+          ...extra,
+        ],
+      });
+
+      test('a booking at another home is never shown; the later booking at this home is', async () => {
+        live();
+        const later = { id: 'ss-later', customer_id: CUSTOMER, scheduled_date: '2027-02-12', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
+        const { data } = await render(records(), visitRows(HOME_B, [later]));
+        expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
+        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/February 12/);
+      });
+
+      test('only another home has a booking and the plan names no cadence: no next visit is shown', async () => {
+        live();
+        const { data } = await render(records(), visitRows(HOME_B));
+        expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+      });
+
+      test('a next booking whose property cannot be placed: nothing is shown, never a guess', async () => {
+        live();
+        const { data } = await render(records(), visitRows({}));
+        expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+      });
+
+      test('this report\'s visit has no property evidence: the customer-wide booking counts only on a proven single-premises account', async () => {
+        live();
+        const rows = {
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program' },
+            { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program' },
+          ],
+          customers: [{ id: CUSTOMER, has_multi_home: false }],
+          customer_properties: [],
+        };
+        const svc = { ...service(records()['svc-cur'].structured_notes), address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201' };
+        const single = await render(records(), rows, svc);
+        expect(single.data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
+        const multi = await render(records(), { ...rows, customers: [{ id: CUSTOMER, has_multi_home: true }] }, svc);
+        expect(multi.data.reportV2.snapshot.nextVisit).toBeUndefined();
+      });
+
+      test('gate off: the customer-wide lookup, as before (the other home\'s date still shows)', async () => {
+        const { data } = await render(records(), visitRows(HOME_B));
+        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
+      });
+    });
+
+    test('a next visit with no property evidence: no gap', async () => {
+      expect(await gapFor({})).toBeNull();
+    });
+
+    test('a FAILED property lookup is a degraded read (no freeze), never read as "another home"', async () => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        await render(records(), {
+          customer_properties: FAIL,
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+            { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
+          ],
+        });
+        expect(spy.mock.calls[0][0].degraded).toBe(true);
+        expect(spy.mock.calls[0][0].ctx.nextVisitGapDays).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  test('a failed next-visit read (the gap that picks the by-next-visit sentence) is a degraded read: no freeze', async () => {
+    live();
+    const recs = records();
+    // Only the v6 copy's next-visit scan fails; every other scheduled_services read answers.
+    const { knex: base } = withRecords(fixtures(), recs);
+    const knex = (table) => {
+      const q = base(table);
+      if (table !== 'scheduled_services') return q;
+      const select = q.select;
+      q.select = (...cols) => (cols.includes('service_type') && cols.includes('scheduled_date')
+        ? { catch: (fn) => Promise.resolve(fn(new Error('read failed'))) }
+        : select(...cols));
+      return q;
+    };
+    knex.raw = base.raw;
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, {});
+    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
   });
 
   describe('an emailed (pinned) PDF waits for frozen copy: lawnCopyV6Unfrozen', () => {

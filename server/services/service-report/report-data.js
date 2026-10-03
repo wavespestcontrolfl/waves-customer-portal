@@ -3824,6 +3824,63 @@ function buildWateringBanner(instruction, weekPlan = null) {
 // The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
 
+// The next lawn visit AT THIS REPORT'S PROPERTY (GATE_LAWN_REPORT_COPY_V6):
+// what the report's "Next visit" line shows and what the v6 copy's "by your
+// next visit" sentence is timed from, so the two can never disagree. On a
+// multi-property account a booking at another home is skipped, not taken
+// (same-line-visit.js, the shared scan). When this report's visit cannot be
+// tied to a property, the customer-wide first lawn booking counts only if the
+// account is PROVEN single-premises (visit-property-scope.js); otherwise the
+// answer is unknown and nothing is shown. A read that FAILS is recorded, so
+// the v6 copy never freezes on it.
+// Returns { state: 'scheduled', row } | { state: 'none' } | { state: 'unknown' }.
+const LAWN_NEXT_VISIT_SCAN = 200;
+async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
+  const noteFailure = () => { if (readFailures) readFailures.add('next_visit'); };
+  const rows = await knex('scheduled_services')
+    .where('customer_id', service.customer_id)
+    .andWhere('scheduled_date', '>', afterIso)
+    // NO 'rescheduled': phantom placeholders hold the OLD date until the
+    // office rebooks (same rule as the nextAppointment queries below).
+    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+    .orderBy('scheduled_date', 'asc')
+    .limit(LAWN_NEXT_VISIT_SCAN)
+    .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS)
+    .catch(failSoft(readFailures, 'next_visit', null));
+  if (!Array.isArray(rows)) return { state: 'unknown' };
+  // A full page with no match could hide this property's booking further out.
+  const noneOrUnknown = () => ({ state: rows.length < LAWN_NEXT_VISIT_SCAN ? 'none' : 'unknown' });
+  const reportVisit = service.scheduled_service_id
+    ? await knex('scheduled_services')
+      .where({ id: service.scheduled_service_id })
+      .first(...PROPERTY_SCOPE_COLUMNS)
+      .catch(failSoft(readFailures, 'next_visit', null))
+    : null;
+  if (reportVisit) {
+    const found = await nextSameLineVisitAtProperty({
+      knex, rows, reportVisit, serviceLine: 'lawn', onLookupFailure: noteFailure,
+    });
+    if (found.state === 'scheduled') return found;
+    if (found.state === 'none') return noneOrUnknown();
+  }
+  // No provable property for this report's visit: the customer-wide first
+  // lawn booking is this property's only on a proven single-premises account.
+  try {
+    const linkage = require('../estimate-property-linkage');
+    const { customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+    const mirrorKey = linkage.normalizedStampedStreet(service.address_line1, service.address_line2, service.city, service.zip) || null;
+    if (!mirrorKey) return { state: 'unknown' };
+    const customerRow = await knex('customers').where({ id: service.customer_id }).first('has_multi_home');
+    const single = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey, { unresolvedFails: true });
+    if (!single) return { state: 'unknown' };
+  } catch {
+    noteFailure();
+    return { state: 'unknown' };
+  }
+  const row = rows.find((candidate) => isSameLineVisit(candidate, { serviceLine: 'lawn' }));
+  return row ? { state: 'scheduled', row } : noneOrUnknown();
+}
+
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -5584,6 +5641,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       const lawnCopyVisitDate = lawnCopyAnchor
         ? (lawnCopyAnchor instanceof Date ? lawnCopyAnchor.toISOString().slice(0, 10) : String(lawnCopyAnchor).slice(0, 10))
         : null;
+      // Days from that visit day to the next lawn visit at this property (the
+      // one the "Next visit" line shows), for the copy's by-next-visit
+      // sentence; null = unknown, and no such sentence is chosen.
+      let lawnCopyGapDays = null;
+      const daysFromVisit = (iso) => {
+        if (!lawnCopyVisitDate || !iso) return null;
+        const gap = Math.round((Date.parse(`${iso}T12:00:00Z`) - Date.parse(`${lawnCopyVisitDate}T12:00:00Z`)) / 86400000);
+        return Number.isFinite(gap) && gap >= 0 ? gap : null;
+      };
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5598,25 +5664,42 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             return new Date(`${iso}T12:00:00Z`)
               .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
           };
-          const nextRow = await knex('scheduled_services')
-            .where('customer_id', service.customer_id)
-            .andWhere('scheduled_date', '>', afterIso)
-            // NO 'rescheduled': phantom placeholders hold the OLD date until the
-            // office rebooks — publishing one shows a stale time as still real
-            // (same rule as the tree-shrub and nextAppointment queries below).
-            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-            // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
-            // Grouped OR so it stays ANDed with the customer/date/status predicates.
-            .andWhere((qb) => qb
-              .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
-              .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
-            .orderBy('scheduled_date', 'asc')
-            .first('scheduled_date')
-            .catch(() => null);
+          // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
+          // (lawnNextVisitAtProperty); the same visit times the v6 copy's
+          // by-next-visit sentence. Gate off: the customer-wide query, as before.
+          const scopedNext = featureGates.lawnReportCopyV6Live()
+            ? await lawnNextVisitAtProperty(service, afterIso, knex, readFailures)
+            : null;
+          const legacyNextRow = async () => {
+            return knex('scheduled_services')
+              .where('customer_id', service.customer_id)
+              .andWhere('scheduled_date', '>', afterIso)
+              // NO 'rescheduled': phantom placeholders hold the OLD date until the
+              // office rebooks — publishing one shows a stale time as still real
+              // (same rule as the tree-shrub and nextAppointment queries below).
+              .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+              // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
+              // Grouped OR so it stays ANDed with the customer/date/status predicates.
+              .andWhere((qb) => qb
+                .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
+                .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
+              .orderBy('scheduled_date', 'asc')
+              .first('scheduled_date')
+              .catch(() => null);
+          };
+          const nextRow = scopedNext
+            ? (scopedNext.state === 'scheduled' ? scopedNext.row : null)
+            : await legacyNextRow();
           let nextVisit = null;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
-          } else if (svcIso) {
+            if (scopedNext) {
+              const raw = nextRow.scheduled_date;
+              lawnCopyGapDays = daysFromVisit(raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10));
+            }
+          } else if (svcIso && !(scopedNext && scopedNext.state === 'unknown')) {
+            // An unknown property match shows nothing: a cadence estimate beside
+            // a real booking we could not place would be a second, wrong date.
             const t = String(service.service_type || '').toLowerCase();
             const m = t.match(/every\s+(\d+)\s+week/);
             let weeks = m ? Number(m[1]) : null;
@@ -5628,6 +5711,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               else if (/weekly/.test(t)) weeks = 1;
             }
             if (weeks) {
+              // No booking at this property: the plan cadence is this visit's own.
+              if (scopedNext) lawnCopyGapDays = weeks * 7;
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
               // Report tokens are permanent — only surface an ESTIMATED next visit when
@@ -5639,7 +5724,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
-        } catch { /* next-visit lookup is best-effort */ }
+        } catch {
+          // Best-effort for the label; under the v6 gate it is also an input
+          // the copy must not freeze without.
+          if (featureGates.lawnReportCopyV6Live()) readFailures.add('next_visit');
+        }
       }
 
       if (reportV2 && featureGates.lawnReportCopyV6Live()) {
@@ -5658,7 +5747,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
-            ctx: { visitDate: lawnCopyVisitDate },
+            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays },
             // Never CREATE the first-writer-wins entry from a degraded read
             // (any input read that failed is in readFailures) or from
             // unverifiable treatment data; a stored entry still replays first.

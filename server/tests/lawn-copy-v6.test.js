@@ -74,19 +74,23 @@ describe('whatToExpect: approved rows only, their own sentences word for word', 
     expect(buildLawnCopyV6(reportV2(), {}, deps).fields.whatToExpect).toBeNull();
   });
 
-  test('the visible-change sentence of the first two approved rows that have one, verbatim, ids recorded; never timing', () => {
+  test('each row\'s visible-change then by-next-visit sentence, verbatim, ids recorded; the gap is handed to the engine', () => {
     const deps = expectationsReturning([
       row('r1', [['visibleChange', 'Treated weeds curl and fade.'], ['limit1', 'Some weeds need a second pass.'], ['byNextVisit', 'Most should be gone by your next visit.']]),
       row('r2', [['limit1', 'Results vary by weed.']]),
-      row('r3', [['visibleChange', 'Color deepens over the coming weeks.']]),
+      row('r3', [['visibleChange', 'Color deepens.']]),
       row('r4', [['visibleChange', 'Never reached.']]),
     ]);
-    const out = buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30' }, deps);
-    expect(out.fields.whatToExpect).toBe('Treated weeds curl and fade. Color deepens over the coming weeks.');
-    expect(out.expectRows).toEqual([{ id: 'r1', keys: ['visibleChange'] }, { id: 'r3', keys: ['visibleChange'] }]);
-    const call = deps.buildExpectations.mock.calls[0][0];
-    expect(call.visitDate).toBe('2026-09-30');
-    expect(call).not.toHaveProperty('nextVisitGapDays');
+    const out = buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30', nextVisitGapDays: 42 }, deps);
+    expect(out.fields.whatToExpect).toBe('Treated weeds curl and fade. Most should be gone by your next visit. Color deepens.');
+    expect(out.expectRows).toEqual([{ id: 'r1', keys: ['visibleChange', 'byNextVisit'] }, { id: 'r3', keys: ['visibleChange'] }]);
+    expect(deps.buildExpectations).toHaveBeenCalledWith(expect.objectContaining({ visitDate: '2026-09-30', nextVisitGapDays: 42 }));
+  });
+
+  test('an unknown gap is not handed on (the engine then materializes no by-next-visit sentence)', () => {
+    const deps = expectationsReturning([row('r1', [['visibleChange', 'Treated weeds curl and fade.']])]);
+    buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30', nextVisitGapDays: null }, deps);
+    expect(deps.buildExpectations.mock.calls[0][0].nextVisitGapDays).toBeUndefined();
   });
 
   test('a sentence that would pass the 42-word cap is left out whole, never cut', () => {
