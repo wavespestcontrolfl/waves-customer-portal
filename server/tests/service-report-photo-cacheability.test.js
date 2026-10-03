@@ -72,6 +72,14 @@ describe('countUnreachableReportPhotos', () => {
     ]);
   });
 
+  it('probes the thumbnails of "What the photos showed" only where a set renders (P23b)', () => {
+    const findings = [{ label: 'Weed pressure', photos: [{ url: 'https://s3.example.com/set-1.jpg', label: 'Front yard' }, { url: 'https://s3.example.com/thumb-only.jpg', label: 'Close-up' }, { url: '' }] }];
+    const withSet = { reportV2: { photoSet: [{ url: 'https://s3.example.com/set-1.jpg', label: 'Front yard' }], photoFindings: findings } };
+    expect(collectRenderedImageUrls(withSet).sort()).toEqual(['https://s3.example.com/set-1.jpg', 'https://s3.example.com/thumb-only.jpg']);
+    // the document prints the block only beside a set
+    expect(collectRenderedImageUrls({ reportV2: { photoFindings: findings } })).toEqual([]);
+  });
+
   it('counts a non-OK response and a network error as unreachable', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce({ ok: false, status: 403 })

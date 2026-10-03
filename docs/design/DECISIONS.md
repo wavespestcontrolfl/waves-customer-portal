@@ -3168,6 +3168,26 @@ into one summary with Review and Clear all. Tools, More and an open visit
 keep the floating cards (they do not render the inline feed). The time clock
 moves from More to Today (`TechTimeTrackingCard variant="field"`).
 
+## 2026-10-03 — The visit sheets and the remaining field cards take the Waves Admin look
+
+Owner 2026-10-03 (phone screenshots): the "Complete lawn visit" sheet and the
+field notices still drew the old navy tech-portal palette inside Waves Admin.
+Slice B of the field-workspace look: `styles/tech-workflow.css` (the Fast
+Complete, recap, photo and trace sheets) is now the admin look, self-contained
+(the sheets portal onto `<body>`, outside `.tech-field`, and open from
+Dispatch and Schedule too, so it redeclares the admin tokens with their values
+as fallbacks): white sheet, stone page ground, hairline borders, 4px/6px
+radii, Roboto at 400/500, one dark ink primary action, pressed choices filled
+ink, amber for a stock warning, red only for an over-label-max or error.
+The trace modal (`TechTreatmentZoneModal`) drops its dark appearance for the
+admin "M" one. The notice cards, assistant bar, recap capture, flag-lead
+modal use the same ink-and-stone palette. The inline-styled panels that sit
+straight on the page (visit brief, visual notes, the three tool pages) read
+`--tfx-*` tokens that only `.tech-field` defines, so the flag-off page keeps its
+palette. `.tf-existing` is no longer a dark box. The 11px labels of the Today
+page stay 14px in the sheets (the portal-brand gate bans smaller text in
+`tech-workflow.css`). Visual only: same data, same actions.
+
 ## 2026-10-03 — The old dark Today page is deleted; the `tech-field-workspace` flag is gone
 
 Owner 2026-10-03 (phone screenshots of the navy page inside Waves Admin, "this

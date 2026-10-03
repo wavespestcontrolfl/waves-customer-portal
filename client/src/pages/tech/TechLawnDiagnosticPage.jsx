@@ -21,13 +21,19 @@ import { useTechBasePath } from '../../components/tech/techBasePath';
 const API = import.meta.env.VITE_API_URL || '';
 const MAX_PHOTOS = 5;
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
+// dark palette it is drawn on. `white` is text on an accent fill, `head` is a
+// heading, `sunk` is a field or sub-card sitting on a card.
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: 'var(--tfx-bg, #0f1923)', card: 'var(--tfx-card, #1e293b)', border: 'var(--tfx-border, #334155)',
+  teal: 'var(--tfx-accent, #0ea5e9)', green: 'var(--tfx-ok, #10b981)', amber: 'var(--tfx-amber, #f59e0b)', red: 'var(--tfx-red, #ef4444)',
+  text: 'var(--tfx-text, #e2e8f0)', muted: 'var(--tfx-muted, #94a3b8)',
+  white: 'var(--tfx-on-accent, #fff)', head: 'var(--tfx-text, #fff)',
+  sunk: 'var(--tfx-bg, #0b131b)', redBg: 'var(--tfx-red-bg, #2a1416)', okBg: 'var(--tfx-card, #0f2a1c)',
 };
-const HEAD = "'Montserrat', system-ui, sans-serif";
-const BODY = "'DM Sans', system-ui, sans-serif";
+const HEAD = "var(--tfx-font, 'Montserrat', system-ui, sans-serif)";
+const BODY = "var(--tfx-font, 'DM Sans', system-ui, sans-serif)";
 
 const SEVERITY_COLOR = { mild: D.green, moderate: D.amber, severe: D.red };
 const MODE_LABEL = {
@@ -83,19 +89,19 @@ function mimeFromDataUrl(dataUrl, fallback = 'image/jpeg') {
 
 function btn(bg, fg = D.white, disabled = false) {
   return {
-    minHeight: 46, padding: '0 16px', border: 'none', borderRadius: 10,
-    background: bg, color: fg, fontFamily: HEAD, fontWeight: 700, fontSize: 15,
+    minHeight: 46, padding: '0 16px', border: 'none', borderRadius: 4,
+    background: bg, color: fg, fontFamily: HEAD, fontWeight: 500, fontSize: 15,
     cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1,
   };
 }
 const inputStyle = {
   width: '100%', boxSizing: 'border-box', minHeight: 44, padding: '0 12px',
-  background: '#0b131b', border: `1px solid ${D.border}`, borderRadius: 8,
+  background: D.sunk, border: `1px solid ${D.border}`, borderRadius: 4,
   color: D.text, fontSize: 15, fontFamily: BODY, outline: 'none',
 };
 
 function Card({ children, style }) {
-  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16, marginBottom: 14, ...style }}>{children}</div>;
+  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 6, padding: 16, marginBottom: 14, ...style }}>{children}</div>;
 }
 
 export default function TechLawnDiagnosticPage() {
@@ -264,38 +270,38 @@ export default function TechLawnDiagnosticPage() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', color: D.text, fontFamily: BODY }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
+        <button type="button" onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 4, fontSize: 14, cursor: 'pointer' }}>
           ← Back
         </button>
-        <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 700, color: D.white, margin: 0 }}>Lawn Diagnostic</h1>
+        <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 500, color: D.head, margin: 0 }}>Lawn Diagnostic</h1>
       </div>
 
-      {error ? <Card style={{ borderColor: D.red, background: '#2a1416' }}><span style={{ color: D.red }}>{error}</span></Card> : null}
-      {notice ? <Card style={{ borderColor: D.green, background: '#0f2a1c' }}><span style={{ color: D.green }}>{notice}</span></Card> : null}
+      {error ? <Card style={{ borderColor: D.red, background: D.redBg }}><span style={{ color: D.red }}>{error}</span></Card> : null}
+      {notice ? <Card style={{ borderColor: D.green, background: D.okBg }}><span style={{ color: D.green }}>{notice}</span></Card> : null}
 
       {step === 'capture' ? (
         <>
           <Card>
-            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white, marginBottom: 10 }}>Photos ({photos.length}/{MAX_PHOTOS})</div>
+            <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head, marginBottom: 10 }}>Photos ({photos.length}/{MAX_PHOTOS})</div>
             {photos.length ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 8, marginBottom: 12 }}>
                 {photos.map((p) => (
                   <div key={p.id} style={{ position: 'relative' }}>
-                    <img src={p.dataUrl} alt="lawn" style={{ width: '100%', height: 90, objectFit: 'cover', borderRadius: 8, border: `1px solid ${D.border}` }} />
+                    <img src={p.dataUrl} alt="lawn" style={{ width: '100%', height: 90, objectFit: 'cover', borderRadius: 4, border: `1px solid ${D.border}` }} />
                     <button onClick={() => setPhotos((arr) => arr.filter((x) => x.id !== p.id))} aria-label="Remove photo"
-                      style={{ position: 'absolute', top: 4, right: 4, width: 24, height: 24, borderRadius: 999, border: 'none', background: 'rgba(0,0,0,0.6)', color: D.white, cursor: 'pointer', fontSize: 14, lineHeight: '24px', padding: 0 }}>×</button>
+                      style={{ position: 'absolute', top: 4, right: 4, width: 24, height: 24, borderRadius: 999, border: 'none', background: 'rgba(0,0,0,0.6)', color: '#fff', cursor: 'pointer', fontSize: 14, lineHeight: '24px', padding: 0 }}>×</button>
                   </div>
                 ))}
               </div>
             ) : null}
             <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple onChange={(e) => addPhotos(e.target.files)} style={{ display: 'none' }} />
             {photos.length < MAX_PHOTOS ? (
-              <button onClick={() => fileRef.current?.click()} style={btn('#0b131b', D.teal)}>+ Add photo</button>
+              <button onClick={() => fileRef.current?.click()} style={btn(D.sunk, D.teal)}>+ Add photo</button>
             ) : null}
           </Card>
 
           <Card>
-            <button onClick={() => setShowProspect((s) => !s)} style={{ ...btn('transparent', D.muted), padding: 0, minHeight: 0, fontWeight: 600 }}>
+            <button onClick={() => setShowProspect((s) => !s)} style={{ ...btn('transparent', D.muted), padding: 0, minHeight: 0, fontWeight: 500 }}>
               {showProspect ? '▾' : '▸'} Prospect details (for sending a report)
             </button>
             {showProspect ? prospectInputs : null}
@@ -309,9 +315,9 @@ export default function TechLawnDiagnosticPage() {
         <>
           <Card>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white }}>Diagnosis</div>
+              <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head }}>Diagnosis</div>
               {meta.releaseMode ? (
-                <span style={{ padding: '4px 10px', borderRadius: 999, background: '#0b131b', border: `1px solid ${D.border}`, color: D.muted, fontSize: 12, fontWeight: 700, fontFamily: HEAD }}>
+                <span style={{ padding: '4px 10px', borderRadius: 4, background: D.sunk, border: `1px solid ${D.border}`, color: D.muted, fontSize: 12, fontWeight: 500, fontFamily: HEAD }}>
                   {MODE_LABEL[meta.releaseMode] || meta.releaseMode}
                 </span>
               ) : null}
@@ -320,9 +326,9 @@ export default function TechLawnDiagnosticPage() {
             {findings.length ? (
               <div style={{ display: 'grid', gap: 8 }}>
                 {findings.map((f, i) => (
-                  <div key={`${f.name}-${i}`} style={{ background: '#0b131b', border: `1px solid ${D.border}`, borderLeft: `4px solid ${SEVERITY_COLOR[f.severity] || D.teal}`, borderRadius: 8, padding: '10px 12px' }}>
+                  <div key={`${f.name}-${i}`} style={{ background: D.sunk, border: `1px solid ${D.border}`, borderLeft: `4px solid ${SEVERITY_COLOR[f.severity] || D.teal}`, borderRadius: 4, padding: '10px 12px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <span style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 14, color: D.white }}>{f.name}</span>
+                      <span style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 14, color: D.head }}>{f.name}</span>
                       <span style={{ color: D.muted, fontSize: 12 }}>{f.confidence}</span>
                     </div>
                     {f.customer_wording ? <div style={{ color: D.muted, fontSize: 13, marginTop: 4, lineHeight: 1.5 }}>{f.customer_wording}</div> : null}
@@ -343,26 +349,26 @@ export default function TechLawnDiagnosticPage() {
 
           {sendResult ? (
             <Card style={{ borderColor: D.green }}>
-              <div style={{ fontFamily: HEAD, fontWeight: 700, color: D.white, marginBottom: 8 }}>Report link ready</div>
+              <div style={{ fontFamily: HEAD, fontWeight: 500, color: D.head, marginBottom: 8 }}>Report link ready</div>
               <div style={{ wordBreak: 'break-all', color: D.teal, fontSize: 13, marginBottom: 10 }}>{sendResult.url}</div>
               <button onClick={copyLink} style={btn(D.green)}>Copy link</button>
             </Card>
           ) : null}
 
           <Card>
-            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white }}>Prospect details</div>
+            <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head }}>Prospect details</div>
             <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>A name plus an email or address is required to send a report.</div>
             {prospectInputs}
           </Card>
 
           <div style={{ display: 'grid', gap: 8 }}>
-            <button onClick={saveInternal} disabled={!!busy || !canActOnReport} style={btn('#0b131b', D.teal, !!busy || !canActOnReport)}>
+            <button onClick={saveInternal} disabled={!!busy || !canActOnReport} style={btn(D.sunk, D.teal, !!busy || !canActOnReport)}>
               {busy === 'save' ? 'Saving…' : 'Save internally'}
             </button>
             <button onClick={sendReport} disabled={!!busy || !canActOnReport} style={btn(D.teal, D.white, !!busy || !canActOnReport)}>
               {busy === 'send' ? 'Sending…' : sendResult ? 'Re-send report' : 'Send prospect report'}
             </button>
-            <button onClick={saveAsLead} disabled={!!busy || !!leadId} style={btn('#0b131b', D.green, !!busy || !!leadId)}>
+            <button onClick={saveAsLead} disabled={!!busy || !!leadId} style={btn(D.sunk, D.green, !!busy || !!leadId)}>
               {busy === 'lead' ? 'Saving…' : leadId ? 'Saved as lead ✓' : 'Save as lead'}
             </button>
             <button onClick={reset} disabled={!!busy} style={btn('transparent', D.muted, !!busy)}>Start over</button>

@@ -10917,6 +10917,299 @@ async function refuseCarriedStopInEditMove(ackedIds) {
   }
 }
 
+// ---- update-details: a stop shared by two or more services (a combo) -----
+//
+// update-details writes ONE row, so a date, time or technician change on a
+// shared stop would leave the other services behind. The request says how to
+// handle it (owner rulings 2026-10-03: Edit appointment can move a combo, and
+// a technician-only change asks too):
+//   comboMove 'together' — the whole stop moves or is reassigned. Everything
+//     is checked BEFORE any write (planVisitMoveForStaff: the same staff move
+//     the schedule runs, against the stop's live membership read here); the
+//     date, window and technician keys are then taken off the body, so the
+//     per-row edit below saves the other fields on the current slot; the
+//     move itself runs after that edit commits (commit()).
+//   comboMove 'separate' — the service is split off its stop here, and the
+//     rest is the ordinary single-row edit.
+// No comboMove (every other caller), a row that is not on a shared stop, or
+// a request that changes nothing about the slot: null, the handler is
+// unchanged.
+// `comboVisit` is the stop the operator was shown ({ id, memberIds,
+// liveCount, liveMemberIds }); a stop whose live services differ from it is
+// refused before anything is saved.
+function comboEditChanges(body, row) {
+  const b = body || {};
+  let intake;
+  try {
+    intake = windowIntakeFromBody(b);
+  } catch {
+    return null; // a half-cleared window is the handler's own 422
+  }
+  const dateTarget = b.scheduledDate !== undefined && b.scheduledDate !== '' ? dateOnly(b.scheduledDate) : null;
+  const start = intake.clearBoth ? null : (intake.windowStart !== undefined ? normalizeHHMM(intake.windowStart) : undefined);
+  return {
+    intake,
+    length: comboLengthChange(b, row, intake),
+    date: !!dateTarget && dateTarget !== dateOnly(row.scheduled_date),
+    start: intake.clearBoth
+      ? !!row.window_start
+      : (start !== undefined && start !== (normalizeHHMM(row.window_start) || null)),
+    technician: b.technicianId !== undefined && (b.technicianId || null) !== (row.technician_id || null),
+  };
+}
+
+// The whole-stop move keeps every service's own length.
+function comboLengthChange(body, row, intake) {
+  const posted = parseInt(body.estimatedDuration, 10);
+  if (Number.isInteger(posted) && posted > 0 && row.estimated_duration_minutes != null
+    && posted !== Number(row.estimated_duration_minutes)) return true;
+  const span = (a, z) => {
+    const [h1, m1] = String(normalizeHHMM(a) || '').split(':').map(Number);
+    const [h2, m2] = String(normalizeHHMM(z) || '').split(':').map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? (h2 * 60 + m2) - (h1 * 60 + m1) : null;
+  };
+  const stored = span(row.window_start, row.window_end);
+  return stored != null && !!intake.windowStart && !!intake.windowEnd && span(intake.windowStart, intake.windowEnd) !== stored;
+}
+
+// A stop with no stored span takes the start only: each service's end is
+// derived from its own length. No time change = a date-only (or
+// technician-only) move, which keeps the stored window.
+function comboMoveWindow(row, changes) {
+  if (!changes.start) return undefined;
+  const keepsSpan = !!(row.window_start && row.window_end);
+  const end = keepsSpan && changes.intake.windowEnd ? normalizeHHMM(changes.intake.windowEnd) : null;
+  return { start: normalizeHHMM(changes.intake.windowStart), ...(end ? { end } : {}) };
+}
+
+// The stop the operator was shown against the stop as it is now. Null = the
+// same live services (or nothing was shown: an older client).
+function comboShownStopChanged(shown, live) {
+  if (shown == null) return false;
+  const ids = (v) => (Array.isArray(v) ? v.map(String).sort().join(',') : null);
+  return typeof shown !== 'object' || String(shown.id) !== String(live.id)
+    || ids(shown.liveMemberIds) !== ids(live.liveMemberIds);
+}
+
+// The split is its own committed action. Every refusal the request answers
+// after it — thrown, sent directly by the handler, or sent by the error
+// middleware — goes out through res.json, so that is where it is disclosed:
+// nobody closes on an unnoticed separation.
+function discloseComboSeparation(res) {
+  const send = res.json.bind(res);
+  res.json = (payload) => send(res.statusCode >= 400 && payload && typeof payload.error === 'string'
+    ? { ...payload, error: `This service was separated from the stop, but the other changes were not saved. ${payload.error}`, comboSeparated: true }
+    : payload);
+}
+
+// 'separate': the service leaves its stop here; the handler then runs the
+// ordinary single-row edit.
+async function separateComboService(req, row) {
+  const vg = require('../services/visit-groups');
+  try {
+    await vg.splitChild({
+      visitId: row.visit_id,
+      scheduledServiceId: row.id,
+      createdBy: `admin:${req.technicianId || 'unknown'}`,
+    });
+  } catch (err) {
+    // The split's own refusals (a frozen visit, a row that just left the
+    // stop) are the operator's to read, not a 500. Nothing was changed.
+    const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
+    if (known) throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    // Any other failure can come after the split committed (a connection
+    // lost on the commit's acknowledgement). Read the row: off the stop =
+    // it did commit, so carry on as separated and let that be disclosed.
+    const now = await db('scheduled_services').where({ id: row.id }).first('visit_id').catch(() => undefined);
+    if (!now || String(now.visit_id || '') === String(row.visit_id)) throw err;
+  }
+  return { separated: true };
+}
+
+const comboStopChangedError = () => Object.assign(
+  httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
+  { code: 'VISIT_MEMBERSHIP_CHANGED' },
+);
+
+// No choice in the request, and it changes the technician: on a shared stop
+// that would reassign this one row and split the stop without anyone having
+// chosen that (the caller did not know the stop is shared, or cannot ask).
+// Refused like a date or time change; the form then shows the choice.
+async function refuseUnchosenComboReassign(req) {
+  if (req.body.technicianId === undefined) return;
+  const row = await db('scheduled_services').where({ id: req.params.id }).first('visit_id', 'technician_id');
+  if (!row || !row.visit_id || (req.body.technicianId || null) === (row.technician_id || null)) return;
+  if ((await require('../services/visit-groups').openMembers(db, row.visit_id)).length < 2) return;
+  throw Object.assign(
+    httpError(409, 'This service is grouped with another at the same stop. Choose whether the technician changes for the whole stop or this service is separated, then save again. Nothing was changed.'),
+    { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+  );
+}
+
+// The same question inside the save's transaction, under the row's lock: a
+// row that joined a shared stop (or whose stop gained a live service) after
+// the unlocked check above must not be reassigned alone. `seenVisitId` is
+// the membership the unlocked check allowed.
+async function assertStillUnsharedForReassign(trx, serviceId, seenVisitId) {
+  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first('visit_id');
+  const nowVisitId = row ? (row.visit_id || null) : null;
+  const shared = !!nowVisitId && (await require('../services/visit-groups').openMembers(trx, nowVisitId)).length >= 2;
+  if (shared || String(nowVisitId || '') !== String(seenVisitId || '')) {
+    throw Object.assign(
+      httpError(409, 'This appointment was grouped with another service while saving — reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
+async function planComboEditMove(req) {
+  const body = req.body || {};
+  const choice = body.comboMove;
+  if (choice === undefined) {
+    await refuseUnchosenComboReassign(req);
+    return null;
+  }
+  if (choice !== 'together' && choice !== 'separate') {
+    throw httpError(400, "comboMove must be 'together' or 'separate'");
+  }
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id');
+  if (!row) return null;
+  const vg = require('../services/visit-groups');
+  const shared = !!row.visit_id && (await vg.openMembers(db, row.visit_id)).length >= 2;
+  if (!shared) {
+    // The operator was shown a shared stop and chose to keep it together,
+    // but it is not shared any more (separated or closed since): refuse,
+    // never move the one service as if that were the choice. 'separate' on
+    // a row already off its stop is the ordinary edit it asked for.
+    if (choice === 'together' && body.comboVisit != null) throw comboStopChangedError();
+    return null;
+  }
+  const changes = comboEditChanges(body, row);
+  if (!changes) return null;
+  if (!(changes.date || changes.start || changes.technician || changes.length)) return null;
+  const live = await vg.visitSummaryForService(db, row.id);
+  if (comboShownStopChanged(body.comboVisit, live)) throw comboStopChangedError();
+
+  if (choice === 'separate') return separateComboService(req, row);
+  return planComboTogetherMove(req, row, changes, live);
+}
+
+// The mover refuses a same-day window that has already passed, for every
+// service it touches (rebooker: sameDayWindowElapsed). Asked here first, so
+// that refusal comes before the edit is saved, not after. A technician-only
+// change keeps each service's own window, so each one is asked; a date or
+// time change is asked about the new window.
+async function comboTargetElapsed(row, changes, newDate, newWindow) {
+  const { sameDayWindowElapsed } = require('../utils/datetime-et');
+  const vg = require('../services/visit-groups');
+  const members = await vg.openMembers(db, row.visit_id);
+  if (!(changes.date || changes.start)) {
+    // A technician-only change never rewinds a visit that is under way.
+    if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status)))) {
+      return 'A service on this stop is already under way, so the stop cannot be reassigned as a whole. Choose Separate to reassign only this service.';
+    }
+    return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
+      ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+      : null;
+  }
+  // Every service's own target window, as the unit mover derives it (the
+  // tapped one takes the new slot, the others shift with it): one of them
+  // can have passed when the tapped one has not.
+  const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+  let targets;
+  try {
+    targets = vg.planMemberTargets({
+      members,
+      primary: members.find((m) => String(m.id) === String(row.id)) || row,
+      visitWindowStart: visit?.window_start || null,
+      win: { start: newWindow?.start || null, end: newWindow?.end || null },
+      newDateStr: newDate,
+    });
+  } catch (err) {
+    if (err?.statusCode) return err.message; // the mover would refuse the same way
+    throw err;
+  }
+  return targets.some((t) => sameDayWindowElapsed(newDate, t.end || t.start))
+    ? 'That time has already passed today for a service on this stop. Pick a later time.'
+    : null;
+}
+
+// 'together': every refusal comes before any write.
+async function planComboTogetherMove(req, row, changes, shown) {
+  const body = req.body;
+  const refuse = (status, message, code) => {
+    throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
+  };
+  // Only a real clear: a stop with no time posts empty bounds as an echo.
+  if (changes.intake.clearBoth && row.window_start) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
+  if (changes.length) {
+    refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
+  }
+  if (body.propertyId !== undefined) {
+    refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
+  }
+  // Two mixes the whole-stop move cannot honor (owner ruling 2026-10-03:
+  // refuse them before anything is saved). The move reassigns THIS stop
+  // only, so a staff change for following visits would be dropped silently;
+  // and a visit made recurring in the same save would build its plan from
+  // the date the stop is leaving.
+  if (changes.technician && normalizeAssignmentScope(body.assignmentScope) !== 'this_only') {
+    refuse(422, 'Moving the whole stop changes the technician for this visit only. Set "Apply staff change to" to this appointment only, or change later visits in their own save.', 'COMBO_ASSIGNMENT_SCOPE');
+  }
+  if (changes.date && body.isRecurring === true && body.spawnRecurringChildren === true) {
+    refuse(422, 'Make this visit recurring in its own save, then move the stop: the plan is built from the visit\'s date.', 'COMBO_MAKE_RECURRING');
+  }
+  // The stored date is a Date from Postgres: normalized before validation.
+  const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
+  if (!newDate) refuse(400, 'That date is not a current or future date.');
+  const newWindow = comboMoveWindow(row, changes);
+  const elapsed = await comboTargetElapsed(row, changes, newDate, newWindow);
+  if (elapsed) refuse(409, elapsed, 'SLOT_TAKEN');
+  // A text is about a new date or time, never a technician change alone.
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
+  const actor = { techRole: req.techRole, technicianId: req.technicianId };
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
+  const planned = await planVisitMoveForStaff({
+    serviceId: row.id,
+    newDate,
+    newWindow,
+    notifyCustomer,
+    body: {
+      ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
+    },
+    actor,
+    sourceSurface: 'edit_modal',
+    // A technician-only change keeps the stop's date and window.
+    keepSlot: !(changes.date || changes.start),
+  });
+  if (!planned.plan) {
+    throw Object.assign(httpError(planned.status, `${planned.body.error} Nothing was changed.`), planned.body.code ? { code: planned.body.code } : {});
+  }
+  // The per-row edit below must not move, reassign or text: the move does.
+  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId', 'assignmentScope', 'notifyCustomer']) delete req.body[key];
+  return {
+    commit: () => runPlannedVisitMove({ plan: planned.plan, serviceId: row.id, newDate, reasonCode: 'admin', notifyCustomer, actor }),
+  };
+}
+
+// The details are saved by the time the move runs, so its outcome is part of
+// the 200 answer, never an error status: `moved` (true / false / null when it
+// is not known whether the move went through) plus whatever the move
+// answered (warnings, needsAttention, notificationSent...).
+async function commitComboEditMove(plan, serviceId) {
+  try {
+    const out = await plan.commit();
+    const moved = out.status < 300 && !out.body?.needsAttention;
+    return { ...out.body, moved, ...(out.status >= 300 ? { error: out.body?.error || 'The stop was not moved.' } : {}) };
+  } catch (err) {
+    const refused = err?.statusCode >= 400 && err.statusCode < 500;
+    logger.error(`[schedule/update-details] whole-stop move after the edit ${refused ? 'was refused' : 'failed'} for ${serviceId}: ${err.message}`);
+    return { moved: refused ? false : null, error: err.message, ...(err.code ? { code: err.code } : {}) };
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -12782,6 +13075,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw httpError(422, 'Choose a saved customer address.');
       }
     }
+    // Before the series planner: a shared stop moved 'together' leaves no
+    // date on the body for it to plan.
+    const comboMovePlan = await planComboEditMove(req);
+    if (comboMovePlan?.separated) discloseComboSeparation(res);
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan && propertyId !== undefined) {
       // An address change regroups relocated occurrences on their OLD dates
@@ -13129,15 +13426,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const normalizedAssignmentScope = normalizeAssignmentScope(assignmentScope);
     let assignmentNeedsChange = false;
     let assignmentShouldRun = false;
+    let reassignSeenVisitId;
     if (hasTechnicianIdUpdate) {
       if (technicianId !== null && typeof technicianId !== 'string') {
         return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
       }
       const existingAssignment = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('id', 'technician_id');
+        .first('id', 'technician_id', 'visit_id');
       if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
       assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      // The membership this reassignment was allowed on (planComboEditMove
+      // refused a shared stop with no choice); re-read under the row lock
+      // before the assignment writes.
+      if (assignmentNeedsChange) reassignSeenVisitId = existingAssignment.visit_id || null;
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
@@ -13810,7 +14112,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
         }
       }
-      if (preReadVisitId) {
+      // Also for a technician change on a row alone on its visit: joining
+      // that visit serializes on this lock, so the membership re-check
+      // before the assignment write below cannot be raced.
+      if (preReadVisitId || reassignSeenVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -14111,6 +14416,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
+      if (reassignSeenVisitId !== undefined) await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);
       if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
@@ -16281,6 +16587,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // A shared stop moved 'together': the edit above saved the other fields
+    // on the stop's current slot; the whole-stop move runs now and sends the
+    // one customer text itself.
+    const comboMove = comboMovePlan?.commit ? await commitComboEditMove(comboMovePlan, req.params.id) : null;
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -16394,6 +16705,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — present only when this save
       // stacked over an existing visit.
       ...(editWarnings.length ? { warnings: editWarnings } : {}),
+      ...(comboMove ? { comboMove } : {}),
+      ...(comboMovePlan?.separated ? { comboSeparated: true } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —
@@ -16461,6 +16774,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // without running its ack/grouped/frozen guards: those exist for the
     // actual commit (and can throw/require a disclosure round-trip),
     // never for a read-only dry run.
+    // The same mirror for a shared stop moved 'together': the save takes the
+    // date off the body before the financial planner runs (planComboEditMove;
+    // the whole-stop move commits the date afterwards, on its own).
+    if (req.body.comboMove === 'together') scheduledDate = undefined;
     if (scheduledDate !== undefined && scheduledDate !== '' && collectiveMoveGateOn()) {
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {
@@ -27614,6 +27931,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,

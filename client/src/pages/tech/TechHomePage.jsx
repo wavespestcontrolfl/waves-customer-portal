@@ -25,8 +25,8 @@
 //                                \--> skipped (with reason)
 //
 // Renders inside TechFieldShell (the field workspace in the Waves Admin
-// look). Existing embedded forms retain their own dark palette until their
-// own slice.
+// look). The timecard sign-off card, Quick Move sheet and project picker in
+// this file still carry the dark palette until their own slice.
 //
 // Audit focus:
 // - State transitions: confirm a tech can't accidentally skip an

@@ -265,7 +265,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // fence compares against it (the browser fetches its own /data, so a
     // change anywhere in between skips the store).
     cardFenceAtRender = await reserviceCardRenderFence(service, knex);
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true, pestWeekWeather: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);

@@ -36,14 +36,21 @@ function humanizeCategory(category) {
     .replace(/_/g, ' ');
 }
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
+// dark palette it is drawn on.
 const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  amber: '#f59e0b',
+  bg: 'var(--tfx-bg, #0f1923)',
+  card: 'var(--tfx-card, #1e293b)',
+  border: 'var(--tfx-border, #334155)',
+  teal: 'var(--tfx-accent, #0ea5e9)',
+  text: 'var(--tfx-text, #e2e8f0)',
+  muted: 'var(--tfx-muted, #94a3b8)',
+  amber: 'var(--tfx-amber, #f59e0b)',
+  red: 'var(--tfx-red, #ef4444)',
+  tealTint: 'var(--tfx-accent-tint, #0ea5e922)',
+  amberTint: 'var(--tfx-amber-tint, #f59e0b22)',
+  redTint: 'var(--tfx-red-tint, #ef444422)',
 };
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -146,7 +153,7 @@ export default function TechProtocolsPage() {
         </button>
         <h1 style={{
           margin: 0, fontSize: 20, fontWeight: 700, color: DARK.text,
-          fontFamily: "'Montserrat', sans-serif",
+          fontFamily: "var(--tfx-font, 'Montserrat', sans-serif)",
         }}>
           Protocols
         </h1>
@@ -163,7 +170,7 @@ export default function TechProtocolsPage() {
             onClick={() => setActiveTab(t.key)}
             style={{
               padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
-              background: activeTab === t.key ? `${DARK.teal}22` : DARK.card,
+              background: activeTab === t.key ? DARK.tealTint : DARK.card,
               border: `1px solid ${activeTab === t.key ? DARK.teal : DARK.border}`,
               color: activeTab === t.key ? DARK.teal : DARK.text,
               cursor: 'pointer', whiteSpace: 'nowrap',
@@ -185,7 +192,7 @@ export default function TechProtocolsPage() {
             onClick={() => setServiceFilter(f.key)}
             style={{
               padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-              background: serviceFilter === f.key ? `${DARK.amber}22` : 'transparent',
+              background: serviceFilter === f.key ? DARK.amberTint : 'transparent',
               border: `1px solid ${serviceFilter === f.key ? DARK.amber : DARK.border}`,
               color: serviceFilter === f.key ? DARK.amber : DARK.muted,
               cursor: 'pointer', whiteSpace: 'nowrap',
@@ -203,8 +210,8 @@ export default function TechProtocolsPage() {
         </p>
       ) : err ? (
         <div style={{
-          background: '#ef444422', border: '1px solid #ef4444',
-          color: '#ef4444', padding: 12, borderRadius: 8, fontSize: 13,
+          background: DARK.redTint, border: `1px solid ${DARK.red}`,
+          color: DARK.red, padding: 12, borderRadius: 8, fontSize: 13,
         }}>
           {err}
         </div>

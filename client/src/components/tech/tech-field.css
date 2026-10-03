@@ -12,6 +12,26 @@
   --tf-line-strong: var(--border-strong, #d6d3d1);
   --tf-surface: var(--surface-primary, #ffffff);
   --tf-subtle: var(--surface-hover, #f5f5f4);
+  /* Tokens for the inline-styled field panels (VisitBriefPanel, VisualNotesPanel,
+     the protocol, lawn-diagnostic and social-post tools). Each reads
+     var(--tfx-*, <tech-portal dark value>), so inside the workspace it takes the
+     admin look. */
+  --tfx-bg: #fafaf9;
+  --tfx-card: #ffffff;
+  --tfx-border: #d6d3d1;
+  --tfx-accent: var(--tf-ink);
+  --tfx-on-accent: #ffffff;
+  --tfx-text: var(--tf-ink);
+  --tfx-muted: var(--tf-muted);
+  --tfx-ok: var(--tf-ink);
+  --tfx-amber: #854d0e;
+  --tfx-red: #a32d2d;
+  --tfx-red-bg: #fcebeb;
+  --tfx-accent-tint: rgba(28, 25, 23, .06);
+  --tfx-ok-tint: rgba(28, 25, 23, .06);
+  --tfx-amber-tint: rgba(133, 77, 14, .1);
+  --tfx-red-tint: rgba(163, 45, 45, .1);
+  --tfx-font: "Roboto", system-ui, sans-serif;
   min-height: 100dvh;
   background: var(--surface-page, #fafaf9);
   color: var(--tf-ink);
@@ -31,8 +51,9 @@
 .tf-nav a svg { width: 20px; height: 20px; }
 .tf-nav a[aria-current] { color: var(--tf-ink); background: var(--tf-subtle); }
 .tech-field :is(a, button):focus-visible { outline: 2px solid var(--tf-ink); outline-offset: 2px; }
-/* The legacy dark panels keep a ring that shows on their dark ground (Codex #5794). */
-.tech-field .tf-existing :is(a, button):focus-visible { outline-color: #7dd3fc; }
+/* The timecard sign-off card (TechHomePage) is still a dark card inside .tf-existing:
+   a white gap inside the ink ring keeps the ring visible on its dark ground (Codex #5794). */
+.tech-field .tf-existing :is(a, button):focus-visible { box-shadow: 0 0 0 4px #ffffff; }
 .tf-page h1, .tf-page h2, .tf-page h3 { font-family: inherit; color: var(--tf-ink); font-weight: 500; }
 .tf-page h1 { font-size: 22px; line-height: 1.3; letter-spacing: -0.015em; margin: 0; }
 .tf-page h2 { font-size: 18px; line-height: 1.35; letter-spacing: -0.005em; margin: 0; }
@@ -106,8 +127,9 @@
 .tf-change-head strong, .tf-change-when strong { font-weight: 500; }
 .tf-dir { font-size: 14px; font-weight: 500; padding: 1px 6px; border-radius: 3px; background: var(--tf-subtle); color: var(--tf-ink); white-space: nowrap; }
 
-/* Existing field forms retain their own palette until their integration slice. */
-.tf-existing { background: #0f1923; color: #e2e8f0; border-radius: 6px; padding: 16px; margin-top: 16px; }
+/* The existing field panels (visit brief, tools, assistant bar) draw their own
+   surfaces in the admin look through the --tfx-* tokens above. */
+.tf-existing { color: var(--tf-ink); margin-top: 16px; }
 @media (min-width: 768px) {
   .tf-main { padding: 20px 20px calc(108px + env(safe-area-inset-bottom, 0px)); }
   .tf-today-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; gap: 16px; }

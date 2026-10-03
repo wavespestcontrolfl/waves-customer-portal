@@ -2169,14 +2169,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const openedSlotKey = useRef(slotKey).current;
   const slotEdited = slotKey !== openedSlotKey;
   // A stop shared by two or more services (lawn + pest). update-details
-  // writes ONE row, so the server refuses a date/time change on it. The
-  // operator chooses here (owner ruling 2026-10-03: a combo can be moved
-  // together or separated from this form):
-  // - together: the other changes are saved first, on the stop's current
-  //   slot; the schedule's whole-stop move runs LAST and sends the one
-  //   customer text, so the text describes the saved appointment and a
-  //   failed save has moved nothing.
-  // - separate: the service is split off, then saved as an ordinary edit.
+  // writes ONE row, so a date, time or technician change on it would leave
+  // the other services behind. The operator chooses here (owner rulings
+  // 2026-10-03: a combo can be moved together or separated from this form,
+  // and a technician-only change asks too) and the ONE save request carries
+  // the choice (`comboMove`). The server does the rest: it checks the move
+  // before it writes anything, saves the other changes, then moves the whole
+  // stop and sends the one customer text, or splits the service off first.
   // The stop is read live on open, so every screen that opens this form
   // (Day, 5-Day, Week, List, the dispatch board) sees a combo the same way;
   // `service.visit` (the Day feed) only fills the moment before the read.
@@ -2199,11 +2198,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const comboCount = Number(comboVisitInfo?.liveCount ?? comboVisitInfo?.serviceCount);
   const comboVisit = comboVisitInfo && comboVisitInfo.id && comboCount > 1 ? comboVisitInfo : null;
   const [comboMove, setComboMove] = useState("together");
-  // What this modal already did, so a retried save never splits twice and
-  // never re-posts details it already saved (see handleSave).
-  const comboDoneRef = useRef({ separated: false, details: null });
-  // The slot and technician the form opened on: where the stop IS until the
-  // whole-stop move, the last write of a save, succeeds and the form closes.
+  // The slot and technician the form opened on: where the stop is.
   const comboOpened = useRef({
     date: form.scheduledDate,
     start: String(form.windowStart || "").slice(0, 5),
@@ -2216,30 +2211,29 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const comboStart = String(form.windowStart || "").slice(0, 5);
   const comboEnd = String(form.windowEnd || "").slice(0, 5);
   const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
+  const comboTechChanged = form.technicianId !== comboOpened.technicianId;
   const spanOf = (start, end) => {
     const [h1, m1] = String(start).split(":").map(Number);
     const [h2, m2] = String(end).split(":").map(Number);
     return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
   };
-  // The whole-stop move keeps every service's own length.
-  // A stop that opened with no time has no span to keep: giving it a time
-  // (a suggested slot fills both bounds) is a move, not a length change.
+  // The whole-stop move keeps every service's own length. A stop that opened
+  // with no time has no span to keep: giving it a time (a suggested slot
+  // fills both bounds) is a move, not a length change.
   const comboOpenedSpan = spanOf(comboOpened.start, comboOpened.end);
   const comboLengthChanged = slotCheckDuration !== comboOpened.duration
     || (comboOpenedSpan != null && spanOf(comboStart, comboEnd) !== comboOpenedSpan);
-  const comboSlotChanged = !!comboVisit && !comboDoneRef.current.separated && (comboPlaceChanged || comboLengthChanged);
+  // The choice is owed whenever the save would move or reassign the stop.
+  const comboSlotChanged = !!comboVisit && (comboPlaceChanged || comboLengthChanged || comboTechChanged);
   // The whole-stop move re-dates THIS visit's stop only: the server never
-  // widens a grouped recurring visit to its series (admin-dispatch.js
-  // seriesPolicy 'single'), so no later visit moves and no series ack is
-  // owed. A technician change rides the same move: this visit only.
-  // Separate leaves an ordinary row, with the ordinary series rules.
+  // widens a grouped recurring visit to its series, so no later visit moves
+  // and no series ack is owed. Separate leaves an ordinary row, with the
+  // ordinary series rules.
   const comboTogether = comboSlotChanged && comboMove === "together";
-  const comboTechChanged = form.technicianId !== comboOpened.technicianId;
-  // A different service or address can take this service off the shared stop
-  // (the server regroups by family and by property), which "together" cannot
-  // then honour.
-  const comboRegroupingEdit = form.serviceType !== comboOpened.serviceType
-    || form.serviceKey !== comboOpened.serviceKey || !!selectedPropertyId;
+  // A different service can take this one off the shared stop (the server
+  // regroups by family), which "together" cannot then honour. The server
+  // refuses a different address itself.
+  const comboRegroupingEdit = form.serviceType !== comboOpened.serviceType || form.serviceKey !== comboOpened.serviceKey;
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3412,7 +3406,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     savingRef.current = true;
     setSaveError("");
     setSaving(true);
-    const inputsAtSaveStart = saveInputsRef.current;
     // Revalidate right before POSTING money — the hook polls, but a gate
     // flip between the last probe and this click would still save under the
     // semantics the preview used. Codex pre-push audit P1 (round 4 on
@@ -3517,10 +3510,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
-    let comboSeparatedThisSave = false;
-    let comboDetailsSaved = false;
-    let comboPartlyMoved = false;
-    let comboMoveUnknown = false;
+    let saveRequestSent = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3532,67 +3522,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
       const notifyOnMove = moveNotifyOffered && notificationType === "sms";
-      // Separate: the split runs first, then the PUT is an ordinary edit of
-      // an ordinary row (it moves it, texts and carries the series ack).
-      if (comboSlotChanged && comboMove === "separate") {
-        try {
-          await adminFetch(`/admin/visits/${comboVisit.id}/split`, {
-            method: "POST", body: JSON.stringify({ serviceId: service.id }),
-          });
-        } catch (splitErr) {
-          // An earlier split whose response was lost has already taken this
-          // service off the stop; the repeat is refused ("not a member").
-          // Read the stop: no longer on it = separated, carry on.
-          const now = await readComboVisit();
-          const stillOnStop = now === undefined
-            || (now && String(now.id) === String(comboVisit.id) && Number(now.liveCount ?? now.serviceCount) > 1);
-          if (stillOnStop) throw splitErr;
-        }
-        comboDoneRef.current.separated = true;
-        comboSeparatedThisSave = true;
-        // A field edited while the split was in flight is not in this
-        // closure's payload: never post the stale values over it.
-        if (saveInputsDrifted(inputsAtSaveStart)) {
-          throw new Error("The form changed while that was saving. Review it and save again.");
-        }
-      }
+      // Refusals the server also makes, said here before the request.
       if (comboTogether && comboLengthChanged) {
         throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
       }
-      if (comboTogether && comboRegroupingEdit) {
-        throw new Error("A different service or address can take this service off the shared stop. Save that change on its own first, or choose Separate.");
+      if (comboTogether && form.scheduledDate !== comboOpened.date && isRecurring && !serviceIsRecurringTemplate) {
+        throw new Error("Make this visit recurring in its own save, then move the stop: the plan is built from the visit's date.");
       }
-      // Together: this PUT saves everything EXCEPT the move. It sends no
-      // date, window or technician at all (never a copy of what the form
-      // opened on, which another operator may have changed since), so it
-      // moves nothing, reassigns nothing, texts nobody and owes no series
-      // ack; the whole-stop move below does those.
-      const comboMoveAfter = comboTogether && comboPlaceChanged;
-      // A retry after the move was refused: the details this modal already
-      // saved are not posted again unless they changed (the operator may
-      // only have picked another time).
-      const detailsOf = (inputs) => {
-        const { form: f, comboMove: _move, notificationType: _notify, seriesPreviewValue: _series, assignmentScope: _scope, ...rest } = inputs;
-        const { scheduledDate: _d, windowStart: _s, windowEnd: _e, technicianId: _t, ...formRest } = f;
-        return { rest, form: JSON.stringify(formRest) };
-      };
-      const savedDetails = comboDoneRef.current.details;
-      const detailsAlreadySaved = comboMoveAfter && !!savedDetails && savedDetails.takePayment === takePayment && (() => {
-        const a = detailsOf(savedDetails.inputs);
-        const b = detailsOf(inputsAtSaveStart);
-        return a.form === b.form && Object.keys(a.rest).every((k) => Object.is(a.rest[k], b.rest[k]));
-      })();
-      comboDetailsSaved = detailsAlreadySaved;
-      const result = detailsAlreadySaved ? savedDetails.result : await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+      if (comboTogether && comboRegroupingEdit) {
+        throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
+      }
+      saveRequestSent = true;
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
-          ...(comboMoveAfter ? { scheduledDate: undefined, windowStart: undefined, windowEnd: undefined, technicianId: undefined } : {}),
+          // A shared stop: the server runs the choice in this one request.
+          comboMove: comboSlotChanged ? comboMove : undefined,
+          // The stop this form showed; the server refuses if it changed.
+          comboVisit: comboSlotChanged && Array.isArray(comboVisit.liveMemberIds)
+            ? { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, liveMemberIds: comboVisit.liveMemberIds }
+            : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
-          notifyCustomer: (!comboMoveAfter && notifyOnMove) || undefined,
+          notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
-          ...(comboMoveAfter ? {} : seriesAckPayload(seriesPreview.preview)),
+          ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
           // Sent unconditionally (see primaryLinePriceValue's own comment) —
           // NOT only when sendAddons — so the server can tell this payload's
           // gross-Price convention apart from MobileServiceEditModal's net
@@ -3684,9 +3639,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : (storedDiscountCleared ? null : undefined),
           estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
+          // The whole-stop move reassigns this stop only (the choice box
+          // says so and the scope picker is hidden for it).
           assignmentScope:
-            !comboMoveAfter && form.technicianId !== (service.technicianId || "")
-              ? assignmentScope
+            form.technicianId !== (service.technicianId || "")
+              ? (comboTogether ? "this_only" : assignmentScope)
               : undefined,
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
@@ -3717,60 +3674,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
-      let comboMoveWarnings = [];
-      if (comboMoveAfter) {
-        comboDetailsSaved = true;
-        comboDoneRef.current.details = { inputs: inputsAtSaveStart, takePayment, result };
-        // A field edited while the details were saving is not in this
-        // closure's move: stop before moving the stop to a stale time.
-        if (saveInputsDrifted(inputsAtSaveStart)) {
-          throw new Error("The form changed while that was saving. Review it and save again.");
-        }
-        const moved = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
-          method: "POST",
-          body: JSON.stringify({
-            newDate: form.scheduledDate,
-            // A stop that had no time takes the start only: each service's
-            // end is derived from its own length.
-            ...(comboStart ? { newWindow: { start: comboStart, end: (comboOpenedSpan != null && comboEnd) || undefined }, deriveWindowFromCurrentVisit: true } : {}),
-            notifyCustomer: notifyOnMove,
-            // A technician change rides the whole-stop move, so every
-            // service lands on the new technician; on the PUT it would
-            // reassign this row only and detach it from the stop.
-            ...(comboTechChanged ? { technicianId: form.technicianId || null } : {}),
-            // The stop the operator was shown. The server refuses the move
-            // if a service joined or left it since, and does not text again
-            // when a repeated request finds the stop already moved.
-            ...(Array.isArray(comboVisit.memberIds)
-              ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, ...(Array.isArray(comboVisit.liveMemberIds) ? { liveMemberIds: comboVisit.liveMemberIds } : {}) } }
-              : {}),
-          }),
-        }).catch((moveErr) => {
-          // Only a 4xx is a refusal (nothing moved). A lost response or a
-          // server error can come after the move committed.
-          if (!(moveErr.status >= 400 && moveErr.status < 500)) comboMoveUnknown = true;
-          throw moveErr;
-        });
-        // 200 with needsAttention = only part of the stop moved (a sibling
-        // stayed behind, or the visit record was not retargeted). Not a
-        // completed move: say what the server says; the stop is repaired
-        // from the board, as its message tells.
-        if (moved?.needsAttention) {
-          comboPartlyMoved = true;
-          throw new Error(moved.needsAttention.message || "Only part of this stop finished moving. Fix it on the schedule before editing it here.");
-        }
-        if (Array.isArray(moved?.warnings)) comboMoveWarnings = moved.warnings;
-        // The form is frozen while saving (see the `inert` body); if an edit
-        // still landed during the move, it is not saved: say so, never close
-        // on it silently.
-        if (saveInputsDrifted(inputsAtSaveStart)) {
-          comboMoveWarnings = [...comboMoveWarnings, "The form was changed while the stop was moving. Those last changes were not saved: reopen the appointment to make them."];
-        }
-        if (notifyOnMove && moved?.notificationSent === false) {
-          comboMoveWarnings = [...comboMoveWarnings, moved.notificationSkipped === "already_at_target"
-            ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
-            : `The customer was not texted about the move: ${moved.notificationError || "the text could not be sent"}.`];
-        }
+      // The whole-stop move's outcome rides in the saved answer: the other
+      // changes are saved either way.
+      const stopMove = result?.comboMove || null;
+      // Not moved (refused, partly, or not confirmed): the details ARE saved,
+      // so the form closes on them like any save and the notice says what
+      // happened to the move. Reopening reads the appointment fresh; nothing
+      // is retried from this form's now-stale state.
+      if (stopMove && stopMove.moved !== true) {
+        const reason = stopMove.needsAttention?.message || stopMove.error || "The stop was not moved.";
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule. If it moved and the customer has not been told, text them. (${reason})`
+            : `The other changes were saved, but the stop was not moved: ${reason} Reopen the appointment to move it.`);
+      }
+      let comboMoveWarnings = stopMove?.moved === true && Array.isArray(stopMove.warnings) ? stopMove.warnings : [];
+      if (stopMove?.moved === true && notifyOnMove && stopMove.notificationSent === false) {
+        comboMoveWarnings = [...comboMoveWarnings, stopMove.notificationSkipped === "already_at_target"
+          ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
+          : `The customer was not texted about the move: ${stopMove.notificationError || "the text could not be sent"}.`];
       }
       if (notifyOnMove && result?.notificationSent === false) {
         showScheduleSaveNotice(
@@ -3930,22 +3853,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
-      // A combo's move or split is its own committed action. When the edit
-      // after it fails, say what already happened — every branch below — so
-      // nobody re-does the move or closes on an unnoticed split.
-      const committed = comboDetailsSaved
-        ? (comboPartlyMoved ? "The other changes were saved. "
-          : comboMoveUnknown ? "The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule, and save again if it is still at its old time (the customer is not texted twice). "
-            : "The other changes were saved, but the stop was not moved. ")
-        : (comboSeparatedThisSave ? "This service was separated from the stop, but the other changes were not saved. " : "");
-      const setSaveError = (message) => setSaveErrorState(committed + message);
       const ack = parseSeriesAckError(e);
       // The server refused a date/time change because the stop is shared and
       // this form did not know it (the read on open was slow, failed, or the
       // stop was grouped since). Nothing was changed. Read the stop now and
       // show the choice.
       const sharedStopNow = e.code === "VISIT_EDIT_SCHEDULE_UNSUPPORTED" && !comboVisit ? await readComboVisit() : null;
-      if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
+      // A shared-stop save is one request that can split or move the stop and
+      // text the customer. No answer at all (the connection dropped) does not
+      // mean nothing happened: never call it a plain failed save.
+      if (saveRequestSent && comboSlotChanged && e.status == null) {
+        setSaveError("The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.");
+      } else if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
         setComboVisitInfo(sharedStopNow);
         setSaveError("This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.");
       } else if (ack?.code === SERIES_ACK_REQUIRED) {
@@ -4134,6 +4053,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // source wins) — a transition here must invalidate any cached preview
     // even when nothing else on the form changed (:3659).
     stackingEnabled, stackingKnown,
+    // The whole-stop choice changes which date the money is planned on.
+    comboTogether,
   });
   useEffect(() => {
     const requestId = ++previewRequestRef.current;
@@ -4149,6 +4070,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           signal: controller.signal,
           body: JSON.stringify({
             ...form,
+            // The save plans the money on the stop's current date when the
+            // whole stop moves together; the preview must do the same.
+            comboMove: comboTogether ? "together" : undefined,
             isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
@@ -4752,7 +4676,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </option>
                 ))}
               </select>
-              {serviceHasSeries &&
+              {serviceHasSeries && !comboTogether &&
                 technicianId !== (service.technicianId || "") && (
                   <div style={{ marginTop: 10 }}>
                     <label style={labelStyle}>Apply staff change to</label>
@@ -6082,7 +6006,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </label>
                   {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
                     <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
-                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are.
+                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are{comboTechChanged ? ", with their technician" : ""}.
                     </div>
                   ) : null}
                 </div>

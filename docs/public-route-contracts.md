@@ -2402,6 +2402,49 @@ visit's assessment carries the marker, so a legacy visit keeps its stored PDF.
 With the gate off, or on a visit without the marker, the payload and the
 signature are byte-identical to before.
 
+`GATE_LAWN_REPORT_PHOTO_FINDINGS` (dark; effective only while
+`GATE_LAWN_REPORT_PHOTO_SET` is also live and a `photoSet` exists), "What the
+photos showed" (`reportV2.photoFindings`): `[{ label, photos: [{ url, label }],
+confirm? }]`, at most 4 findings. The key exists only where a block was built
+and is an empty list when every finding is hidden by its card; it is never on
+`lawnAssessment`. Off, the payload and the PDF cache key are byte-identical to
+`GATE_LAWN_REPORT_PHOTO_SET` alone, and the run is never read. On, it is built
+only from the visit's CURRENT confirmed assessment's reviewed run
+(`lawn_assessment_runs.reviewed_at` set), from `reviewed_findings` the technician
+kept (the same keep rule as the tip ranking, `keptRunRows` in `tip-library.js`).
+Only SYMPTOM labels print, from the explicit allowlist `PHOTO_FINDING_LABELS`
+(capitalized by code): weed pressure, thinning turf, color and nutrient stress,
+color stress, general lawn stress, a lawn condition we are monitoring. Named
+causes (chinch bug, caterpillar, grub, large patch, gray leaf spot, dollar spot,
+fungal activity), "drought stress", "overwatering signal" and "no major visible
+stress" never print here. A finding also prints only while the report's own
+category card for that topic reads `watch` or `needs_attention`
+(`reportV2.diagnosis`: weed pressure reads `weed_pressure`, thinning turf
+`coverage`, the two color labels `color_vigor`, the two generic labels
+`damage_disease_signals`); a healthy, strong, tracking, unknown or missing card
+leaves it out, and the cap of four applies after that check. Most severe first
+(stored order inside a severity). `photos` are the photos the finding cites
+(`photo_refs` mapped through the run's `photo_ids`), at most 3, each reusing a
+URL and label of `photoSet`; a cited photo that is not in the set has no
+thumbnail, and a finding with no link prints with none. `confirm` appears only
+for a finding the technician marked `can_determine: false`, as the one fixed
+sentence "The photos from this visit cannot confirm this. A {blade close-up |
+trouble spot} photo would let us confirm it.", naming a cause-supporting shot
+(shared shot list `supportsCause`) that neither the finding's photos nor the rest
+of the visit's set contain; if the data cannot name one, there is no sentence.
+Stored free text (`observed_evidence`, `cannot_determine_reason`,
+`confirmation_step`, `customer_wording`, `name`) is never read. The block is
+outside the lead's word budget. It is opt-in per render: only the `/data` render,
+the direct PDF route and the PDF queue read the run, `/ask` never does. All or
+nothing: a failed run read omits the block and counts into
+`imageResolutionFailures` (so that PDF is not cached), and so does a built block
+that never reaches `reportV2`. The PDF cache signature gains `:pf=<hash>`
+(findings, their photo numbers, the run's photo order) only for a visit with a
+printable selection, so other visits keep their key. The web report and the PDF
+(`ServiceReportDocument`) print the same block; thumbnails link on the web and
+never in print or the browser's print of the live page. The server probe
+(`collectRenderedImageUrls`) checks the thumbnails beside the set.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
@@ -2433,6 +2476,56 @@ is no prior visit, or when the prior visit froze no memory. The sentences are
 selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
+
+`GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
+live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
+leaves the lawn payload and render unchanged, key for key, with no weather read
+and no write) adds ONE fixed sentence to `reportV2.lead.watching` on LIVE views
+only (`mode: 'live'`): "Our weather data shows rain soon after your treatment,
+which can reduce its effect. Tell us if results look weak." (20 words; it
+commits Waves to no action.) It is the whole Watching line when there is no
+writer sentence, follows the writer's own sentence when the two fit the
+20-word Watching cap together, and REPLACES the writer's sentence when they
+do not (it fits alone); it is given up with the rest of Watching if the lead
+runs over its 250-word budget. PDF, static and queued builds never carry it, so PDF content and its
+cache signature are unchanged. No other payload key is added: the item below
+is internal and `reportV2.sinceLast` leaves it off. Only a product whose catalog
+row states a rainfast interval (`products_catalog.rainfast_minutes`) is judged,
+and only from the facts FROZEN with the visit (`reportIdentitySnapshot.productFacts`),
+never from the live catalog: a later catalog edit cannot change what was known
+at treatment time. A frozen "no interval" is known-absent and not judged. If any
+applied product's interval is unknown (no snapshot on an older record, a product
+the snapshot never saw or one frozen as not approved for reports, or an unusable
+frozen interval) the whole verdict is held, never judged on a partial set. Only
+the rendered `/data` view opts in (the Ask Waves `/ask` build, which also uses
+`mode: 'live'`, makes no weather call and no write). Nothing is judged until
+EVERY interval on the visit is over: one hour after the LONGEST interval ended,
+and for 7 days at most, a LIVE `/data` view reads the property's modeled rain
+from Open-Meteo (a weather-model analysis, not a gauge; hourly slots for an
+interval of 2 hours or more, quarter-hour slots for a shorter one) for
+completion to completion plus each interval, in one pass. Rain of at least 0.25
+inch inside any interval, judged on the unrounded total, writes ONE
+`retreatCheck` item naming every breached interval and its products onto the
+visit's frozen memory entry
+(`structured_notes.lawnVisitMemory[assessmentId].retreatCheck`: first writer
+wins, compare-and-set on that entry, never creates an entry, no row lock; the same
+UPDATE re-asks the token route's read eligibility, `report_template_version =
+'service_report_v1'` and not a suppressed typed report, so a record that stops being
+readable while the weather lookup is in flight is not written) and
+the sentence follows. The first eligible `/data` view is enough: it reads the record again after its own memory step, so a request that creates the entry can also judge. Later views replay the stored item with no weather call.
+A missing hour, a failed or slow read, missing coordinates or a missing
+completion time writes nothing and says nothing; the next live view tries
+again; one interval that cannot be read holds back the whole verdict, and so does a failed read of the visit's products or their catalog facts (a stored verdict still replays, nothing new is judged or written until a healthy view). The next
+visit's frozen `sinceLast` carries the item as engine input only, even when the
+visit had no applied list or watched topics (a support-product-only visit): that
+internal block is not served, the progress engine and the since-last copy treat
+it as no block, and `reportV2.sinceLast` stays absent for such a visit. The sentence is fixed, carries no number, product name or commitment (no
+re-check, no visit, no free re-treatment), and nothing is sent to a customer.
+As a helpful extra that nothing depends on, the next lawn visit's Fast Complete
+context (an admin route, `GET /admin/dispatch/:serviceId/lawn-fast/context`)
+carries one fixed technician line read from the prior visit's stored item at
+the same property. No token, eligibility, privacy or rate-limit change.
+
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

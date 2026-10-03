@@ -115,6 +115,17 @@ test('dryRun reports an inherited technician who is no longer assignable as unas
   expect(out.body.wouldBook.technicianId).toBeNull();
 });
 
+test('the dryRun overlap probe carries the technician the write would land with (unassignable inherited tech → null)', async () => {
+  install();
+  await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ technicianId: 'tech-1', windowStart: '09:00', windowEnd: '10:00' });
+
+  findConflictingVisits.mockClear();
+  assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('out'), { code: 'TECH_NOT_ASSIGNABLE' }));
+  await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(findConflictingVisits.mock.calls[0][0].technicianId).toBeNull();
+});
+
 test('useSuggestedDate keeps the today-or-later rule', async () => {
   install({ record: { structured_notes: { typedFollowupVerdict: { required: true, suggestedDate: '2026-09-20' } } } });
   const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
