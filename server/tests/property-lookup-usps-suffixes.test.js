@@ -205,3 +205,20 @@ describe('diagonal post-directions through the suffix helpers', () => {
     expect(wheres[0]).not.toContain('LK NW');
   });
 });
+
+describe('a street whose name is a suffix word', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  test('typed "100 W Lake" finds a roll that spells "100 W LAKE" (mock filters by the outbound LIKE)', async () => {
+    const { auditAddressHouseNumber } = require('../services/property-lookup/ai-property-lookup');
+    const ROLL = ['100 W LAKE', '120 W LAKE'];
+    global.fetch = jest.fn().mockImplementation(async (url) => {
+      const where = new URL(url).searchParams.get('where');
+      const like = /LIKE '%(.*)%'/.exec(where)[1].split('%');
+      const rows = ROLL.filter((r) => { let i = 0; return like.every((part) => { const j = r.indexOf(part, i); if (j < 0) return false; i = j + part.length; return true; }); });
+      return { ok: true, json: async () => ({ features: rows.map((r) => ({ attributes: { SITUS_ADDRESS: r, SITUS_POSTAL_ZIP: '34202' } })) }) };
+    });
+    const audit = await auditAddressHouseNumber('100 W Lake, Bradenton, FL 34202');
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
+  });
+});

@@ -13,9 +13,39 @@
 // (live 10-02). The spelled-out form rides along as a second spelling.
 const LEADING_AVENUE_RE = /^((?:\d+[A-Z]?\s+)?(?:(?:N|S|E|W|NE|NW|SE|SW)\s+)?)AVE(\s+[A-Z0-9]{1,3})$/;
 
+// A street type that is the street's NAME ("100 W LAKE" → key "W LK") cannot
+// be stripped from the query, and a roll may spell it either way. The other
+// spelling of a terminal USPS suffix word (standard → its longest listed
+// name: LK → LAKE, VW → VIEW) rides along as a second query (live audit
+// P1 10-02). A word whose two forms are equal adds nothing.
+const { USPS_STREET_SUFFIXES } = require('./usps-street-suffixes');
+const SPELLED_BY_STANDARD = {};
+for (const [word, standard] of Object.entries(USPS_STREET_SUFFIXES)) {
+  // USPS lists some plurals as variants of a singular standard (PARKS →
+  // PARK); a plural is never the spelled form of a singular standard.
+  if (word.endsWith('S') && !standard.endsWith('S')) continue;
+  if (!SPELLED_BY_STANDARD[standard] || word.length > SPELLED_BY_STANDARD[standard].length) SPELLED_BY_STANDARD[standard] = word;
+}
+// Only when the suffix word IS the whole name (optional house number and
+// directions around it) — every other street reaches the roll with its
+// suffix already stripped, so it needs no second spelling.
+const TERMINAL_WORD_RE = /^((?:\d+[A-Z]?\s+)?(?:(?:NE|NW|SE|SW|N|S|E|W)\s+)?)([A-Z]+)(\s+(?:NE|NW|SE|SW|N|S|E|W))?$/;
+function otherSuffixSpelling(text) {
+  const m = TERMINAL_WORD_RE.exec(text);
+  const standard = m && USPS_STREET_SUFFIXES[m[2]];
+  if (!standard) return null;
+  // Only abbreviated → spelled: the normalizer only ever WRITES the
+  // abbreviation ("W LK"); a spelled word in the query came from the typed
+  // text as-is ("HARBOR" from "Harbor Blvd") and needs no second request.
+  if (m[2] !== standard || SPELLED_BY_STANDARD[standard] === standard) return null;
+  return `${m[1]}${SPELLED_BY_STANDARD[standard]}${m[3] || ''}`;
+}
+
 function routeSpellingVariants(text) {
   const avenue = LEADING_AVENUE_RE.exec(text);
   if (avenue) return [text, `${avenue[1]}AVENUE${avenue[2]}`];
+  const suffixSpelling = otherSuffixSpelling(text);
+  if (suffixSpelling) return [text, suffixSpelling];
   // The targeted query can carry a pre-direction ("123 N US 41"); it is kept
   // ahead of every spelling ("123 N US HWY 41").
   const m = /^((?:\d+[A-Z]?\s+)?(?:(?:N|S|E|W|NE|NW|SE|SW)\s+)?)(SR|US|CR)\s+(\d{1,4}[A-Z]?)$/.exec(text);
