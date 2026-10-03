@@ -1183,7 +1183,7 @@ describe('GitHub review round 1 on PR #4656', () => {
   // percentageDiscountDollars helper for its own percentage branch
   // UNCONDITIONALLY ("not itself gated... whether or not
   // GATE_DISCOUNT_STACKING is live" — see that function's own comment;
-  // also documented in this repo's CLAUDE.md: "The corrected cent-exact
+  // also documented in this repo's docs/gates-and-env.md: "The corrected cent-exact
   // rounding... is live regardless of the gate"). previewLineDiscount
   // (this component's own base per-line preview, used whenever no
   // appointment-level discount rides the group) still did the OLD plain

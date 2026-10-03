@@ -2342,7 +2342,7 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
     // baseAmount * (amount / 100) — plain IEEE754 float division, which
     // rounds 5% of $20.70 down to $1.03 (20.70 * 0.05 ===
     // 1.0349999999999999). The mobile checkout preview (and every other
-    // discount surface, per CLAUDE.md's "regardless of the gate" rounding
+    // discount surface, per docs/gates-and-env.md's "regardless of the gate" rounding
     // rule) now shows the cent-exact $1.04 through
     // lib/discountStack.percentageDiscountDollars — sharing that same
     // integer-cents helper here keeps this cap-check from clamping the

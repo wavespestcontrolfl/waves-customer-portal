@@ -20,7 +20,7 @@
  * / applySeriesMoveEffects), which this module never calls. The one
  * notification the mover fires post-commit is tech-visit-notifications.js's
  * notifyAssignmentChange — a STAFF-only in-app/push notice to the two techs
- * involved (CLAUDE.md: "staff-only, never a customer channel"), left on by
+ * involved (docs/gates-and-env.md: "staff-only, never a customer channel"), left on by
  * default here since it is not customer communication.
  *
  * Out of scope, always left parked for a human (never thrown away):
