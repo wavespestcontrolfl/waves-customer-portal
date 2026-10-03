@@ -16,6 +16,15 @@
 // house number cannot blow up the scan. Read-only. The property leg is
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
+//
+// `complete: true` is the strict mode for a caller that must claim "exactly one"
+// (the call booker's household hold): NO row limit (a limit could hide a second
+// household), the unit must be EXACTLY equal (a unit on one side only is another
+// door), EVERY error propagates (a failed property leg is not "no match"), every
+// matching address source is returned (a customer can appear once per source, so
+// the caller can judge the source that matched), and each row also carries
+// `active`, `customer_property_type`, `source_property_type` and
+// `source_occupancy_type`. The default mode is unchanged.
 const logger = require('./logger');
 const { sameStreetAddress, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
 
@@ -43,40 +52,52 @@ function candidateAddressString(row) {
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
  */
-async function findCustomersAtAddress(database, address, { excludeCustomerId = null } = {}) {
+async function findCustomersAtAddress(database, address, { excludeCustomerId = null, complete = false } = {}) {
   const houseNumber = houseNumberOf(address);
   if (!houseNumber) return [];
+  const limit = complete ? null : PER_LEG_LIMIT;
 
-  const primary = await database('customers')
+  const primaryQuery = database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
     .where('address_line1', 'ilike', `${houseNumber} %`)
-    .orderBy('id')
-    .limit(PER_LEG_LIMIT)
+    .orderBy('id');
+  const primary = await (limit ? primaryQuery.limit(limit) : primaryQuery)
     .select(
       'id', 'account_id', 'first_name', 'last_name', 'phone', 'email',
       'address_line1', 'address_line2', 'city', 'state', 'zip',
       'waveguard_tier', 'monthly_rate', 'pipeline_stage',
+      ...(complete ? ['active', 'property_type as customer_property_type', 'property_type as source_property_type'] : []),
     );
   const candidates = primary.map((row) => ({ ...row, matchedVia: 'primary' }));
 
-  try {
-    const property = await database('customer_properties as cp')
+  const propertyLeg = async () => {
+    const propertyQuery = database('customer_properties as cp')
       .join('customers as c', 'cp.customer_id', 'c.id')
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
       .where('cp.address_line1', 'ilike', `${houseNumber} %`)
-      .orderBy('cp.id')
-      .limit(PER_LEG_LIMIT)
+      .orderBy('cp.id');
+    const property = await (limit ? propertyQuery.limit(limit) : propertyQuery)
       .select(
         'c.id', 'c.account_id', 'c.first_name', 'c.last_name', 'c.phone', 'c.email',
         'c.waveguard_tier', 'c.monthly_rate', 'c.pipeline_stage',
         'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.state', 'cp.zip',
+        ...(complete ? ['c.active', 'c.property_type as customer_property_type',
+          'cp.property_type as source_property_type', 'cp.occupancy_type as source_occupancy_type'] : []),
       );
     candidates.push(...property.map((row) => ({ ...row, matchedVia: 'property' })));
-  } catch (propErr) {
-    logger.warn(`[customer-address-match] property-address leg skipped: ${propErr.message}`);
+  };
+  if (complete) {
+    // Fail closed: an unreadable property leg must fail the caller, not read as "no match".
+    await propertyLeg();
+  } else {
+    try {
+      await propertyLeg();
+    } catch (propErr) {
+      logger.warn(`[customer-address-match] property-address leg skipped: ${propErr.message}`);
+    }
   }
 
   const seen = new Set();
@@ -84,8 +105,9 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   for (const row of candidates) {
     if (!row.address_line1) continue;
     if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
-    if (seen.has(String(row.id))) continue;
-    if (!sameStreetAddress(candidateAddressString(row), address)) continue;
+    // complete mode keeps one row per matching SOURCE (the caller judges the source that matched).
+    if (!complete && seen.has(String(row.id))) continue;
+    if (!sameStreetAddress(candidateAddressString(row), address, complete ? { requireExactUnit: true } : undefined)) continue;
     seen.add(String(row.id));
     matches.push(row);
   }

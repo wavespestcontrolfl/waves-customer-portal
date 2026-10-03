@@ -375,6 +375,18 @@ describe('household hold card (GATE_CALL_HOUSEHOLD_HOLD)', () => {
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
   });
 
+  it('Dismiss carries the card version too (the server 409s a dismissal of a refreshed card)', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = await cardEl();
+    fireEvent.click(within(el).getByRole('button', { name: /dismiss/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /^dismiss$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/hh/dismiss', {
+      method: 'PUT', body: JSON.stringify({ note: null, expected_updated_at: card.updated_at }),
+    }));
+  });
+
   it('a malformed suggested id never becomes a link', () => {
     render(<ConfirmEvidence reasonCode="household_address_match" payload={{ ...payload, suggested_customer_id: 'not-a-uuid' }} suggestedOpenId="also-bad" />);
     expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();

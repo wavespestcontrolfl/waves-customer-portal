@@ -509,10 +509,28 @@ describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operat
     }
   });
 
+  test('Resolve AND Dismiss are version-bound: a card refreshed (match moved) after the operator loaded it refuses with the stale outcome, and so does a request with no version', async () => {
+    const f = seed();
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      f.tables.triage_items[0].payload = { ...f.tables.triage_items[0].payload, suggested_customer_id: '55555555-5555-4555-8555-555555555555' };
+      f.tables.triage_items[0].updated_at = NEW_CARD_VERSION;
+      for (const action of ['resolve', 'dismiss']) {
+        const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('STALE_CARD_VERSION');
+        expect((await put(baseUrl, `/${CARD_ID}/${action}`, {})).status).toBe(409);
+      }
+      expect(f.tables.triage_items[0].status).toBe('open');
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: NEW_CARD_VERSION })).status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('dismissed');
+  });
+
   test('wiring: the list resolves the suggested customer to its live merge survivor for the Open customer link', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     expect(src).toContain("i.reason_code === 'household_address_match'");
-    expect(src).toContain('suggestedCustomerOpenTarget(db, item.payload)');
+    expect(src).toContain('openTargetsForIds(db, wanted)');
     expect(src).toContain('item.suggested_customer_open_id =');
   });
 });

@@ -72,18 +72,28 @@ function liveSurvivorSql(idExpr) {
   )`;
 }
 
-// The record the office should OPEN for each listed customer: the id itself while it is
-// live, else the live survivor its active merge chain (liveSurvivorSql) ends at; a listed
-// id with neither is returned unchanged.
-// Returns [{ id, open_id }] in listing order (codex #5559 r18).
-async function owedCustomerOpenTargets(conn, payload) {
-  const ids = owedCustomerIds(payload);
-  if (!ids.length) return [];
+// The record the office should OPEN for each id, in ONE query: the id itself while it is live,
+// else the live survivor its active merge chain (liveSurvivorSql) ends at. Returns a Map
+// id -> open id; an id with neither is mapped to itself. Used by the triage list for every
+// first-name and household-hold card on the page together.
+async function openTargetsForIds(conn, idList) {
+  const ids = [...new Set((idList || []).map(String).filter((id) => UUID_RE.test(id)))];
+  const out = new Map();
+  if (!ids.length) return out;
   const result = await conn.raw(`
     select ids.id, ${liveSurvivorSql('ids.id')} as open_id
-    from unnest(?::text[]) with ordinality as ids(id, ord) order by ids.ord`, [ids]);
-  const byId = new Map((result?.rows || []).map((r) => [String(r.id), r.open_id ? String(r.open_id) : null]));
-  return ids.map((id) => ({ id, open_id: byId.get(id) || id }));
+    from unnest(?::text[]) as ids(id)`, [ids]);
+  for (const r of (result?.rows || [])) out.set(String(r.id), r.open_id ? String(r.open_id) : String(r.id));
+  return out;
+}
+
+// The record the office should OPEN for each listed customer: the id itself while it is
+// live, else the live survivor its active merge chain ends at; a listed id with neither is
+// returned unchanged. Returns [{ id, open_id }] in listing order (codex #5559 r18).
+async function owedCustomerOpenTargets(conn, payload) {
+  const ids = owedCustomerIds(payload);
+  const open = await openTargetsForIds(conn, ids);
+  return ids.map((id) => ({ id, open_id: open.get(id) || id }));
 }
 
 // The household-hold card's suggested customer (payload.suggested_customer_id), UUID-guarded,
@@ -91,16 +101,6 @@ async function owedCustomerOpenTargets(conn, payload) {
 function suggestedCustomerId(payload) {
   const id = String(parsePayload(payload).suggested_customer_id || '').trim();
   return UUID_RE.test(id) ? id : null;
-}
-
-// { id, open_id } for the household-hold card's suggested customer (open_id follows an active
-// merge chain to the live survivor; the id itself when it has none), or null with no valid id.
-async function suggestedCustomerOpenTarget(conn, payload) {
-  const id = suggestedCustomerId(payload);
-  if (!id) return null;
-  const result = await conn.raw(`select ${liveSurvivorSql('?::text')} as open_id`, [id]);
-  const open = result?.rows?.[0]?.open_id;
-  return { id, open_id: open ? String(open) : id };
 }
 
 // True only when the card lists at least one customer and EVERY listed customer is
@@ -117,5 +117,5 @@ async function everyOwedCustomerNamed(conn, payload) {
 
 module.exports = {
   UUID_RE, owedCustomerIds, owedCustomerNamedSql, everyOwedCustomerNamed, owedCustomerOpenTargets,
-  liveSurvivorSql, suggestedCustomerId, suggestedCustomerOpenTarget,
+  liveSurvivorSql, openTargetsForIds, suggestedCustomerId,
 };

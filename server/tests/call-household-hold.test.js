@@ -18,7 +18,7 @@ const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
 const {
-  householdHoldEligible, classifyHouseholdCandidates, loadHouseholdCandidates, householdPhoneOnFile,
+  householdHoldEligible, classifyHouseholdCandidates, householdPhoneOnFile, retireHouseholdHoldCard,
   findHouseholdCustomerByAddress, fileHouseholdHoldCard, triageCardStillOpen, firstNameAdvisoryAddressOk,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
@@ -107,18 +107,21 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
   const call = { address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34240' };
   const src = (over = {}) => ({ address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34240', commercial: false, ...over });
   const cust = (id, over = {}) => ({ id, first_name: 'Sample', last_name: 'Customer', active: true, property_type: 'residential', waveguard_tier: 'Bronze', ...over });
-  const set = (entries) => ({
-    customers: entries.map(([c]) => c),
-    sourcesById: new Map(entries.map(([c, sources]) => [c.id, sources])),
-  });
+  // The shared same-address query's `complete` rows: one per matching address SOURCE.
+  const set = (entries) => entries.flatMap(([c, sources]) => sources.map((source) => ({
+    id: c.id, first_name: c.first_name, last_name: c.last_name, active: c.active, waveguard_tier: c.waveguard_tier,
+    customer_property_type: c.property_type,
+    address_line1: source.address_line1, address_line2: source.address_line2, city: source.city, zip: source.zip,
+    source_property_type: source.commercial ? 'commercial' : null, source_occupancy_type: null,
+  })));
 
   test('zero candidates: no hold', () => {
-    expect(classifyHouseholdCandidates({ customers: [], sourcesById: new Map() }, call)).toEqual({ customer: null, reason: 'no_address_match' });
+    expect(classifyHouseholdCandidates([], call)).toEqual({ customer: null, reason: 'no_address_match' });
   });
 
   test('exactly one: the hold names that customer', () => {
     const a = cust('a');
-    expect(classifyHouseholdCandidates(set([[a, [src()]]]), call)).toEqual({ customer: a, reason: 'address_match' });
+    expect(classifyHouseholdCandidates(set([[a, [src()]]]), call)).toEqual({ customer: { id: 'a', first_name: 'Sample', last_name: 'Customer' }, reason: 'address_match' });
   });
 
   test('two or more matching customers: no hold, however they match (row or property source)', () => {
@@ -130,7 +133,7 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
 
   test('a customer with the address on BOTH its row and a property row is still one customer', () => {
     const a = cust('a');
-    expect(classifyHouseholdCandidates(set([[a, [src(), src()]]]), call).customer).toBe(a);
+    expect(classifyHouseholdCandidates(set([[a, [src(), src()]]]), call).customer.id).toBe('a');
   });
 
   test.each([
@@ -149,15 +152,15 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
 
   test('the basic cleanup only: case, punctuation, whitespace, ZIP+4 and the suffix alias table match', () => {
     const a = cust('a');
-    expect(classifyHouseholdCandidates(set([[a, [src({ address_line1: ' 100  example LP. ', city: 'sarasota', zip: '34240-1111' })]]]), call).customer).toBe(a);
-    expect(classifyHouseholdCandidates(set([[a, [src({ address_line1: '100 Example Lp' })]]]), { ...call, address_line1: '100 Example Loop' }).customer).toBe(a);
+    expect(classifyHouseholdCandidates(set([[a, [src({ address_line1: ' 100  example LP. ', city: 'sarasota', zip: '34240-1111' })]]]), call).customer.id).toBe('a');
+    expect(classifyHouseholdCandidates(set([[a, [src({ address_line1: '100 Example Lp' })]]]), { ...call, address_line1: '100 Example Loop' }).customer.id).toBe('a');
     // the same unit on both sides, after the same cleanup
-    expect(classifyHouseholdCandidates(set([[a, [src({ address_line2: 'Apt 3' })]]]), { ...call, address_line2: ' apt  3 ' }).customer).toBe(a);
+    expect(classifyHouseholdCandidates(set([[a, [src({ address_line2: 'Apt 3' })]]]), { ...call, address_line2: ' apt  3 ' }).customer.id).toBe('a');
   });
 
   test('an explicitly inactive customer is not counted (and so cannot make a second household); a NULL flag is', () => {
     const [a, inactive] = [cust('a'), cust('b', { active: false })];
-    expect(classifyHouseholdCandidates(set([[a, [src()]], [inactive, [src()]]]), call).customer).toBe(a);
+    expect(classifyHouseholdCandidates(set([[a, [src()]], [inactive, [src()]]]), call).customer.id).toBe('a');
     expect(classifyHouseholdCandidates(set([[inactive, [src()]]]), call).reason).toBe('no_address_match');
     // active NULL still counts toward "more than one", then fails the active requirement on its own
     expect(classifyHouseholdCandidates(set([[cust('a'), [src()]], [cust('n', { active: null }), [src()]]]), call).reason).toBe('multiple_customers_at_address');
@@ -176,7 +179,7 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
   test('an UNRELATED commercial property on a residential customer does not waive the hold (codex #5700 r1 P1)', () => {
     const a = cust('a');
     const elsewhere = src({ address_line1: '7 Elsewhere Way', commercial: true });
-    expect(classifyHouseholdCandidates(set([[a, [src(), elsewhere]]]), call)).toEqual({ customer: a, reason: 'address_match' });
+    expect(classifyHouseholdCandidates(set([[a, [src(), elsewhere]]]), call).reason).toBe('address_match');
   });
 });
 
@@ -265,12 +268,21 @@ const SKIP = !process.env.DATABASE_URL;
     expect((await findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).reason).toBe('multiple_customers_at_address');
   });
 
-  test('the loader reads only whole-token house-number candidates and never limits the count', async () => {
-    for (let i = 0; i < 25; i += 1) await newCustomer({ phone: `+1941555${String(2000 + i)}` });
-    await newCustomer({ phone: '+19415558000', address_line1: '1100 Example Loop' });
-    const { customers } = await loadHouseholdCandidates(trx, CALL);
-    expect(customers).toHaveLength(25);
-    expect((await loadHouseholdCandidates(trx, { ...CALL, address_line1: 'Example Ranch' })).customers).toEqual([]);
+  test('the finder rides the shared same-address query in complete mode: no row limit can hide a second household, and a failing leg fails closed', async () => {
+    const { findCustomersAtAddress } = require('../services/customer-address-match');
+    // 60 households at the very same address (more than the default per-leg limit of 50)
+    for (let i = 0; i < 60; i += 1) await newCustomer({ phone: `+1941555${String(3000 + i)}` });
+    expect((await findCustomersAtAddress(trx, '100 Example Loop, Sarasota, 34240')).length).toBe(50); // default mode: bounded
+    expect((await findCustomersAtAddress(trx, '100 Example Loop, Sarasota, 34240', { complete: true })).length).toBe(60); // complete: all
+    expect((await findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).reason).toBe('multiple_customers_at_address');
+    // a unit on one side only is another door in complete mode (the default mode keeps it a possible duplicate)
+    await newCustomer({ phone: '+19415558888', address_line2: 'Apt 3' });
+    expect((await findCustomersAtAddress(trx, '100 Example Loop Apt 3, Sarasota, 34240', { complete: true })).map((r) => r.address_line2)).toEqual(['Apt 3']);
+    // fail closed: a property leg that cannot be read propagates instead of reading as "no match"
+    await trx.raw('SAVEPOINT before_break');
+    await trx.raw('ALTER TABLE customer_properties RENAME COLUMN active TO active_gone');
+    await expect(findHouseholdCustomerByAddress({ phone: '+19415550999', address: CALL, conn: trx })).rejects.toBeTruthy();
+    await trx.raw('ROLLBACK TO SAVEPOINT before_break');
   });
 
   test('the card filer: ONE card per call with the full payload; open/claimed dedup; a dismissed card waives; a resolved one re-files', async () => {
@@ -323,16 +335,48 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await fileHouseholdHoldCard(trx, { ...args, callLogId: randomUUID() })).toBe('open');
   });
 
-  test('the card filer re-checks the call under the lock: a linked call or a lost claim files nothing', async () => {
+  test('the card filer says WHICH way the call moved: a lost claim, or a link made meanwhile (with the linked customer)', async () => {
     const [call] = await trx('call_log').insert({ twilio_call_sid: `CA${'9'.repeat(30)}h1`, direction: 'inbound', processing_token: 'tok-1' }).returning('id');
     const args = { callLogId: call.id, procToken: 'tok-1', customerId: randomUUID(), phone: '+19415550999', extracted: { first_name: 'Sample' } };
-    expect(await fileHouseholdHoldCard(trx, { ...args, procToken: 'someone-else' })).toBe('moved');
-    await trx('call_log').where({ id: call.id }).update({ customer_id: (await newCustomer()).id });
-    expect(await fileHouseholdHoldCard(trx, args)).toBe('moved'); // the office linked it meanwhile
+    expect(await fileHouseholdHoldCard(trx, { ...args, procToken: 'someone-else' })).toBe('claim_lost');
+    const linked = await newCustomer();
+    await trx('call_log').where({ id: call.id }).update({ customer_id: linked.id });
+    expect(await fileHouseholdHoldCard(trx, args)).toEqual({ state: 'linked', customerId: linked.id }); // the office linked it meanwhile
+    // a lost claim wins over a link: the owning pass decides
+    expect(await fileHouseholdHoldCard(trx, { ...args, procToken: 'someone-else' })).toBe('claim_lost');
     expect(await trx('triage_items').where({ call_log_id: call.id })).toHaveLength(0);
     await trx('call_log').where({ id: call.id }).update({ customer_id: null });
     expect(await fileHouseholdHoldCard(trx, args)).toBe('open');
     expect(await trx('triage_items').where({ call_log_id: call.id })).toHaveLength(1);
+  });
+
+  test('a standing card is retired (resolved by the system, never dismissed) when the hold no longer stands; the review flag follows', async () => {
+    const [call] = await trx('call_log').insert({ twilio_call_sid: `CA${'9'.repeat(30)}h2`, direction: 'inbound', review_status: 'open' }).returning('id');
+    const base = { callLogId: call.id, customerId: randomUUID(), phone: '+19415550999', extracted: { first_name: 'Sample' } };
+    // nothing standing: no transaction needed, nothing changes
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'n' })).toBe(0);
+    await fileHouseholdHoldCard(trx, base);
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'the reprocessed call no longer matches one existing customer' })).toBe(1);
+    const [card] = await trx('triage_items').where({ call_log_id: call.id });
+    expect(card).toMatchObject({ status: 'resolved', resolution_source: 'auto', resolution_rule: 'household_hold_retired',
+      resolution_note: 'the reprocessed call no longer matches one existing customer' });
+    expect(card.resolved_at).toBeTruthy();
+    expect((await trx('call_log').where({ id: call.id }).first('review_status')).review_status).toBe('resolved');
+    // a resolved card does not block a fresh filing if the hold stands again
+    expect(await fileHouseholdHoldCard(trx, base)).toBe('open');
+    // a DISMISSED card (the office's waiver) is never touched by a retire
+    await trx('triage_items').where({ call_log_id: call.id }).del();
+    await fileHouseholdHoldCard(trx, base);
+    await trx('triage_items').update({ status: 'dismissed' });
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'n' })).toBe(0);
+    expect((await trx('triage_items').where({ call_log_id: call.id }))[0].status).toBe('dismissed');
+    // a claimed card retires too, and another open card keeps the call's review flag open
+    await trx('triage_items').where({ call_log_id: call.id }).del();
+    await fileHouseholdHoldCard(trx, base);
+    await trx('triage_items').update({ status: 'in_progress' });
+    await trx('triage_items').insert({ call_log_id: call.id, category: 'service_unknown', severity: 'blocking', reason_code: 'address_unverified', status: 'open', summary: 's' });
+    expect(await retireHouseholdHoldCard(trx, { callLogId: call.id, note: 'n' })).toBe(1);
+    expect((await trx('call_log').where({ id: call.id }).first('review_status')).review_status).toBe('open');
   });
 
   test('the finalization recheck: only an open / claimed card keeps the reason counting toward review_status', async () => {
@@ -346,16 +390,23 @@ const SKIP = !process.env.DATABASE_URL;
   });
 
   test('the Open customer target follows an active merge chain to the live survivor', async () => {
-    const { suggestedCustomerOpenTarget, suggestedCustomerId } = require('../utils/missing-first-name-card');
+    const { openTargetsForIds, suggestedCustomerId } = require('../utils/missing-first-name-card');
     await trx.raw('CREATE TEMP TABLE customer_merge_journal (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), winner_customer_id uuid, loser_customer_id uuid, created_at timestamptz DEFAULT clock_timestamp(), undone_at timestamptz) ON COMMIT DROP');
     const [loser, mid, winner, live] = [await newCustomer({ deleted_at: new Date() }), await newCustomer({ deleted_at: new Date() }), await newCustomer(), await newCustomer()];
     await trx('customer_merge_journal').insert([{ winner_customer_id: mid.id, loser_customer_id: loser.id }, { winner_customer_id: winner.id, loser_customer_id: mid.id }]);
-    expect(await suggestedCustomerOpenTarget(trx, { suggested_customer_id: live.id })).toEqual({ id: live.id, open_id: live.id });
-    expect(await suggestedCustomerOpenTarget(trx, { suggested_customer_id: loser.id })).toEqual({ id: loser.id, open_id: winner.id });
+    expect((await openTargetsForIds(trx, [live.id])).get(live.id)).toBe(live.id);
+    expect((await openTargetsForIds(trx, [loser.id])).get(loser.id)).toBe(winner.id);
     // an undone hop is not followed; a gone id with no merge is returned unchanged; a malformed id yields nothing
     await trx('customer_merge_journal').where({ loser_customer_id: mid.id }).update({ undone_at: new Date() });
-    expect(await suggestedCustomerOpenTarget(trx, { suggested_customer_id: loser.id })).toEqual({ id: loser.id, open_id: loser.id });
-    expect(await suggestedCustomerOpenTarget(trx, { suggested_customer_id: 'not-a-uuid' })).toBeNull();
+    expect((await openTargetsForIds(trx, [loser.id])).get(loser.id)).toBe(loser.id);
+    expect((await openTargetsForIds(trx, ['not-a-uuid'])).size).toBe(0);
+    // ONE query resolves every id on a page (household and first-name cards together), mapped back per id
+    await trx('customer_merge_journal').where({ loser_customer_id: mid.id }).update({ undone_at: null });
+    let queries = 0;
+    const counting = { raw: (...args) => { queries += 1; return trx.raw(...args); } };
+    const batch = await openTargetsForIds(counting, [live.id, loser.id, mid.id, live.id, 'not-a-uuid']);
+    expect(queries).toBe(1);
+    expect([...batch.entries()].sort()).toEqual([[live.id, live.id], [loser.id, winner.id], [mid.id, winner.id]].sort());
     expect(suggestedCustomerId({ suggested_customer_id: 'not-a-uuid' })).toBeNull();
     expect(suggestedCustomerId(JSON.stringify({ suggested_customer_id: live.id }))).toBe(live.id);
   });
@@ -381,12 +432,41 @@ describe('wiring in processRecording (structural pin)', () => {
     expect(step3).toContain("throw new Error('household_hold_card_unavailable');");
     expect(step3).toContain("throw new Error('household_hold_lookup_unavailable');");
     expect(step3).toContain("cardState === 'waived'");
-    expect(step3).toContain("if (cardState === 'open' && !bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');");
+    expect(step3).toContain("if (!bridgeNeedsConfirmation.includes('household_address_match')) bridgeNeedsConfirmation.push('household_address_match');");
     // the filer takes the per-call lock before its first read, inside one transaction, and never inside a booking transaction
-    const filer = source.slice(source.indexOf('async function fileHouseholdHoldCard'), source.indexOf('async function findCustomerForCallContact'));
+    const filer = source.slice(source.indexOf('async function fileHouseholdHoldCard'), source.indexOf('async function retireHouseholdHoldCard'));
     expect(filer.indexOf('conn.transaction')).toBeLessThan(filer.indexOf('lockTriageCall(trx, callLogId)'));
     expect(filer.indexOf('lockTriageCall(trx, callLogId)')).toBeLessThan(filer.indexOf("trx('call_log')"));
     expect(filer.indexOf("trx('call_log')")).toBeLessThan(filer.indexOf("trx('triage_items')"));
+  });
+
+  test('each filer result is handled separately: claim_lost abandons, linked continues on the linked customer, neither holds', () => {
+    expect(step3).toMatch(/if \(cardState === 'claim_lost'\) \{[\s\S]{0,300}return abandonToPeer\('the household hold'\);/);
+    expect(step3).toMatch(/cardState\.state === 'linked'\) \{[\s\S]{0,300}householdLinkedCustomerId = cardState\.customerId;/);
+    // linked: this pass continues on that customer (the create branch is closed to it), never as a hold
+    expect(source).toMatch(/\} else if \(householdLinkedCustomerId\) \{\s+customerId = householdLinkedCustomerId;\s+\} else if \(householdHoldActive\) \{/);
+    const holdSet = step3.slice(step3.indexOf("} else {\n            householdHoldActive = true;"));
+    expect(holdSet.indexOf('householdHoldActive = true')).toBeLessThan(holdSet.indexOf("push('household_address_match')"));
+  });
+
+  test('a standing card is retired whenever this pass does not hold (no match, number now on file, address no longer exact, unlinked, gate off) and its review reason is dropped; a prelinked call is left to the sweep', () => {
+    expect(step3).toContain('const householdPrelinked = !!customerId;');
+    expect(step3).toContain('if (!householdPrelinked && !(phone && !explicitUnlink)) await retireStandingHouseholdCard();');
+    expect(step3).toContain('if (!householdHoldActive && !householdLinkedCustomerId && !householdPrelinked) await retireStandingHouseholdCard();');
+    expect(step3).toContain("bridgeNeedsConfirmation.splice(at, 1)");
+    expect(step3).toContain('household hold is switched off');
+  });
+
+  test('ONE open-card helper serves the first-name and household reasons', () => {
+    expect(source).not.toContain('missingFirstNameCardStillOpen');
+    expect(source).toContain("triageCardStillOpen(db, call.id, 'missing_first_name')");
+    expect(source).toContain("await triageCardStillOpen(trx, call.id, 'missing_first_name')");
+  });
+
+  test('the household finder uses the shared same-address query, not a parallel loader', () => {
+    expect(source).not.toContain('loadHouseholdCandidates');
+    expect(source).toContain('findCustomersAtAddress(conn,');
+    expect(source).toContain('{ complete: true }');
   });
 
   test('nothing is written to any customer: the hold block touches no customers / contact / consent writer', () => {
@@ -394,10 +474,11 @@ describe('wiring in processRecording (structural pin)', () => {
       expect(step3).not.toContain(forbidden);
     }
     const helpers = source.slice(source.indexOf('// ── Household hold (GATE_CALL_HOUSEHOLD_HOLD)'), source.indexOf('async function findCustomerForCallContact'));
-    // the ONLY update is the card's own evidence refresh on triage_items (codex #5700 r1); no deletes
+    // the ONLY updates are on triage_items: the card's evidence refresh and the retire (plus the review-status sync helper); no deletes
     expect(helpers).not.toMatch(/\.(del|delete)\(/);
-    expect(helpers.match(/\.update\(/g)).toHaveLength(1);
+    expect(helpers.match(/\.update\(/g)).toHaveLength(2);
     expect(helpers).toContain("await trx('triage_items').where({ id: live.id }).update({");
+    expect(helpers).toContain(".where({ call_log_id: callLogId, reason_code: 'household_address_match' })\n      .whereIn('status', ['open', 'in_progress'])\n      .update({");
     expect(helpers.match(/\.insert\(/g)).toHaveLength(1);
     expect(helpers).not.toMatch(/trx\('customers'\)|conn\('customers'\)\.(insert|update)/);
   });

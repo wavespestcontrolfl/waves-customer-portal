@@ -21,7 +21,7 @@ const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
 const { validatePhoneCallAppointmentCustomer, advisoryBookingAddressHoldFields,
-  fileMissingFirstNameCard, firstNameAdvisoryAddressOk, addressesExactlyMatch, missingFirstNameCardStillOpen } = _test;
+  fileMissingFirstNameCard, firstNameAdvisoryAddressOk, addressesExactlyMatch, triageCardStillOpen } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -231,7 +231,7 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
   });
 
   test('wiring: the booking path marks the call for review while the first-name card is open', () => {
-    expect(source).toContain("if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)");
+    expect(source).toContain("if (await triageCardStillOpen(db, call.id, 'missing_first_name').catch(() => false)");
   });
 
   test('wiring: the fenced re-read only RECORDS the owed card; it is filed after the booking transaction settles, committed or rolled back (codex #5559 r14)', () => {
@@ -243,7 +243,7 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(filedAt).toBeGreaterThan(catchAt);
     const block = source.slice(filedAt, filedAt + 700);
     expect(block).toContain('await fileFirstNameAdvisoryCard(db)');
-    expect(block).toContain('await missingFirstNameCardStillOpen(db, call.id)');
+    expect(block).toContain('await triageCardStillOpen(db, call.id, \'missing_first_name\')');
     expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
@@ -264,7 +264,7 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
 
   test('dedup, append and fresh insert all run in ONE transaction under the per-call triage lock taken before the first read', () => {
     const start = source.indexOf('async function fileMissingFirstNameCard(');
-    const block = source.slice(start, source.indexOf('async function missingFirstNameCardStillOpen', start));
+    const block = source.slice(start, source.indexOf('async function triageCardStillOpen', start));
     const lock = block.indexOf('await lockTriageCall(trx, callLogId);');
     expect(lock).toBeGreaterThan(-1);
     expect(block.indexOf('return conn.transaction(async (trx) => {')).toBeLessThan(lock);
@@ -287,7 +287,7 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
     const start = source.indexOf('await lockTriageCall(trx, call.id);\n      // A street-level hold');
     const block = source.slice(start, source.indexOf('// Keep the established leads -> call_log lock order', start));
     expect(block).toContain("const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')");
-    expect(block).toContain('await missingFirstNameCardStillOpen(trx, call.id)');
+    expect(block).toContain('await triageCardStillOpen(trx, call.id, \'missing_first_name\')');
     expect(block).toContain("(r !== 'missing_first_name' || firstNameStillOwed)");
   });
 
@@ -384,14 +384,14 @@ const SKIP = !process.env.DATABASE_URL;
     await fileMissingFirstNameCard(trx, args);
     // the finalization recheck: only an open / claimed card keeps the reason counting toward review_status
     await trx('triage_items').update({ status: 'open' });
-    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(true);
+    expect(await triageCardStillOpen(trx, callLogId, 'missing_first_name')).toBe(true);
     await trx('triage_items').update({ status: 'in_progress' });
-    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(true);
+    expect(await triageCardStillOpen(trx, callLogId, 'missing_first_name')).toBe(true);
     await trx('triage_items').update({ status: 'resolved' });
-    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(false);
+    expect(await triageCardStillOpen(trx, callLogId, 'missing_first_name')).toBe(false);
     await trx('triage_items').update({ status: 'dismissed' });
-    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(false);
-    expect(await missingFirstNameCardStillOpen(trx, randomUUID())).toBe(false);
+    expect(await triageCardStillOpen(trx, callLogId, 'missing_first_name')).toBe(false);
+    expect(await triageCardStillOpen(trx, randomUUID(), 'missing_first_name')).toBe(false);
     // a different call gets its own card
     expect(await fileMissingFirstNameCard(trx, { ...args, callLogId: randomUUID() })).toBe(true);
   });

@@ -342,31 +342,29 @@ router.get('/', async (req, res) => {
       }
     }
 
-    // A first-name card's "Open customer" links must reach an editable record: a listed customer
-    // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
+    // "Open customer" links must reach an editable record: a listed / suggested customer merged away
+    // since filing opens the survivor of its merge chain. ONE batched query resolves every id on the
+    // page (first-name cards' owed customers and household-hold cards' suggested customer together),
+    // then the results are mapped back per card.
     const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
-    if (nameCards.length) {
-      const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
-      for (const item of nameCards) {
-        try {
-          item.owed_customer_open_ids = [...new Set((await owedCustomerOpenTargets(db, item.payload)).map((t) => t.open_id))];
-        } catch (linkErr) {
-          logger.warn(`[admin-triage] first-name link targets read failed: ${linkErr.code || linkErr.name || 'error'}`);
-        }
-      }
-    }
-
-    // A household-hold card's "Open customer" link must reach an editable record too: a suggested
-    // customer merged away since filing opens the survivor of its merge chain (same resolution).
     const householdCards = items.filter((i) => i.reason_code === 'household_address_match');
-    if (householdCards.length) {
-      const { suggestedCustomerOpenTarget } = require('../utils/missing-first-name-card');
-      for (const item of householdCards) {
-        try {
-          item.suggested_customer_open_id = (await suggestedCustomerOpenTarget(db, item.payload))?.open_id || null;
-        } catch (linkErr) {
-          logger.warn(`[admin-triage] household link target read failed: ${linkErr.code || linkErr.name || 'error'}`);
+    if (nameCards.length || householdCards.length) {
+      try {
+        const { owedCustomerIds, suggestedCustomerId, openTargetsForIds } = require('../utils/missing-first-name-card');
+        const wanted = [
+          ...nameCards.flatMap((item) => owedCustomerIds(item.payload)),
+          ...householdCards.map((item) => suggestedCustomerId(item.payload)).filter(Boolean),
+        ];
+        const openIdOf = await openTargetsForIds(db, wanted);
+        for (const item of nameCards) {
+          item.owed_customer_open_ids = [...new Set(owedCustomerIds(item.payload).map((id) => openIdOf.get(id) || id))];
         }
+        for (const item of householdCards) {
+          const id = suggestedCustomerId(item.payload);
+          item.suggested_customer_open_id = id ? (openIdOf.get(id) || id) : null;
+        }
+      } catch (linkErr) {
+        logger.warn(`[admin-triage] link targets read failed: ${linkErr.code || linkErr.name || 'error'}`);
       }
     }
 
@@ -556,6 +554,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
       // Resolve / Dismiss must not settle a customer the operator never saw.
       || item.reason_code === 'missing_first_name'
+      // …and the household-hold card, whose suggested customer a reprocess can move: a stale
+      // Resolve / Dismiss must not settle a match the operator never saw (a Dismiss is also the
+      // permanent waiver that lets a later pass create and book the duplicate).
+      || item.reason_code === 'household_address_match'
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
