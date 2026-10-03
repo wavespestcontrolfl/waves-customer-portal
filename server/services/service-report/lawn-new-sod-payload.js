@@ -24,7 +24,7 @@ const { NEW_SOD_COPY, buildNewSodBanner, buildNewSodWeekPlan } = require('./lawn
 
 // Advice words. A text key from the advice list below that matches is removed. Observations
 // ("what we saw") and the customer's own words are not on the list and are never touched.
-const ADVICE_WORDS = /water|irrigat|sprinkl|moist|\bdry\b|drought|damp|\brain\b|\bmow|mower|ease back|\bskip\b|extra run/i;
+const ADVICE_WORDS = /water|irrigat|sprinkl|moist|drought|damp|\brain\b|\bmow|mower|ease back|\bskip\b|extra run/i;
 
 // Every watering / irrigation / mowing module and key, where it lives, and what happens to it.
 const NEW_SOD_PAYLOAD_RULES = Object.freeze({
@@ -44,7 +44,9 @@ const NEW_SOD_PAYLOAD_RULES = Object.freeze({
   'data.reportV2.mowing': 'removed',
   'data.reportV2.trends.{waterGap,mowing,mowingBand}': 'removed',
   'data.reportV2.insights[category water|mowing]': 'removed',
-  'data.reportV2.{snapshot,insights[],followUp,smsSummary} advice keys': 'scrubbed (see ADVICE_KEYS)',
+  'data.reportV2.{snapshot,insights[],followUp,lead,todaysResult,smsSummary} advice keys, consistencyWarnings[].suggestedFix': 'scrubbed (see the *_ADVICE_KEYS lists; todaysResult, followUp and the lead are what reconciliation produces)',
+  'data.lawnAssessment.recommendations.{nextVisitFocus,customerTip,recommendations[]}': 'scrubbed (the source the reconciliation step rebuilds the follow-up from)',
+  'data.dynamicContext.reentry.irrigationReadyAt': 'removed (the label irrigation hold; added after the payload is built)',
 });
 
 // The advice-bearing text keys. Observations (whatWeSaw, photoSummary), the treatment record
@@ -52,12 +54,35 @@ const NEW_SOD_PAYLOAD_RULES = Object.freeze({
 const SNAPSHOT_ADVICE_KEYS = ['customerAction', 'wavesNext', 'rootCause', 'scoreExplanation'];
 const INSIGHT_ADVICE_KEYS = ['headline', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'];
 const FOLLOW_UP_ADVICE_KEYS = ['headline', 'reason', 'customerAction'];
+// The report lead (derived by the reconciliation step, so it exists only after it ran).
+const LEAD_ADVICE_KEYS = ['headline', 'why', 'next', 'watching', 'whatToExpect'];
+// The SOURCE the reconciliation step reads and rebuilds the follow-up from (lawnAssessment.recommendations),
+// which is also sent to the client: scrubbed here so nothing downstream can rebuild advice from it.
+const RECOMMENDATION_TEXT_KEYS = ['nextVisitFocus', 'customerTip', 'action', 'text'];
 
 const advice = (value) => typeof value === 'string' && ADVICE_WORDS.test(value);
 
 function scrubKeys(host, keys) {
   if (!host || typeof host !== 'object') return;
   for (const key of keys) if (advice(host[key])) host[key] = null;
+}
+
+// Is this payload an ACTIVE new-sod report? The banner is the marker: it is the one key every path
+// keeps through reconciliation and spreads, and only an active visit carries state 'new_sod'.
+function isNewSodPayload(data) {
+  return !!(data && data.reportV2 && data.reportV2.banner && data.reportV2.banner.state === 'new_sod');
+}
+
+function scrubRecommendations(recs) {
+  if (!recs || typeof recs !== 'object') return;
+  scrubKeys(recs, RECOMMENDATION_TEXT_KEYS);
+  if (Array.isArray(recs.recommendations)) {
+    recs.recommendations = recs.recommendations.filter((item) => {
+      if (typeof item === 'string') return !advice(item);
+      if (item && typeof item === 'object') { scrubKeys(item, RECOMMENDATION_TEXT_KEYS); return !!(item.action || item.text); }
+      return true;
+    });
+  }
 }
 
 function enforceReportV2(v2, plan, banner) {
@@ -96,7 +121,16 @@ function enforceReportV2(v2, plan, banner) {
     for (const card of v2.insights) if (card && card.category !== 'customer_concern') scrubKeys(card, INSIGHT_ADVICE_KEYS);
   }
   scrubKeys(v2.snapshot, SNAPSHOT_ADVICE_KEYS);
+  // Products of the reconciliation pass (it runs before this step on the paths that reconcile).
+  if (advice(v2.todaysResult)) v2.todaysResult = null;
+  if (Array.isArray(v2.consistencyWarnings)) {
+    for (const warning of v2.consistencyWarnings) if (warning && typeof warning === 'object') scrubKeys(warning, ['suggestedFix']);
+  }
   scrubKeys(v2.followUp, FOLLOW_UP_ADVICE_KEYS);
+  if (v2.lead && typeof v2.lead === 'object') {
+    scrubKeys(v2.lead, LEAD_ADVICE_KEYS);
+    if (Array.isArray(v2.lead.yourPart)) v2.lead.yourPart = v2.lead.yourPart.filter((task) => !advice(task));
+  }
   if (advice(v2.smsSummary)) v2.smsSummary = null;
 }
 
@@ -104,7 +138,7 @@ function enforceReportV2(v2, plan, banner) {
  * @param {object} data  the finished buildReportV1Data payload of an ACTIVE new-sod lawn visit
  * @returns {object} the same payload, enforced
  */
-function enforceNewSodPayload(data) {
+function enforceNewSodPayload(data, { dynamicContext = null } = {}) {
   if (!data || typeof data !== 'object') return data;
   const plan = buildNewSodWeekPlan();
   const banner = buildNewSodBanner();
@@ -129,10 +163,26 @@ function enforceNewSodPayload(data) {
     }
     la.overwateringSignal = false;
     la.droughtStress = null;
+    scrubRecommendations(la.recommendations);
   }
+  // The re-entry context is added after the payload is built (the label irrigation hold is a watering hold).
+  const reentry = (dynamicContext && dynamicContext.reentry) || (data.dynamicContext && data.dynamicContext.reentry);
+  if (reentry && typeof reentry === 'object') reentry.irrigationReadyAt = null;
 
   if (data.reportV2 && typeof data.reportV2 === 'object') enforceReportV2(data.reportV2, plan, banner);
   return data;
 }
 
-module.exports = { enforceNewSodPayload, NEW_SOD_PAYLOAD_RULES, ADVICE_WORDS, NEW_SOD_COPY };
+/**
+ * The boundary step: the LAST call on every path that assembles a lawn payload for a client (after the
+ * reconciliation pass, which rebuilds the follow-up, today's result and the lead, and after the
+ * re-entry context is attached). A no-op, returning the very same object untouched, unless the payload is
+ * an ACTIVE new-sod visit, so a gate-off or inactive visit is never affected. For an active visit a failure
+ * here is NOT swallowed: it must stop the report rather than ship the normal watering advice.
+ */
+function enforceNewSodAtBoundary(data, dynamicContext = null) {
+  if (!isNewSodPayload(data)) return data;
+  return enforceNewSodPayload(data, { dynamicContext });
+}
+
+module.exports = { enforceNewSodPayload, enforceNewSodAtBoundary, isNewSodPayload, NEW_SOD_PAYLOAD_RULES, ADVICE_WORDS, NEW_SOD_COPY };

@@ -7,6 +7,7 @@ const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
 const { applyLawnReportReconciliation } = require('./report-consistency');
+const { enforceNewSodAtBoundary } = require('./lawn-new-sod-payload');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
@@ -298,6 +299,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (codex P1 #3600 r11).
     attachTermiteReportV2(data, service);
     attachCockroachReportV2(data, service);
+    // New-sod boundary step (a no-op unless the payload is an active new-sod visit): the LAST step before the
+    // render, after the reconciliation pass above, so nothing can rebuild a watering or mowing sentence.
+    enforceNewSodAtBoundary(data, data.dynamicContext);
     // This path never composes pestReportV2 itself (the actual bytes come
     // from the browser's own /data fetch below) — but `data` already
     // carries `pestWeekWeatherUncacheable` straight from buildReportV1Data

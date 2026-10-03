@@ -37,6 +37,7 @@ const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services
 
 const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
+const { enforceNewSodAtBoundary } = require('../services/service-report/lawn-new-sod-payload');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -850,7 +851,8 @@ async function buildServiceReportV1ResponseData(service, token, {
   }
 
   if (suppressedTypedReport(service)) {
-    return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
+    // New-sod boundary step (a no-op unless the payload is an active new-sod visit): the LAST step.
+    return enforceNewSodAtBoundary({ ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) }, dynamicContext);
   }
 
   // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL)
@@ -899,13 +901,15 @@ async function buildServiceReportV1ResponseData(service, token, {
     }
   }
 
-  return {
+  // New-sod boundary step (a no-op unless the payload is an active new-sod visit): the LAST step, after the
+  // reconciliation pass above and the re-entry context, so nothing can rebuild a watering or mowing sentence.
+  return enforceNewSodAtBoundary({
     ...data,
     dynamicContext,
     ...(crossSell ? { crossSell } : {}),
     ...(referral ? { referral } : {}),
     ...(staffViewer ? { staffViewer: true } : {}),
-  };
+  }, dynamicContext);
 }
 
 async function findProjectByReportSegment(segment) {

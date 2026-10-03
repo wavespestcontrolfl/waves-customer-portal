@@ -16,6 +16,7 @@
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { resolveWaterInForecast } = require('./lawn-watering-forecast');
+const { isNewSodPayload, ADVICE_WORDS } = require('./lawn-new-sod-payload');
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -70,9 +71,12 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       logger.warn(`[lawn-report-gate] ${blockers.length} blocker contradiction(s) on service_record ${service.id}: ${blockers.map((b) => b.code).join(', ')}`);
     }
 
+    // New-sod mode: the reconciliation's today's-result sentence is the summary's first sentence and can
+    // carry watering or mowing advice; it is frozen (and later texted), so it gets the same advice rule.
+    const newSodVisit = isNewSodPayload(data);
     const frozen = {
       smsSummary: reportV2.smsSummary || null,
-      todaysResult: fix.todaysResult || null,
+      todaysResult: (newSodVisit && ADVICE_WORDS.test(String(fix.todaysResult || ''))) ? null : (fix.todaysResult || null),
       statusHeadline: reportV2.snapshot?.statusHeadline || null,
       generatedAt: new Date().toISOString(),
       warningCodes: warnings.map((w) => w.code),
