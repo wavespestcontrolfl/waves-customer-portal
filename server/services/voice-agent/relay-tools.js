@@ -692,10 +692,22 @@ async function accountDetailsForEstimate(ctx = {}, stated = {}) {
   try {
     const db = require('../../models/db');
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
-      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
+      .first('id', 'account_id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
     if (!row) return null;
     const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
     if (isLeadStage(row.pipeline_stage) || nameConflicts({ first_name: stated.first_name }, row)) return null;
+    // An account can also hold its properties as SIBLING customer profiles
+    // (one account_id, one profile per property). Another live profile on
+    // the account is another address "on your account": ambiguous, so the
+    // ordinary intake. Same account predicate as booking's property match.
+    const accountId = row.account_id || row.id;
+    const sibling = await db('customers')
+      .where(function () { this.where('account_id', accountId).orWhere('id', accountId); })
+      .whereNot('id', row.id)
+      .whereNull('deleted_at')
+      .andWhere(function () { this.whereNull('active').orWhere('active', true); })
+      .first('id');
+    if (sibling) return null;
     // WHICH address is "the service address on your account": the customers
     // row mirrors the primary property, which can be retired while another
     // stays active. Exactly one ACTIVE property row → that row's own address
@@ -1134,7 +1146,6 @@ async function executeTool(name, input = {}, ctx = {}) {
           // the office card.
           ...(input.callback_phone && isLikelyE164(callerPhone) ? { callback_phone: callerPhone } : {}),
           ...(input.use_account_details === true && accountDetails ? { account_details_confirmed: 'true' } : {}),
-          ...(offerAccountQuestion ? { account_question_offered: 'true' } : {}),
         });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
@@ -1776,6 +1787,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
         as_soon_as_possible: 'Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.',
       }[spokenExpectation];
+      // The offer is latched HERE, where the result that presents it is
+      // built: a capture that failed earlier never showed it, so its retry
+      // still can.
+      if (offerAccountQuestion && estimateQueued === false && estimateMissing.length && typeof ctx.noteEstimateFields === 'function') {
+        ctx.noteEstimateFields({ account_question_offered: 'true' });
+      }
       const estimateNote = estimateQueued === true
         ? ` The estimate request IS on the office queue. ${expectationCopy}`
         : (estimateQueued === false

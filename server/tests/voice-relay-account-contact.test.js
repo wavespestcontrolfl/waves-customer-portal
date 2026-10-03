@@ -206,6 +206,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   const HOME = { address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', active: true };
   let holder;
   let properties; // the account's customer_properties rows
+  let siblingProfile; // another live customer profile on the same account
   // A card FILED (or rewritten) as deliverable. An incomplete capture also
   // calls the writer, revise-only (stillMissing), which files nothing new.
   const filedCards = () => surfaceEstimateRequestForCustomer.mock.calls.filter((c) => !((c[2] || {}).stillMissing || []).length);
@@ -223,10 +224,13 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   beforeEach(() => {
     holder = { ...HOLDER };
     properties = [{ ...HOME }];
+    siblingProfile = undefined;
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    // customers: `.where({id})` reads the caller's own row; `.where(fn)` is the sibling-profile probe.
+    const siblingProbe = { whereNot: () => siblingProbe, whereNull: () => siblingProbe, andWhere: () => siblingProbe, first: async () => siblingProfile };
     db.mockImplementation((table) => (table === 'customer_properties'
       ? { where: () => ({ select: async () => properties }) }
-      : { where: () => ({ whereNull: () => ({ first: async () => { customerReads += 1; return holder; } }) }) }));
+      : { where: (w) => (typeof w === 'function' ? siblingProbe : { whereNull: () => ({ first: async () => { customerReads += 1; return holder; } }) }) }));
   });
 
   test('without the yes nothing is taken from the account: the details are missing, and the result offers the one question', async () => {
@@ -313,6 +317,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     ['a different person on the account\'s line', () => {}, { first_name: 'Robin' }],
     ['an account with more than one active property', () => { properties = [{ ...HOME }, { ...HOME, address_line1: '9 Rental Rd' }]; }, {}],
     ['an account whose properties are all retired', () => { properties = [{ ...HOME, active: false }]; }, {}],
+    ['an account that holds another property as a sibling customer profile', () => { siblingProfile = { id: 'c-2' }; }, {}],
     ['a deleted account', () => { holder = undefined; }, {}],
   ])('%s gets the ordinary intake: the flag is ignored and the question is not offered', async (_label, arrange, input) => {
     arrange();
@@ -332,6 +337,14 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     await ask({ use_account_details: true }, estimateCtx(over));
     expect(customerReads).toBe(0);
     expect(filedCards()).toEqual([]);
+  });
+
+  test('a capture that failed never showed the offer, so its retry still makes it', async () => {
+    const ctx = estimateCtx(callStore());
+    createLeadFromExtraction.mockRejectedValueOnce(new Error('db down'));
+    const failed = await ask({}, ctx);
+    expect(failed).not.toMatch(/ONE question/);
+    expect(await ask({}, ctx)).toMatch(/ONE question/);
   });
 
   test('ONE question means asked once: after the offer, a caller giving their own details is not asked again', async () => {
@@ -431,8 +444,10 @@ describe('the exception lives at system priority, only when the caller-context l
     // Open times need no address from a known customer; a written estimate still confirms its details.
     expect(buildBasePrompt(true)).toMatch(/Open times for such a customer need no address/);
     expect(buildBasePrompt(true)).toMatch(/pass an address only when they say the visit is for a different property/);
-    expect(buildBasePrompt(true)).toMatch(/written estimate ask ONE question: "Should it go to the email and service address on your\s+account\?"/);
-    expect(buildBasePrompt(true)).toMatch(/use_account_details both\s+true/);
+    // The question is asked only when the tool's result offers it (the tool knows who is eligible).
+    expect(buildBasePrompt(true)).toMatch(/written estimate, call capture_lead with estimate_requested first/);
+    expect(buildBasePrompt(true)).toMatch(/ONLY when that result offers it, ask the one\s+question "Should it go to the email and service address on your account\?"/);
+    expect(buildBasePrompt(true)).toMatch(/When the result does not offer it, ask for what is missing/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });
