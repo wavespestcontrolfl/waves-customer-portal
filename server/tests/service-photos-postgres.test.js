@@ -216,7 +216,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     try {
       expect((await reconcile(technicianToken, false)).status).toBe(409);
       await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: replacementTechnicianId });
-      const handedOff = await reconcile(technicianToken, true);
+      const handedOff = await reconcile(technicianToken, false);
       expect(handedOff.status).toBe(409);
       expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
       expect(await db('dispatch_alerts').where({

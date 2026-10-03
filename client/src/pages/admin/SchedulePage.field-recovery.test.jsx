@@ -443,7 +443,7 @@ describe('completion photos in an unsubmitted draft', () => {
       generationPhotoCount: 0,
       servicePhotos: [],
       reconcileOwed: true,
-      abandonMissingPhotos: true,
+      abandonMissingPhotos: false,
       pendingPhotoCompletion: {
         serviceRecordId: 'record-1', servicePhotoVisit,
         completionPhotoUpload: { failed: 0, reconcileOwed: true },
@@ -476,7 +476,7 @@ describe('completion photos in an unsubmitted draft', () => {
 
     const first = await mount(vi.fn());
     await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
-    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true, expectedVisit: servicePhotoVisit });
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false, expectedVisit: servicePhotoVisit });
     expect(await screen.findByRole('button', { name: 'Dismiss local recovery' })).toBeTruthy();
     expect(await getCompletionDraft(service.id)).toMatchObject({ reconciliationHandedOff: true });
 

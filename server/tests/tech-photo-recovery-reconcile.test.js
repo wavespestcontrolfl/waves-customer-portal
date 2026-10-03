@@ -129,7 +129,7 @@ describe('POST /:id/photos/reconcile', () => {
       structured_notes: { servicePhotoVisit: receipt },
     }];
     await withServer(async (baseUrl) => {
-      const handedOff = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: true, expectedVisit: receipt });
+      const handedOff = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: false, expectedVisit: receipt });
       expect(handedOff.status).toBe(409);
       expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
       expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
@@ -139,7 +139,7 @@ describe('POST /:id/photos/reconcile', () => {
       expect(updates).toHaveLength(0);
 
       const denied = await reconcile(baseUrl, 'tech', {
-        abandonMissingPhotos: true,
+        abandonMissingPhotos: false,
         expectedVisit: { ...receipt, technicianId: 'tech-other', revision: 'wrong' },
       });
       expect(denied.status).toBe(403);

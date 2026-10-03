@@ -1055,30 +1055,28 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     let record = null;
     if (!technicianVisitRowInScope(req, svc)) {
-      if (req.body?.abandonMissingPhotos === true) {
-        record = await db('service_records')
-          .where({ scheduled_service_id: svc.id })
-          .orderBy('created_at', 'desc')
-          .first('id', 'technician_id', 'structured_notes');
-        if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId)) {
-          const { createAlertOnce } = require('../services/dispatch-alerts');
-          await createAlertOnce({
-            type: PHOTO_RECONCILIATION_HANDOFF,
-            severity: 'warn',
-            techId: svc.technician_id || null,
-            jobId: svc.id,
-            payload: {
-              source: 'photo_recovery_access_lost',
-              serviceRecordId: record.id,
-              message: 'Recovered photos need an office report reconciliation after technician access changed.',
-            },
-            existingPayloadSource: 'photo_recovery_access_lost',
-          });
-          return res.status(409).json({
-            error: 'Report repair was handed to the office after visit access changed.',
-            code: 'photo_reconciliation_handed_off',
-          });
-        }
+      record = await db('service_records')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'desc')
+        .first('id', 'technician_id', 'structured_notes');
+      if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId)) {
+        const { createAlertOnce } = require('../services/dispatch-alerts');
+        await createAlertOnce({
+          type: PHOTO_RECONCILIATION_HANDOFF,
+          severity: 'warn',
+          techId: svc.technician_id || null,
+          jobId: svc.id,
+          payload: {
+            source: 'photo_recovery_access_lost',
+            serviceRecordId: record.id,
+            message: 'Recovered photos need an office report reconciliation after technician access changed.',
+          },
+          existingPayloadSource: 'photo_recovery_access_lost',
+        });
+        return res.status(409).json({
+          error: 'Report repair was handed to the office after visit access changed.',
+          code: 'photo_reconciliation_handed_off',
+        });
       }
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
