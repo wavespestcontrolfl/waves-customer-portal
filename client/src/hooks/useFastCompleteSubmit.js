@@ -61,8 +61,8 @@ export default function useFastCompleteSubmit({
   const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
   const pendingSummaryRef = useRef('');
-  const rejectedKeyRef = useRef(null);
-  const persistedKeyRef = useRef(null);
+  const rejectedBodyRef = useRef(null);
+  const persistedBodyRef = useRef(null);
   const inFlight = useRef(false);
   const scopeRef = useRef(scopeOf(serviceId, operatorId, 0));
   const storageWarningSeenRef = useRef(false);
@@ -81,8 +81,8 @@ export default function useFastCompleteSubmit({
     const scope = scopeOf(serviceId, operatorId, scopeRef.current.epoch + 1);
     scopeRef.current = scope;
     keyRef.current = genIdempotencyKey();
-    rejectedKeyRef.current = null;
-    persistedKeyRef.current = null;
+    rejectedBodyRef.current = null;
+    persistedBodyRef.current = null;
     pendingBodyRef.current = null;
     pendingSummaryRef.current = '';
     inFlight.current = false;
@@ -114,7 +114,7 @@ export default function useFastCompleteSubmit({
         pendingBodyRef.current = attempt.body;
         pendingSummaryRef.current = attempt.summary || '';
         keyRef.current = attempt.body.idempotencyKey;
-        persistedKeyRef.current = attempt.body.idempotencyKey;
+        persistedBodyRef.current = attempt.body;
         setRestored(true);
         setFailure('retry');
         setError('An unfinished completion is saved on this device. Tap Retry when you’re ready to send the same completion again.');
@@ -124,9 +124,9 @@ export default function useFastCompleteSubmit({
     return () => { active = false; };
   }, [serviceId, operatorId]);
 
-  const clearStored = useCallback(async (scope, idempotencyKey) => {
-    if (scope.serviceId && scope.operatorId && idempotencyKey) {
-      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, idempotencyKey);
+  const clearStored = useCallback(async (scope, body) => {
+    if (scope.serviceId && scope.operatorId && body) {
+      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, body);
     }
     return true;
   }, []);
@@ -136,35 +136,33 @@ export default function useFastCompleteSubmit({
     const stored = await putFastCompletionAttempt(
       scope.serviceId,
       scope.operatorId,
-      { body, summary },
+      { body, summary, expectedBody: persistedBodyRef.current },
     );
     if (!sameScope(scopeRef.current, scope)) return 'stale';
     if (stored) {
-      persistedKeyRef.current = body.idempotencyKey;
+      persistedBodyRef.current = body;
       setStorageWarning('');
       storageWarningSeenRef.current = false;
       if (failure === 'storage') setFailure(null);
       return 'send';
     }
-    // A second tab may have prepared a newer attempt after this tab started.
-    // Its different key owns the row; do not send or erase either attempt.
+    // Compare the body as well as the key: another tab can confirm the same
+    // request while this tab still holds its unconfirmed revision.
     const observed = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
     if (!sameScope(scopeRef.current, scope)) return 'stale';
-    const observedKey = String(observed.attempt?.body?.idempotencyKey || '');
-    if (observed.available && observedKey && observedKey !== body.idempotencyKey) {
+    const observedBody = observed.attempt?.body;
+    if (observed.available && JSON.stringify(observedBody) === JSON.stringify(body)) {
+      persistedBodyRef.current = body;
+      return 'send';
+    }
+    if (observed.available && (observedBody || persistedBodyRef.current)) {
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       storageWarningSeenRef.current = false;
       setStorageWarning('');
       setFailure('terminal');
-      setError('Another completion for this visit was prepared in a different tab. Close and reopen it from the schedule to continue that attempt.');
+      setError('This saved completion was changed or discarded in another tab. Close and reopen it from the schedule before continuing.');
       return 'conflict';
-    }
-    if (observed.available && observedKey === body.idempotencyKey
-      && observed.attempt.summary === summary
-      && JSON.stringify(observed.attempt.body) === JSON.stringify(body)) {
-      persistedKeyRef.current = body.idempotencyKey;
-      return 'send';
     }
     setStorageWarning(STORAGE_WARNING);
     if (storageWarningSeenRef.current) return 'send';
@@ -177,14 +175,15 @@ export default function useFastCompleteSubmit({
 
   const settleFailure = useCallback(async (err, scope, body, summary) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body.idempotencyKey) : true;
+    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body) : true;
     if (!sameScope(scopeRef.current, scope)) return;
-    if (outcome === 'correctable' && !removed && persistedKeyRef.current === body.idempotencyKey) {
-      rejectedKeyRef.current = body.idempotencyKey;
+    if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
+      rejectedBodyRef.current = body;
     }
     pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
     pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
     if (outcome === 'correctable') {
+      if (removed) persistedBodyRef.current = null;
       keyRef.current = genIdempotencyKey();
       setRestored(false);
     }
@@ -216,27 +215,28 @@ export default function useFastCompleteSubmit({
     setPrompt(null);
 
     try {
-      if (rejectedKeyRef.current) {
-        const rejectedKey = rejectedKeyRef.current;
-        const removed = await clearStored(scope, rejectedKey);
+      if (rejectedBodyRef.current) {
+        const rejectedBody = rejectedBodyRef.current;
+        const removed = await clearStored(scope, rejectedBody);
         if (!sameScope(scopeRef.current, scope)) return;
         if (!removed) {
           const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
           if (!sameScope(scopeRef.current, scope)) return;
-          if (!current.available || current.attempt?.body.idempotencyKey === rejectedKey) {
+          if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(rejectedBody)) {
             pendingBodyRef.current = null;
             pendingSummaryRef.current = '';
             setError('Could not clear the rejected completion on this device. Try sending again when device storage is available.');
             return;
           }
         }
-        rejectedKeyRef.current = null;
+        rejectedBodyRef.current = null;
+        persistedBodyRef.current = null;
       }
       // Persist the exact held body, including photos, before network.
       const persistence = await persistPrepared(scope, body, heldSummary);
       if (persistence !== 'send') return;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      await clearStored(scope, body.idempotencyKey);
+      await clearStored(scope, body);
       if (!sameScope(scopeRef.current, scope)) return;
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
@@ -273,16 +273,16 @@ export default function useFastCompleteSubmit({
   const discard = useCallback(async () => {
     if (inFlight.current) return;
     const scope = scopeRef.current;
-    const idempotencyKey = pendingBodyRef.current?.idempotencyKey;
+    const body = pendingBodyRef.current;
     inFlight.current = true;
     setSubmitting(true);
     try {
-      const removed = await clearStored(scope, idempotencyKey);
+      const removed = await clearStored(scope, body);
       if (!sameScope(scopeRef.current, scope)) return;
-      if (!removed && persistedKeyRef.current === idempotencyKey) {
+      if (!removed && persistedBodyRef.current) {
         const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
         if (!sameScope(scopeRef.current, scope)) return;
-        if (!current.available || current.attempt?.body?.idempotencyKey === idempotencyKey) {
+        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(body)) {
           setError('Could not discard the saved completion on this device. Keep it open and try Discard again.');
           return;
         }
@@ -290,7 +290,7 @@ export default function useFastCompleteSubmit({
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       keyRef.current = genIdempotencyKey();
-      persistedKeyRef.current = null;
+      persistedBodyRef.current = null;
       setRestored(false);
       setFailure(null);
       setError('');

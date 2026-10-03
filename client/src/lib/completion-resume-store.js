@@ -55,13 +55,17 @@ function openDb(dbName) {
     if (!factory) return resolve(null);
     let request;
     try {
-      request = factory.open(dbName, DB_VERSION);
+      request = factory.open(dbName, dbName === FAST_COMPLETION_DB_NAME ? 2 : DB_VERSION);
     } catch {
       return resolve(null);
     }
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      const store = db.objectStoreNames.contains(STORE)
+        ? request.transaction.objectStore(STORE) : db.createObjectStore(STORE);
+      if (dbName === FAST_COMPLETION_DB_NAME && !store.indexNames.contains("operatorMetadata")) {
+        store.createIndex("operatorMetadata", ["operatorId", "serviceId", "storedAt", "summary"]);
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
@@ -201,6 +205,9 @@ export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = D
   return mutateFastCompletionRow(key, (current) => {
     const currentKey = String(current?.body?.idempotencyKey || "");
     if (current && currentKey !== attemptKey) return null;
+    if (attempt.expectedBody && !current) return null;
+    if (current && JSON.stringify(current.body) !== JSON.stringify(attempt.body)
+      && JSON.stringify(current.body) !== JSON.stringify(attempt.expectedBody)) return null;
     return { value: record };
   });
 }
@@ -221,27 +228,42 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
   });
 }
 
-// Discover this operator's attempts even after a visit leaves today's route.
-// Enumerate keys first so another operator's photo-bearing bodies are not read.
+// The index cursor exposes only metadata keys, so a menu scan never clones
+// photo-bearing bodies. The exact request is loaded only on explicit open.
 export async function listFastCompletionAttempts(operatorId) {
-  if (!operatorId) return { available: false, attempts: [] };
-  const keys = await withStore(FAST_COMPLETION_DB_NAME, "readonly", null, (store) => store.getAllKeys());
-  if (!Array.isArray(keys)) return { available: false, attempts: [] };
-  const prefix = `${FAST_COMPLETION_PREFIX}${String(operatorId)}:`;
-  const results = await Promise.all(keys.filter((key) => String(key).startsWith(prefix))
-    .map((key) => getFastCompletionAttempt(String(key).slice(prefix.length), operatorId)));
-  return {
-    available: results.every((result) => result.available),
-    attempts: results.map((result) => result.attempt).filter(Boolean),
-  };
+  const unavailable = { available: false, attempts: [] };
+  if (!operatorId) return unavailable;
+  const db = await openDb(FAST_COMPLETION_DB_NAME);
+  if (!db) return unavailable;
+  return new Promise((resolve) => {
+    const attempts = [];
+    const done = (available) => {
+      db.close();
+      resolve(available ? { available, attempts } : unavailable);
+    };
+    try {
+      const tx = db.transaction(STORE, "readonly");
+      const range = IDBKeyRange.bound([String(operatorId)], [String(operatorId), []]);
+      const read = tx.objectStore(STORE).index("operatorMetadata").openKeyCursor(range);
+      read.onsuccess = () => {
+        const cursor = read.result;
+        if (!cursor) return;
+        const [owner, serviceId, storedAt, summary] = cursor.key;
+        attempts.push({ operatorId: owner, serviceId, storedAt, summary });
+        cursor.continue();
+      };
+      read.onerror = () => done(false);
+      tx.oncomplete = () => done(true);
+      tx.onerror = tx.onabort = () => done(false);
+    } catch { done(false); }
+  });
 }
 
-export function deleteFastCompletionAttempt(serviceId, operatorId, expectedIdempotencyKey) {
+export function deleteFastCompletionAttempt(serviceId, operatorId, expectedBody) {
   const key = fastCompletionAttemptKey(serviceId, operatorId);
-  const expected = String(expectedIdempotencyKey || "");
-  if (!key || !expected) return Promise.resolve(false);
+  if (!key || !expectedBody?.idempotencyKey) return Promise.resolve(false);
   return mutateFastCompletionRow(key, (current) => (
-    String(current?.body?.idempotencyKey || "") === expected ? { delete: true } : null
+    current && JSON.stringify(current.body) === JSON.stringify(expectedBody) ? { delete: true } : null
   ));
 }
 

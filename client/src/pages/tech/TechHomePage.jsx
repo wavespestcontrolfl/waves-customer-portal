@@ -922,7 +922,7 @@ export default function TechHomePage({ section = 'today' }) {
       .filter((attempt) => !selectedVisitKey && !myServices.some((service) => String(service.id) === attempt.serviceId))
       .map((attempt) => ({ id: attempt.serviceId, customerName: 'Saved completion',
         serviceType: attempt.summary || 'Unfinished completion', status: 'unknown',
-        scheduledDate: attempt.body.expectedVisit?.scheduledDate, fastCompletionRecoveryOnly: true })),
+        fastCompletionRecoveryOnly: true })),
   ];
   // Existing live-visit routing stays behind the recovery check below.
   const openPestCompletion = useCallback((service) => {

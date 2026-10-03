@@ -50,3 +50,28 @@ for (const [name, Sheet, reportFlow] of [
     expect(completed).toHaveBeenCalledTimes(1);
   });
 }
+
+
+test('recovered confirmation shows a failed discard and retains the saved attempt', async () => {
+  const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained work' };
+  await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit' });
+  const request = vi.fn(async (path) => {
+    if (!path.endsWith('/complete')) throw Object.assign(new Error('Context unavailable'), { status: 503 });
+    throw Object.assign(new Error('Review report before sending'), { status: 409, code: 'report_rules_review' });
+  });
+  render(<FastCompleteSheet service={{ id: 'visit-a', reportFlow: true }} operatorId="tech-a"
+    request={request} onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  const back = await screen.findByRole('button', { name: 'Go back' });
+  const factory = globalThis.indexedDB;
+  globalThis.indexedDB = undefined;
+  try {
+    fireEvent.click(back);
+    expect(await screen.findByText(/Could not discard the saved completion/)).toBeInTheDocument();
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  } finally { globalThis.indexedDB = factory; }
+  expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt.body).toEqual(body);
+  fireEvent.click(back);
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull());
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});

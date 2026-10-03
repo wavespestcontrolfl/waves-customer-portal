@@ -29,7 +29,7 @@ const fastKey = (serviceId, operatorId) => `fast-complete:${operatorId}:${servic
 
 function replaceFromSecondConnection(serviceId, operatorId, body, summary) {
   return new Promise((resolve, reject) => {
-    const open = indexedDB.open(FAST_DB, 1);
+    const open = indexedDB.open(FAST_DB, 2);
     open.onerror = () => reject(open.error);
     open.onsuccess = () => {
       const db = open.result;
@@ -256,7 +256,7 @@ describe('useFastCompleteSubmit durable attempts', () => {
 
     expect(request).not.toHaveBeenCalled();
     expect(view.result.current.failure).toBe('terminal');
-    expect(view.result.current.error).toContain('prepared in a different tab');
+    expect(view.result.current.error).toContain('another tab');
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toMatchObject({ body: newer });
   });
 
@@ -278,6 +278,23 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(JSON.parse(request.mock.calls[1][1].body)).toMatchObject(corrected);
     expect(view.result.current.done.summary).toBe('Corrected');
+  });
+
+  it.each(['retry', 'discard'])('keeps a different tab’s confirmed same-key body during stale %s', async (action) => {
+    const original = { idempotencyKey: 'shared-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: original, summary: 'Report' });
+    const firstRequest = vi.fn().mockRejectedValueOnce(Object.assign(new Error('Confirm'), {
+      status: 409, code: 'report_rules_review',
+    })).mockRejectedValue(new Error('Response lost'));
+    const first = renderHook(() => useFastCompleteSubmit({ ...scope, request: firstRequest, confirmable: true }));
+    const staleRequest = vi.fn();
+    const stale = renderHook(() => useFastCompleteSubmit({ ...scope, request: staleRequest, confirmable: true }));
+    await waitFor(() => expect(first.result.current.restored && stale.result.current.restored).toBe(true));
+    await act(async () => { await first.result.current.retry(); });
+    await act(async () => { await first.result.current.confirm(); });
+    await act(async () => { await stale.result.current[action](); });
+    expect(staleRequest).not.toHaveBeenCalled();
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual({ ...original, reportRulesConfirmed: true });
   });
 
   it('warns before sending when persistence fails, then sends only after another explicit tap', async () => {
