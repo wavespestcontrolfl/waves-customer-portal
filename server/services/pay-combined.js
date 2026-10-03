@@ -663,7 +663,7 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
  * verified or released; money in flight is never touched — the settle
  * paths keep their own ownership guards for it.
  */
-async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds) {
+async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds, { invalidateVisitIds = null, pending = null, deferApply = false } = {}) {
   const ids = (scheduledServiceIds || []).filter(Boolean);
   if (!ids.length) return { released: 0, inFlight: 0 };
   // Serialize with combined /setup (codex r9 P1): the same per-customer
@@ -683,13 +683,40 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     // edited member is in the scan too (Codex #4311 r27 P1).
     .where((q) => q.whereIn('scheduled_service_id', ids)
       .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
-        .whereIn('scheduled_service_id', ids).select('packet_id')))
+        .whereIn('scheduled_service_id', ids).select('packet_id'))
+      // An invoice minted from the service record alone carries no visit link of its own; it
+      // moves with the visit's payer (visit-linked-invoice-withdrawal.js), so its session does too.
+      .orWhere((x) => x.whereNull('scheduled_service_id')
+        .whereIn('service_record_id', database('service_records').whereIn('scheduled_service_id', ids).select('id'))))
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
     // the in-flight signal the PI-status check must see and report.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
-  return releaseWholeOrNothing(database, [rows]);
+  // The ordinary (non-combined) checkout of an invoice that rides these visits without a packet
+  // is invalidated by the same move: its pre-issued client secret could still be confirmed with
+  // Stripe directly. `invalidateVisitIds` narrows that to the visits whose Bill-To really changes.
+  await markLinkedSingleInvoiceSessions(database, rows, { scheduledServiceIds: invalidateVisitIds || ids }, pending);
+  return releaseWholeOrNothing(database, [rows], { deferApply });
+}
+
+// Flag the rows whose own single-invoice PaymentIntent the Bill-To change invalidates: the visit-linked
+// invoices (no packet) that MOVE to a payer (ownerTransitions, the one answer the fence and the
+// withdrawal read too). planStampedSessionRelease then cancels such an intent while it is
+// unconfirmed and reports it as in flight once money is moving.
+async function markLinkedSingleInvoiceSessions(database, rows, scope, pending) {
+  if (!rows.length) return rows;
+  const invalidated = await require('./visit-linked-invoice-withdrawal').linkedSessionInvoiceIds(database, scope, { pending });
+  for (const row of rows) if (invalidated.has(String(row.id))) row.invalidatesSingleInvoice = true;
+  return rows;
+}
+
+// Clear the invoice stamps of every planned intent that will be (or already was) cancelled.
+async function clearPlannedStamps(database, plan) {
+  for (const { piId, outcome } of plan.intents) {
+    if (outcome === 'kept_single_invoice' || outcome === 'in_flight') continue;
+    await clearPaymentIntentStamps(database, piId);
+  }
 }
 
 /** Plan every side, then cancel only if NOTHING is in flight (Codex #4311
@@ -697,7 +724,10 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
  * that is about to be refused for in-flight money must not already have
  * cancelled a sibling session — a Stripe cancel is an external effect the
  * caller's transaction cannot roll back. */
-async function releaseWholeOrNothing(database, rowSets) {
+// `deferApply`: plan and refuse now, but hand back `apply()` for the caller to run as the LAST step before
+// its transaction commits - the Stripe cancels are external and cannot roll back, so they must not run
+// while a later validation can still reject the edit.
+async function releaseWholeOrNothing(database, rowSets, { deferApply = false } = {}) {
   const plans = [];
   let inFlight = 0;
   for (const rows of rowSets) {
@@ -706,9 +736,17 @@ async function releaseWholeOrNothing(database, rowSets) {
     plans.push(plan);
   }
   if (inFlight > 0) return { released: 0, inFlight };
-  let released = 0;
-  for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
-  return { released, inFlight: 0 };
+  // A deferred release still unstamps the planned intents NOW (a database write that rolls back with a
+  // rejected edit): the withdrawal that follows returns the homeowner's applied credit, and the credit
+  // reversal refuses any invoice that still has a PaymentIntent attached. Only the Stripe cancel waits.
+  if (deferApply) for (const plan of plans) await clearPlannedStamps(database, plan);
+  const apply = async () => {
+    let released = 0;
+    for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
+    return { released, inFlight: 0 };
+  };
+  if (deferApply) return { released: 0, inFlight: 0, apply };
+  return apply();
 }
 
 /** The customer-default-payer fence over SEVERAL customers at once — one
@@ -716,12 +754,18 @@ async function releaseWholeOrNothing(database, rowSets) {
  * every referencing customer's debt together, and a per-customer loop
  * cancelled the first customer's confirmable session before a later
  * customer's in-flight payment refused the change. */
-async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds) {
+async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds, { invalidateLinked = false, pending = null, deferApply = false } = {}) {
   const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
   if (!ids.length) return { released: 0, inFlight: 0 };
   const rowSets = [];
-  for (const id of ids) rowSets.push(await lockAndPinStampedSessionsForCustomer(database, id));
-  return releaseWholeOrNothing(database, rowSets);
+  for (const id of ids) {
+    const rows = await lockAndPinStampedSessionsForCustomer(database, id);
+    // A payer activation / default-payer change moves visit-linked invoices to AP: the checkout
+    // intents of the ones that MOVE are invalidated too.
+    if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: id }, pending);
+    rowSets.push(rows);
+  }
+  return releaseWholeOrNothing(database, rowSets, { deferApply });
 }
 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
@@ -859,10 +903,19 @@ async function lockAndPinStampedSessionsForCustomer(database, customerId, { expe
   return rows;
 }
 
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false } = {}) {
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false, invalidateLinked = false, pending = null, deferApply = false } = {}) {
   if (!customerId) return { released: 0, inFlight: 0 };
   const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
-  return releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice });
+  if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: String(customerId) }, pending);
+  // Whole-or-nothing, like every multi-intent release: a Stripe cancel cannot be rolled back with the
+  // refused payer edit, so nothing is cancelled while any intent of the set has money in flight.
+  const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice });
+  if (plan.inFlight > 0) return { released: 0, inFlight: plan.inFlight };
+  if (deferApply) {
+    await clearPlannedStamps(database, plan);
+    return { released: 0, inFlight: 0, apply: () => applyStampedSessionRelease(database, plan) };
+  }
+  return applyStampedSessionRelease(database, plan);
 }
 
 // The pay.combined.customer namespace matches createInvoicePaymentIntent /
@@ -943,7 +996,9 @@ async function planStampedSessionRelease(database, rows, { invalidatedSingleInvo
     if (!pi) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
-    const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice });
+    const invalidated = invalidatedSingleInvoice
+      || rows.some((r) => r.invalidatesSingleInvoice && String(r.stripe_payment_intent_id) === piId);
+    const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice: invalidated });
     if (expectedOutcomes && Object.prototype.hasOwnProperty.call(expectedOutcomes, piId) && expectedOutcomes[piId] !== outcome) {
       const err = new Error(`Payment session ${piId} changed since this was approved (the card said ${expectedOutcomes[piId]}, it is now ${outcome}) — review a fresh proposal`);
       err.previewChanged = true;

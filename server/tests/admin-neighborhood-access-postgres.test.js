@@ -287,7 +287,7 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(row).toMatchObject({ source: 'office', source_customer_id: null });
   });
 
-  test('confirm: active again, confirmed now, bell helper called; retire hides it', async () => {
+  test('confirm: active again, confirmed now, and no bell work from the route; retire hides it', async () => {
     const n = await neighborhood('Sumac Ridge');
     const id = await entry(n, { code: '9191', status: 'needs_confirm', last_confirmed_at: MONTHS_AGO(9) });
     const confirmed = await call('PATCH', `/entries/${id}`, { action: 'confirm' });
@@ -295,7 +295,8 @@ postgres('admin neighborhood gate-code routes', () => {
     const row = await trx('neighborhood_access').where({ id }).first();
     expect(row.status).toBe('active');
     expect(Date.now() - new Date(row.last_confirmed_at).getTime()).toBeLessThan(60000);
-    expect(mockOpenKeys).toHaveBeenCalled();
+    // Code differences are logged, never rung: the route does no bell work.
+    expect(mockOpenKeys).not.toHaveBeenCalled();
 
     const retired = await call('PATCH', `/entries/${id}`, { action: 'retire' });
     expect(retired).toMatchObject({ status: 200, body: { status: 'retired' } });
@@ -307,15 +308,6 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await call('PATCH', `/entries/${id}`, { gate_label: 'Renamed' })).status).toBe(409);
     expect((await call('PATCH', `/entries/${id}`, { action: 'explode' })).status).toBe(400);
     expect((await call('PATCH', `/entries/${randomUUID()}`, { action: 'confirm' })).status).toBe(404);
-  });
-
-  test('a failing bell close never fails the save', async () => {
-    const n = await neighborhood('Tamarind Park');
-    const id = await entry(n, { code: '1357', status: 'needs_confirm' });
-    mockOpenKeys.mockRejectedValueOnce(Object.assign(new Error('boom 1357'), { code: 'XX000' }));
-    expect((await call('PATCH', `/entries/${id}`, { action: 'confirm' })).status).toBe(200);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('XX000'));
-    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('1357');
   });
 
   test('edit: validates the merged entry, rejects a duplicate live code, never logs the value', async () => {

@@ -2928,15 +2928,59 @@ router.get('/waveguard-forecast', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A technician's request may ask for at most this many standard packs.
+const TECH_RESTOCK_MAX_PACKS = 20;
+
 // POST /waveguard-forecast/:productId/restock-request — save projected demand.
 router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
     const body = req.body || {};
+    const isAdminCaller = req.techRole === 'admin';
+    // A technician asks from a job card: the request names one of their own
+    // current visits. The planning fields are the office forecast tool's and
+    // are never read, the priority is fixed, and the request always dedupes
+    // against the live one (codex #5683 r3, #5733 r2).
+    if (!isAdminCaller) {
+      const visitId = typeof body.scheduledServiceId === 'string' ? body.scheduledServiceId.trim() : '';
+      const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+      const owned = UUID_RE.test(visitId)
+        ? await technicianCurrentVisitFilter(
+          { techRole: 'technician', technicianId: req.technicianId },
+          db('scheduled_services').where('scheduled_services.id', visitId),
+        ).first('scheduled_services.id')
+        : null;
+      if (!owned) return res.status(403).json({ error: 'Restock requests are sent from one of your own visits' });
+      // The details are the server's, not the phone's (codex #5733 r3): the
+      // unit is the product's own, the reason names the product and the
+      // visit, and the quantity is bounded by the product's standard order
+      // (TECH_RESTOCK_MAX_PACKS packs). The product stays the technician's
+      // choice: the job card's tank helper lets them pick any stocked product.
+      const standard = await require('../services/job-card').standardOrderFor(req.params.productId, { dbh: db });
+      if (!standard) return res.status(404).json({ error: 'Product not found' });
+      if (standard.unavailable) return res.status(409).json({ error: 'This product cannot be ordered from the job card right now. Tell the office.', code: 'order_unavailable' });
+      // The card's quantity is in the unit the card showed. A unit changed
+      // since (an office unit fix) makes that number stale: refuse rather
+      // than save it against the new unit. No unit sent = the standard order.
+      const sentUnit = typeof body.unit === 'string' ? body.unit.trim().toLowerCase() : '';
+      const currentUnit = String(standard.unit || '').trim().toLowerCase();
+      if (sentUnit && sentUnit !== currentUnit) {
+        return res.status(409).json({ error: 'This product changed since the job card loaded. Reopen the job card and try again.', code: 'order_unit_changed' });
+      }
+      const asked = Number(body.requestedQuantity);
+      const quantity = sentUnit && Number.isFinite(asked) && asked > 0 ? Math.min(asked, standard.quantity * TECH_RESTOCK_MAX_PACKS) : standard.quantity;
+      const result = await inventoryOperations.createRestockRequest(req.params.productId, {
+        requestedQuantity: quantity, ...(standard.unit ? { unit: standard.unit } : {}),
+        priority: 'high', allowDuplicate: false,
+        reason: `Job card: ${standard.name} (visit ${visitId.slice(0, 8)})`,
+      }, { actorId: req.technicianId, actorName: req.technician?.name || null, source: 'waveguard_inventory_forecast' });
+      return res.json({ success: true, existing: result.existing, restockRequest: result.restockRequest });
+    }
     const result = await inventoryOperations.createRestockRequest(req.params.productId, {
-      requestedQuantity: body.requestedQuantity, unit: body.unit,
-      priority: String(body.priority || 'high').toLowerCase(), allowDuplicate: body.allowDuplicate,
-      neededBy: body.neededBy, reason: body.reason, targetStock: body.targetStock,
+      requestedQuantity: body.requestedQuantity, unit: body.unit, reason: body.reason,
+      priority: String(body.priority || 'high').toLowerCase(),
+      allowDuplicate: body.allowDuplicate,
+      neededBy: body.neededBy, targetStock: body.targetStock,
       forecastDays: body.forecastDays, committedDemand: body.committedDemand,
       projectedRemaining: body.projectedRemaining, firstShortDate: body.firstShortDate,
     }, { actorId: req.technicianId, actorName: req.technician?.name || null, source: 'waveguard_inventory_forecast' });

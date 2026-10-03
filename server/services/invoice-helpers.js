@@ -94,6 +94,32 @@ function invoiceAmountDue(invoice) {
   return Math.max(0, totalCents - creditCents) / 100;
 }
 
+// Estimate-deposit credit an invoice carries, in cents: the absolute amounts of
+// its ledger-backed `deposit_credit` line items (the application record
+// create() writes; voidInvoice's restore sums the same lines). Deposit credit
+// is prior payment, not a discount, and has no column of its own.
+function invoiceDepositCreditCents(invoice) {
+  let items = [];
+  try {
+    const raw = invoice && invoice.line_items;
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    items = Array.isArray(arr) ? arr : [];
+  } catch { items = []; }
+  return items
+    .filter((item) => item?.category === 'deposit_credit')
+    .reduce((sum, line) => sum + Math.abs(Math.round(Number(line.amount ?? line.unit_price ?? 0) * 100)), 0);
+}
+
+// What the invoice itself bills, in cents, before any card surcharge: the
+// expression InvoiceService.create() stores as `total` (and the draft-edit
+// recompute, calculateUpdateFinancials, repeats): max(0, subtotal - discount +
+// tax - applied deposit credit). A settled total can never honestly be lower.
+function invoicePrincipalCents(invoice) {
+  const netCents = Math.round(((Number(invoice && invoice.subtotal) || 0)
+    - (Number(invoice && invoice.discount_amount) || 0) + (Number(invoice && invoice.tax_amount) || 0)) * 100);
+  return Math.max(0, netCents - invoiceDepositCreditCents(invoice));
+}
+
 function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
@@ -419,6 +445,8 @@ module.exports = {
   isCollectibleOwnInvoice,
   hasCollectibleAmountDue,
   invoiceAmountDue,
+  invoiceDepositCreditCents,
+  invoicePrincipalCents,
   formatCardLine,
   COLLECTION_PENDING_FENCE_CODES,
   isCollectionPendingFenceError,

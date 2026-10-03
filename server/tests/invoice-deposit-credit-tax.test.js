@@ -696,6 +696,11 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
       if (table === 'payers') {
         const q = {
           where: jest.fn(() => q),
+          // A visit-linked create holds its payer rows FOR SHARE through the insert (#5650).
+          whereIn: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          forShare: jest.fn(() => q),
+          select: jest.fn(async () => [{ id: 9 }]),
           first: jest.fn(async () => ({
             id: 9, active: true, payment_terms: 'net30', tax_exempt: false,
             company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com',

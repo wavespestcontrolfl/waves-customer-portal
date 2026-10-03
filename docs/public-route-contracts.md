@@ -2269,12 +2269,11 @@ through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
 (`treatment-summary.js`), never the AI treatment narrative that later overwrites
 `snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
 optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
-42 words: the visible-change sentence of the first two expectation rows the owner
-has approved for today's products, printed word for word, a sentence that would
-pass the cap left out whole; no by-next-visit timing yet, since that needs the
-next visit at this property, which the report's own next-visit line does not
-resolve; every row ships `approved: false`, so the key is absent until the owner
-approves one) and
+42 words: for the first two expectation rows the owner has approved for today's
+products, each row's visible-change sentence and, when the gap to the next lawn
+visit at this property is known, its by-next-visit sentence, printed word for
+word, a sentence that would pass the cap left out whole; every unapproved row
+is skipped) and
 `watching` ("We are also keeping an eye on <topics>." for the watched issues
 after the one the headline names, at most three). The lead's word budget gives
 these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
@@ -2300,7 +2299,22 @@ key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen o
 under this gate, so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live. The same gate keeps model-written lawn copy from stating result timing
+and its cache signature carries a `:copyv6=1` stamp while the gate is live. While the gate is live,
+`snapshot.nextVisit` (the lead's "Next visit" line) is the next lawn booking AT
+THIS REPORT'S PROPERTY (`report-data.js` `lawnNextVisitAtProperty`, the shared
+same-line / same-property scan): a booking at another of the customer's homes is
+skipped, no booking here falls back to the visit's own plan cadence estimate, a
+visit that cannot be tied to a property uses the customer-wide booking only on a
+proven single-premises account, and otherwise the key is absent. The copy's
+by-next-visit sentence is timed from that same visit, counted from the selected
+assessment's date, and the frozen entry records that visit's day
+(`nextVisitIso`, with each printed sentence in `expectSentences`): when a later
+render shows a different day (a reschedule) the gap-timed sentence is left out
+of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
+sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
+(PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
+so a stored PDF never depends on the customer's bookings and its cache signature
+carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
@@ -6016,6 +6030,52 @@ a write failure is warn-logged by error kind ONLY). No cookie, user agent
 or referrer is ever read; the network address is used only by the
 one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
+Typed-decision labeler token (`POST /api/admin/typed-decisions/reviews/:id/label`
+with header `X-Labeler-Token`; `server/routes/typed-decisions-labeler.js`;
+owner 2026-10-02, "token is fine"). The Claude labeling runner (two blind
+graders that agree; `~/.claude` factory, outside this repo) writes its labels
+here instead of through a person's admin session. It is its OWN router, mounted
+in front of the admin router (`routes/admin-typed-decisions.js`), whose
+`adminAuthenticate, requireAdmin` guard is unchanged: a request WITHOUT the
+header leaves the token router at once (`next('router')`) and is handled exactly
+as before; a request WITH the header never leaves it (terminal 404).
+**Auth:** constant-time compare (`safeEqual`) against
+`TYPED_DECISIONS_LABELER_TOKEN`; unset or shorter than 32 characters = off.
+**Token format gate / generic 404:** the check is against the env value with no
+DB read; a wrong, short or unset token, any method other than POST, any path
+other than `/reviews/<uuid>/label` (a structured UUID, not any 36 hex/hyphen
+characters), and `GATE_TYPED_DECISIONS` off all answer the same
+`404 { error: 'Not found' }`. **Gate:** `GATE_TYPED_DECISIONS` (dark gate: the
+limiter is never reached while it is off, so a probe never sees a revealing
+429). **Order:** the router is mounted in `server/index.js` ABOVE the global
+`cors()` (an allowed-origin OPTIONS would otherwise answer 204), the global
+`/api/` limiter and every body parser, so a request carrying the header gets its
+privacy headers and, when anything is wrong, the generic 404 before any global
+middleware can answer. **Maintenance:** because the router answers ahead of the
+app-wide Staff maintenance interlock, a verified token passes through the same
+`staffMaintenance` middleware inside it: while `STAFF_MAINTENANCE_MODE` is on it
+gets the interlock's 503 before the limiter or any write (a wrong token still
+reads 404). **Rate limit:** 120 requests a minute per /64-collapsed
+IP (`labelerLimiter`, `unauthenticatedAuthLimitKey`), applied only after the
+token, path and gate pass; the global limiter never sees these requests.
+**Body:** the router's own `express.json({ limit: '16kb' })`, after the limiter
+(a valid caller's malformed or oversized body gets the parser's 400 / 413 with
+the privacy headers already set). **Privacy headers:** `Cache-Control:
+no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer` on every
+response to a request carrying the header. **Writes:** the SAME handler a
+signed-in admin uses (`labelReview`: the same verdict / `seen_answer` /
+`seen_subject` binding and 409s), narrowed for the token: `force` is refused
+(`403 labeler_no_force`) before any write, the update matches only rows still
+`unreviewed` (a row a person labeled answers `409 already_labeled`),
+`labeled_by` is the fixed string `claude-labeler`, and the audit row is actor
+`system`. **Payload:** the same `{ review }` as the staff route (the review
+row's ids, answers and label; subject text is never returned by this write).
+Exception to the baseline, recorded on purpose: past the token check, the
+handler's own validation answers keep their staff-route statuses (400 bad body,
+404 unknown review, 409 `subject_changed` / `answer_changed` /
+`already_labeled`), because the caller holds a valid secret and needs them to
+skip or retry; none of them is reachable without the token.
+
 The route-WIDE invariants — every public route must be listed here, the
 baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the

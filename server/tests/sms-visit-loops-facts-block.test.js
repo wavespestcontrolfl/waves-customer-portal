@@ -288,7 +288,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries cumulative cflv (+ payment facts: cflvp) and fits the column even with all four category tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_cflvp');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';

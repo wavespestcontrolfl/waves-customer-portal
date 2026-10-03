@@ -12,6 +12,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import NamedSearchesTable from "../../components/admin/NamedSearchesTable";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import {
   ActionFeedback,
@@ -787,7 +788,14 @@ function GeoGridTab() {
   const [kwDraft, setKwDraft] = useState("");
   const [kwSaving, setKwSaving] = useState(false);
   const [kwErr, setKwErr] = useState("");
+  const [named, setNamed] = useState(null);
+  const loadNamed = () => {
+    adminFetch("/admin/seo/geo-grid/named-searches")
+      .then(setNamed)
+      .catch(() => setNamed(null));
+  };
   useEffect(() => {
+    loadNamed();
     adminFetch("/admin/seo/geo-grid")
       .then((d) => {
         setCfg(d);
@@ -839,9 +847,14 @@ function GeoGridTab() {
       const t = setInterval(async () => {
         n += 1;
         const s = await adminFetch("/admin/seo/geo-grid").catch(() => null);
-        if (!s?.scanning || n > 18) {
-          clearInterval(t);
+        const done = !s?.scanning;
+        // The button gives up after about six minutes (tick 19), but a large
+        // grid can run longer and only a finished scan counts: keep checking
+        // for up to 30 more minutes and reload once the server says it is done.
+        if (done || n > 108) clearInterval(t);
+        if (done || n === 19) {
           setRunning(false);
+          loadNamed();
           // Only reload if the user hasn't switched office/keyword since starting.
           if (
             selRef.current.office === scanned.office &&
@@ -899,6 +912,7 @@ function GeoGridTab() {
         body: { keywords: list },
       });
       const saved = r?.keywords || list;
+      loadNamed();
       setCfg((c) => ({
         ...c,
         keywords: saved,
@@ -932,6 +946,7 @@ function GeoGridTab() {
   const officeCenter = cfg.offices.find((o) => o.id === office);
   return (
     <div>
+      <NamedSearchesTable data={named} />
       <div className="flex [gap:12px] items-center flex-wrap [margin-bottom:16px]">
         <Select className="!w-auto" value={office} onChange={(e) => setOffice(e.target.value)}>
           {cfg.offices.map((o) => (

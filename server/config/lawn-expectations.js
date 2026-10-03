@@ -213,8 +213,8 @@ const PRODUCT_ROWS = {
     byNextVisit: {
       too_early: 'Weeds usually take about a week to show a change, so your next visit is early for a final read.',
       partial: 'By your next visit, treated weeds should be yellowing or curling, with browning still to come.',
-      visible: 'By your next visit, most treated weeds should be browning or fading.',
-      complete: 'By your next visit, most treated weeds should be brown or fading. Any still green then get a second look.',
+      visible: 'By your next visit, most treated weeds should be yellowing, browning or both.',
+      complete: 'By your next visit, most treated weeds should be yellow, brown or fading. Any still green then get a second look.',
     },
     contactTrigger: 'If treated weeds are still fully green after about 3 weeks, let us know.',
   },
@@ -241,8 +241,8 @@ const PRODUCT_ROWS = {
     byNextVisit: {
       too_early: 'Sedge usually takes 1 to 2 weeks to show a change, so your next visit is early for a final read.',
       partial: 'By your next visit, treated sedge should be yellowing, with browning still to come.',
-      visible: 'By your next visit, treated sedge should be browning down.',
-      complete: 'By your next visit, treated sedge should be brown. Regrowth from the tubers is common, and a repeat treatment is expected.',
+      visible: 'By your next visit, treated sedge should be yellowing, browning or both.',
+      complete: 'By your next visit, treated sedge should be yellow or brown. Regrowth from the tubers is common, and a repeat treatment is expected.',
     },
     contactTrigger: 'If sedge is still fully green after about 4 weeks, let us know.',
   },
