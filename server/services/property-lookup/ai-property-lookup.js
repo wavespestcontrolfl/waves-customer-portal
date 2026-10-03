@@ -2493,6 +2493,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       // without asking anyone: skipped, not a clean "no parcel".
       if (!parcel && statewideParcelLayerDisabled()) pointLookupFailed = true;
     }
+    // A parcel in hand was examined, whichever layer found it: a county-layer
+    // failure the statewide layer recovered from is a completed check.
+    if (parcel) pointLookupFailed = false;
     const point = { lat: geoContext.lat, lng: geoContext.lng };
     // The county layer can hand back the nearest parcel when none contains
     // the point. The existing guards judge it as before; for the parent
