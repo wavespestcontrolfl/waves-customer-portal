@@ -27,6 +27,7 @@
  */
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { techScopedConfirmActive, findConflictingVisits } = require('./occupancy');
 
@@ -55,6 +56,18 @@ async function lastTechnicianFor(conn, customerId) {
   return row?.technician_id || null;
 }
 
+/** Live route stops per technician on the day (the lighter-day tie-break). */
+async function stopsByTechnician(conn, date, technicianIds) {
+  const rows = await conn('scheduled_services')
+    .where('scheduled_date', date)
+    .whereIn('technician_id', technicianIds)
+    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+    .groupBy('technician_id')
+    .select('technician_id')
+    .count('* as stops');
+  return new Map(rows.map((row) => [row.technician_id, Number(row.stops) || 0]));
+}
+
 /**
  * Extra drive minutes per technician for this exact start, from find-time.
  * A technician find-time cannot place (no coordinates, off the hour grid, an
@@ -77,7 +90,7 @@ async function detourByTechnician({ lat, lng, date, windowStart, durationMinutes
     if (!id || !Number.isFinite(slot.detour_minutes)) continue;
     const seen = detours.get(id);
     if (!seen || slot.detour_minutes < seen.detourMinutes) {
-      detours.set(id, { detourMinutes: slot.detour_minutes, stopsThatDay: Number(slot.stops_that_day) || 0 });
+      detours.set(id, { detourMinutes: slot.detour_minutes });
     }
   }
   return detours;
@@ -148,11 +161,15 @@ async function pickTechnicianForVisit({
     // take the visit.
     logger.warn(`[pick-technician] route estimate failed (ranking by availability only): ${err.message}`);
   }
-  const lastTechnicianId = free.length > 1 ? await lastTechnicianFor(conn, customerId) : null;
+  // Counted from the day's rows, not from the route estimate, so the
+  // lighter-day tie-break also holds when there is no estimate at all.
+  const [lastTechnicianId, stops] = free.length > 1
+    ? await Promise.all([lastTechnicianFor(conn, customerId), stopsByTechnician(conn, date, free.map((t) => t.id))])
+    : [null, new Map()];
   const candidates = free.map((tech) => ({
     id: tech.id, name: tech.name || null,
     detourMinutes: detours.get(tech.id)?.detourMinutes ?? null,
-    stopsThatDay: detours.get(tech.id)?.stopsThatDay ?? 0,
+    stopsThatDay: stops.get(tech.id) || 0,
   }));
   const winner = rankCandidates(candidates, lastTechnicianId);
   return {
