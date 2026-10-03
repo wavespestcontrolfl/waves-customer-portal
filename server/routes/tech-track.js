@@ -873,16 +873,23 @@ const VISIT_RECEIPT_FIELDS = [
   'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
   'scheduledDate', 'status', 'revision',
 ];
+function recoveryReceiptMatchesRecord(record, rawExpectedVisit) {
+  if (rawExpectedVisit == null || rawExpectedVisit === '') return true;
+  let expectedVisit = null;
+  try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
+  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
+  return !!expectedVisit
+    && VISIT_RECEIPT_FIELDS.every((field) => String(expectedVisit[field] ?? '') === String(storedVisit?.[field] ?? ''));
+}
 function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId) {
   if (rawExpectedVisit == null || rawExpectedVisit === '') {
     return String(record?.technician_id || '') === String(actorId || '');
   }
   let expectedVisit = null;
   try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
-  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
   return !!expectedVisit
     && String(expectedVisit.technicianId || '') === String(actorId || '')
-    && VISIT_RECEIPT_FIELDS.every((field) => String(expectedVisit[field] ?? '') === String(storedVisit?.[field] ?? ''));
+    && recoveryReceiptMatchesRecord(record, expectedVisit);
 }
 
 async function resolvePhotoReconciliationHandoffs(serviceId, actorId) {
@@ -1085,6 +1092,12 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       .orderBy('created_at', 'desc')
       .first('id', 'technician_id', 'service_line', 'service_data', 'structured_notes');
     if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
+    if (!recoveryReceiptMatchesRecord(record, req.body?.expectedVisit)) {
+      return res.status(409).json({
+        error: 'The completion record changed after this photo recovery was saved.',
+        code: 'visit_identity_changed',
+      });
+    }
 
     const summary = await reconcilePhotoSummary(record, {
       abandonMissingPhotos: req.body?.abandonMissingPhotos === true,

@@ -157,6 +157,26 @@ describe('POST /:id/photos/reconcile', () => {
     });
   });
 
+  test('a stale recovery receipt cannot reconcile a newer completion record', async () => {
+    const storedReceipt = {
+      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
+      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'new-completion',
+    };
+    tables.service_records[0].structured_notes = { servicePhotoVisit: storedReceipt };
+    await withServer(async (baseUrl) => {
+      const response = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: true,
+        expectedVisit: { ...storedReceipt, revision: 'old-completion' },
+      });
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('visit_identity_changed');
+      expect(updates).toHaveLength(0);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+      expect(mockAlert).not.toHaveBeenCalled();
+    });
+  });
+
   test('clears the cached PDF key and does NOT start a render for a report that never rendered', async () => {
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
