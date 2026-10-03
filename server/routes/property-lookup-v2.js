@@ -244,6 +244,12 @@ function occupancyOption(value) {
   return occupancyAnswer ? { occupancyAnswer } : {};
 }
 
+// True when the admin lookup skipped the business check because the job is
+// whole-property (association) — only while the gate is live.
+function businessIdentityBypassed(wholeProperty) {
+  return wholeProperty === true && lookupBusinessIdentityLive();
+}
+
 // GATE_LOOKUP_BUSINESS_IDENTITY changes the response (business scope, the
 // question, the commercial typing) and the CSR's answer changes it again, so
 // they join the coalescing key; '' while the leg is off keeps every key as it was.
@@ -1273,6 +1279,10 @@ router.post('/property-lookup', async (req, res) => {
     // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();
+    // A whole-property (association) lookup skips the business check. The
+    // tool is told so it can ask for a fresh lookup if the business type
+    // later stops being an association. Absent while the gate is off.
+    if (businessIdentityBypassed(wholeProperty)) result.meta.businessIdentityBypassed = true;
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
@@ -2052,7 +2062,13 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
     applies: true,
     sizeSource: 'candidate',
     resolved: null,
-    candidate: { address: lookupAddress, buildingSqft, commercialSubtype },
+    candidate: {
+      address: lookupAddress, buildingSqft, commercialSubtype,
+      // A suite staff confirmed from the listed business, with no unit typed:
+      // the listing's own suite and name let the public-record match pick
+      // THIS tenant's license row. Used for this request's match only.
+      ...businessSuiteHints(lookupAddress, options),
+    },
     buildingSqft,
     distrustedVerifiedSqft,
   };
@@ -2309,7 +2325,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // staff for the building's.
   const verifiedSizeWithheldForBuilding = (businessScope.decision === BUSINESS_SCOPE.BUILDING && recordSqftIsVerified(rc))
     ? Number(rc.squareFootage) : null;
-  if (verifiedSizeWithheldForBuilding) rc = { ...rc, squareFootage: 0 };
+  if (verifiedSizeWithheldForBuilding) {
+    // A story count verified at this address is withheld with the size for
+    // the same reason: one space's count would derive the building's
+    // footprint, perimeter, attic and slab.
+    const storiesVerified = rc._storiesSource === 'verified'
+      || rc._fieldEvidence?.stories?.sourceType === 'verified'
+      || (Array.isArray(rc._verifiedFields) && rc._verifiedFields.includes('stories'));
+    rc = {
+      ...rc,
+      squareFootage: 0,
+      ...(storiesVerified ? { stories: null, _storiesSource: 'default' } : {}),
+    };
+  }
   const commercialSuiteUnitScoped = Boolean(commercialSuiteScope?.applies);
   if (commercialSuiteUnitScoped) {
     // SAME blanking residentialUnitLookup applies below, via the shared
@@ -2514,7 +2542,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   if (verifiedSizeWithheldForBuilding) {
     fieldVerifyFlags.push({
       field: 'squareFootage',
-      reason: `A verified size (${verifiedSizeWithheldForBuilding.toLocaleString()} sq ft) is saved for this address, but it may be for one space, not the whole building, so it was not applied. Enter the building's square footage.`,
+      reason: `A verified size (${verifiedSizeWithheldForBuilding.toLocaleString()} sq ft) is saved for this address, but it may be for one space, not the whole building, so it was not applied (nor a verified story count). Enter the building's square footage and confirm its stories.`,
       priority: 'HIGH',
     });
   }
@@ -3118,6 +3146,14 @@ function suiteUnitKey(address) {
 // later cache hit from upgrading to a license size until the row expires.
 const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats']);
 
+// The matched listing's suite and name, as hints for the suite-size match —
+// only for a staff-confirmed business suite at an address with no typed unit.
+function businessSuiteHints(lookupAddress, options) {
+  const matched = options.businessIdentity?.matched;
+  if (options.businessScope?.decision !== BUSINESS_SCOPE.SUITE || !matched || suiteUnitKey(lookupAddress)) return {};
+  return { unitHint: matched.subpremise || null, businessNameHint: matched.name || null };
+}
+
 async function applyCommercialSuiteSize(profile, opts = {}) {
   if (!profile) return profile;
   const candidate = profile._commercialSuiteCandidate;
@@ -3131,12 +3167,14 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
   try {
     const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
     const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
+    const parts = suiteAddressParts(candidate.address);
     const suiteSize = await resolveCommercialSuiteSize({
-      address: suiteAddressParts(candidate.address),
+      address: candidate.unitHint && !parts.unit ? { ...parts, unit: candidate.unitHint } : parts,
       phone: null,
       // The point of this lane is discovering the business FROM the
-      // address — no hint is typed in by the operator here.
-      businessNameHint: null,
+      // address — no hint is typed in by the operator here; a
+      // staff-confirmed listing supplies its own name (businessSuiteHints).
+      businessNameHint: candidate.businessNameHint || null,
       commercialRiskType: null,
       commercialSubtype: candidate.commercialSubtype,
     }, opts);
@@ -6075,6 +6113,7 @@ module.exports._private = {
   buildResultFromCachedLookup,
   suiteUnitKeyForProfile,
   occupancyOption,
+  businessIdentityBypassed,
   prepareBusinessIdentity,
   cachedAggregateResolvesToOwnUnit,
   cachedUnitFolioStale,

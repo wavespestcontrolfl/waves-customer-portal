@@ -228,6 +228,11 @@ describe('gate on', () => {
     expect(p.fieldVerifyFlags).toContainEqual(expect.objectContaining({
       field: 'squareFootage', priority: 'HIGH', reason: expect.stringMatching(/1,350 sq ft.*was not applied/),
     }));
+    // A story count verified at the address is withheld with it.
+    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), squareFootage: 1350, stories: 3, _verifiedFields: ['squareFootage', 'stories'] }));
+    const withStories = (await run({ occupancyAnswer: 'building' })).enriched;
+    expect(withStories.stories).toBe(1);
+    expect(withStories.storiesSource).toBe('default');
     // No withholding without a verified size.
     lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
     const plain = (await run({ occupancyAnswer: 'building' })).enriched;
@@ -254,6 +259,24 @@ describe('gate on', () => {
       expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'BUSINESS_IDENTITY_OFF', statusCode: 409, failClosed: true }));
     }
     expect(() => translateV2CallToV1Input(plain, ['PEST'], {})).not.toThrow(expect.objectContaining({ code: 'BUSINESS_IDENTITY_OFF' }));
+  });
+
+  test('a staff-confirmed suite with no unit typed hands the listing\'s own suite and name to the size match; a typed unit keeps its own', async () => {
+    const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+    placesReply = () => ({ ok: true, json: async () => ({ places: [placeAt({ subpremise: '103' })] }) });
+    await run({ occupancyAnswer: 'suite' });
+    expect(resolveCommercialSuiteSize).toHaveBeenCalledWith(
+      expect.objectContaining({ address: expect.objectContaining({ unit: '103' }), businessNameHint: 'Example Nail Bar' }),
+      expect.anything(),
+    );
+    resolveCommercialSuiteSize.mockClear();
+    placesReply = () => ({ ok: true, json: async () => ({ places: [placeAt()] }) });
+    await performPropertyLookup('100 Example Plaza Dr Ste 3, Examplecity, FL 00000', {
+      persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true, occupancyAnswer: 'suite',
+    });
+    const [input] = resolveCommercialSuiteSize.mock.calls[0];
+    expect(String(input.address.unit)).toMatch(/3$/);
+    expect(input.businessNameHint).toBeNull();
   });
 
   test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
@@ -583,13 +606,23 @@ describe('suite stamp unit key', () => {
 });
 
 describe('the admin route body and the coalescing key', () => {
-  test('the occupancy body field becomes a lookup option only when it is one of the two answers', () => {
+  test('the occupancy body field becomes a lookup option only when it is one of the three answers', () => {
     const { occupancyOption } = _private;
     expect(occupancyOption('suite')).toEqual({ occupancyAnswer: 'suite' });
     expect(occupancyOption(' Building ')).toEqual({ occupancyAnswer: 'building' });
+    expect(occupancyOption('none')).toEqual({ occupancyAnswer: 'none' });
     expect(occupancyOption('maybe')).toEqual({});
     expect(occupancyOption(undefined)).toEqual({});
     expect(occupancyOption({ x: 1 })).toEqual({});
+  });
+
+  test('a whole-property lookup is reported as having skipped the business check only while the gate is on', () => {
+    const { businessIdentityBypassed } = _private;
+    expect(businessIdentityBypassed(true)).toBe(false);
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    expect(businessIdentityBypassed(true)).toBe(true);
+    expect(businessIdentityBypassed(false)).toBe(false);
+    expect(businessIdentityBypassed(undefined)).toBe(false);
   });
 
   test('gate off: keys are exactly what they were; gate on: the CSR answer joins the key so answers never share a run', () => {

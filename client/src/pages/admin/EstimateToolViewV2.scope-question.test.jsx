@@ -109,7 +109,9 @@ function jsonResponse(body, { status = 200 } = {}) {
 let fetchMock;
 let lookupReply;
 let calcReply;
+let lookupMeta;
 beforeEach(() => {
+  lookupMeta = () => ({});
   localStorage.setItem("waves_admin_token", "qa-token");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => {});
@@ -119,7 +121,7 @@ beforeEach(() => {
     const path = String(url);
     if (path.endsWith("/estimator/property-lookup")) {
       const body = JSON.parse(init.body);
-      return Promise.resolve(jsonResponse({ enriched: structuredClone(lookupReply(body)), errors: [] }));
+      return Promise.resolve(jsonResponse({ enriched: structuredClone(lookupReply(body)), errors: [], meta: lookupMeta() }));
     }
     if (path.endsWith("/calculate-estimate")) return Promise.resolve(calcReply());
     if (path.includes("/discounts")) return Promise.resolve(jsonResponse([]));
@@ -410,6 +412,25 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(lookupBodies()).toHaveLength(3));
     expect(lookupBodies()[2]).not.toHaveProperty("occupancy");
     expect(await screen.findByText(QUESTION)).toBeInTheDocument();
+  });
+
+  it("a lookup that skipped the business check as a whole-property job, on a form that is no longer one, asks for a fresh lookup and blocks pricing until it runs", async () => {
+    const NOTICE = "The business type changed. Run Property Lookup again before pricing.";
+    lookupReply = () => ({ ...answeredProfile("building"), businessIdentity: undefined, serviceScopeDecision: undefined, serviceScopeQuestion: undefined, occupancyAnswer: undefined });
+    lookupMeta = () => ({ businessIdentityBypassed: true });
+    await lookUp();
+    const prompt = screen.getByRole("region", { name: "Scope question" });
+    expect(prompt).toHaveTextContent(NOTICE);
+    expect(screen.queryByRole("button", { name: "Just their space" })).not.toBeInTheDocument();
+    pickPest();
+    const generate = screen.getByRole("button", { name: "Generate Estimate", exact: true });
+    expect(generate).toBeDisabled();
+    expect(generate).toHaveAttribute("title", NOTICE);
+    // The fresh lookup runs the business check: the notice goes and pricing opens.
+    lookupMeta = () => ({});
+    fireEvent.click(screen.getByRole("button", { name: "Property Lookup", exact: true }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Scope question" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Generate Estimate", exact: true })).toBeEnabled();
   });
 
   it("a server 409 COMMERCIAL_SCOPE_UNRESOLVED shows the same prompt and blocks the buttons", async () => {

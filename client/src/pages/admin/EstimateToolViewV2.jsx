@@ -48,6 +48,8 @@ import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDis
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
+
+const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
 
@@ -2655,9 +2657,16 @@ export default function EstimateToolViewV2({
     && scopePending.address === form.address.trim()
     && hasScopeVerdict
     && enrichedProfile.occupancyAnswer !== scopePending.answer;
+  // The last lookup ran as a whole-property (HOA / multifamily) job, which
+  // skips the business check, and the business type has since changed to
+  // something else: that profile was never asked suite vs building, so a
+  // fresh lookup is required before pricing.
+  const formIsWholeProperty = ["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
+    || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || ""));
+  const scopeLookupStale = !!enrichedProfile && lookupMeta?.businessIdentityBypassed === true && !formIsWholeProperty;
   const scopeQuestion = scopeUnresolved
     ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION)
-    : (scopeAnswerPending ? SCOPE_QUESTION : scopeConflict);
+    : (scopeAnswerPending ? SCOPE_QUESTION : (scopeLookupStale ? SCOPE_STALE_NOTICE : scopeConflict));
   // A server-raised question belongs to the lookup it came from: a cleared
   // or re-addressed lookup (no profile) drops it.
   useEffect(() => {
@@ -3318,6 +3327,7 @@ export default function EstimateToolViewV2({
         checkedAt: data.meta?.cachedAt || data.meta?.timestamp || new Date().toISOString(),
         cache: data.meta?.cache,
         errors: data.errors || [],
+        businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
       });
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
@@ -5204,6 +5214,7 @@ export default function EstimateToolViewV2({
                 // Only the answer the server applied reads as chosen; while
                 // the question is open none stands.
                 answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
+                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
                 busy={lookupStatus.type === "loading"}
                 onAnswer={answerScope}
               />

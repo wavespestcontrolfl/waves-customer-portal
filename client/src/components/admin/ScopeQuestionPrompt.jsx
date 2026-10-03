@@ -48,7 +48,19 @@ const ANSWERS = [
  * `question` is set the estimate cannot be priced; answering re-runs the
  * lookup with the answer.
  */
-export default function ScopeQuestionPrompt({ profile, question, answer, busy, onAnswer }) {
+export default function ScopeQuestionPrompt({ profile, question, answer, busy, onAnswer, notice }) {
+  // A notice replaces the question: the lookup itself must be run again
+  // before there is anything to answer.
+  if (notice) {
+    return (
+      <section
+        aria-label="Scope question"
+        className="mb-2.5 rounded-xs border-hairline border-zinc-300 bg-zinc-50 px-3 py-2 text-14 text-zinc-900"
+      >
+        <p className="m-0 font-medium">{notice}</p>
+      </section>
+    );
+  }
   const line = businessLine(profile?.businessIdentity);
   if (!question && !line && !answer) return null;
   const hint = answer ? null : SUGGESTION_HINTS[profile?.serviceScopeSuggestion];
