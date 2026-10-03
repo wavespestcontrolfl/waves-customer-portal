@@ -235,8 +235,12 @@ function recordingKnex(rowsByTable) {
       }
       return chain;
     };
-    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit']) chain[m] = rec(m);
-    chain.select = async (...args) => { calls.push([`${table} select`, ...args]); return rowsByTable[table] || []; };
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit', 'offset']) chain[m] = rec(m);
+    chain.select = async (...args) => {
+      calls.push([`${table} select`, ...args]);
+      const rows = rowsByTable[table];
+      return (typeof rows === 'function' ? rows() : rows) || [];
+    };
     return chain;
   };
   knex.calls = calls;
@@ -270,7 +274,7 @@ describe('searchReportBlogPosts', () => {
       expect(order).toBeGreaterThanOrEqual(0);
       expect(order).toBeLessThan(limit);
       const [, sql, bindings] = calls[order];
-      expect(sql).toMatch(new RegExp(`^\\(CASE WHEN .+ THEN 1 ELSE 0 END \\+ CASE WHEN .+ THEN 1 ELSE 0 END\\) DESC, ${newest} DESC NULLS LAST$`));
+      expect(sql).toMatch(new RegExp(`^\\(CASE WHEN .+ THEN 1 ELSE 0 END \\+ CASE WHEN .+ THEN 1 ELSE 0 END\\) DESC, ${newest} DESC NULLS LAST, id$`));
       expect(bindings).toEqual(expect.arrayContaining(['\\m(?:ghost|ghosts)\\M', '\\m(?:ants|ant|antses)\\M']));
       expect(calls[limit]).toEqual([`${table} limit`, 500]);
     }
@@ -292,6 +296,18 @@ describe('searchReportBlogPosts', () => {
     // Every ? in the SQL is a binding (knex reads a bare ? as one).
     expect((calls[hub][1].match(/\?/g) || []).length).toBe(calls[hub][2].length);
     expect(hub).toBeLessThan(calls.findIndex(([name]) => name === 'content_registry limit'));
+  });
+
+  test('rows that cannot be linked never crowd linkable ones out: the registry reads on until it has them (GitHub Codex P2 r4 on #5652)', async () => {
+    const spokeOnly = Array.from({ length: 500 }, (_, i) => registryRow(`bbbbbbbb-0000-4000-8000-${String(i).padStart(12, '0')}`, `Ghost Ants on a Lawn Site ${i}`, {
+      live_url: '/blog/ghost-ants-lawn/', canonical_url: '/blog/ghost-ants-lawn/', metadata: { frontmatter: { domains: ['bradentonfllawncare.com'] } },
+    }));
+    const pages = [spokeOnly, [REGISTRY_LIVE]];
+    let page = 0;
+    const knex = recordingKnex({ content_registry: () => pages[page++] || [] });
+    const posts = await searchReportBlogPosts(knex, 'ghost ants');
+    expect(posts.map((post) => post.id)).toEqual([REGISTRY_LIVE.id]);
+    expect(knex.calls.filter(([name]) => name === 'content_registry offset').map(([, offset]) => offset)).toEqual([0, 500]);
   });
 
   test('a plural finds the singular: "ghost ants" finds a Ghost Ant post, at its live URL', async () => {
@@ -431,7 +447,7 @@ function scriptedDb(service, posts, calls, registry = []) {
   return (table) => {
     calls.push(table);
     const chain = {};
-    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit', 'offset']) {
       chain[m] = (arg) => {
         if (typeof arg === 'function') arg.call({ whereRaw() { return this; }, orWhereRaw() { return this; } });
         return chain;

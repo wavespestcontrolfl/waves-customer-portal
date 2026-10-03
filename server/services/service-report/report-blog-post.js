@@ -25,9 +25,11 @@ const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
 
 const MAX_RESULTS = 8;
-// The most rows a search reads per source (the site has a few hundred posts;
-// this only bounds a runaway read).
+// The most rows a search ranks per source (the site has a few hundred posts;
+// this only bounds a runaway read), and the most registry rows it reads to
+// collect them.
 const MAX_CANDIDATES = 500;
+const MAX_REGISTRY_READ = 5000;
 const MAX_TERMS = 4;
 const MAX_TITLE_CHARS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -172,11 +174,40 @@ function anyTermIn(query, columns, terms, newestColumn) {
         for (const column of columns) this.orWhereRaw(`COALESCE(${column}, '') ~* ?`, [sqlPattern(term)]);
       }
     })
+    // id last: a total order, so pages never skip or repeat a row.
     .orderByRaw(
-      `(${terms.map(() => `CASE WHEN ${holds} THEN 1 ELSE 0 END`).join(' + ')}) DESC, ${newestColumn} DESC NULLS LAST`,
+      `(${terms.map(() => `CASE WHEN ${holds} THEN 1 ELSE 0 END`).join(' + ')}) DESC, ${newestColumn} DESC NULLS LAST, id`,
       terms.flatMap(holdsBindings),
     )
     .limit(MAX_CANDIDATES);
+}
+
+// The registry's linkable posts that answer the terms, best covered first:
+// read a page at a time until MAX_CANDIDATES of them can be linked
+// (registryLink judges each row: live, indexable, rendered on the hub, by
+// its URL and by its frontmatter's domains) or the rows run out, so rows
+// that cannot be linked never crowd linkable ones out (GitHub Codex P2 r2/r4
+// on #5652). The URL filter only spares reading most of another site's rows.
+async function registryCandidates(knex, terms) {
+  const found = [];
+  for (let offset = 0; offset < MAX_REGISTRY_READ; offset += MAX_CANDIDATES) {
+    const rows = await anyTermIn(knex('content_registry')
+      .where({ content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' })
+      .whereRaw('COALESCE(noindex_detected, false) = false')
+      // (Every pattern is a binding: knex reads a bare ? in the SQL as one.)
+      .whereRaw(
+        "(live_url ~* ? OR (COALESCE(live_url, '') !~* ? AND (COALESCE(canonical_url, '') !~* ? OR canonical_url ~* ?)))",
+        [HUB_URL_RE, ABSOLUTE_URL_RE, ABSOLUTE_URL_RE, HUB_URL_RE],
+      ), REGISTRY_TEXT, terms, 'published_at')
+      .offset(offset)
+      .select(REGISTRY_COLUMNS);
+    for (const row of rows) {
+      const post = registryLink(row);
+      if (post) found.push({ row, post });
+    }
+    if (rows.length < MAX_CANDIDATES || found.length >= MAX_CANDIDATES) break;
+  }
+  return found;
 }
 
 // Which terms a post's text holds, and where (a title or headline over the
@@ -210,19 +241,8 @@ const pathKey = (url) => {
 async function searchReportBlogPosts(knex, query) {
   const terms = searchTerms(query);
   if (!terms.length) return [];
-  const [registryRows, portalRows] = await Promise.all([
-    anyTermIn(knex('content_registry')
-      .where({ content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' })
-      .whereRaw('COALESCE(noindex_detected, false) = false')
-      // Only a row whose live URL can be on the hub reaches the cap: a spoke
-      // site's posts never crowd the Waves posts out (GitHub Codex P2 r2 on
-      // #5652); registryLink still decides.
-      // (Every pattern is a binding: knex reads a bare ? in the SQL as one.)
-      .whereRaw(
-        "(live_url ~* ? OR (COALESCE(live_url, '') !~* ? AND (COALESCE(canonical_url, '') !~* ? OR canonical_url ~* ?)))",
-        [HUB_URL_RE, ABSOLUTE_URL_RE, ABSOLUTE_URL_RE, HUB_URL_RE],
-      ), REGISTRY_TEXT, terms, 'published_at')
-      .select(REGISTRY_COLUMNS),
+  const [registryFound, portalRows] = await Promise.all([
+    registryCandidates(knex, terms),
     anyTermIn(knex('blog_posts')
       .where('status', 'published')
       .where('astro_status', 'live')
@@ -237,8 +257,8 @@ async function searchReportBlogPosts(knex, query) {
     if (found.has(key)) return;
     found.set(key, { post, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
-  for (const row of registryRows) {
-    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: row.target_keyword, summary: row.meta_description }, row.published_at);
+  for (const { row, post } of registryFound) {
+    add(post, { title: `${row.title || ''} ${row.h1 || ''}`, keyword: row.target_keyword, summary: row.meta_description }, row.published_at);
   }
   for (const row of portalRows) {
     add(reportBlogLink(row), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
