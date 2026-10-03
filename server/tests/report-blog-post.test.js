@@ -241,8 +241,17 @@ function recordingKnex(rowsByTable) {
       return chain;
     };
     for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit', 'offset']) chain[m] = rec(m);
+    // The sweep's rows for given portal posts: filtered by db_blog_id, as
+    // the database would.
+    let postIds = null;
+    chain.whereIn = (column, ids) => {
+      calls.push([`${table} whereIn`, column, ids]);
+      if (column === 'db_blog_id') postIds = ids.map(String);
+      return chain;
+    };
     chain.select = async (...args) => {
       calls.push([`${table} select`, ...args]);
+      if (postIds) return (rowsByTable[`${table}:swept`] || []).filter((row) => postIds.includes(String(row.db_blog_id)));
       const rows = rowsByTable[table];
       return (typeof rows === 'function' ? rows() : rows) || [];
     };
@@ -376,6 +385,15 @@ describe('searchReportBlogPosts', () => {
     expect(posts[0].id).toBe('66666666-6666-4666-8666-666666666666');
   });
 
+  test('a portal post the sweep found gone never comes back on its stale live stamp (GitHub Codex P1 r5 on #5652)', async () => {
+    const gone = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000002', db_blog_id: LIVE.id, live_status: 'not_found', live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+    const knex = recordingKnex({ blog_posts: [LIVE], 'content_registry:swept': [gone] });
+    expect(await searchReportBlogPosts(knex, 'ghost ants')).toEqual([]);
+    expect(knex.calls).toEqual(expect.arrayContaining([['content_registry whereIn', 'db_blog_id', [LIVE.id]]]));
+    // Not swept yet: the portal's own rule.
+    expect((await searchReportBlogPosts(recordingKnex({ blog_posts: [LIVE] }), 'ghost ants')).map((post) => post.id)).toEqual([LIVE.id]);
+  });
+
   test('at most eight', async () => {
     const rows = Array.from({ length: 12 }, (_, i) => registryRow(`aaaaaaaa-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, `Termite Season Note ${i}`));
     expect(await searchReportBlogPosts(recordingKnex({ content_registry: rows }), 'termites')).toHaveLength(8);
@@ -391,7 +409,12 @@ describe('searchReportBlogPosts', () => {
 describe('resolveReportBlogPostPick', () => {
   // The savepoint reader: each read gets a knex that answers its table's row.
   const readerOf = (rows) => jest.fn(async (fn) => fn((table) => {
-    const chain = { where: () => chain, first: async () => rows[table] || null };
+    let byPost = false;
+    const chain = {
+      where: (clause) => { byPost = !!clause && Object.prototype.hasOwnProperty.call(clause, 'db_blog_id'); return chain; },
+      first: async () => rows[table] || null,
+      select: async () => (byPost ? rows[`${table}:swept`] || [] : []),
+    };
     return chain;
   }));
   const reader = (row) => readerOf({ blog_posts: row });
@@ -410,6 +433,16 @@ describe('resolveReportBlogPostPick', () => {
     const read = reader(LIVE);
     expect(await resolveReportBlogPostPick(read, 'not-a-uuid')).toEqual({ post: null, rejected: true });
     expect(read).not.toHaveBeenCalled();
+  });
+
+  test('a portal pick the sweep has a row for stands on the sweep: gone or noindex is refused (GitHub Codex P1 r5 on #5652)', async () => {
+    const swept = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000001', db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+    expect(await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [{ ...swept, live_status: 'not_found' }] }), LIVE.id))
+      .toEqual({ post: null, rejected: true });
+    expect(await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [{ ...swept, noindex_detected: true }] }), LIVE.id))
+      .toEqual({ post: null, rejected: true });
+    expect((await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [swept] }), LIVE.id)).post)
+      .toMatchObject({ url: LIVE.astro_live_url });
   });
 
   test('a pick from the registry resolves from the registry; one no longer live there is refused', async () => {
@@ -452,14 +485,19 @@ function scriptedDb(service, posts, calls, registry = []) {
   return (table) => {
     calls.push(table);
     const chain = {};
+    let swept = false;
     for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit', 'offset']) {
       chain[m] = (arg) => {
         if (typeof arg === 'function') arg.call({ whereRaw() { return this; }, orWhereRaw() { return this; } });
         return chain;
       };
     }
+    chain.whereIn = (column) => { if (column === 'db_blog_id') swept = true; return chain; };
     chain.first = async () => (table === 'scheduled_services' ? service : null);
-    chain.select = async () => (table === 'blog_posts' ? posts : (table === 'content_registry' ? registry : []));
+    chain.select = async () => {
+      if (swept) return [];
+      return table === 'blog_posts' ? posts : (table === 'content_registry' ? registry : []);
+    };
     return chain;
   };
 }

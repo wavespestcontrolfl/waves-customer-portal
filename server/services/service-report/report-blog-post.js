@@ -104,6 +104,28 @@ function registryLink(row) {
   return { id: String(row.id), title: title.slice(0, MAX_TITLE_CHARS), url };
 }
 
+// A portal post as a report may link it: the registry's verdict when the
+// daily sweep has a row for the post (db_blog_id), so a page the sweep found
+// gone or noindex is never linked on the portal's stale astro_status (GitHub
+// Codex P1 r5 on #5652); the portal's own rule (reportBlogLink) only for a
+// post the sweep has not seen yet.
+function portalLink(row, matched = []) {
+  if (!matched.length) return reportBlogLink(row);
+  return matched.map(registryLink).find(Boolean) || null;
+}
+
+// The registry rows the sweep keeps for these portal posts, by post id.
+async function registryRowsForPortal(knex, ids) {
+  const byPost = new Map();
+  if (!ids.length) return byPost;
+  const rows = await knex('content_registry').whereIn('db_blog_id', ids).select([...REGISTRY_COLUMNS, 'db_blog_id']);
+  for (const row of rows || []) {
+    const key = String(row.db_blog_id);
+    byPost.set(key, [...(byPost.get(key) || []), row]);
+  }
+  return byPost;
+}
+
 // Words a search drops: short words that name no topic ("how to get rid
 // of"). A search box's filler list, not a judgment of what was meant.
 const FILLER_WORDS = new Set([
@@ -260,8 +282,9 @@ async function searchReportBlogPosts(knex, query) {
   for (const { row, post } of registryFound) {
     add(post, { title: `${row.title || ''} ${row.h1 || ''}`, keyword: row.target_keyword, summary: row.meta_description }, row.published_at);
   }
+  const sweptPortal = await registryRowsForPortal(knex, portalRows.map((row) => row.id).filter(Boolean));
   for (const row of portalRows) {
-    add(reportBlogLink(row), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
+    add(portalLink(row, sweptPortal.get(String(row.id)) || []), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
   }
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over
@@ -289,7 +312,10 @@ async function resolveReportBlogPostPick(read, blogPostId) {
   const fromRegistry = registryLink(registryRow);
   if (fromRegistry) return { post: fromRegistry };
   const row = await read((k) => k('blog_posts').where({ id: blogPostId }).first(COLUMNS));
-  const post = reportBlogLink(row);
+  if (!row) return { post: null, rejected: true };
+  // A portal pick the sweep has a row for stands on the sweep's verdict.
+  const matched = await read((k) => k('content_registry').where({ db_blog_id: blogPostId }).select(REGISTRY_COLUMNS));
+  const post = portalLink(row, Array.isArray(matched) ? matched : []);
   return post ? { post } : { post: null, rejected: true };
 }
 
