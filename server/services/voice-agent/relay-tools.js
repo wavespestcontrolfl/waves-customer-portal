@@ -1738,6 +1738,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about — file the estimate-request card, and let the result below tell
       // the model whether the promise may be spoken.
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
+      // Whether the card already standing for this call took this capture's
+      // correction. The result below only says so when it did.
+      let standingCardRevised = false;
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
         // A card an earlier capture on this call queued must not keep details
@@ -1746,7 +1749,8 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (!leadCreated && leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           if (typeof surfaceEstimateRequestForCustomer === 'function') {
-            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount, stillMissing: estimateMissing });
+            const revised = await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount, stillMissing: estimateMissing });
+            standingCardRevised = Boolean(revised && revised.persisted === true);
           }
         }
       } else if (estimateRequested) {
@@ -1781,10 +1785,16 @@ async function executeTool(name, input = {}, ctx = {}) {
                 // An estimate already promised on this call is still owed: the
                 // office card now says the details need confirming, so the
                 // caller is never told it was dropped.
-                ? 'The estimate already promised on this call stays on the office queue, marked that these '
-                  + 'details need confirming. Ask for what is missing and call capture_lead again with '
-                  + 'estimate_requested: true. If the caller declines to give it, respect that: tell them a Waves '
-                  + 'team member will call you back to confirm where to send it, and end the call normally.'
+                ? (standingCardRevised
+                  ? 'The estimate already promised on this call stays on the office queue, marked that these '
+                    + 'details need confirming. '
+                  // The card write failed (or another session owns the call):
+                  // never claim the office saw the change. The retry writes it.
+                  : 'The estimate already promised on this call is still owed, but this change could NOT be '
+                    + 'saved to the office queue. ')
+                  + 'Ask for what is missing and call capture_lead again with estimate_requested: true. If the '
+                  + 'caller declines to give it, respect that: tell them a Waves team member will call you back to '
+                  + 'confirm where to send it, and end the call normally.'
                 : 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
                   + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
                   + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '

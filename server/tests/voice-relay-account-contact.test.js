@@ -364,6 +364,12 @@ describe('a written estimate for an established customer: ONE yes/no question (o
       const revise = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
       expect(revise[1]).toMatchObject({ city: 'Venice', address_line1: null });
       expect(revise[2]).toMatchObject({ stillMissing: ['address_line1'], sessionKey: 'sk-1', callSid: 'CA-acct-1', spokenExpectation: 'about_15_minutes' });
+      // If that card write fails, the result does not claim the office saw the change.
+      surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false });
+      const unsaved = await ask({ city: 'Venice' }, ctx);
+      expect(unsaved).toMatch(/still owed, but this change could NOT be\s+saved to the office queue/);
+      expect(unsaved).not.toMatch(/marked that these/);
+      expect(unsaved).toMatch(/will call you back to\s+confirm where to send it/);
       // Completed correction: the card is rewritten with the new address, same promise, same timing.
       expect(await ask({ address_line1: '9 Rental Rd', city: 'Venice' }, ctx)).toMatch(/usually goes out in about 15 minutes/);
       const rewrite = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
