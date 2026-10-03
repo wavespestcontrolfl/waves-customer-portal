@@ -413,7 +413,9 @@ describe('correct_invoice_address', () => {
   test('confirm writes through the shared audited correction (one transaction, critical audit row) and says nothing was re-sent', async () => {
     const preview = await prev();
     const res = await run('correct_invoice_address', { invoice_id: INV, ...NEW }, { confirmed: true, technicianId: 'admin-1', executionPins: { _verified_address_correction: preview } });
-    expect(audited).toHaveBeenCalledWith(db, INV, expect.objectContaining(NEW), { actorId: 'admin-1', via: 'intelligence_bar' });
+    expect(audited).toHaveBeenCalledWith(db, INV, expect.objectContaining(NEW), {
+      actorId: 'admin-1', via: 'intelligence_bar', expect: { before: expect.objectContaining({ address_line1: '1 Old Street' }) },
+    });
     expect(res).toMatchObject({ success: true, invoice_number: 'WPC-2099-0001', address_now: { address_line1: '9 New Street Apt 4' }, address_before: { address_line1: '1 Old Street' } });
     expect(res.note).toMatch(/nothing was re-sent to the customer/);
   });
@@ -429,6 +431,17 @@ describe('correct_invoice_address', () => {
     expect(audited).not.toHaveBeenCalled();
   });
 
+  test('drift found under the writer lock (void, or a newer address) comes back as preview_changed and claims no success', async () => {
+    const preview = await prev();
+    const ctx = { confirmed: true, technicianId: 'admin-1', executionPins: { _verified_address_correction: preview } };
+    audited.mockResolvedValueOnce({ drift: 'void' });
+    expect(await run('correct_invoice_address', { invoice_id: INV, ...NEW }, ctx)).toMatchObject({ code: 'invoice_void', preview_changed: true });
+    audited.mockResolvedValueOnce({ drift: 'address' });
+    const res = await run('correct_invoice_address', { invoice_id: INV, ...NEW }, ctx);
+    expect(res).toMatchObject({ preview_changed: true, error: expect.stringMatching(/printed address changed/) });
+    expect(res.success).toBeUndefined();
+  });
+
   test('the contract: carded, not irreversible, no customer contact, lists what changes and what does not', async () => {
     const preview = await prev();
     const contract = buildContract({ toolName: 'correct_invoice_address', params: { invoice_id: INV, ...NEW }, displayParams: {}, preview, summary: 's' });
@@ -439,23 +452,62 @@ describe('correct_invoice_address', () => {
 });
 
 describe('correctInvoiceAddressAudited (the one writer behind the PUT route and the bar)', () => {
-  test('commits the snapshot and a critical before/after audit row in one transaction, marking the bar as the surface', async () => {
+  const INPUT = { address_line1: '9 New Street', city: 'Bradenton', state: 'FL', zip: '34203' };
+  const OLD = { address_line1: '1 Old Street', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' };
+  // The row as read under the FOR UPDATE lock (what a concurrent commit leaves).
+  function harness(locked) {
     const written = [];
     const trx = (table) => ({
       where: () => ({
-        forUpdate: () => ({ first: async () => (table === 'invoices' ? { id: INV, customer_id: CUST, customer_address_snapshot: null } : undefined) }),
+        forUpdate: () => ({ first: async () => (table === 'invoices' ? { id: INV, customer_id: CUST, ...locked } : undefined) }),
         first: async () => ({ address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }),
         update: async (patch) => { written.push({ table, patch }); },
       }),
     });
     trx.fn = { now: () => 'NOW()' };
-    const conn = { transaction: jest.fn(async (work) => work(trx)) };
-    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, { address_line1: '9 New Street', city: 'Bradenton', state: 'FL', zip: '34203' }, { actorId: 'admin-1', via: 'intelligence_bar' });
+    return { written, trx, conn: { transaction: jest.fn(async (work) => work(trx)) } };
+  }
+
+  test('commits the snapshot and a critical before/after audit row in one transaction, marking the bar as the surface', async () => {
+    const { written, trx, conn } = harness({ status: 'paid', customer_address_snapshot: null });
+    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT, { actorId: 'admin-1', via: 'intelligence_bar' });
     expect(result.after).toMatchObject({ address_line1: '9 New Street', corrected_at: expect.any(String) });
     expect(written).toEqual([{ table: 'invoices', patch: expect.objectContaining({ customer_address_snapshot: expect.objectContaining({ city: 'Bradenton' }) }) }]);
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'invoice.address.correct', actor_id: 'admin-1', resource_id: INV, critical: true, trx,
       metadata: expect.objectContaining({ customerId: CUST, via: 'intelligence_bar', before: expect.objectContaining({ address_line1: '55 Live Ave' }), after: expect.objectContaining({ city: 'Bradenton' }) }),
     }));
+  });
+
+  test('an approved expectation that still holds under the lock writes normally', async () => {
+    const { written, conn } = harness({ status: 'paid', customer_address_snapshot: OLD });
+    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT, { expect: { before: OLD } });
+    expect(result.after.city).toBe('Bradenton');
+    expect(written).toHaveLength(1);
+  });
+
+  test('another correction landed between preview and lock: nothing is written, no audit row, drift address', async () => {
+    const newer = { ...OLD, address_line1: '2 Newer Street' };
+    const { written, conn } = harness({ status: 'paid', customer_address_snapshot: newer });
+    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT, { expect: { before: OLD } });
+    expect(result).toEqual({ drift: 'address' });
+    expect(written).toEqual([]);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('the invoice was voided between preview and lock: nothing is written, no audit row, drift void', async () => {
+    const { written, conn } = harness({ status: 'void', customer_address_snapshot: OLD });
+    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT, { expect: { before: OLD } });
+    expect(result).toEqual({ drift: 'void' });
+    expect(written).toEqual([]);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('the PUT route passes no expectation and keeps its behavior (any status, any prior address)', async () => {
+    const { written, conn } = harness({ status: 'void', customer_address_snapshot: { ...OLD, address_line1: 'Anything' } });
+    const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT);
+    expect(result.after.city).toBe('Bradenton');
+    expect(written).toHaveLength(1);
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
   });
 });

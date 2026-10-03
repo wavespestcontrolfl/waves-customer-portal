@@ -88,15 +88,25 @@ function correctedInvoiceAddress(invoice) {
  * Rewrites only customer_address_snapshot — presentation data. Amounts,
  * status, the customer profile, saved properties and payer bill-to stay
  * untouched, and nothing is sent. Returns { before, after } for the audit.
+ *
+ * `expect` (the Intelligence Bar's approved card): { before } is the address the
+ * card showed as printed now, and its presence also requires a non-void
+ * invoice. Both are checked on the row read under the FOR UPDATE lock, before
+ * anything is written; a mismatch resolves { drift: 'void' | 'address' } and
+ * writes nothing. The PUT route passes none and keeps its behavior.
  */
-async function correctInvoiceAddress(trx, invoiceId, input) {
+async function correctInvoiceAddress(trx, invoiceId, input, { expect = null } = {}) {
   // corrected_at marks a staff correction: it outranks the linked visit's
   // address in billing emails (billing-email-details invoicePropertyAddress).
   const after = { ...normalizeInvoiceAddressInput(input), corrected_at: new Date().toISOString() };
   const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate()
-    .first('id', 'customer_id', 'customer_address_snapshot');
+    .first('id', 'customer_id', 'status', 'customer_address_snapshot');
   if (!invoice) return null;
   const before = await loadDisplayedInvoiceAddress(trx, invoice);
+  if (expect) {
+    if (String(invoice.status || '').toLowerCase() === 'void') return { drift: 'void' };
+    if (ADDRESS_FIELDS.some((field) => (before[field] || null) !== (expect.before?.[field] || null))) return { drift: 'address' };
+  }
   await trx('invoices').where({ id: invoiceId }).update({ customer_address_snapshot: after, updated_at: trx.fn.now() });
   return { invoice, before, after };
 }
@@ -107,13 +117,14 @@ async function correctInvoiceAddress(trx, invoiceId, input) {
  * and the Intelligence Bar's correct_invoice_address, so a correction can
  * never land without its audit row. `conn` is the knex handle; `actor` is
  * { actorId, ip, userAgent, via? } (via marks a non-route surface). Resolves
- * the correction, or null for an unknown invoice.
+ * the correction, null for an unknown invoice, or { drift } (see
+ * correctInvoiceAddress) with nothing written.
  */
-async function correctInvoiceAddressAudited(conn, invoiceId, input, { actorId = null, ip = null, userAgent = null, via = null } = {}) {
+async function correctInvoiceAddressAudited(conn, invoiceId, input, { actorId = null, ip = null, userAgent = null, via = null, expect = null } = {}) {
   const { recordAuditEvent } = require('./audit-log');
   return conn.transaction(async (trx) => {
-    const corrected = await correctInvoiceAddress(trx, invoiceId, input);
-    if (!corrected) return null;
+    const corrected = await correctInvoiceAddress(trx, invoiceId, input, { expect });
+    if (!corrected || corrected.drift) return corrected;
     await recordAuditEvent({
       actor_type: 'technician',
       actor_id: actorId,

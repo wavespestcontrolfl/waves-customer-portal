@@ -416,8 +416,16 @@ async function correctInvoiceAddress(input, actionContext = {}) {
   }
   const done = await InvoiceAddress.correctInvoiceAddressAudited(db, preview.invoice_id, input, {
     actorId: actionContext.technicianId || null, via: 'intelligence_bar',
+    // Re-checked under the invoice row lock the writer takes: a correction or a
+    // void that landed after the re-plan above writes nothing.
+    expect: { before: preview.address_printed_now },
   });
   if (!done) return { error: 'No invoice matches that.', code: 'invoice_not_found' };
+  if (done.drift) {
+    return done.drift === 'void'
+      ? { error: `Invoice ${preview.invoice_number} was voided after the card was shown, so its address was not changed.`, code: 'invoice_void', preview_changed: true }
+      : { error: 'The invoice\'s printed address changed after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
   logger.info(`[intelligence-bar:billing-write] corrected the printed address on invoice ${preview.invoice_id}`);
   return {
     success: true,
