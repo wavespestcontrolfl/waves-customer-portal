@@ -161,7 +161,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -17963,9 +17963,15 @@ const CallRecordingProcessor = {
                     try {
                       const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
                         conn: pickSp,
-                        date: scheduledDate,
-                        windowStart: windowStart || '09:00',
-                        windowEnd: windowEnd || '10:00',
+                        // The reused row's OWN day and window (a marker or
+                        // idempotency match can sit at a different time than
+                        // this call stated). A windowless row occupies no
+                        // time: the pick declines and the default stands.
+                        date: callBookingDateOnly(existing.scheduled_date),
+                        windowStart: existing.window_start ? String(existing.window_start).slice(0, 5) : null,
+                        windowEnd: existing.window_start
+                          ? followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)
+                          : null,
                         durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                         lat: existing.lat ?? null,
                         lng: existing.lng ?? null,

@@ -181,6 +181,9 @@ describe('wiring', () => {
     expect(src).not.toContain('technician_id: defaultTechnicianId,');
     // Reused unassigned row: the pick excludes the row itself.
     expect(src).toContain('excludeServiceIds: [existing.id],');
+    // …and reads the row's OWN day and window, not the time this call stated.
+    expect(src).toContain('date: callBookingDateOnly(existing.scheduled_date),');
+    expect(src).toContain('followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)');
     expect(src).toContain('let reuseTechId = reuseCandidateTechId;');
     // Post-commit recheck judges each fresh row on its own technician.
     expect(src).toContain('technicianId: svc.technician_id || null,');
