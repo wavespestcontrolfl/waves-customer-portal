@@ -301,3 +301,13 @@ test.each([
   expect(plainReason(code)).not.toBe('I could not match it to a choice');
   expect(plainReason(code)).not.toContain('_');
 });
+
+test('a product said as the current How still holds when the fill changes How', () => {
+  const result = plan({
+    rows: [row('a')],
+    products: [product('a', { method: 'spot_treatment', heard: 'spot treated with a' })],
+    visit: { ...NO_VISIT, method: 'perimeter_spray', heard: 'perimeter' },
+  });
+  expect(result.formPatch.method).toBe('perimeter_spray');
+  expect(texts(result)).toContain('Heard “spot treated with a” — Product a went down a different way from the How row.');
+});

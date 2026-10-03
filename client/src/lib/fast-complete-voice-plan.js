@@ -185,11 +185,14 @@ function applyAmount(plan, key, p) {
 function applyProductMethod(plan, key, p) {
   const { ops } = plan;
   const row = plan.rows.get(key);
-  if (!p.method || ops.rowMethod(row, plan.form.method) === p.method) return;
+  if (!p.method) return;
+  // A spray on a row that follows How is a hint even when it matches How now:
+  // the visit's How is settled after every product (planVisitMethod).
   if (ops.followsVisitMethod(row) && ops.sprayMethods.has(p.method)) {
     plan.sprayHints.push({ method: p.method, heard: p.heard, name: row.name });
     return;
   }
+  if (ops.rowMethod(row, plan.form.method) === p.method) return;
   if (!row.added) {
     addCheck(plan, `Heard ${quoted(p.heard)} — ${row.name} has no way to set that; check how it went down.`);
     return;

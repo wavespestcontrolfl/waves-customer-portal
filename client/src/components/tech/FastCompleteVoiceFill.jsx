@@ -71,8 +71,13 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
   const dismiss = useCallback((id) => setChecks((prev) => prev.filter((check) => check.id !== id)), []);
   const confirm = useCallback((id) => setConfirms((prev) => prev.filter((item) => item.id !== id)), []);
 
+  // A 404 later (gate turned off) takes the mic away, never what is already on
+  // the sheet: open Checks, confirms and the office note stay reachable while
+  // they hold Complete.
+  const pending = checks.length > 0 || confirms.length > 0 || officeNote.trim() !== '';
   return {
-    enabled: enabled && !unavailable,
+    enabled: enabled && (!unavailable || pending),
+    micEnabled: enabled && !unavailable,
     filling: status === 'filling',
     error,
     checks,
@@ -214,7 +219,7 @@ export function VoiceFillTop({ voice, serviceId, locked, onPendingChange }) {
   if (!voice.enabled) return null;
   return (
     <>
-      <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />
+      {voice.micEnabled && <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />}
       <ConfirmSection confirms={voice.confirms} locked={locked} onConfirm={voice.confirm} />
       <ChecksSection checks={voice.checks} locked={locked} onDismiss={voice.dismiss} />
     </>

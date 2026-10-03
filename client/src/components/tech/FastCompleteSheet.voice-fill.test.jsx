@@ -377,4 +377,29 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     fireEvent.change(screen.getByLabelText('Office note (not on the report)'), { target: { value: 'Gate code is 1234.' } });
     expect(completeButton().disabled).toBe(false);
   });
+
+  test('a later 404 takes the mic away but keeps what still holds Complete reachable', async () => {
+    let calls = 0;
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/voice-fill') && ++calls > 1) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Request failed (404)'), { status: 404 });
+      }
+      return base(path, options);
+    });
+    await openSheet(request);
+    say('first');
+    await screen.findByRole('region', { name: 'Confirm what I filled' });
+    say('second');
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Tell me what you did' })).toBeNull());
+    expect(screen.getByRole('region', { name: 'Confirm what I filled' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Check' })).toBeTruthy();
+    expect(screen.getByLabelText('Office note (not on the report)')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
+    confirmAll();
+    expect(completeButton().disabled).toBe(false);
+  });
 });
+
