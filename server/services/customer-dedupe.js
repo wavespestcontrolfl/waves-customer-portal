@@ -2439,6 +2439,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
       throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
     }
+    // Remember who owns each side's visit-linked invoices BEFORE the sweep moves the loser's under the
+    // winner, so the withdrawal after the Bill-To lands acts on the invoices whose owner moved.
+    const LinkedOwners = require('./visit-linked-invoice-withdrawal');
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id });
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId });
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:

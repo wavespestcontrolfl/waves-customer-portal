@@ -4284,6 +4284,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
                 statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
               });
             }
+          } else if (updates.payer_id !== undefined) {
+            // Unchanged payer: nothing to refuse, but remember each linked invoice's owner so the
+            // withdrawal below acts only on what moves.
+            await require('../services/visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: req.params.id }, customerPayerPending);
           }
           // Assigning a DEFAULT payer must first release any unconfirmed
           // combined pay-page session on this customer's invoices (codex

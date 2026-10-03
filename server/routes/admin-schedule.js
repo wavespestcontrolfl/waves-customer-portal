@@ -14680,7 +14680,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // The children took the Bill-To in the same write: their visit-linked invoices follow
               // it (withdrawn when a payer now owns them, released when it cleared).
               const childVisitIds = movedChildIds.map((row) => (row && typeof row === 'object' ? row.id : row));
-              if (childVisitIds.length) {
+              // Only an edit that touched the payer or the self-pay pin can move an invoice (a PO-only
+              // edit propagates the PO and nothing else).
+              if (childVisitIds.length && payerFieldsTouched) {
                 const Linked = require('../services/visit-linked-invoice-withdrawal');
                 await Linked.reconcileLinkedInvoices(trx, { scheduledServiceIds: childVisitIds });
                 await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });

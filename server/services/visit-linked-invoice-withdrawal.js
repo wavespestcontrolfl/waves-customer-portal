@@ -173,6 +173,14 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
   return out;
 }
 
+// Remember the owner of every visit-linked invoice in scope BEFORE a write that changes who pays,
+// for a writer with nothing to refuse at that point: the withdrawal after the write then acts on what
+// moved, not on every invoice that merely resolves to a payer now (an invoice with no remembered
+// owner is judged against what it records: self-pay, or the payer named by its stamp).
+async function recordOwnerPlan(trx, scope, pending = null) {
+  await ownerTransitions(trx, scope, { mode: 'pre', pending, stamped: 'unstamped' });
+}
+
 // The visits the fence, withdrawal and release will lock for these customers: the visit every
 // non-terminal visit-linked invoice rides (processing and already-stamped ones included, since the
 // fence judges the first and the release re-judges the second). A caller that takes a payer row FOR
@@ -292,4 +300,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
   return false;
 }
 
-module.exports = { ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

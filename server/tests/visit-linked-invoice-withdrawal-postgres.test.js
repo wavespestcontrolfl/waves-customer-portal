@@ -334,6 +334,23 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(f.visitId).toBeTruthy();
   });
 
+  test('a merge into an already payer-linked winner withdraws what moved (the loser\'s invoice) and leaves the winner\'s own residue and its checkout alone', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const payerId = await payer();
+    const winner = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_winner_residue' } });
+    const loser = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_loser' } });
+    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    // The merge remembers both sides' owners, then its sweep moves the loser's records under the winner.
+    await Linked.recordOwnerPlan(mockPg, { customerId: loser.customerId });
+    await Linked.recordOwnerPlan(mockPg, { customerId: winner.customerId });
+    await mockPg('scheduled_services').where({ id: loser.visitId }).update({ customer_id: winner.customerId });
+    await mockPg('service_records').where({ id: loser.recordId }).update({ customer_id: winner.customerId });
+    await mockPg('invoices').where({ id: loser.invoiceId }).update({ customer_id: winner.customerId });
+    expect(await Packets.withdrawPacketInvoicesForOwner(mockPg, { customerId: winner.customerId })).toEqual([loser.invoiceId]);
+    expect(await invoiceRow(winner.invoiceId)).toMatchObject({ scheduled_send_error: null, stripe_payment_intent_id: 'pi_winner_residue' });
+  });
+
   test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
     const payerId = await payer();
     const future = new Date(Date.now() + 3 * 86400e3);

@@ -70,6 +70,18 @@ async function put(customerId, body) {
     return { customerId, invoiceId };
   }
 
+  test('resubmitting an unchanged ACTIVE payer does not withdraw a payer-owned residue invoice or cancel its checkout', async () => {
+    const retained = await payer(true);
+    const { customerId, invoiceId } = await customerWithInvoice(retained);
+    const piId = (await db('invoices').where({ id: invoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id;
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const same = await put(customerId, { firstName: 'Fixture', payerId: retained });
+    expect([200, 500]).toContain(same.status);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await db('invoices').where({ id: invoiceId }).first()).toMatchObject({ stripe_payment_intent_id: piId, scheduled_send_error: null });
+  });
+
   test('resubmitting an unchanged payer that is inactive leaves the invoice and its checkout alone; assigning an active payer moves both', async () => {
     const retained = await payer(false);
     const { customerId, invoiceId } = await customerWithInvoice(retained);

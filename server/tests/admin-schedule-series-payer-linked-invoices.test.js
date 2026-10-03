@@ -168,3 +168,13 @@ test('clearing a series payer that reveals the customer default still fences, in
   expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceId: 'svc-1' });
   expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: ['child-pending'] });
 });
+
+test('a PO-only series edit propagates the PO and runs no Bill-To pipeline for the children', async () => {
+  const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ poNumber: 'PO-FIXTURE-1' }),
+  });
+  expect(res.status).toBe(200);
+  expect(Linked.linkedInvoiceChargeInFlight).not.toHaveBeenCalled();
+  expect(Linked.reconcileLinkedInvoices).not.toHaveBeenCalled();
+  expect(Linked.withdrawLinkedInvoicesForOwner).not.toHaveBeenCalled();
+});
