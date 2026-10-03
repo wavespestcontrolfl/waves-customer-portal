@@ -420,7 +420,10 @@ function hasContact(customer, prefs) {
   const email = String(recipient?.email || '').trim();
   // A customer who turned texts off (notification_prefs.sms_enabled false)
   // has no text channel: the canonical sender would block it.
-  return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() && prefs?.sms_enabled !== false };
+  // ...and one whose billing channel is email-only, with an address to send to, is
+  // refused the text by the canonical consent gate (CHANNEL_EMAIL_ONLY).
+  const emailOnly = prefs?.billing_channel === 'email' && !!String(prefs?.billing_email || customer?.email || '').trim();
+  return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() && prefs?.sms_enabled !== false && !emailOnly };
 }
 
 // The notices' stored first visits (rate checks read their stamped price).
@@ -1371,7 +1374,15 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   }
   next.delivery_revoked = failure;
   const prepay = live.billing_lane === 'annual_prepay';
-  const rateWritten = !!live.applied_at && !prepay;
+  // A prepaid renewal already RECORDED (a successor term exists, possibly invoiced at the
+  // increased amount) cannot be reversed here: flagged for a hand check, as a written rate is.
+  let prepayTerm = null;
+  let renewalRecorded = false;
+  if (prepay && meta.term_id) {
+    prepayTerm = await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first();
+    if (prepayTerm) renewalRecorded = await require('./rate-review-apply')._private.successorTermExists(trx, prepayTerm, live.family_key);
+  }
+  const rateWritten = (!!live.applied_at && !prepay) || renewalRecorded;
   // A channel of unknown outcome is still out there: not a clean failure.
   const parked = !rateWritten && Object.keys(meta.uncertain_channels || {}).length > 0;
   if (parked) {
@@ -1387,7 +1398,7 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   // even after the 30-day reminder (which does not quote the new amount): a retained
   // amount would be enforced at renewal as an increase the customer never received.
   if (!rateWritten && live.applied_at && prepay) {
-    const term = meta.term_id ? await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first() : null;
+    const term = prepayTerm;
     if (term && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents)) {
       await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
       next.prepay_unstaged = true;

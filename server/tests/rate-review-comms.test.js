@@ -1294,6 +1294,33 @@ describe('customer surfaces', () => {
       expect(meta().prepay_unstaged).toBe(true);
     });
 
+    test('prepaid with the renewal already recorded (a successor term exists): flagged for a hand check, not reset for a re-send', async () => {
+      const prepay = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+      });
+      const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+      b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+      await sendEmailOnly(b);
+      Object.assign(notices()[0], { applied_at: NOW });
+      mockDb.store.annual_prepay_terms[0].next_term_prepay_amount = '484.00';
+      mockDb.store.annual_prepay_terms.push({ id: 'term-2', customer_id: CUSTOMER(1), status: 'pending', renewed_from_term_id: 'term-1', term_start: '2027-05-15', prepay_amount: '484.00' });
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      expect(alerts[0]).toMatchObject({ rateWritten: true });
+      expect(notices()[0]).toMatchObject({ status: 'sent' });
+      expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBe('484.00'); // untouched: the renewal exists
+    });
+
+    test('preview: an email-only billing channel is previewed as email only (the text would be refused CHANNEL_EMAIL_ONLY)', async () => {
+      const b = book();
+      b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_channel: 'email', sms_enabled: true }];
+      mockDb.reset(b);
+      const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+      expect(out.customers[0].channels).toEqual({ email: true, sms: false });
+      expect(out.counts).toMatchObject({ letters: 1, email: 1, sms: 0 });
+    });
+
     test('an email of UNKNOWN outcome next to a text that later fails parks the letter as send_uncertain (it may have arrived), never a clean draft', async () => {
       mockDb.reset(book());
       emailLeg.mockResolvedValue({ sent: false, attempted: true }); // timed out: ambiguous
