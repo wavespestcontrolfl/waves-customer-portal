@@ -20934,6 +20934,19 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // — no pay link, and the copy says the card is charged after that visit.
   const prepayAwaitingFirstVisit = !!prepayTerm && !!invoice
     && !!prepayJobStamp && String(prepayJobStamp.status || '') === 'awaiting_first_visit';
+  // GATE_PAF_TERMITE: a signed, activated termite annual plan whose charge
+  // waits for the station installation (or is being taken right after it) is
+  // not owed now either. Signing mints the term and invoice, so this retry
+  // reads as 'annual_prepay' — without this it would hand the customer the
+  // /pay link and the prepay_invoice step before installation (GitHub Codex
+  // #5816 r3). The wait record on the estimate decides.
+  let termiteChargeState = estimate.annual_plan_signature_charge || null;
+  if (typeof termiteChargeState === 'string') {
+    try { termiteChargeState = JSON.parse(termiteChargeState); } catch { termiteChargeState = null; }
+  }
+  const termiteAwaitingInstallation = !!prepayTerm && !!invoice && !!termiteChargeState
+    && (termiteChargeState.status === 'awaiting_installation'
+      || (termiteChargeState.status === 'claimed' && termiteChargeState.trigger === 'installation_complete'));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
@@ -20943,7 +20956,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
     && String(prepayJobStamp?.status || '') === 'delivered_fallback';
   const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
-    && !prepayAwaitingFirstVisit && invoice.token
+    && !prepayAwaitingFirstVisit && !termiteAwaitingInstallation && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -21007,7 +21020,8 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit
+        && !termiteAwaitingInstallation,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -21034,10 +21048,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
       // may have an executor mid-charge → tender-neutral 'ambiguous'
       // "we're confirming your payment" copy (Codex r26 P2).
-      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit,
+      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit || termiteAwaitingInstallation,
       prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
         ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
-        : (prepayAwaitingFirstVisit ? 'after_first_visit' : null)),
+        : (prepayAwaitingFirstVisit ? 'after_first_visit' : (termiteAwaitingInstallation ? 'after_installation' : null))),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     ...(invoiceKind === 'annual_prepay_deferred'

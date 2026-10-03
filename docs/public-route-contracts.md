@@ -1818,7 +1818,14 @@ that customer's document still says so. Only when no agreement is issued yet doe
 the field is then present when the gate is on AND the ACTIVE annual agreement version carries the
 after-installation wording. The React success card then adds: "Nothing is charged when you sign.
 After your station installation is completed, we charge your payment method on file, or send a
-payment link if there is none." The office accept notification names the same timing. While the
+payment link if there is none." The office accept notification names the same timing. After the signature, while the plan's
+charge record on the estimate reads `awaiting_installation` (or its after-installation charge is
+in flight), the already-accepted retry carries NO `invoicePayUrl`, `invoiceMode: false`,
+`invoiceSettled: true`, `nextStep: 'confirmed'` and `prepayChargeStatus: 'after_installation'`:
+the customer is never offered the plan invoice before installation. The card then reads "Your
+plan agreement is signed. Nothing is charged yet. After your station installation is completed,
+we charge your payment method on file, or send a payment link if there is none." Once the charge
+is declined or skipped, the ordinary pay-link posture returns. While the
 gate has never been on, no agreement carries that wording, so the field is absent and the card is
 byte-identical to before. No message is sent because of this field.
 

@@ -4324,6 +4324,11 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               const ceilingText = chargedText ? ` of up to ${fmtMoney(chargedTotal)}` : '';
               return `Your plan is approved. Nothing was charged today — your annual prepay${ceilingText} is charged to your saved card (or debited from your saved bank account) after your first visit. Any account credit lowers it.`;
             }
+            if (acceptResult.prepayChargeStatus === 'after_installation') {
+              // GATE_PAF_TERMITE: signed and active, charged after the
+              // station installation. No amount, no pay link.
+              return 'Your plan agreement is signed. Nothing is charged yet. After your station installation is completed, we charge your payment method on file, or send a payment link if there is none.';
+            }
             if (acceptResult.prepayChargeStatus === 'processing') {
               return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;
             }
