@@ -418,6 +418,21 @@ const BOOKING_TOOLS = [
  * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
+// capture_lead's one account-aware input. It exists only while the
+// caller-context lane is on (a known caller needs that lane), so the gate-off
+// tool surface stays exactly as it was.
+const USE_ACCOUNT_DETAILS_PROPERTY = {
+  type: 'boolean',
+  description: 'ONLY with estimate_requested, and ONLY after the caller answered YES to "Should it go to the '
+    + 'email and service address on your account?". The tool then uses the name, email and service address '
+    + 'on their account for whatever they did not give on the call. Never set it without that yes, and '
+    + 'never read the account\'s details aloud.',
+};
+const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_lead' ? tool : {
+  ...tool,
+  input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, use_account_details: USE_ACCOUNT_DETAILS_PROPERTY } },
+}));
+
 function activeTools({ officeOpen = null } = {}) {
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
@@ -426,7 +441,9 @@ function activeTools({ officeOpen = null } = {}) {
   const transfer = isTransferAvailable(officeOpen) ? TRANSFER_TOOLS : [];
   if (!isContextEnabled()) return [...TOOLS, ...transfer];
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer] : [...TOOLS, ...CONTEXT_TOOLS, ...transfer];
+  return isBookingEnabled()
+    ? [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer]
+    : [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...transfer];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -656,6 +673,35 @@ function availabilityResultToText(res, ctx = {}) {
     'then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. ' +
     'If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.'
   );
+}
+
+/**
+ * The account details a written estimate may use once the caller CONFIRMS
+ * them (capture_lead `use_account_details`), or null. Only for a verified
+ * full-tier caller (the calling number IS the account's own customers.phone)
+ * who is an established customer speaking for themselves: a row still in the
+ * lead pipeline, or a caller who gave a different first name, opens a LEAD
+ * under the lead writer's own rules (isLeadStage, nameConflicts) and gets the
+ * ordinary intake. An account with more than one property has no single
+ * "service address on your account" to confirm. Fail-soft: an unanswerable
+ * read is null.
+ */
+async function accountDetailsForEstimate(ctx = {}, stated = {}) {
+  if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
+      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
+    if (!row) return null;
+    const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
+    if (isLeadStage(row.pipeline_stage) || nameConflicts({ first_name: stated.first_name }, row)) return null;
+    const properties = await db('customer_properties').where({ customer_id: ctx.customerId, active: true })
+      .count('* as count').first().then((r) => parseInt((r && r.count) || 0, 10));
+    return properties > 1 ? null : row;
+  } catch (err) {
+    logger.warn(`[voice-relay] account details for an estimate could not be read callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -1022,6 +1068,38 @@ async function executeTool(name, input = {}, ctx = {}) {
         requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
         pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
       };
+      // ⭐ ONE YES/NO QUESTION INSTEAD OF AN INTAKE (owner ruling 2026-10-03).
+      // An established customer who answers yes to "should it go to the email
+      // and service address on your account?" has CONFIRMED those details on
+      // the call, so from here they are treated exactly like details the
+      // caller stated: remembered for the call, written with the capture, on
+      // the office card (labelled as confirmed, not as said). Without the
+      // yes nothing is taken from the account.
+      const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
+      const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
+        ? await accountDetailsForEstimate(ctx, estimateFields) : null;
+      const detailsFromAccount = [];
+      let accountCouldFill = false;
+      if (accountDetails) {
+        const acct = {
+          first_name: nz(accountDetails.first_name),
+          last_name: nz(accountDetails.last_name),
+          // An email given on THIS capture that could not be read is the
+          // caller naming another address: the account's does not stand in.
+          email: !nz(input.email) && nz(accountDetails.email) && isValidEmail(nz(accountDetails.email)) ? nz(accountDetails.email) : null,
+        };
+        // An address is one thing: the account's is used whole, and only when
+        // the caller stated no part of a location and it is a full address.
+        const LOCATION = ['address_line1', 'city', 'zip'];
+        const acctLocation = !LOCATION.some((k) => estimateFields[k]) && nz(accountDetails.address_line1) && (nz(accountDetails.city) || nz(accountDetails.zip))
+          ? Object.fromEntries(LOCATION.map((k) => [k, nz(accountDetails[k])])) : null;
+        accountCouldFill = ['first_name', 'last_name', 'email'].some((k) => !estimateFields[k] && acct[k]) || Boolean(acctLocation);
+        if (input.use_account_details === true) {
+          for (const k of ['first_name', 'last_name']) if (!estimateFields[k] && acct[k]) { estimateFields[k] = acct[k]; if (!detailsFromAccount.includes('name')) detailsFromAccount.push('name'); }
+          if (!estimateFields.email && acct.email) { estimateFields.email = acct.email; detailsFromAccount.push('email'); }
+          if (acctLocation) { Object.assign(estimateFields, acctLocation); detailsFromAccount.push('address'); }
+        }
+      }
       if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
@@ -1623,7 +1701,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1647,6 +1725,13 @@ async function executeTool(name, input = {}, ctx = {}) {
               + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
               + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
               + 'and end the call normally.'
+              // The one-question path, offered only when it would actually help.
+              + (accountCouldFill && input.use_account_details !== true
+                ? ' This caller is an established customer, so instead you may ask ONE question — "Should it go to '
+                  + 'the email and service address on your account?" — and on a YES call capture_lead again with '
+                  + 'estimate_requested: true and use_account_details: true. On a no, ask for the ones they want. '
+                  + 'Never read the account\'s details aloud.'
+                : '')
             : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
               + 'Waves team member will follow up, nothing stronger.')
           : '');

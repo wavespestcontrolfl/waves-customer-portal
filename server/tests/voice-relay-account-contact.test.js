@@ -28,6 +28,12 @@ jest.mock('../routes/booking', () => ({
   },
 }));
 jest.mock('../services/scheduling/parse-when', () => ({ parseWhen: jest.fn(), summarizeWindow: jest.fn() }));
+jest.mock('../services/lead-from-extraction', () => ({
+  createLeadFromExtraction: jest.fn(),
+  surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
+  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
+  nameConflicts: jest.requireActual('../services/lead-from-extraction').nameConflicts,
+}));
 
 const db = require('../models/db');
 const { executeTool } = require('../services/voice-agent/relay-tools');
@@ -194,6 +200,107 @@ describe('a known customer\'s open times are for the property on their account',
   });
 });
 
+describe('a written estimate for an established customer: ONE yes/no question (owner ruling 2026-10-03)', () => {
+  const { createLeadFromExtraction, surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
+  const HOLDER = { first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', pipeline_stage: 'active_customer' };
+  let holder;
+  let properties;
+  const estimateCtx = (over = {}) => fullTier({ markCaptured: jest.fn(), ...over });
+  const ask = (input = {}, ctx = estimateCtx()) => executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, ...input }, ctx);
+  beforeEach(() => {
+    holder = { ...HOLDER };
+    properties = 1;
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    db.mockImplementation((table) => (table === 'customer_properties'
+      ? { where: () => ({ count: () => ({ first: async () => ({ count: String(properties) }) }) }) }
+      : { where: () => ({ whereNull: () => ({ first: async () => { customerReads += 1; return holder; } }) }) }));
+  });
+
+  test('without the yes nothing is taken from the account: the details are missing, and the result offers the one question', async () => {
+    const out = await ask();
+    expect(out).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    expect(out).toMatch(/ask ONE question — "Should it go to the email and service address on your account\?"/);
+    expect(out).toMatch(/use_account_details: true/);
+    expect(out).not.toMatch(/dana@example\.com|12 Test Street/); // never recited
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: null, address_line1: null });
+  });
+
+  test('after a yes the account\'s name, email and address complete the request, and the card says they were confirmed', async () => {
+    const noteEstimateFields = jest.fn();
+    const out = await ask({ use_account_details: true }, estimateCtx({ noteEstimateFields }));
+    expect(out).toMatch(/IS on the office queue/);
+    const [customerId, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    expect(customerId).toBe('c-1');
+    expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
+    expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
+    // Confirmed details are remembered and written like stated ones.
+    expect(noteEstimateFields).toHaveBeenCalledWith(expect.objectContaining({ email: 'dana@example.com', address_line1: '12 Test Street' }));
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'dana@example.com', address_line1: '12 Test Street' });
+  });
+
+  test('what the caller said on the call wins: only what they did not give comes from the account, and a location is never mixed', async () => {
+    await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
+    const out = await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
+    expect(out).toMatch(/still missing: address_line1/); // a stated city is that property: the account's street does not complete it
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: 'Dana', email: 'other@example.com', city: 'Venice', address_line1: null });
+  });
+
+  test('an unreadable email given on the capture is not replaced by the account\'s', async () => {
+    const out = await ask({ use_account_details: true, email: 'dana at work dot' });
+    expect(out).toMatch(/still missing: email/);
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a customer still in the lead pipeline', () => { holder.pipeline_stage = 'estimate_sent'; }, {}],
+    ['a different person on the account\'s line', () => {}, { first_name: 'Robin' }],
+    ['an account with more than one property', () => { properties = 2; }, {}],
+    ['a deleted account', () => { holder = undefined; }, {}],
+  ])('%s gets the ordinary intake: the flag is ignored and the question is not offered', async (_label, arrange, input) => {
+    arrange();
+    const out = await ask({ use_account_details: true, ...input });
+    expect(out).toMatch(/still missing: /);
+    expect(out).toMatch(/email, address_line1/);
+    expect(out).not.toMatch(/ONE question/);
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a recognised-only caller', { customerTier: 'redacted' }],
+    ['an unverified match', { callerVerified: false }],
+  ])('%s never has the account read for an estimate', async (_label, over) => {
+    jest.spyOn(require('../services/voice-agent/relay-alert'), 'alertOfficeContactFollowUp').mockResolvedValue(true);
+    customerReads = 0;
+    await ask({ use_account_details: true }, estimateCtx(over));
+    expect(customerReads).toBe(0);
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('use_account_details is a capture_lead input only while the caller-context lane is on', () => {
+    const { activeTools, TOOLS } = require('../services/voice-agent/relay-tools');
+    const props = (tools) => Object.keys(tools.find((t) => t.name === 'capture_lead').input_schema.properties);
+    const saved = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    try {
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+      expect(props(activeTools())).toContain('use_account_details');
+      delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      expect(props(activeTools())).not.toContain('use_account_details');
+      expect(props(TOOLS)).not.toContain('use_account_details');
+    } finally {
+      if (saved === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED; else process.env.VOICE_RELAY_CONTEXT_ENABLED = saved;
+    }
+  });
+
+  test('a capture that is already complete, or is not an estimate, never reads the account', async () => {
+    customerReads = 0;
+    await ask({ first_name: 'Dana', last_name: 'Sample', email: 'd@example.com', address_line1: '1 A St' });
+    await executeTool('capture_lead', { call_summary: 'Just a note.', use_account_details: true }, estimateCtx());
+    expect(customerReads).toBe(0);
+  });
+});
+
 describe('the exception lives at system priority, only when the caller-context lane is on', () => {
   test('context on: the intake exception is in the system prompt (so a late-arriving caller block is covered); context off: untouched', () => {
     const { buildBasePrompt } = require('../services/voice-agent/relay-conversation');
@@ -202,7 +309,8 @@ describe('the exception lives at system priority, only when the caller-context l
     // Open times need no address from a known customer; a written estimate still confirms its details.
     expect(buildBasePrompt(true)).toMatch(/Open times for such a customer need no address/);
     expect(buildBasePrompt(true)).toMatch(/pass an address only when they say the visit is for a different property/);
-    expect(buildBasePrompt(true)).toMatch(/written estimate does need the full name, email and service address/);
+    expect(buildBasePrompt(true)).toMatch(/written estimate ask ONE question: "Should it go to the email and service address on your\s+account\?"/);
+    expect(buildBasePrompt(true)).toMatch(/use_account_details both\s+true/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });

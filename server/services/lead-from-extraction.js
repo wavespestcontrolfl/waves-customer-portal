@@ -331,6 +331,7 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
   if (!customerId) return { persisted: false, suppressed: false };
   try {
     const NotificationService = require('./notification-service');
+    const fromAccount = Array.isArray(opts.accountDetailsConfirmed) ? opts.accountDetailsConfirmed : [];
     const who = [extracted.first_name, extracted.last_name].filter(Boolean).map((v) => properCase(String(v).trim())).join(' ') || 'an existing customer';
     const service = extracted.requested_service || extracted.matched_service || null;
     const notif = await NotificationService.notifyAdmin(
@@ -347,9 +348,13 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         // The details collected ON THIS CALL are the fulfilment details (hook
         // P1): the account's email/address may be stale or a different
         // property. Nothing here mutates the customer — staff decide.
-        extracted.email ? `Email given on the call: ${extracted.email}` : null,
+        // A detail the caller did not say but CONFIRMED ("send it to the ones
+        // on my account") is labelled as that, never as given on the call.
+        extracted.email
+          ? (fromAccount.includes('email') ? `Email on the account (the caller confirmed it on the call): ${extracted.email}` : `Email given on the call: ${extracted.email}`)
+          : null,
         extracted.address_line1
-          ? `Service address given on the call: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}`
+          ? `${fromAccount.includes('address') ? 'Service address on the account (the caller confirmed it on the call)' : 'Service address given on the call'}: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}`
           : null,
         opts.phone ? `Callback number: ${opts.phone}` : null,
         extracted.call_summary ? `Call summary: ${String(extracted.call_summary).slice(0, 400)}` : null,
@@ -382,6 +387,8 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
           city: extracted.city || null,
           zip: extracted.zip || null,
           phone: opts.phone || null,
+          // which of the details are the account's own, confirmed by the caller
+          details_from_account: fromAccount,
         },
       },
     );
@@ -1031,5 +1038,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
   sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage, surfaceEstimateRequestForCustomer,
-  isLeadStage,
+  isLeadStage, nameConflicts,
 };

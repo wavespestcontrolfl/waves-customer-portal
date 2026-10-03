@@ -51,3 +51,13 @@ test('no customer ⇒ no card; a thrown notify is non-blocking', async () => {
   notifyAdmin.mockRejectedValue(new Error('boom'));
   expect(await surfaceEstimateRequestForCustomer('c-1', {}, {})).toEqual({ persisted: false, suppressed: false });
 });
+
+test('details the caller CONFIRMED from the account are labelled as that, never as given on the call (#5803 follow-up)', async () => {
+  notifyAdmin.mockResolvedValue({ id: 'n-9' });
+  await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: '12 Shell Dr', city: 'Venice', zip: '34285' }, { callSid: 'CA9', accountDetailsConfirmed: ['name', 'email', 'address'] });
+  const [, , body, opts] = notifyAdmin.mock.calls[0];
+  expect(body).toContain('Email on the account (the caller confirmed it on the call): pat@example.com');
+  expect(body).toContain('Service address on the account (the caller confirmed it on the call): 12 Shell Dr, Venice, 34285');
+  expect(body).not.toMatch(/given on the call/);
+  expect(opts.metadata.details_from_account).toEqual(['name', 'email', 'address']);
+});
