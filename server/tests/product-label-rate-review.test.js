@@ -20,11 +20,9 @@ const { reviewedRates, rateFactsError, MAX_DIRECTIONS } = require('../services/p
 const PRODUCT_ID = '11111111-2222-4333-8444-555555555555';
 const ACTOR_ID = '22222222-2222-4333-8444-555555555555';
 const direction = (over = {}) => ({
-  status: 'rate', useSite: 'Outdoor perimeter of structures', targets: 'Ants, spiders', method: 'Coarse spray',
-  rateText: '0.2 to 0.8 fl oz per gallon of water',
-  quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per gallon of water. Do not apply more than once every 21 days.', page: 2, note: '', ...over,
+  useSite: 'Outdoor perimeter of structures', targets: 'Ants, spiders', method: 'Coarse spray',
+  quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per gallon of water. Do not apply more than once every 21 days.', page: 2, ...over,
 });
-const conditional = (over = {}) => direction({ status: 'conditional', rateText: '', quote: 'Synthetic label: see the rate table by pest.', note: 'Rate table by pest.', ...over });
 const extraction = (directions = [direction()]) => ({ identityMatch: true, registration: '123-456', productName: 'Synthetic test product', facts: { directions } });
 const approve = (candidateId) => decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId, decision: 'approve', identityConfirmed: true }, 'rates');
 let row;
@@ -67,12 +65,12 @@ test('extract → source review → approved directions; only label_rate_review 
   expect(reviewedRates(row, 'current')).toBeNull();
   const request = dispatchWithFallback.mock.calls[0][1];
   expect(request.promptVersion).toBe('epa_rates_v1');
-  expect(request.system).toMatch(/Never compute, convert, round, reword, abbreviate or infer/);
+  expect(request.system).toMatch(/The quote is the only place an amount appears/);
   expect(JSON.stringify(request.jsonSchema)).not.toMatch(/maxLength|minLength|minimum|minItems|maxItems/);
   const candidateId = result.review.draft.id;
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId, decision: 'approve' }, 'rates')).rejects.toMatchObject({ statusCode: 400 });
   await approve(candidateId);
-  expect(reviewedRates(row, 'current')).toMatchObject({ verified: true, directions: [expect.objectContaining({ rateText: '0.2 to 0.8 fl oz per gallon of water', page: 2 })] });
+  expect(reviewedRates(row, 'current')).toMatchObject({ verified: true, directions: [{ useSite: 'Outdoor perimeter of structures', targets: 'Ants, spiders', method: 'Coarse spray', quote: expect.stringContaining('0.2 to 0.8 fl oz per gallon of water'), page: 2 }] });
   expect(row.label_verified_at).toBeNull(); expect(row.default_rate).toBe('9');
   expect(row.label_weather_review).toEqual({ revision: 'w1' });
   expect(changes.every((p) => Object.keys(p).sort().join(',') === 'label_rate_review,updated_at')).toBe(true);
@@ -115,7 +113,7 @@ test('the gate going off hides approved directions from readers', async () => {
 });
 
 test('a failed extraction stores nothing', async () => {
-  dispatchWithFallback.mockResolvedValue({ ok: true, json: extraction([direction({ rateText: '5 fl oz per acre' })]) });
+  dispatchWithFallback.mockResolvedValue({ ok: true, json: extraction([direction({ quote: ' ' })]) });
   await expect(extractLabelReview(PRODUCT_ID, ACTOR_ID, 'rates')).rejects.toMatchObject({ statusCode: 422 });
   expect(changes).toHaveLength(0);
 });
@@ -127,30 +125,14 @@ test('an unknown kind is refused', async () => {
 
 describe('rate direction validation', () => {
   const error = (directions, pageCount = 3) => extractionError(extraction(directions), '123-456', pageCount, 'rates');
-  const printed = (rateText) => direction({ rateText, quote: `Synthetic label: apply ${rateText} as a coarse spray.` });
-  test('a quoted rate and a quoted conditional line pass', () => {
-    expect(error([direction(), conditional()])).toBeNull();
-  });
-  test.each([
-    '1 fl oz per 10 gallons',
-    '4 to 8 fl oz per 100 linear feet',
-    '2 oz per 1,000 board feet',
-    '3 to 6 scoops per cubic yard',
-    '1/3 fl oz per 1,000 sq ft',
-    '2 2/3 oz per gallon',
-    '\u2153 fl oz per gallon',
-    '0.03% to 0.06%',
-    'one packet per acre',
-    'one-half to one pint per acre',
-  ])('%s is kept exactly as the label prints it', (rateText) => {
-    expect(error([printed(rateText)])).toBeNull();
-  });
-  test('a rate printed twice passes when one printing is whole', () => {
-    expect(error([direction({ rateText: '2 fl oz per gallon', quote: 'Synthetic label: use 0.2 fl oz per gallon indoors, 2 fl oz per gallon outdoors.' })])).toBeNull();
-    expect(error([direction({ rateText: '0.5 fl oz per gallon', quote: 'Synthetic label: Step 2. 0.5 fl oz per gallon (see page 4).' })])).toBeNull();
-  });
-  test('spacing, case and dash style do not break the verbatim check', () => {
-    expect(error([direction({ rateText: '0.2\u20130.8 FL OZ  per gallon', quote: 'Synthetic label: mix 0.2-0.8 fl oz\nper gallon.' })])).toBeNull();
+  test('a quoted label passage passes, whatever units or wording the label uses', () => {
+    expect(error([
+      direction(),
+      direction({ quote: 'Synthetic label: 2 oz per 1,000 board feet.' }),
+      direction({ quote: 'Synthetic label: 1/3 to 2 2/3 fl oz per 100 linear feet.' }),
+      direction({ quote: 'Synthetic label: one packet per acre.' }),
+      direction({ quote: 'Synthetic label: see the rate table by pest on page 6.' }),
+    ])).toBeNull();
   });
   test.each([
     ['no directions', [], 'invalid_label_shape'],
@@ -158,23 +140,10 @@ describe('rate direction validation', () => {
     ['a page past the document', [direction({ page: 4 })], 'invalid_label_page'],
     ['no quote', [direction({ quote: ' ' })], 'missing_label_evidence'],
     ['a blank use site', [direction({ useSite: '  ' })], 'missing_label_evidence'],
-    ['a rate with no amount text', [direction({ rateText: ' ' })], 'missing_label_value'],
-    ['a rate that is not in the quote', [direction({ rateText: '0.2 to 0.9 fl oz per gallon of water' })], 'rate_not_in_quote'],
-    ['a converted fraction', [direction({ rateText: '0.33 fl oz per gallon', quote: 'Synthetic label: mix 1/3 fl oz per gallon.' })], 'rate_not_in_quote'],
-    ['a reworded denominator', [direction({ rateText: '0.2 to 0.8 fl oz per gal' , quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per 10 gallons.' })], 'rate_not_in_quote'],
-    ['a rate starting inside a decimal', [direction({ rateText: '2 fl oz per gallon', quote: 'Synthetic label: mix 0.2 fl oz per gallon.' })], 'rate_not_in_quote'],
-    ['a rate starting inside a fraction', [direction({ rateText: '3 fl oz per gallon', quote: 'Synthetic label: mix 1/3 fl oz per gallon.' })], 'rate_not_in_quote'],
-    ['a rate starting inside a mixed fraction', [direction({ rateText: '2/3 oz per gallon', quote: 'Synthetic label: mix 2 2/3 oz per gallon.' })], 'rate_not_in_quote'],
-    ['a rate starting inside a thousands number', [direction({ rateText: '500 lb per acre', quote: 'Synthetic label: apply 1,500 lb per acre.' })], 'rate_not_in_quote'],
-    ['only the high end of a range', [direction({ rateText: '0.8 fl oz per gallon of water' })], 'rate_not_in_quote'],
-    ['only the high end of a dashed range', [direction({ rateText: '0.8 fl oz per gallon', quote: 'Synthetic label: mix 0.2-0.8 fl oz per gallon.' })], 'rate_not_in_quote'],
-    ['only the low end of a range', [direction({ rateText: '0.2', quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per gallon.' })], 'rate_not_in_quote'],
-    ['a rate without its denominator', [direction({ rateText: '0.2 to 0.8 fl oz' })], 'rate_not_in_quote'],
-    ['a rate stopping inside the denominator number', [direction({ rateText: '1 fl oz per 1', quote: 'Synthetic label: mix 1 fl oz per 10 gallons.' })], 'rate_not_in_quote'],
-    ['a rate stopping inside a unit', [direction({ rateText: '0.2 to 0.8 fl oz per gal' })], 'rate_not_in_quote'],
-    ['a conditional line carrying an amount', [conditional({ rateText: '0.2 fl oz per gallon' })], 'unscoped_label_value'],
-    ['a model-made number beside the text', [{ ...direction(), low: 0.2 }], 'invalid_label_shape'],
-    ['a model-made unit code beside the text', [{ ...direction(), unit: 'fl_oz' }], 'invalid_label_shape'],
+    ['a model-made number beside the quote', [{ ...direction(), low: 0.2 }], 'invalid_label_shape'],
+    ['a model-made unit code beside the quote', [{ ...direction(), unit: 'fl_oz' }], 'invalid_label_shape'],
+    ['an extracted rate beside the quote', [{ ...direction(), rateText: '0.2 to 0.8 fl oz per gallon of water' }], 'invalid_label_shape'],
+    ['a model note beside the quote', [{ ...direction(), note: 'Use 0.5 fl oz.' }], 'invalid_label_shape'],
   ])('%s is rejected', (_name, directions, code) => {
     expect(error(directions)).toBe(code);
   });

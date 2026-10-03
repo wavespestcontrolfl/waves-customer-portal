@@ -78,14 +78,10 @@ and its own gate, which also needs `GATE_LABEL_PIPELINE`. `product-label-review.
 holds the one flow; `product-label-rates.js` holds what differs: the prompt, the
 direction schema, validation and the reader.
 
-A direction is one label line: use site, target pests, method, the source quote,
-the physical PDF page, and `rateText`: the amount and what it is per, copied
-verbatim out of the quote ("1/3 to 2/3 fl oz per 1,000 board feet"). The server
-rejects a `rateText` that does not appear in the quote, so the stored amount is
-always the label's own words: units, denominators and fractions stay as printed
-and there is no model-made number or unit code beside the text. Limits the label
-states for the line stay in the quote. A line whose amount depends on a table, a
-calculation or the applicator's volume is `conditional` and carries no amount.
+A direction is one label passage: use site, target pests, method, the passage
+quoted verbatim and the physical PDF page. It holds no amount field of any kind
+(no number, unit code or extracted rate text), so nothing stored can differ from
+what the label prints. The amount, its units and any limits are in the quote.
 
 Approval is admin-only, needs the same identity and source-page confirmation,
 and rechecks the latest PPLS filename and checksum. It writes only
@@ -95,8 +91,8 @@ pricing. `label_verified_at` is not a label-provenance signal (planning rates
 carry it), which is why rate evidence has its own record.
 
 Nothing consumes approved directions for a dose in this change.
-The mix tool parses `rateText` in code (never the model) and refuses what it
-cannot parse.
+The mix tool reads the amount out of the approved quote in code (never the
+model) and refuses what it cannot read.
 `reviewedRates(product, sourceStatus)` is the reader for the later mix tool: it
 returns the directions only for an approved review whose product identity
 (name, registration, formulation) is unchanged and whose EPA source is current,

@@ -56,8 +56,8 @@ describe('ProductLabelReview rates', () => {
     id: 'rate-candidate-1',
     source: { productName: 'Synthetic product', registration: 'TEST-100', url: 'https://example.test/label.pdf' },
     facts: { directions: [
-      { status: 'rate', useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', rateText: '1/3 to 2/3 fl oz per 1,000 board feet', quote: 'Synthetic label: 1/3 to 2/3 fl oz per 1,000 board feet.', page: 4, note: '' },
-      { status: 'conditional', useSite: 'Turf', targets: 'Listed pests', method: '', rateText: '', quote: 'Synthetic label: see rate table.', page: 7, note: 'Rate table by pest.' },
+      { useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', quote: 'Synthetic label: 1/3 to 2/3 fl oz per 1,000 board feet.', page: 4 },
+      { useSite: 'Turf', targets: 'Listed pests', method: '', quote: 'Synthetic label: see rate table.', page: 7 },
     ] },
   };
   beforeEach(() => {
@@ -65,11 +65,11 @@ describe('ProductLabelReview rates', () => {
   });
   const mountRates = () => render(<UiSurface density="comfortable"><ProductLabelReview product={product} kind="rates" /></UiSurface>);
 
-  it('shows each label line with its amount, limits and source page, and no amount for a conditional line', async () => {
+  it('shows each label passage as quoted, with its site, pests and source page', async () => {
     mountRates();
-    expect(await screen.findByText('1/3 to 2/3 fl oz per 1,000 board feet')).toBeInTheDocument();
+    expect(await screen.findByText('Synthetic label: 1/3 to 2/3 fl oz per 1,000 board feet.')).toBeInTheDocument();
     expect(screen.getByText('Ants, spiders · Coarse spray')).toBeInTheDocument();
-    expect(screen.getByText('CONDITIONAL')).toBeInTheDocument();
+    expect(screen.getAllByText('LABEL PASSAGE')).toHaveLength(2);
     expect(screen.getByRole('link', { name: 'Source page 4' })).toHaveAttribute('href', 'https://example.test/label.pdf#page=4');
     expect(fetch.mock.calls[0][0]).toBe('/api/admin/inventory/fixture-product/label-rate-review');
   });

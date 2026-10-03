@@ -41,22 +41,17 @@ const KINDS = {
     ariaLabel: "Label rate review",
     title: "Label rate evidence",
     intro:
-      "Read the EPA label, check each rate line against its source page, then approve. Approved lines are stored as label evidence; they do not change catalog rates, protocols or pricing.",
+      "Read the EPA label, check each quoted rate passage against its source page, then approve. Approved passages are stored as label evidence; they do not change catalog rates, protocols or pricing.",
     current: "Current rate review",
     approve: "Approve rate lines",
     revoke: "Revoke rate review",
     confirm:
-      "I matched the exact product and formulation and checked every rate line, its site and its pests against the source pages. Conditional lines carry no amount.",
+      "I matched the exact product and formulation and checked every quoted passage, its site and its pests against the source pages.",
     saved: "Review saved.",
     footer:
-      "A line the label does not print is not a rate. Conditional lines show the label passage only.",
+      "Each line is the label's own passage. Nothing here is a computed or converted amount.",
   },
 };
-
-// The amount is the label's own text; nothing is reformatted here.
-function rateAmount(direction) {
-  return direction.status === "rate" ? direction.rateText : "CONDITIONAL";
-}
 
 async function request(productId, path, action = "", body) {
   const response = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/admin/inventory/${productId}/${path}${action}`, {
@@ -134,10 +129,8 @@ function Evidence({ entry, kind }) {
             <EvidenceCard
               key={index}
               label={direction.useSite}
-              value={rateAmount(direction)}
-              strong={direction.status === "rate"}
+              value="LABEL PASSAGE"
               quote={direction.quote}
-              note={direction.note}
               page={direction.page}
               sourceUrl={entry.source.url}
             >
