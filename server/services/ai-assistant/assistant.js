@@ -38,6 +38,27 @@ function escalationPriority(customerMessage) {
 }
 
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
+async function persistedPortalTurn(channel, identifier, customerId, turn) {
+  if (!turn?.requestRowId) return null;
+  const query = db('agent_messages as message')
+    .innerJoin('agent_sessions as conversation', 'conversation.id', 'message.conversation_id')
+    .where({ 'message.portal_chat_request_id': turn.requestRowId, 'message.role': 'user',
+      'conversation.channel': channel, 'conversation.channel_identifier': identifier });
+  if (customerId) query.where('conversation.customer_id', customerId);
+  else query.whereNull('conversation.customer_id');
+  return runQuery(query.select('conversation.*',
+    'message.id as portal_turn_message_id', 'message.content as portal_turn_message_content',
+    'message.created_at as portal_turn_message_created_at').first(), turn, 'portal turn recovery');
+}
+function portalReplay(conversation, fallback) {
+  if (!conversation.portal_turn_message_id) return { content: fallback, cursor: null, isolate: false };
+  const cursor = { id: conversation.portal_turn_message_id, content: conversation.portal_turn_message_content,
+    createdAt: conversation.portal_turn_message_created_at };
+  const legacy = conversation.customer_id
+    && parsedContextSnapshot(conversation.context_snapshot)?.version !== MINIMAL_CONTEXT_VERSION;
+  const expired = conversation.status !== 'active' || new Date(conversation.timeout_at).getTime() <= Date.now();
+  return { content: cursor.content, cursor, isolate: legacy || expired };
+}
 const waitFor = (work, turn, stage) => turn
   ? turn.waitFor(work, stage)
   : (typeof work === 'function' ? work() : work);
@@ -402,18 +423,20 @@ class WavesAssistant {
     // 1. Find or create conversation (respecting 30-min timeout)
     let conversation;
     try {
-      conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn);
+      conversation = await this.resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn);
     } catch (convErr) {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
       return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
     }
+    const replay = portalReplay(conversation, message);
+    const turnMessage = replay.content;
 
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
     const lane = portalLane(channel, { secondaryProperty });
     turn?.registerFallbackExtras?.(() => laneExtras(lane));
-    const trigger = this.matchedEscalationTrigger(message, channel);
+    const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
     // 3. Save the user message
     try {
@@ -421,7 +444,7 @@ class WavesAssistant {
         const messageInsert = executor('agent_messages').insert({
           conversation_id: conversation.id,
           role: 'user',
-          content: message,
+          content: turnMessage,
           channel,
           ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
         }).onConflict().ignore();
@@ -452,7 +475,7 @@ class WavesAssistant {
       if (topic === 'billing' && lane.payments) {
         await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards, lane.context, turn);
       }
-      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', {
+      const escResult = await this.escalate(conversation, turnMessage, 'Sensitive topic detected in customer message', {
         topic, ...(turn ? { turn } : {}),
       });
       return { ...escResult, ...laneExtras(lane) };
@@ -461,12 +484,14 @@ class WavesAssistant {
     // 5. Build conversation history for Claude
     // Portal chat reads the newest messages; other channels keep the original
     // oldest-first read.
-    const history = await this.buildHistory(conversation.id, { newest: lane.portal === true, turn });
+    const history = await this.buildHistory(conversation.id, {
+      newest: lane.portal === true, turn, through: replay.cursor, isolate: replay.isolate,
+    });
     // The customer's own words this turn, which the re-service tool
     // classifies (the model's reading of them never decides what is covered).
     // Only this message counts: an earlier report is never carried forward
     // past a later "they're gone now".
-    if (lane.reservice) lane.context.customerMessage = message;
+    if (lane.reservice) lane.context.customerMessage = turnMessage;
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
@@ -479,13 +504,18 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
-      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel, turn });
+      return await this.answerWithTools({ conversation, message: turnMessage, history, contextStr, lane, customerId, channel, turn });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       // A card or button a tool already built this turn still shows under
       // the fallback text.
       return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) };
     }
+  }
+
+  async resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn) {
+    const recovered = await persistedPortalTurn(channel, channelIdentifier || customerPhone, customerId, turn);
+    return recovered || this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn);
   }
 
   /**
@@ -751,10 +781,19 @@ class WavesAssistant {
   // so a long chat still reaches its latest turn (portal chat). Without it,
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
-  async buildHistory(conversationId, { newest = false, turn = null } = {}) {
-    const msgs = await runQuery(db('agent_messages')
+  async buildHistory(conversationId, { newest = false, turn = null, through = null, isolate = false } = {}) {
+    if (isolate) return [{ role: 'user', content: through.content }];
+    const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
-      .whereIn('role', ['user', 'assistant'])
+      .whereIn('role', ['user', 'assistant']);
+    if (through?.id && through?.createdAt) {
+      historyQuery.where((bounded) => bounded
+        .where('created_at', '<', through.createdAt)
+        .orWhere((sameTime) => sameTime
+          .where('created_at', through.createdAt)
+          .where('id', '<=', through.id)));
+    }
+    const msgs = await runQuery(historyQuery
       .orderBy([{ column: 'created_at', order: newest ? 'desc' : 'asc' }, ...(newest ? [{ column: 'id', order: 'desc' }] : [])])
       .limit(20), turn, 'conversation history');
     const ordered = newest ? msgs.reverse() : msgs;
