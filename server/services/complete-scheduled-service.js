@@ -13309,9 +13309,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
-        // The regular annual-prepay body, kept beside a first-charge body so a
-        // quiet-hours hold queues text that is still true in the morning.
-        let firstChargeFallbackBase = null;
         // includePayLink === false omits the pay link from the completion SMS
         // (e.g. customer paid in person) — report-only. This is scoped to the
         // SMS body only; the mobile in-person payment sheet
@@ -13569,25 +13566,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // paid template; the post-block recovery restores the separate
               // receipt the claim stood down.
             }
-            // GATE_PAF_PREPAY (owner ruling 2026-10-02, first visit only): when
-            // this performed visit releases a deferred year's charge, say the
-            // year is being charged now instead of "nothing due today".
-            // Disabled / missing template or no facts → the regular text below.
-            if (!body && annualPrepayCovered
-              && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)) {
-              const firstCharge = await require('../services/paf-prepay-release').firstChargeCompletionFacts(svc);
-              if (firstCharge) {
-                // Only with its safe fallback in hand: a quiet-hours hold must
-                // be able to queue the regular text instead (GitHub Codex #5640 r3).
-                firstChargeFallbackBase = await renderTemplate('service_complete_annual_prepay', paidTemplateVars, paidTemplateContext);
-                if (firstChargeFallbackBase) {
-                  sentSmsType = 'service_complete_annual_prepay_first_charge';
-                  body = await renderTemplate(sentSmsType, {
-                    ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
-                  }, paidTemplateContext);
-                }
-              }
-            }
             if (!body && annualPrepayCovered) {
               sentSmsType = 'service_complete_annual_prepay';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
@@ -13839,20 +13817,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // matches what the precheck-suppressed path would have
               // rendered. The pay link stays (its target renders live paid
               // state); only the static balance sentence is removed.
-              // A held "being charged now" text would land after an overnight
-              // charge: the queued replay is the regular annual-prepay body
-              // instead (GitHub Codex #5640 r2).
-              // The review ask rides along only if the send-time review
-              // decision kept it on the body (a rejected ask was stripped).
-              if (sentSmsType === 'service_complete_annual_prepay_first_charge' && firstChargeFallbackBase) {
-                const keptReview = reviewSuffix && sentSmsBody.includes(reviewSuffix.trim());
-                sentSmsType = 'service_complete_annual_prepay';
-                sentSmsBody = `${firstChargeFallbackBase}${keptReview ? reviewSuffix : ''}`.trim();
-                // The service record's history says what was actually queued
-                // (GitHub Codex #5640 r4): written with the queue row below.
-                deferredDelta.completionSmsType = sentSmsType;
-                deferredDelta.completionSmsBody = sentSmsBody;
-              }
               const deferredReplayBody = require('../services/open-balance')
                 .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {
