@@ -206,6 +206,9 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   // Protocol config reads carry per-product cost/COGS data (owner-only);
   // techs get protocol reference in the tech portal instead.
   "protocols",
+  // Unit review exists to fix inventory units (POST .../unit-review/:id/fix is
+  // admin-only): a technician tab that could only ever 403 on its one action.
+  "unit-review",
 ]);
 export default function InventoryPage() {
   const { lastMutation } = useIntelligenceBarActions();
@@ -474,6 +477,7 @@ export default function InventoryPage() {
           showToast={showToast}
           onUpdate={loadStats}
           refreshId={inventoryRefresh}
+          canAuthor={isAdminRole}
         />
       )}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
@@ -1703,7 +1707,12 @@ function PriceSyncTab({ showToast }) {
   );
 }
 
-function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
+function WaveGuardForecastTab({
+  showToast,
+  onUpdate,
+  refreshId,
+  canAuthor = false,
+}) {
   const [days, setDays] = useState(14);
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1960,7 +1969,8 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                     )}
                   </TD>
                   <TD>
-                    {["short", "warning"].includes(product.status) ? (
+                    {["short", "warning"].includes(product.status) &&
+                    canAuthor ? (
                       <Button
                         onClick={() => createRestock(product)}
                         disabled={creatingId === product.productId}
@@ -1970,7 +1980,11 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                         {product.inventoryUnit || product.demandUnit || ""}
                       </Button>
                     ) : (
-                      <span className="text-ink-secondary">No request</span>
+                      <span className="text-ink-secondary">
+                        {["short", "warning"].includes(product.status)
+                          ? "Owner places requests"
+                          : "No request"}
+                      </span>
                     )}
                   </TD>
                 </TR>
@@ -3171,6 +3185,7 @@ function RestockRequestsTab({
                       setReceiveDrafts={setReceiveDrafts}
                       receivingId={receivingId}
                       runAction={runAction}
+                      canAuthor={canAuthor}
                     />
                   </TR>
                 );
@@ -3285,7 +3300,7 @@ function RestockStatusCell({
           )}
         </div>
       )}
-      {request.status === "open" && order?.status !== "placing" && (
+      {canAuthor && request.status === "open" && order?.status !== "placing" && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}
           disabled={receivingId === request.id}
@@ -3310,6 +3325,7 @@ function RestockActionCell({
   setReceiveDrafts,
   receivingId,
   runAction,
+  canAuthor = false,
 }) {
   const setDraft = (patch) =>
     setReceiveDrafts((prev) => ({
@@ -3319,6 +3335,14 @@ function RestockActionCell({
         ...patch,
       },
     }));
+  // Receive / Cancel POST restock-requests/:id/action, an owner-only write:
+  // a technician reads the queue but gets no action controls.
+  if (!canAuthor)
+    return (
+      <TD>
+        <span className="text-ink-secondary">View only</span>
+      </TD>
+    );
   if (request.order?.status === "placing")
     return (
       <TD>
@@ -3807,152 +3831,167 @@ function ExpandedProduct({
                     {new Date(vp.lastChecked).toLocaleDateString()}
                   </span>
                 )}
-                <Button onClick={() => queueRefresh(vp)} variant="secondary">
-                  Refresh
-                </Button>
+                {canAuthor && (
+                  <Button onClick={() => queueRefresh(vp)} variant="secondary">
+                    Refresh
+                  </Button>
+                )}
               </div>
             ))}
           </div>{" "}
         </div>
       )}
-      <div className="flex gap-[8px] items-end">
-        {" "}
-        <Field label="Vendor">
-          <Select
-            value={vendorId}
-            onChange={(e) => setVendorId(e.target.value)}
-            className="w-[160px]"
-          >
-            {vendors
-              .filter((v) => v.active)
-              .map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                </option>
-              ))}
-          </Select>
-        </Field>{" "}
-        <Field label="Price">
-          <Input
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-            type="number"
-            step="0.01"
-            placeholder="0.00"
-            className="w-[100px]"
-          />
-        </Field>{" "}
-        <Field label="Quantity">
-          <Input
-            value={qty}
-            onChange={(e) => setQty(e.target.value)}
-            placeholder="e.g. 32 oz"
-            className="w-[120px]"
-          />
-        </Field>{" "}
-        <Button
-          onClick={() => {
-            if (price) {
-              onSave(product.id, vendorId, price, qty);
-              setPrice("");
-              setQty("");
-            }
-          }}
-          variant="primary"
-        >
-          Add Price
-        </Button>{" "}
-      </div>{" "}
-      <div className="grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]">
-        {" "}
-        <Card className="p-3">
+      {/* Prices and stock are authored by the owner only (PUT .../pricing and
+          POST .../adjust are admin-only): a technician reads them. */}
+      {canAuthor && (
+        <div className="flex gap-[8px] items-end">
           {" "}
-          <div className="text-ui-body text-ink-secondary mb-[8px]">
-            Manual Adjustment
-          </div>{" "}
-          <div className="grid grid-cols-2 gap-[8px]">
-            {" "}
+          <Field label="Vendor">
             <Select
-              value={adjustForm.movementType}
-              onChange={(e) =>
-                setAdjustForm((f) => ({
-                  ...f,
-                  movementType: e.target.value,
-                }))
-              }
+              value={vendorId}
+              onChange={(e) => setVendorId(e.target.value)}
+              className="w-[160px]"
             >
+              {vendors
+                .filter((v) => v.active)
+                .map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+            </Select>
+          </Field>{" "}
+          <Field label="Price">
+            <Input
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              type="number"
+              step="0.01"
+              placeholder="0.00"
+              className="w-[100px]"
+            />
+          </Field>{" "}
+          <Field label="Quantity">
+            <Input
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              placeholder="e.g. 32 oz"
+              className="w-[120px]"
+            />
+          </Field>{" "}
+          <Button
+            onClick={() => {
+              if (price) {
+                onSave(product.id, vendorId, price, qty);
+                setPrice("");
+                setQty("");
+              }
+            }}
+            variant="primary"
+          >
+            Add Price
+          </Button>{" "}
+        </div>
+      )}{" "}
+      <div
+        className={
+          canAuthor
+            ? "grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]"
+            : "grid grid-cols-1 gap-[12px] mt-[14px]"
+        }
+      >
+        {" "}
+        {canAuthor && (
+          <Card className="p-3">
+            {" "}
+            <div className="text-ui-body text-ink-secondary mb-[8px]">
+              Manual Adjustment
+            </div>{" "}
+
+            <div className="grid grid-cols-2 gap-[8px]">
               {" "}
-              <option value="restock">Restock</option>{" "}
-              <option value="correction">Correction</option>{" "}
-              <option value="damaged_lost">Damaged/Lost</option>{" "}
-            </Select>{" "}
-            <div className="flex gap-[6px]">
-              {" "}
-              <Input
-                value={adjustForm.quantity}
+              <Select
+                value={adjustForm.movementType}
                 onChange={(e) =>
                   setAdjustForm((f) => ({
                     ...f,
-                    quantity: e.target.value,
+                    movementType: e.target.value,
                   }))
                 }
-                type="number"
-                step="0.0001"
-                placeholder="Amount"
-                className="w-full"
+              >
+                {" "}
+                <option value="restock">Restock</option>{" "}
+                <option value="correction">Correction</option>{" "}
+                <option value="damaged_lost">Damaged/Lost</option>{" "}
+              </Select>{" "}
+              <div className="flex gap-[6px]">
+                {" "}
+                <Input
+                  value={adjustForm.quantity}
+                  onChange={(e) =>
+                    setAdjustForm((f) => ({
+                      ...f,
+                      quantity: e.target.value,
+                    }))
+                  }
+                  type="number"
+                  step="0.0001"
+                  placeholder="Amount"
+                  className="w-full"
+                />{" "}
+                <Input
+                  value={adjustForm.unit}
+                  onChange={(e) =>
+                    setAdjustForm((f) => ({
+                      ...f,
+                      unit: e.target.value,
+                    }))
+                  }
+                  placeholder="unit"
+                  className="w-[70px]"
+                />{" "}
+              </div>{" "}
+              <Input
+                value={adjustForm.lotNumber}
+                onChange={(e) =>
+                  setAdjustForm((f) => ({
+                    ...f,
+                    lotNumber: e.target.value,
+                  }))
+                }
+                placeholder="Lot number"
               />{" "}
               <Input
-                value={adjustForm.unit}
+                value={adjustForm.reason}
                 onChange={(e) =>
                   setAdjustForm((f) => ({
                     ...f,
-                    unit: e.target.value,
+                    reason: e.target.value,
                   }))
                 }
-                placeholder="unit"
-                className="w-[70px]"
+                placeholder="Reason"
+              />{" "}
+              <Input
+                value={adjustForm.note}
+                onChange={(e) =>
+                  setAdjustForm((f) => ({
+                    ...f,
+                    note: e.target.value,
+                  }))
+                }
+                placeholder="Note"
+                className="col-span-full"
               />{" "}
             </div>{" "}
-            <Input
-              value={adjustForm.lotNumber}
-              onChange={(e) =>
-                setAdjustForm((f) => ({
-                  ...f,
-                  lotNumber: e.target.value,
-                }))
-              }
-              placeholder="Lot number"
-            />{" "}
-            <Input
-              value={adjustForm.reason}
-              onChange={(e) =>
-                setAdjustForm((f) => ({
-                  ...f,
-                  reason: e.target.value,
-                }))
-              }
-              placeholder="Reason"
-            />{" "}
-            <Input
-              value={adjustForm.note}
-              onChange={(e) =>
-                setAdjustForm((f) => ({
-                  ...f,
-                  note: e.target.value,
-                }))
-              }
-              placeholder="Note"
-              className="col-span-full"
-            />{" "}
-          </div>{" "}
-          <Button
-            onClick={submitAdjustment}
-            variant="primary"
-            className="mt-[8px] w-full"
-          >
-            Apply Adjustment
-          </Button>{" "}
-        </Card>{" "}
+            <Button
+              onClick={submitAdjustment}
+              variant="primary"
+              className="mt-[8px] w-full"
+            >
+              Apply Adjustment
+            </Button>{" "}
+          </Card>
+        )}{" "}
         <Card className="p-3 min-w-[0px]">
           {" "}
           <div className="text-ui-body text-ink-secondary mb-[8px]">

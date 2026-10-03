@@ -634,4 +634,110 @@ describe('StripeService.refund', () => {
     // No pending re-persist — the only update is the final record+clear.
     expect(updatePayments).toHaveBeenCalledTimes(1);
   });
+
+  // B03: the annual-prepay claw-back must read the invoice AFTER the
+  // credit-restore block terminalized it to 'refunded' under its row lock —
+  // a refunded invoice is refused by every replacement-settlement path, so a
+  // replacement payment cannot take ownership between the sync's ownership
+  // read and the term cancel.
+  describe('full-refund ordering: credit restore, then prepay claw-back', () => {
+    let order;
+    let invoiceRow;
+    let statusSeenBySync;
+    let creditMock;
+    let syncMock;
+
+    // The invoices lookup the credit-restore block runs (by the payment's PI).
+    function stubInvoiceLookup(row) {
+      const original = dbMock.getMockImplementation();
+      const invoicesQuery = { where: jest.fn(() => invoicesQuery), first: jest.fn(async () => row) };
+      dbMock.mockImplementation((table) => (table === 'invoices' ? invoicesQuery : original(table)));
+      return invoicesQuery;
+    }
+
+    function loadWithRecorders() {
+      const StripeService = loadService();
+      creditMock = require('../services/customer-credit').returnAppliedCreditOnRefund;
+      syncMock = require('../services/annual-prepay-renewals').syncTermForRefundedPayment;
+      return StripeService;
+    }
+
+    beforeEach(() => {
+      order = [];
+      invoiceRow = { id: 'inv-1', status: 'paid' };
+      statusSeenBySync = null;
+    });
+
+    function recordOrder() {
+      creditMock.mockImplementation(async () => {
+        order.push('credit');
+        invoiceRow.status = 'refunded'; // what the real helper does under the row lock
+      });
+      syncMock.mockImplementation(async () => {
+        order.push('sync');
+        statusSeenBySync = invoiceRow.status;
+      });
+    }
+
+    test('an owned invoice is terminalized by the credit restore BEFORE the term sync reads it', async () => {
+      const invoicesQuery = stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+
+      await StripeService.refund('pay-1', {});
+
+      expect(invoicesQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_abc' });
+      expect(order).toEqual(['credit', 'sync']);
+      expect(statusSeenBySync).toBe('refunded');
+      expect(syncMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-1', stripe_payment_intent_id: 'pi_abc' }));
+    });
+
+    test('no invoice owned by this PI (credit restore does not apply): the sync still runs, as before', async () => {
+      stubInvoiceLookup(null);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+
+      await StripeService.refund('pay-1', {});
+
+      expect(creditMock).not.toHaveBeenCalled();
+      expect(order).toEqual(['sync']);
+    });
+
+    test('a credit restore that throws is logged and never skips the claw-back', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      creditMock.mockImplementation(async () => { order.push('credit'); throw new Error('lock timeout'); });
+
+      const result = await StripeService.refund('pay-1', {});
+
+      expect(order).toEqual(['credit', 'sync']);
+      // The refund itself still reports success.
+      expect(result.refund_issued_amount).toBe(100);
+    });
+
+    test('a sync that throws never masks the refund or undoes the credit restore', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      syncMock.mockImplementation(async () => { order.push('sync'); throw new Error('prepay sync down'); });
+
+      const result = await StripeService.refund('pay-1', {});
+
+      expect(order).toEqual(['credit', 'sync']);
+      expect(invoiceRow.status).toBe('refunded');
+      expect(result.refund_issued_amount).toBe(100);
+    });
+
+    test('a PARTIAL refund runs neither the credit restore nor the claw-back', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+
+      await StripeService.refund('pay-1', { amount: 40 });
+
+      expect(order).toEqual([]);
+      expect(invoiceRow.status).toBe('paid');
+    });
+  });
 });

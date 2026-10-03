@@ -1144,9 +1144,17 @@ async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
   return base > 0 ? Math.round((base / coverageVisitCount) * 100) / 100 : null;
 }
 
-// seedNotBefore (opt-in, ADMIN-BUG-R18): a gap-fill never seeds a visit
-// dated before it; such slots come back in unseededPastDates for the caller
-// to hand to the office. gapFillOnly (opt-in, same lane): the term is never
+// seedNotBefore (ADMIN-BUG-R18): a gap-fill never seeds a visit dated before
+// it; such slots come back in unseededPastDates for the caller to hand to the
+// office. Unset, it DEFAULTS to today for an already-activated term (B09): a
+// refresh of an activated term — a schedule edit, the recurring-alerts page,
+// the notice cron — is a pure gap-filler, and a slot whose date has passed
+// (cancelled / no-show / skipped and never rebooked) can never be performed.
+// Re-seeding it as a pending visit and stamping it prepaid spent the
+// customer's paid slot on a phantom row and made the term read fully covered,
+// so the office was never prompted to book a real replacement. Only a FIRST
+// activation keeps its own floor (the today-floored anchor + window slide
+// below). gapFillOnly (opt-in, same lane): the term is never
 // treated as a first activation — no today floor on the anchor, no window
 // slide persisted to term_end — even when no visit is linked to it yet (a
 // legacy decided lapse): only slots inside the stored window are filled.
@@ -1348,6 +1356,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let adoptedPromisedRow = null;
   const datesToSeed = [];
   const unseededPastDates = [];
+  // An explicit floor wins; otherwise an already-activated term never seeds
+  // before today (see the header). A first activation needs none — its anchor
+  // is already floored at today, so no target date can precede it.
+  const pastFloor = seedNotBefore || (alreadyActivated ? today : null);
   for (const scheduledDate of targetDates) {
     if (datesToSeed.length + unseededPastDates.length >= remainingToSeed) break;
     const exactOnly = scheduledDate === promisedTarget;
@@ -1362,7 +1374,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       if (exactOnly) adoptedPromisedRow = matched;
       continue;
     }
-    if (seedNotBefore && scheduledDate < seedNotBefore) {
+    if (pastFloor && scheduledDate < pastFloor) {
       unseededPastDates.push(scheduledDate);
       continue;
     }
@@ -4468,9 +4480,10 @@ async function fileSkippedPastSlots(conn, term, skippedPast, windowEnd) {
     { title: 'Annual prepay: a paid visit needs a replacement booked' });
 }
 
-// seedNotBefore (opt-in, the re-stamp sweep): the gap-fill never seeds a
-// visit dated before it — passed through to ensureCoverageRowsForTerm.
-// Unset (every activation / schedule-edit caller), behavior is unchanged.
+// seedNotBefore (the re-stamp sweep passes it explicitly): the gap-fill never
+// seeds a visit dated before it — passed through to ensureCoverageRowsForTerm,
+// which defaults it to today for an already-activated term (B09), so every
+// caller of this refresh is floored; a first activation keeps its own floor.
 async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -4512,8 +4525,11 @@ async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null }
     // A paid slot the floor declined to seed (its date passed) is never
     // dropped silently: after a partial activation the sweep would stamp
     // what exists and stop matching the term, leaving the customer a visit
-    // short (Codex #5515 r1 P2). Filed after commit, deduped per term.
-    if (seedNotBefore) await fileSkippedPastSlots(conn, term, ensured?.unseededPastDates, windowEnd);
+    // short (Codex #5515 r1 P2). Filed after commit, deduped per term — and
+    // for EVERY refresh now (B09), so a past slot the floor skips on a
+    // schedule edit or a recurring-alerts page open reaches the office the
+    // same way; the per-term dedupe keeps a refresh on every page open quiet.
+    await fileSkippedPastSlots(conn, term, ensured?.unseededPastDates, windowEnd);
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
     // (codex r18 pre-push P0, superseding the earlier hard-stop): the
     // prepaid stamp is the anti-double-bill mechanism — an already-booked
@@ -5500,6 +5516,45 @@ async function syncTermForRefundedPayment(payment, conn = db) {
   if (!(await annualPrepayTableExists()) || !payment) return [];
   const invoiceId = await findInvoiceIdForRefundedPayment(payment, conn);
   if (!invoiceId) return [];
+
+  // Ownership check (B03; the charge.refunded handler's terminalize guard,
+  // same rule): findInvoiceIdForRefundedPayment reads the payment's
+  // metadata.invoice_id first, which a dispute-created reopen never clears.
+  // When a REPLACEMENT payment has since paid the invoice, the invoice row
+  // points at the replacement, and refunding the ORIGINAL charge must not
+  // claw back coverage the replacement is paying for. A payment with no
+  // Stripe identity to compare keeps the legacy claw-back
+  // (refundedPaymentOwnsInvoice).
+  //
+  // What makes this unlocked read stable, per caller: the invoice is already
+  // terminalized to 'refunded' under its row lock BEFORE this runs, and every
+  // replacement-settlement path refuses a refunded invoice under that same
+  // lock, so ownership cannot change between this read and the term cancel.
+  //   - charge.refunded webhook: terminalized in the handler's own
+  //     transaction (returnAppliedCreditOnRefund, after the ownership check),
+  //     committed before this post-commit call.
+  //   - in-app StripeService.refund: terminalized by its credit-restore
+  //     block, which deliberately runs BEFORE this call (it finds the
+  //     invoice by the refunded PI, i.e. only an invoice that PI still owns).
+  // An invoice the payment does not own is never terminalized by either, so
+  // it is skipped here without a lock.
+  //
+  // Why the invoice row lock is NOT held across the transition: settlement
+  // and the pay-page paths lock customer THEN invoice (stripe.js settlement
+  // helpers, the webhook succeeded fallback), while dispute-created
+  // locks term, customer, THEN invoice, and the cancel below takes term then
+  // customer. Holding the invoice first would invert both orders for the
+  // same invoice and can deadlock a replacement payment or a dispute.
+  const invoiceRow = await conn('invoices')
+    .where({ id: invoiceId })
+    .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
+  if (invoiceRow && !require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
+    paymentIntentId: payment.stripe_payment_intent_id,
+    chargeId: payment.stripe_charge_id,
+  })) {
+    logger.warn(`[annual-prepay] refund of payment ${payment.id || payment.stripe_charge_id} no longer owns invoice ${invoiceId} (invoice PI ${invoiceRow.stripe_payment_intent_id || 'none'}, charge ${invoiceRow.stripe_charge_id || 'none'}) — term coverage left untouched`);
+    return [];
+  }
 
   return syncTermForInvoicePayment({
     id: invoiceId,

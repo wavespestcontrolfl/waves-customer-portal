@@ -9,6 +9,7 @@ const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing')
 const DunningKeys = require('./customer-dunning/constants');
 const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
 const BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX = 'Billing email re-quote required: ';
+const BILLING_EMAIL_REQUOTE_RETIRED_PREFIX = 'Billing email old quote retired: ';
 const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
   invoice_followup_sequence: 'invoice_followups',
 });
@@ -104,7 +105,7 @@ function hasRequoteRefusalEvidence(message) {
 // Stop the frozen snapshot while allowing a fresh rendering to claim both
 // ledgers. Consume the repair marker atomically: repeating an old repair must
 // not release a newer reservation that has already been reclaimed.
-async function releaseBillingEmailReservationForRequote(message, database = db) {
+async function releaseBillingEmailReservationForRequote(message, database = db, { propagateErrors = false } = {}) {
   if (!hasRequoteRefusalEvidence(message)) return false;
   try {
     return await database.transaction(async (trx) => {
@@ -141,18 +142,92 @@ async function releaseBillingEmailReservationForRequote(message, database = db) 
       const claimReleased = await trx('scheduled_services')
         .where({ id: context.appointment_id, customer_id: context.customer_id })
         .update({ balance_reminder_sent_at: null });
-      if (Number(claimReleased) !== 1) throw new Error('pinned previsit claim was not released');
+      if (Number(claimReleased) !== 1) throw Object.assign(new Error('pinned previsit claim was not released'), { reservationNoop: true });
       const retired = await trx('email_messages').where({ id: current.id }).update({
         error_message: String(current.error_message).replace(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
-          'Billing email old quote retired: '),
+          BILLING_EMAIL_REQUOTE_RETIRED_PREFIX),
         updated_at: new Date(),
       });
-      if (Number(retired) !== 1) throw new Error('old quote marker was not retired');
+      if (Number(retired) !== 1) throw Object.assign(new Error('old quote marker was not retired'), { reservationNoop: true });
       return true;
     });
   } catch (err) {
     logger.warn(`[billing-email-reservation] changed-quote release failed: ${redactContact(err.message)}`);
+    // A caller that terminalized the row in its own transaction needs a real failure to roll back
+    // with. A refused invariant (a pinned appointment that is gone, a marker already retired) is a
+    // no-op the recovery sweep owns, never a reason to fail the caller.
+    if (propagateErrors && !err.reservationNoop) throw err;
     return false;
+  }
+}
+
+// A stored billing copy the retry rail STOPPED because the customer's address
+// was corrected (not refused): the reservation must stay claimable, so the
+// owning sender's next attempt renders fresh to the live address. A resolved
+// leg is never claimed again (claimVerdict) and an unsettled one is held, so
+// the leg is reopened with the plain failed-attempt flag, the same
+// definite-non-send outcome a bound customer-dunning row reaches
+// (DUNNING_OUTCOME_PATCH.unsent). A previsit reminder pinned to an appointment
+// goes through the re-quote release instead, which also frees its appointment
+// claim.
+function isPrevisitReissue(message) {
+  const context = replayContext(message);
+  return !!context && context.source_entry_point === 'previsit_balance_reminder' && !!context.appointment_id;
+}
+
+// The stopped row's CURRENT attempt never reached a mailbox: settled failed by
+// the retry rail, exhausted, no schedule, positive handoff evidence that the
+// provider rejected (or never received) this very attempt, and no provider
+// acceptance or delivery stamp on the row. The webhook's block event leaves the
+// acceptance-time stamps on the row it re-arms, and the rail clears `sent_at`
+// when it stops such a row, so a stamp that is still present means the attempt
+// really was accepted and is never reopened here.
+function hasStoppedUnsentEvidence(message) {
+  return message?.status === 'failed' && !!message.provider_retry_exhausted_at
+    && !message.provider_retry_next_at && !hasAcceptedEvidence(message)
+    && ['pending', 'rejected'].includes(message.provider_handoff_phase)
+    && !!message.send_attempt_token && message.provider_handoff_attempt_token === message.send_attempt_token;
+}
+
+// Reopen the exact reservation the stopped attempt owns, in one transaction
+// that holds the email row: the attempt must still be the current one with its
+// unsent evidence, and the ledger write is a compare-and-set on the
+// reservation's identity that leaves a resolved reservation alone. A delivery
+// stamp the acceptance wrote (late-payment-checker stamps `delivered` when
+// SendGrid accepts) belongs to the attempt that was just rejected, so it is
+// cleared with the failed flag; claimVerdict would refuse a delivered leg.
+// Returns false when there is nothing to reopen (not a replay, the attempt is
+// no longer current, the reservation is resolved or gone) and throws when the
+// write itself failed.
+async function reopenBillingEmailReservationForReissue(message, database = db) {
+  const context = replayContext(message);
+  if (!context || !message?.id) return false;
+  try {
+    return await database.transaction(async (trx) => {
+      const query = trx('email_messages').where({ id: message.id });
+      if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
+      else query.where({ send_attempt_token: message.send_attempt_token });
+      const current = await query.forUpdate().first();
+      if (!hasStoppedUnsentEvidence(current)) return false;
+      const match = reservationMatch(context);
+      const reopen = trx('collections_contact_ledger')
+        .where({ id: context.collections_ledger_id, customer_id: match.customerId, channel: match.channel, source: match.source })
+        .whereRaw("metadata->>'notificationEventKey' = ?", [match.notificationEventKey])
+        .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [JSON.stringify({ resolved: true })]);
+      if (match.invoiceId) reopen.whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([match.invoiceId])]);
+      const changed = await reopen.update({
+        metadata: trx.raw(
+          "(COALESCE(metadata, '{}'::jsonb) - 'delivered') || ?::jsonb",
+          [JSON.stringify({ send_failed: true, code: 'email_not_sent' })],
+        ),
+      });
+      return Number(changed) === 1;
+    });
+  } catch (err) {
+    logger.warn(`[billing-email-reservation] reissue reopen failed: ${redactContact(err.message)}`);
+    // Never swallowed: the stop that terminalized the row commits or fails together with this write,
+    // so an error here must reach its transaction. "Nothing to reopen" returns false above instead.
+    throw err;
   }
 }
 
@@ -392,9 +467,12 @@ async function repairAcceptedBillingEmailReservations(rows, database = db, optio
 module.exports = {
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX,
   BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
+  BILLING_EMAIL_REQUOTE_RETIRED_PREFIX,
   hasAcceptedEvidence,
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,
   releaseBillingEmailReservationForRequote,
+  isPrevisitReissue,
+  reopenBillingEmailReservationForReissue,
   repairAcceptedBillingEmailReservations,
 };

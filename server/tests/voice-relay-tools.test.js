@@ -207,6 +207,168 @@ describe('find_slots', () => {
   });
 });
 
+// Owner ruling 2026-10-03: a caller recognised only through a customer's
+// secondary contact slot (spouse, tenant) gets ONE office bell tied to that
+// customer — never a new lead under their own number.
+describe('capture_lead for a recognised contact (secondary slot)', () => {
+  const relayAlert = require('../services/voice-agent/relay-alert');
+  const recognised = (over = {}) => ({
+    from: '+19415550133', callSid: 'CA-contact-1', callerVerified: true, customerId: 'c-1111', customerTier: 'redacted', markCaptured: jest.fn(), noteCallSummary: jest.fn(), ...over,
+  });
+  let bell;
+  beforeEach(() => { bell = jest.spyOn(relayAlert, 'alertOfficeContactFollowUp').mockResolvedValue(true); });
+  afterEach(() => bell.mockRestore());
+
+  test('rings the office for the customer, creates no lead, and stands the floor down', async () => {
+    const ctx = recognised();
+    const out = await executeTool('capture_lead', { call_summary: 'Asked what time the lawn tech is coming today.' }, ctx);
+    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c-1111', callbackPhone: '+19415550133', callSid: 'CA-contact-1', summary: expect.stringContaining('lawn tech') }));
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+    expect(ctx.markCaptured).toHaveBeenCalledWith({ leadCreated: false });
+    expect(out).toMatch(/no new lead was created/);
+    expect(out).toMatch(/follow up with THEM/);
+    expect(out).toMatch(/Never promise that Waves will contact the account holder/);
+    // The benchmark fixture answers with this exact live text.
+    const fixture = require('../fixtures/voice-relay-eval/scenarios.json').scenarios.find((sc) => sc.id === 'eta-recognised-redacted');
+    expect(fixture.fixtures.toolResponses.capture_lead).toEqual({ text: out, capture: { leadCreated: false } });
+  });
+
+  test('a channel preference and a do-not-contact request reach the office with the bell', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Wants the office to email, not call.', preferred_contact_method: 'email',
+      contact_preference: 'please stop calling me', do_not_contact_request: true,
+    }, recognised());
+    const { notes } = bell.mock.calls[0][0];
+    expect(notes).toEqual(expect.arrayContaining([
+      'Prefers: email.',
+      'Contact preference: “please stop calling me”.',
+      expect.stringMatching(/^Has a contact restriction/),
+    ]));
+  });
+
+  test('everything the lead would have held reaches the office: name, email, address, service, timing', async () => {
+    const ctx = recognised({ getEstimateFields: () => ({ first_name: 'Robin', last_name: 'Sample' }) });
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Wants a quote emailed.', email: 'robin@example.com', preferred_contact_method: 'email',
+      address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', requested_service: 'Lawn Care Program',
+      preferred_date_time: 'mornings', estimate_requested: true,
+    }, ctx);
+    const { notes } = bell.mock.calls[0][0];
+    expect(notes).toEqual(expect.arrayContaining([
+      'Gave their name as Robin Sample.', // from an earlier capture on this call
+      'Email: robin@example.com.',
+      'Address given: 12 Test Street, Bradenton, 34205.',
+      'Service: Lawn Care Program.',
+      'Timing: mornings.',
+      'Asked for a written estimate — none was queued.',
+      'Prefers: email.',
+    ]));
+    expect(out).toMatch(/NO written estimate was queued/);
+  });
+
+  test('two captures on one call: the later one keeps the earlier callback number and contact restriction', async () => {
+    let bag = {};
+    const ctx = recognised({ getContactFollowUp: () => ({ ...bag }), noteContactFollowUp: (f) => { bag = { ...f }; } });
+    await executeTool('capture_lead', {
+      call_summary: 'Email only, stop calling.', callback_phone: '+19415550199', preferred_contact_method: 'email',
+      contact_preference: 'email only, stop calling', do_not_contact_request: true,
+    }, ctx);
+    await executeTool('capture_lead', { call_summary: 'Added their email.', email: 'robin@example.com' }, ctx);
+    const second = bell.mock.calls[1][0];
+    expect(second.callbackPhone).toBe('+19415550199'); // not reverted to the inbound number
+    expect(second.notes).toEqual(expect.arrayContaining([
+      'Email: robin@example.com.',
+      'Prefers: email.',
+      'Contact preference: “email only, stop calling”.',
+      expect.stringMatching(/^Has a contact restriction/),
+    ]));
+    // A new number given later replaces the earlier one.
+    await executeTool('capture_lead', { call_summary: 'Different number.', callback_phone: '+19415550188' }, ctx);
+    expect(bell.mock.calls[2][0].callbackPhone).toBe('+19415550188');
+  });
+
+  test('a later capture that only adds a detail keeps the original reason for the call', async () => {
+    let bag = {};
+    const ctx = recognised({ getContactFollowUp: () => ({ ...bag }), noteContactFollowUp: (f) => { bag = { ...f }; } });
+    await executeTool('capture_lead', { call_summary: 'Asked what time the lawn tech is coming today.' }, ctx);
+    await executeTool('capture_lead', { call_summary: 'Added their email.', email: 'robin@example.com' }, ctx);
+    const second = bell.mock.calls[1][0];
+    expect(second.summary).toBe('Asked what time the lawn tech is coming today.');
+    expect(second.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email.']));
+    // A third capture keeps the second one's note as well.
+    await executeTool('capture_lead', { call_summary: 'Also discuss the damaged gate.' }, ctx);
+    const third = bell.mock.calls[2][0];
+    expect(third.summary).toBe('Asked what time the lawn tech is coming today.');
+    expect(third.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email. | Also discuss the damaged gate.']));
+  });
+
+  // The code never judges which channels a restriction covers: any
+  // restriction flags the bell for review with the caller's words, and the
+  // agent is told to promise only what the caller did not decline.
+  test.each([
+    ['a text-only opt-out with a requested callback', 'stop texting me, call me instead'],
+    ['an everything-but-email request', 'do not contact me except by email'],
+    ['a total no-contact request', 'do not contact me again'],
+    ['a bare flag with no words', undefined],
+  ])('%s → the bell is a request to review and no declined channel is promised', async (_label, words) => {
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Asked about today\'s visit.', ...(words ? { contact_preference: words } : {}), do_not_contact_request: true,
+    }, recognised());
+    const arg = bell.mock.calls[0][0];
+    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Has a contact restriction/)]));
+    if (words) expect(arg.notes).toEqual(expect.arrayContaining([`Contact preference: “${words}”.`]));
+    expect(out).toMatch(/Promise a follow-up ONLY by a way they did not decline/);
+    expect(out).toMatch(/if they asked for no contact at all, promise none/);
+    expect(out).not.toMatch(/follow up with THEM/);
+  });
+
+  test('no restriction → the ordinary follow-up bell and promise', async () => {
+    const out = await executeTool('capture_lead', { call_summary: 'Asked about today\'s visit.', preferred_contact_method: 'phone' }, recognised());
+    expect(bell.mock.calls[0][0].notes).not.toEqual(expect.arrayContaining([expect.stringMatching(/^Has a contact restriction/)]));
+    expect(out).toMatch(/follow up with THEM/);
+  });
+
+  test('a card number in the summary is scrubbed before it reaches the bell', async () => {
+    await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
+    expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);
+  });
+
+  test('a bell that cannot be raised falls through to the lead path, so a human still has an artifact', async () => {
+    bell.mockResolvedValue(false);
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-fallback', created: true });
+    const out = await executeTool('capture_lead', { call_summary: 'Needs a call back.' }, recognised());
+    expect(createLeadFromExtraction).toHaveBeenCalled();
+    expect(out).toMatch(/Lead saved successfully/);
+  });
+
+  test.each([
+    ['the account holder\'s own number (full tier)', { customerTier: 'full' }],
+    ['an unverified session', { callerVerified: false }],
+    ['a caller with no matched account', { customerId: null }],
+  ])('%s keeps the lead path — no contact bell', async (_label, over) => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', created: true });
+    await executeTool('capture_lead', { call_summary: 'Wants pest control.' }, recognised(over));
+    expect(bell).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).toHaveBeenCalled();
+  });
+
+  test('a superseded session saves nothing: no bell latched, no fallback lead, and the model is told', async () => {
+    bell.mockResolvedValue('superseded');
+    const ctx = recognised({ sessionKey: 'nonce-old' });
+    const out = await executeTool('capture_lead', { call_summary: 'Late write from an old socket.' }, ctx);
+    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ sessionKey: 'nonce-old' }));
+    expect(out).toMatch(/superseded by a reconnect — NOTHING was saved/);
+    expect(ctx.markCaptured).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
+  test('a sandbox call still writes nothing — no bell', async () => {
+    await executeTool('capture_lead', { call_summary: 'test' }, recognised({ sandbox: true }));
+    expect(bell).not.toHaveBeenCalled();
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+});
+
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
   test('capture preserves the claimed-session linkage when recovery is off', async () => {
     const saved = process.env.GATE_VOICE_RELAY_RECOVERY;

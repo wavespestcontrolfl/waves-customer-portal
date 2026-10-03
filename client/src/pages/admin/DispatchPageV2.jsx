@@ -1181,11 +1181,12 @@ export default function DispatchPageV2({
 
   return (
     <div className="min-h-full bg-surface-page font-sans text-zinc-900">
-      {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs.
+      {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs,
+          and only to an admin (POST /dispatch/sync is owner-only).
           The Schedule h1 + "+ Add Appointment" pill that used to share this
           row are now lifted into AdminDispatchPage so they sit above the
           centered top-level tab pill. */}
-      {activeTab !== "board" && viewMode === "day" && (
+      {activeTab !== "board" && viewMode === "day" && getAdminUser()?.role === "admin" && (
         <div className="hidden md:flex justify-end mb-4">
           {" "}
           <Button
