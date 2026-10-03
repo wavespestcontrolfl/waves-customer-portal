@@ -106,6 +106,15 @@ postgres('neighborhood gate entries for the day feed', () => {
     expect(map.size).toBe(0);
   });
 
+  test('a switched-off neighborhood gives no fallback', async () => {
+    const n = await neighborhood('Off Grove');
+    await entry(n, { code: '6969', status: 'active' });
+    await trx('neighborhoods').where({ id: n }).update({ active: false });
+    const c = await customer([n]);
+    const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);
+    expect(map.size).toBe(0);
+  });
+
   test('no neighborhood link = no entry', async () => {
     const c = await customer([null]);
     const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);
