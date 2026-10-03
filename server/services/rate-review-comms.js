@@ -115,7 +115,9 @@ function money(centsValue) {
   return PriceChangeNotices.formatMoney(Number(centsValue) || 0);
 }
 
-const byEffective = (a, b) => String(a.effectiveDate).localeCompare(String(b.effectiveDate));
+// Same-date lines keep one order (by notice id): the batch read is unordered, and the slots
+// and the primary notice token must not differ between the preview and the send.
+const byEffective = (a, b) => String(a.effectiveDate).localeCompare(String(b.effectiveDate)) || String(a.noticeId).localeCompare(String(b.noticeId));
 
 function dateLabel(day) {
   return formatDisplayDate(day, { fallback: day || '' });
@@ -244,6 +246,19 @@ function subjectLine(ordered) {
     : `Your Waves rate from ${dateLabel(ordered[0].effectiveDate)}`;
 }
 
+// "Before the new-rate date" assurance: one sentence per billing arrangement the letter
+// actually carries (template variable assurance_line, migration 20261003160000; the notice
+// page builds the same from its lines).
+const ASSURANCE_BY_UNIT = Object.freeze([
+  ['application', 'Any application completed before the new-rate date is billed at your current rate.'],
+  ['month', 'Your monthly dues stay at your current amount through the month before the new-rate date.'],
+  ['year', 'Your prepaid plan stays exactly as it is until it renews.'],
+]);
+function assuranceLine(lines) {
+  const units = new Set((lines || []).map((l) => l.unit));
+  return ASSURANCE_BY_UNIT.filter(([unit]) => units.has(unit)).map(([, sentence]) => sentence).join(' ');
+}
+
 // The email payload (and the frozen page content) for one customer's lines.
 function letterPayload({ customer, prefs = null, lines, costBlock, noticeUrl }) {
   const ordered = [...lines].sort(byEffective);
@@ -253,6 +268,7 @@ function letterPayload({ customer, prefs = null, lines, costBlock, noticeUrl }) 
     // The subject (template variable, migration 20261003140000): the dated wording for a
     // single-date letter, neutral wording when the lines start on different dates.
     subject_line: subjectLine(ordered),
+    assurance_line: assuranceLine(ordered),
     cost_block: costBlock,
     notice_url: noticeUrl,
     prepay_note: ordered.some((l) => l.unit === 'year')
@@ -676,7 +692,7 @@ async function renderLetter(payload) {
 }
 
 function noticeUrlFor(lines) {
-  const primary = [...lines].sort((a, b) => (a.effectiveDate < b.effectiveDate ? -1 : 1))[0];
+  const primary = [...lines].sort((a, b) => String(a.effectiveDate).localeCompare(String(b.effectiveDate)) || String(a.notice.id).localeCompare(String(b.notice.id)))[0];
   return portalUrl(`/price-change/${primary.notice.notice_token}`);
 }
 
@@ -894,6 +910,7 @@ const SMS_HOLD_REASONS = {
   NOTICE_REPOINTED: 'notice_repointed',
   RECIPIENT_PHONE_CHANGED: 'recipient_phone_changed',
   RECIPIENT_UNAVAILABLE: 'recipient_unavailable',
+  RECIPIENT_CHANNEL_CHANGED: 'recipient_changed',
 };
 
 const phoneKey = (p) => { const e = toE164(String(p || '').trim()); return e ? String(e).replace(/\D/g, '') : ''; };
@@ -901,7 +918,7 @@ const phoneKey = (p) => { const e = toE164(String(p || '').trim()); return e ? S
 // Run INSIDE the customer-comms + phone fence, immediately before the Twilio
 // request: the notice must still belong to the letter's customer and that
 // customer must still own the number being texted. null = clear to send.
-async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = null) {
+async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = null, { emailLeg = null } = {}) {
   if (!(await stillOwned(trx, noticeIds, customerId))) {
     return { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer', retryable: false };
   }
@@ -915,6 +932,13 @@ async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = nu
   const live = await trx('customers').where({ id: customerId }).first();
   if (!live || live.deleted_at || live.active === false) {
     return { ok: false, code: 'RECIPIENT_UNAVAILABLE', reason: 'the customer is no longer active', retryable: false };
+  }
+  // The email-leg fact the text was declared with (hasEmailLeg), re-read under the fence: a
+  // billing email or an email-only channel choice committed since must not be overtaken.
+  if (emailLeg != null) {
+    const livePrefs = await trx('notification_prefs').where({ customer_id: customerId }).first();
+    const now = hasContact(live, livePrefs || {});
+    if (now.email !== emailLeg || !now.sms) return { ok: false, code: 'RECIPIENT_CHANNEL_CHANGED', reason: 'the customer\'s delivery channels changed since this text was built', retryable: false };
   }
   if (!phoneKey(phone) || phoneKey(live.phone) !== phoneKey(phone)) {
     return { ok: false, code: 'RECIPIENT_PHONE_CHANGED', reason: 'the number on file is no longer the one this text was built for', retryable: false };
@@ -1061,6 +1085,12 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // ...and so must the letter template: the email leg refuses a changed template on its
     // own (expectedContentHash); this stops the text too, so neither provider proceeds.
     if ((await letterTemplateHash(conn, { share: conn !== dbh })) !== templateHash) return { ok: false, reason: 'template_changed' };
+    // A prepaid line: the renewal writers' own lock, taken (never waited for) on the handoff
+    // transaction and held through the request, so no successor term is created between the
+    // prepaid checks below and the provider call. Busy = a renewal is being written: held.
+    if (conn !== dbh && entry.lines.some((l) => l.unit === 'year')) {
+      try { await require('./rate-review-apply')._private.tryAnnualPrepayLock(conn, entry.customerId); } catch (_err) { return { ok: false, reason: 'renewal_in_progress' }; }
+    }
     const at = clock();
     return revalidateClaimed(conn, entry, claimed, { today: etDateString(at), now: at });
   };
@@ -1159,10 +1189,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // closed with a named code; one that arrives later waits for the
       // request. A notice token therefore never texts a previous customer.
       withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
-        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility);
+        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility, { emailLeg: hasContact(customer, prefs).email });
         if (refusal) return refusal;
-        await markHandoff('sms');
-        return dispatch(trx);
+        // The canonical sender's own provider-start hook: it fires after the sender's
+        // consent, suppression and send-window rechecks, immediately before the request.
+        return dispatch(trx, () => markHandoff('sms'));
       }),
     },
   });
@@ -1213,6 +1244,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // commits before the stamp, which then sees it, or waits for the stamp.
   const orphaned = [];
   const undeliveredEarly = [];
+  const resolvedAlertKeys = [];
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
     // Twilio's verdict on this letter's text (its callback may already be in sms_log or
@@ -1271,6 +1303,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         metadata: JSON.stringify({ ...base, ...(Object.keys(early).length ? { channel_failures: early } : {}), ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt), payload: frozen.payload } }),
       });
       const snap = await trx('rate_review_snapshots').where({ notice_id: l.noticeId }).first();
+      // A re-send that delivered ends the earlier bounce: its office alerts close below.
+      for (const r of [...(meta.delivery_revocations || []), priorRevoked].filter(Boolean)) resolvedAlertKeys.push(`rate-review-delivery-revoked:${live.id}:${r.event}`);
       await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({
         status: 'sent', updated_at: sentAt,
         ...(snap ? { flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)) } : {}),
@@ -1296,6 +1330,13 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   if (undeliveredEarly.length) {
     await raiseDeliveryAlerts(undeliveredEarly);
     return { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' };
+  }
+  if (resolvedAlertKeys.length && require('../config/feature-gates').alertEpisodesLive()) {
+    try {
+      await require('./admin-alert-episodes').closeAdminAlertKeys(dbh, resolvedAlertKeys, 'rate_review_resent');
+    } catch (err) {
+      logger.warn(`[rate-review-comms] delivery alerts not closed for customer ${entry.customerId}: ${err.message}`);
+    }
   }
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
 }

@@ -28,6 +28,9 @@ const fixture = require('./helpers/rate-review-apply-fixture');
 const mockDb = fixture.createFakeDb();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The episode close writes notifications with raw SQL the fake database does not model.
+const mockCloseAlertKeys = jest.fn(async () => 0);
+jest.mock('../services/admin-alert-episodes', () => ({ ...jest.requireActual('../services/admin-alert-episodes'), closeAdminAlertKeys: (...a) => mockCloseAlertKeys(...a) }));
 // The live-lane read (rate-review-apply.js resolveLiveLane) walks the
 // prepaid terms through this helper — the same stand-in the apply suite uses.
 jest.mock('../services/annual-prepay-renewals', () => ({
@@ -84,10 +87,19 @@ jest.mock('../services/email-template-library', () => {
           ...(() => {
             const variables = require('../models/migrations/20261003150000_rate_review_letter_subject_variables')._private;
             const v = variables.shiftVariables({ allowed: [...TEMPLATE.required, ...TEMPLATE.optional, subjectMigration.VAR], required: TEMPLATE.required, optional: [...TEMPLATE.optional, subjectMigration.VAR] }, true);
-            return { required_variables: JSON.stringify(v.required), allowed_variables: JSON.stringify(v.allowed) };
+            // ...and after 20261003160000 (the assurance sentence is {{assurance_line}})
+            const a = require('../models/migrations/20261003160000_rate_review_letter_assurance_line')._private.shiftVariables({ allowed: v.allowed, required: v.required, optional: v.optional || [] }, true);
+            return { required_variables: JSON.stringify(a.required), allowed_variables: JSON.stringify(a.allowed) };
           })(),
         },
-        activeVersion: { id: 'v1', subject: subjectMigration.NEW_SUBJECT, preview_text: TEMPLATE.preview, blocks: TEMPLATE.blocks, text_body: null },
+        activeVersion: {
+          id: 'v1', subject: subjectMigration.NEW_SUBJECT, preview_text: TEMPLATE.preview, text_body: null,
+          blocks: (() => {
+            const neutral = require('../models/migrations/20261003120000_rate_review_letter_lane_neutral_assurance')._private;
+            const line = require('../models/migrations/20261003160000_rate_review_letter_assurance_line')._private;
+            return line.swapSentence(neutral.swapSentence(TEMPLATE.blocks, neutral.OLD_SENTENCE, neutral.NEW_SENTENCE).blocks, line.OLD_SENTENCE, line.NEW_SENTENCE).blocks;
+          })(),
+        },
       };
     }),
   };
@@ -150,7 +162,7 @@ const snapshots = () => mockDb.store.rate_review_snapshots;
 
 // A leg that reached its provider handoff (the request was made) and then returns `result`.
 const emailVia = (result) => async (args) => { await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient && args.recipient.email }); return result; };
-const smsVia = (result) => async (args) => { await args.sendOptions.withSmsHandoff(async () => ({ ok: true })); return result; };
+const smsVia = (result) => async (args) => { await args.sendOptions.withSmsHandoff(async (trx, onProviderStart) => { if (onProviderStart) await onProviderStart(); return { ok: true }; }); return result; };
 
 beforeEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
@@ -514,6 +526,52 @@ describe('sendBatch', () => {
     emailLeg.mockImplementation(async () => { active += 1; peak = Math.max(peak, active); await new Promise((r) => setImmediate(r)); active -= 1; return { sent: true, attempted: true }; });
     try { expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).sent).toBe(3); } finally { delete mockDb.client; }
     expect(peak).toBe(1);
+  });
+
+  test('a re-send that delivers closes the earlier bounce alert for that notice', async () => {
+    mockDb.reset(book());
+    smsLeg.mockResolvedValue({ sent: false, attempted: false }); // email only
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    Object.assign(notices()[0], { metadata: JSON.stringify({ ...JSON.parse(notices()[0].metadata), email_message_id: 'em-1' }) });
+    await comms.handleEmailDeliveryEvent(mockDb, { id: 'em-1', template_key: comms.TEMPLATE_KEY, recipient_type: 'customer', recipient_id: CUSTOMER(1) }, { event: 'bounce', timestamp: 1790000000 });
+    expect(notices()[0].status).toBe('draft');
+    mockCloseAlertKeys.mockClear();
+    expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).sent).toBe(1);
+    expect(mockCloseAlertKeys).toHaveBeenCalledWith(expect.anything(), [`rate-review-delivery-revoked:${notices()[0].id}:bounce`], 'rate_review_resent');
+  });
+
+  test('same-date lines keep one order whatever order the batch read returns them in (same digest, same primary notice)', async () => {
+    const lawn = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1), lawn] });
+    b.rate_review_snapshots[1].family_key = 'lawn_care';
+    mockDb.reset(b);
+    const first = await previewDigest();
+    mockDb.store.price_change_notices.reverse();
+    expect(await previewDigest()).toBe(first);
+  });
+
+  test('the text is refused when the customer\'s channels changed since it was built (a billing email added, email-only chosen)', async () => {
+    mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+    const digest = await previewDigest();
+    let refusal = null;
+    emailLeg.mockResolvedValue({ sent: false, attempted: false }); // no address when the letter was built
+    smsLeg.mockImplementation(async (args) => {
+      mockDb.store.notification_prefs = [{ customer_id: CUSTOMER(1), billing_email: 'new@example.com', billing_channel: 'email', sms_enabled: true }];
+      refusal = await args.sendOptions.withSmsHandoff(async () => ({ ok: true }));
+      return { sent: false, attempted: false, blockedCode: refusal.code };
+    });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(refusal).toMatchObject({ ok: false, code: 'RECIPIENT_CHANNEL_CHANGED' });
+    expect(notices()[0].sent_at).toBeNull();
+  });
+
+  test('the letter\'s assurance names only the billing arrangements the customer has', async () => {
+    mockDb.reset(book());
+    const text = (await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW })).html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    expect(text).toContain('Any application completed before the new-rate date is billed at your current rate.');
+    expect(text).not.toContain('monthly dues');
+    expect(text).not.toContain('prepaid plan');
+    expect(text).not.toContain('{{');
   });
 
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {

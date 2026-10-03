@@ -338,6 +338,12 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
     return { sent: !!res.sent, attempted, ...(res.providerMessageId ? { sid: String(res.providerMessageId) } : {}) };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
+    // The carrier accepted the text and a later step threw (the messaging audit write):
+    // the sender tags the error with the outcome it observed. Accepted stays accepted.
+    const observed = err && err.providerOutcome;
+    if (observed && observed.deliveryOutcome === 'accepted') {
+      return { sent: true, attempted: true, ...(observed.providerMessageId ? { sid: String(observed.providerMessageId) } : {}) };
+    }
     return { sent: false, attempted, ...(attempted && !reachedSender ? { definiteNonSend: true } : {}) };
   }
 }

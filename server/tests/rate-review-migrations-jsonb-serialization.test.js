@@ -13,6 +13,7 @@ const seed = require('../models/migrations/20261001200000_rate_review_letter_ema
 const assurance = require('../models/migrations/20261003120000_rate_review_letter_lane_neutral_assurance');
 const subject = require('../models/migrations/20261003140000_rate_review_letter_subject_line');
 const variables = require('../models/migrations/20261003150000_rate_review_letter_subject_variables');
+const assuranceLine = require('../models/migrations/20261003160000_rate_review_letter_assurance_line');
 
 const T = seed._private.TEMPLATE;
 const DIR = path.join(__dirname, '../models/migrations');
@@ -21,6 +22,7 @@ const FILES = [
   '20261003130000_rate_review_sms_failures.js',
   '20261003140000_rate_review_letter_subject_line.js',
   '20261003150000_rate_review_letter_subject_variables.js',
+  '20261003160000_rate_review_letter_assurance_line.js',
 ];
 const JSON_COLUMNS = ['allowed_variables', 'required_variables', 'optional_variables', 'blocks'];
 
@@ -68,6 +70,34 @@ describe('rate review migrations write jsonb as JSON text (real pg serializer)',
   });
 
   const seededLists = { allowed: [...T.required, ...T.optional], required: T.required, optional: T.optional };
+
+  test.each(['array', 'string'])('20261003160000 up and down (%s original): the sentence becomes {{assurance_line}}, required; an edited paragraph is left alone', async (shape) => {
+    const A = assuranceLine._private;
+    const after120000 = assurance._private.swapSentence(T.blocks, assurance._private.OLD_SENTENCE, assurance._private.NEW_SENTENCE).blocks;
+    expect(A.OLD_SENTENCE).toBe(assurance._private.NEW_SENTENCE); // starts exactly where 20261003120000 ends
+    const lists = { allowed: [...T.required, ...T.optional, 'subject_line'], required: [...T.required.filter((v) => v !== 'effective_date'), 'subject_line'], optional: [...T.optional, 'effective_date'] };
+    const r = recorder({ subjectText: '{{subject_line}}', lists, shape, blocks: after120000 });
+    await assuranceLine.up(r.knex);
+    const cols = assertWireJson(r.writes);
+    expect([...cols].sort()).toEqual(['allowed_variables', 'blocks', 'optional_variables', 'required_variables']);
+    const blocksUp = JSON.parse(prepareValue(r.writes.find((w) => w.patch.blocks).patch.blocks));
+    expect(JSON.stringify(blocksUp)).toContain('{{assurance_line}}');
+    expect(JSON.stringify(blocksUp)).not.toContain('monthly dues stay');
+    const up = r.writes.at(-1).patch;
+    expect(JSON.parse(prepareValue(up.required_variables))).toContain('assurance_line');
+    expect(JSON.parse(prepareValue(up.allowed_variables))).toContain('assurance_line');
+    r.writes.length = 0;
+    await assuranceLine.up(r.knex); // idempotent: nothing left to swap
+    expect(r.writes).toEqual([]);
+    await assuranceLine.down(r.knex);
+    assertWireJson(r.writes);
+    expect(JSON.parse(prepareValue(r.writes.find((w) => w.patch.blocks).patch.blocks))).toEqual(after120000);
+    expect(JSON.parse(prepareValue(r.writes.at(-1).patch.required_variables))).toEqual(lists.required);
+    // an operator-edited paragraph: no write at all
+    const edited = recorder({ subjectText: '{{subject_line}}', lists, shape, blocks: [{ type: 'paragraph', content: 'Our own words.' }] });
+    await assuranceLine.up(edited.knex);
+    expect(edited.writes).toEqual([]);
+  });
 
   test.each(['array', 'string'])('20261003140000 up and down (%s original)', async (shape) => {
     const r = recorder({ subjectText: subject._private.OLD_SUBJECT, lists: seededLists, shape });

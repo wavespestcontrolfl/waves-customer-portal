@@ -82,7 +82,7 @@ describe('PriceChangeNoticePage v2', () => {
     if (line.unit !== 'application') expect(document.body.textContent).not.toMatch(/Any application completed before the new-rate date/);
   });
 
-  it('a mixed letter (several lanes) gets the one sentence true for all three', async () => {
+  it('a mixed letter gets one sentence per billing arrangement it carries, and none it does not', async () => {
     renderWith({
       ...legacy,
       review: { firstName: 'Testcust', costBlock: 'Costs.', hasPrepay: true, lines: [
@@ -91,7 +91,8 @@ describe('PriceChangeNoticePage v2', () => {
       ] },
     });
     await screen.findByRole('heading', { level: 1 });
-    expect(document.body.textContent).toMatch(/applications completed before it are billed at your current rate, monthly dues stay at your current amount through the month before it, and a prepaid plan stays exactly as it is until it renews/);
+    expect(document.body.textContent).toContain('Any application completed before the new-rate date is billed at your current rate. Your monthly dues stay at your current amount through the month before the new-rate date.');
+    expect(document.body.textContent).not.toMatch(/prepaid plan stays/);
   });
 
   it('the heading does not claim one date for a letter whose lines start on different dates; a single-date letter keeps it', async () => {
