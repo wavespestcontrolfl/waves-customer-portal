@@ -576,7 +576,7 @@ async function matchAcceptCustomerByPhone(estimate, database = db) {
   return {
     match,
     candidateCount: candidates.length,
-    ...(contradicted ? { contradicted: true } : {}),
+    ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
 }
 
@@ -11822,6 +11822,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // insert's own defaults (pipeline_stage 'active_customer' + the quoted
       // monthly_rate) are never read as a pre-existing monthly membership.
       let customerCreatedThisAccept = false;
+      // Set only when the contradicted-phone branch below mints the profile; returned
+      // with the commit so the office alert fires post-commit, never from a rolled-back accept.
+      let phoneContradictionRejectedId = null;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11895,8 +11898,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        const { match: existing, candidateCount, contradicted: phoneContradicted } = await matchAcceptCustomerByPhone(estimate, trx);
+        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(estimate, trx);
         if (phoneContradicted) {
+          phoneContradictionRejectedId = phoneRejectedCustomerId || null;
           logger.warn(`[estimate-accept] phone on estimate ${estimate.id} belongs to a customer whose email and address both disagree with the estimate — creating a new profile on its own account`);
         }
         if (!existing && candidateCount > 1) {
@@ -13804,6 +13808,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardInvoiceMinted,
         standardInvoiceAttached,
         setupFeeDeferredToFirstVisit,
+        phoneContradictionRejectedId,
       };
     }).catch((txErr) => {
       // PG 40P01 (deadlock_detected): Postgres aborted this transaction to
@@ -14271,6 +14276,41 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
       void sendNewRecurringWelcome(acceptConversion.welcomeSms)
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
+    }
+    // B18: the accept took the contradicted-phone branch (the phone on the estimate belongs to
+    // another customer, so the accepter got their own profile and account). They cannot sign in by
+    // phone until it is corrected, so the office is told once, post-commit like the other deferred
+    // alerts (a rolled-back accept never gets here). Fail-soft: the accept already committed.
+    if (txResult.phoneContradictionRejectedId && customerId) {
+      try {
+        const { fitAction } = require('../services/admin-alert-names');
+        const rejected = await db('customers').where({ id: txResult.phoneContradictionRejectedId }).first('id', 'first_name', 'last_name');
+        const rejectedName = [rejected?.first_name, rejected?.last_name].filter(Boolean).join(' ') || 'another customer';
+        await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+          area: 'Customers',
+          action: fitAction('Customers', estimate.customer_name || 'the new customer', [
+            (n) => `fix ${n}'s phone number`,
+            (n) => `fix ${n}'s phone`,
+          ]),
+          why: 'The phone on their estimate is another customer\u2019s, so they cannot sign in to the portal yet.',
+          severity: 'needs-you',
+          link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+          subject: { type: 'customer', id: String(customerId) },
+          doneWhen: 'phone_corrected',
+          who: 'person',
+        }, {
+          bell: true,
+          dedupeKey: `accept-phone-contradicted:${estimate.id}`,
+          dedupeVersion: 'v1',
+          detail: `This estimate's phone number belongs to another customer (${rejectedName}, customer id ${txResult.phoneContradictionRejectedId}). `
+            + 'The person who accepted was set up as a separate customer and was asked for their own card. '
+            + 'They cannot sign in to the portal by phone until their phone number is corrected: fix the phone on the new customer, '
+            + 'or merge the two if they are the same person.',
+          metadata: { estimateId: estimate.id, customerId: String(customerId), rejectedCustomerId: String(txResult.phoneContradictionRejectedId) },
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] contradicted-phone office alert failed for estimate ${estimate.id}: ${e.message}`);
+      }
     }
     // The converter deferred the commercial-schedule admin notification
     // (deferCommercialScheduleNotification) so a rolled-back accept can't page

@@ -4162,6 +4162,9 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     ...overrides,
   });
 
+  const contradictionAlerts = () => require('../services/notification-service').notifyAdmin.mock.calls
+    .filter(([, , , opts]) => String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:'));
+
   test('contradicted lone candidate: new profile is created on a DIFFERENT account, the rejected customer is untouched', async () => {
     resetStore(recurringPestEstimate({ id: 'est-b18-1', token: 'tok-b18-1-x0123456789' }));
     db.__state.tables.customers.push(sharedPhoneRow());
@@ -4183,6 +4186,38 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     // A second account row was minted; the rejected customer still sits alone on his.
     expect(db.__state.tables.customer_accounts).toHaveLength(2);
     expect(db.__state.tables.customers.find((c) => c.id === 'cust-bob')).toMatchObject({ account_id: 'acct-bob', email: 'bob@example.com' });
+
+    // Exactly one office alert, raised after the commit, about the NEW customer.
+    const alerts = contradictionAlerts();
+    expect(alerts).toHaveLength(1);
+    const [category, headline, why, opts] = alerts[0];
+    expect(category).toBe('customer');
+    expect(headline).toBe("Customers \u2014 fix Pat Tester's phone number");
+    expect(why).toBe('The phone on their estimate is another customer\u2019s, so they cannot sign in to the portal yet.');
+    expect(opts.dedupeKey).toBe('accept-phone-contradicted:est-b18-1');
+    expect(opts.bell).toBe(true);
+    expect(opts.link).toBe(`/admin/customers?customerId=${newId}`);
+    expect(opts.metadata).toMatchObject({
+      area: 'Customers', severity: 'needs-you', subject: { type: 'customer', id: newId }, doneWhen: 'phone_corrected', who: 'person',
+      estimateId: 'est-b18-1', customerId: newId, rejectedCustomerId: 'cust-bob',
+    });
+    expect(opts.detail).toContain('Bob Example');
+    expect(opts.detail).toContain('merge the two if they are the same person');
+  });
+
+  test('a rolled-back contradicted accept raises no alert and leaves no profile or account behind', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-4', token: 'tok-b18-4-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion failed'));
+
+    const res = await putAccept('tok-b18-4-x0123456789');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(EstimateConverter.convertEstimate).toHaveBeenCalledTimes(1);
+    expect(contradictionAlerts()).toHaveLength(0);
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(storedEstimate().customer_id).toBeNull();
   });
 
   test('control: several profiles share the phone and none is unique — the new profile still joins the shared account', async () => {
@@ -4203,6 +4238,7 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(created.account_id).toBe('acct-shared');
     expect(created.profile_label).toBe('Additional property');
     expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(contradictionAlerts()).toHaveLength(0);
   });
 
   test('control: a lone candidate whose email agrees is still reused (no new profile, no new account)', async () => {
@@ -4216,5 +4252,6 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(storedEstimate().customer_id).toBe('cust-bob');
     expect(db.__state.tables.customers).toHaveLength(1);
     expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(contradictionAlerts()).toHaveLength(0);
   });
 });

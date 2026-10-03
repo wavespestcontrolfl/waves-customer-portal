@@ -1554,7 +1554,10 @@ pre-fill identity, so a submitted email never steers which profile the accept
 lands on (a lone phone hit is reused unless the estimate's stored email AND
 address are both present and both disagree with the profile's, in which case the
 accept mints a fresh profile on its own account and the accepter gets the
-normal card rules; this covers the lone-candidate case only, and when several
+normal card rules, and once the accept commits the office gets one Customers
+needs-you alert (dedupe `accept-phone-contradicted:<estimateId>`) to correct the
+new profile's phone, because portal login is by phone and still opens the
+existing customer; this covers the lone-candidate case only, and when several
 profiles share the phone and none matches uniquely the fresh profile still
 joins the phone-matched account as before); an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
