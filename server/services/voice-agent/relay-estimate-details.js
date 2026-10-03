@@ -52,8 +52,12 @@ async function accountDetailsForEstimate(ctx = {}, stated = {}) {
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
       .first('id', 'account_id', 'first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
     if (!row) return null;
-    // A row still in the lead pipeline, or a caller who gave a different first
-    // name, opens a LEAD under the lead writer's own rules: ordinary intake.
+    // A row still in the lead pipeline gets a lead that needs the intake. A
+    // caller who gave a different first name is someone else on the account's
+    // line: the account's details are not theirs to confirm. Both get the
+    // ordinary questions. (This decides ONLY whether account details may be
+    // used; how the capture is linked to the account is the lead writer's
+    // own, unchanged, identity rule.)
     const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
     if (isLeadStage(row.pipeline_stage) || nameConflicts({ first_name: stated.first_name }, row)) return null;
     // An account can hold its properties as SIBLING customer profiles (one
@@ -166,7 +170,11 @@ async function resolveEstimateDetails({ input, extracted, emailNow, estimateRequ
   // earlier capture of this call: the flag on its own confirms nothing.
   const offered = prior.account_question_offered === 'true';
   const yesToOffer = input.use_account_details === true && offered;
-  const confirmed = yesToOffer || prior.account_details_confirmed === 'true';
+  // …and an explicit false takes an earlier yes back, for the rest of the
+  // call: the marker is overwritten, so later captures cannot resume the
+  // account's details until the caller says yes again.
+  const revoked = input.use_account_details === false;
+  const confirmed = yesToOffer || (!revoked && prior.account_details_confirmed === 'true');
   const { used, worthAsking } = await accountFillsFor({ estimateRequested, estimateFields, stated, emailUnreadable, isValidEmail, confirmed, ctx });
   const estimateMissing = estimateRequested ? REQUIRED.filter((k) => !estimateFields[k]) : [];
   const chosenCallback = input.callback_phone && callerPhoneValid ? callerPhone : null;
@@ -179,7 +187,7 @@ async function resolveEstimateDetails({ input, extracted, emailNow, estimateRequ
     callback_phone: chosenCallback,
     // The yes is remembered whether or not the account could be read just
     // now: eligibility is re-proven on every capture.
-    account_details_confirmed: yesToOffer ? 'true' : null,
+    account_details_confirmed: yesToOffer ? 'true' : (revoked ? 'revoked' : null),
   });
   return {
     estimateFields,
@@ -205,8 +213,9 @@ async function accountFillsFor({ estimateRequested, estimateFields, stated, emai
  * artifact. A lifecycle customer gets no lead, so the estimate-request card
  * is filed — or, when the request is incomplete, a card an earlier capture on
  * this call queued is revised (revise-only: with none standing nothing is
- * filed). Returns `{ estimateQueued, cardRevised }`; estimateQueued is null
- * when no estimate was requested.
+ * filed). Returns `{ estimateQueued, cardRevised, superseded }`; estimateQueued
+ * is null when no estimate was requested, and `superseded` is true when the
+ * card write found another session owning the call.
  */
 async function fileEstimateRequest({ estimateRequested, estimateMissing, leadCreated, customerId, details, cardOpts }) {
   if (!estimateRequested) return { estimateQueued: null, cardRevised: false };
@@ -217,7 +226,10 @@ async function fileEstimateRequest({ estimateRequested, estimateMissing, leadCre
   if (typeof surfaceEstimateRequestForCustomer !== 'function') return { estimateQueued: false, cardRevised: false };
   const written = await surfaceEstimateRequestForCustomer(customerId, details, incomplete ? { ...cardOpts, stillMissing: estimateMissing } : cardOpts);
   const persisted = Boolean(written && written.persisted === true);
-  return { estimateQueued: !incomplete && persisted, cardRevised: incomplete && persisted };
+  // Another socket owns the call now: nothing was written, and the caller of
+  // this function must stop (capture_lead's superseded hard stop).
+  const superseded = Boolean(written && written.superseded === true);
+  return { estimateQueued: !incomplete && persisted, cardRevised: incomplete && persisted, superseded };
 }
 
 const RETRY = 'Ask for what is missing and call capture_lead again with estimate_requested: true. ';

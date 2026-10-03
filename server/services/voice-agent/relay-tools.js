@@ -1624,7 +1624,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated, holdOpen });
       // The artifact behind the promise: the lead, or the office card (filed,
       // or revised when a correction leaves the request incomplete).
-      const { estimateQueued, cardRevised } = await estimateDetails.fileEstimateRequest({
+      const { estimateQueued, cardRevised, superseded: cardSuperseded } = await estimateDetails.fileEstimateRequest({
         estimateRequested,
         estimateMissing,
         leadCreated,
@@ -1632,6 +1632,13 @@ async function executeTool(name, input = {}, ctx = {}) {
         details: { ...extracted, ...estimateFields },
         cardOpts: { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount },
       });
+      // The card write re-proves call ownership (its fence). A reconnect that
+      // took the call between the lead write and here gets the same hard stop
+      // as a superseded lead write: this socket says and starts nothing more.
+      if (cardSuperseded) {
+        return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+          + 'tools and do not answer account questions; say goodbye briefly.';
+      }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
       if (!promiseStands) {

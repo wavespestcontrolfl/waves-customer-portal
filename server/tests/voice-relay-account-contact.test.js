@@ -483,6 +483,31 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(ctx.notePromise).not.toHaveBeenCalled();
   });
 
+  test('an explicit no after the yes takes it back for the rest of the call: the account\'s address does not complete a later capture', async () => {
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    holder.email = null;
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: email/);
+    // They change their mind and give their own email; the address must now be asked for.
+    const out = await ask({ use_account_details: false, email: 'own@example.com' }, ctx);
+    expect(out).toMatch(/still missing: first_name, last_name, address_line1/);
+    expect(store.bag().account_details_confirmed).toBe('revoked');
+    expect(await ask({}, ctx)).toMatch(/still missing: first_name, last_name, address_line1/); // stays revoked
+    expect(filedCards()).toEqual([]);
+    // A fresh yes is honoured again.
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/IS on the office queue/);
+  });
+
+  test('a card write that finds another session owning the call is a hard stop: no promise, no follow-up work', async () => {
+    const notePromise = jest.fn();
+    const ctx = estimateCtx({ notePromise });
+    surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false, superseded: true });
+    const out = await ask({ use_account_details: true }, ctx);
+    expect(out).toMatch(/superseded by a reconnect — NOTHING was saved\. Do NOT call any more\s+tools/);
+    expect(out).not.toMatch(/office queue|still missing/);
+    expect(notePromise).not.toHaveBeenCalled();
+  });
+
   test('use_account_details is a capture_lead input only while the caller-context lane is on', () => {
     const { activeTools, TOOLS } = require('../services/voice-agent/relay-tools');
     const props = (tools) => Object.keys(tools.find((t) => t.name === 'capture_lead').input_schema.properties);
