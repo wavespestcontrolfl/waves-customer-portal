@@ -13534,6 +13534,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     let addressUpdatedIds = [];
+    // The Stripe cancels of a planned Bill-To session release, run as the transaction's last step.
+    let applySessionRelease = null;
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
@@ -14461,6 +14463,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, movedVisitIds, {
               invalidateVisitIds: movedVisitIds,
               pending: ownerPending,
+              // Planned and refused here; the Stripe cancels run as the LAST step of this transaction, after
+              // every later validation that can still reject the edit (they cannot roll back).
+              deferApply: true,
             });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
@@ -14471,6 +14476,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               { isValidation: true },
             );
           }
+          applySessionRelease = visitRelease.apply || null;
         }
         // Locked before-image for the price/service series-scope blocks
         // below: group changes are detected value-by-value against this
@@ -15964,6 +15970,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+      // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
+      // release run (they are external and cannot roll back with a rejected edit).
+      if (applySessionRelease) await applySessionRelease();
     });
 
     // Tech-facing notice for a same-tech date/time move (a tech change in the

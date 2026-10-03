@@ -663,7 +663,7 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
  * verified or released; money in flight is never touched — the settle
  * paths keep their own ownership guards for it.
  */
-async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds, { invalidateVisitIds = null, pending = null } = {}) {
+async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds, { invalidateVisitIds = null, pending = null, deferApply = false } = {}) {
   const ids = (scheduledServiceIds || []).filter(Boolean);
   if (!ids.length) return { released: 0, inFlight: 0 };
   // Serialize with combined /setup (codex r9 P1): the same per-customer
@@ -697,7 +697,7 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
   // is invalidated by the same move: its pre-issued client secret could still be confirmed with
   // Stripe directly. `invalidateVisitIds` narrows that to the visits whose Bill-To really changes.
   await markLinkedSingleInvoiceSessions(database, rows, { scheduledServiceIds: invalidateVisitIds || ids }, pending);
-  return releaseWholeOrNothing(database, [rows]);
+  return releaseWholeOrNothing(database, [rows], { deferApply });
 }
 
 // Flag the rows whose own single-invoice PaymentIntent the Bill-To change invalidates: the visit-linked
@@ -716,7 +716,10 @@ async function markLinkedSingleInvoiceSessions(database, rows, scope, pending) {
  * that is about to be refused for in-flight money must not already have
  * cancelled a sibling session — a Stripe cancel is an external effect the
  * caller's transaction cannot roll back. */
-async function releaseWholeOrNothing(database, rowSets) {
+// `deferApply`: plan and refuse now, but hand back `apply()` for the caller to run as the LAST step before
+// its transaction commits - the Stripe cancels are external and cannot roll back, so they must not run
+// while a later validation can still reject the edit.
+async function releaseWholeOrNothing(database, rowSets, { deferApply = false } = {}) {
   const plans = [];
   let inFlight = 0;
   for (const rows of rowSets) {
@@ -725,9 +728,13 @@ async function releaseWholeOrNothing(database, rowSets) {
     plans.push(plan);
   }
   if (inFlight > 0) return { released: 0, inFlight };
-  let released = 0;
-  for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
-  return { released, inFlight: 0 };
+  const apply = async () => {
+    let released = 0;
+    for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
+    return { released, inFlight: 0 };
+  };
+  if (deferApply) return { released: 0, inFlight: 0, apply };
+  return apply();
 }
 
 /** The customer-default-payer fence over SEVERAL customers at once — one
@@ -735,7 +742,7 @@ async function releaseWholeOrNothing(database, rowSets) {
  * every referencing customer's debt together, and a per-customer loop
  * cancelled the first customer's confirmable session before a later
  * customer's in-flight payment refused the change. */
-async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds, { invalidateLinked = false, pending = null } = {}) {
+async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds, { invalidateLinked = false, pending = null, deferApply = false } = {}) {
   const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
   if (!ids.length) return { released: 0, inFlight: 0 };
   const rowSets = [];
@@ -746,7 +753,7 @@ async function releaseUnconfirmedCombinedSessionsForCustomers(database, customer
     if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: id }, pending);
     rowSets.push(rows);
   }
-  return releaseWholeOrNothing(database, rowSets);
+  return releaseWholeOrNothing(database, rowSets, { deferApply });
 }
 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
@@ -884,7 +891,7 @@ async function lockAndPinStampedSessionsForCustomer(database, customerId, { expe
   return rows;
 }
 
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false, invalidateLinked = false, pending = null } = {}) {
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false, invalidateLinked = false, pending = null, deferApply = false } = {}) {
   if (!customerId) return { released: 0, inFlight: 0 };
   const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
   if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: String(customerId) }, pending);
@@ -892,6 +899,7 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
   // refused payer edit, so nothing is cancelled while any intent of the set has money in flight.
   const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice });
   if (plan.inFlight > 0) return { released: 0, inFlight: plan.inFlight };
+  if (deferApply) return { released: 0, inFlight: 0, apply: () => applyStampedSessionRelease(database, plan) };
   return applyStampedSessionRelease(database, plan);
 }
 

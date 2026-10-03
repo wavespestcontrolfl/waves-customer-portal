@@ -4146,6 +4146,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // regardless of the flag; syncPrimaryAddress is a no-op when no primary
       // row exists.
       let emailSync = null;
+      let applySessionRelease = null;
       try {
         await db.transaction(async (trx) => {
           // Membership-affecting edits participate in the customer-comms
@@ -4297,7 +4298,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4306,6 +4307,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             if (payerRelease.inFlight > 0) {
               throw new Error('A combined bank payment for this customer is still in flight — retry the payer change after it settles or fails');
             }
+            // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
+            applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // A Bill-To edit that can make a withdrawn combined-visit invoice
@@ -4384,6 +4387,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               { before: lockedBefore, after: lockedAfter }, trx
             );
           }
+          // Every refusal has passed: only now do the planned session cancels (external, not rollback-able) run.
+          if (applySessionRelease) await applySessionRelease();
         });
       } catch (e) {
         if (e && e.churnBlocked) return res.status(409).json(e.payload);

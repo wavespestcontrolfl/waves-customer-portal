@@ -253,3 +253,26 @@ test('the combined-session release gets only the visits whose owner moves: a com
   expect(options.invalidateVisitIds).toEqual(['svc-1']);
   expect(JSON.stringify(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mock.calls)).not.toContain('child-completed');
 });
+
+test('the planned session release is applied (Stripe cancels) only as the LAST step: a Bill-To change whose later step rejects the save cancels nothing', async () => {
+  const apply = jest.fn(async () => ({ released: 1, inFlight: 0 }));
+  PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mockResolvedValueOnce({ released: 0, inFlight: 0, apply });
+  // A step AFTER the release rejects the save (the packet withdrawal's credit reversal refusing, for example).
+  Packets.withdrawPacketInvoicesForOwner.mockRejectedValueOnce(Object.assign(new Error('homeowner credit reversal incomplete'), { code: 'CREDIT_REVERSAL_INCOMPLETE' }));
+  const rejected = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
+  });
+  expect(rejected.status).toBeGreaterThanOrEqual(400);
+  expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).toHaveBeenCalledWith(
+    expect.anything(), expect.anything(), expect.objectContaining({ deferApply: true }),
+  );
+  expect(apply).not.toHaveBeenCalled();
+
+  // A save that passes every step applies it, once, at the end.
+  PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mockResolvedValueOnce({ released: 0, inFlight: 0, apply });
+  const ok = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
+  });
+  expect(ok.status).toBe(200);
+  expect(apply).toHaveBeenCalledTimes(1);
+});

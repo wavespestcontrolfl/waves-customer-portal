@@ -880,6 +880,85 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await linkedScheduledServiceId(await invoiceRow(direct.invoiceId), mockPg)).toBe(direct.visitId);
   });
 
+  test('a deferred session release cancels nothing until apply() runs, and refuses on in-flight money before any cancel', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const payerId = await payer();
+    const f = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_deferred' } });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const pending = { visitPatch: { visitIds: [f.visitId], payer_id: payerId } };
+    const plan = await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [f.visitId], { invalidateVisitIds: [f.visitId], pending, deferApply: true });
+    expect(plan).toMatchObject({ released: 0, inFlight: 0 });
+    expect(typeof plan.apply).toBe('function');
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_deferred' });
+    expect(await plan.apply()).toMatchObject({ released: 1 });
+    expect(cancel).toHaveBeenCalledWith('pi_deferred');
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
+    // In-flight money refuses at plan time, with no apply offered.
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ stripe_payment_intent_id: 'pi_deferred' });
+    cancel.mockClear();
+    retrieve.mockImplementation(async (id) => ({ id, status: 'processing', metadata: {} }));
+    const refused = await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [f.visitId], { invalidateVisitIds: [f.visitId], pending, deferApply: true });
+    expect(refused).toEqual({ released: 0, inFlight: 1 });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  test('payer activation cancels no checkout when a step after the release rejects it (the withdrawal throws): Stripe is untouched and the payer stays inactive', async () => {
+    const Payers = require('../services/payer');
+    const payerId = await payer(false);
+    const f = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_activation' } });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockRejectedValueOnce(Object.assign(new Error('homeowner credit reversal incomplete'), { code: 'CREDIT_REVERSAL_INCOMPLETE' }));
+    await expect(Payers.updatePayer(payerId, { active: true })).rejects.toThrow(/credit reversal incomplete/);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_activation' });
+  });
+
+  test('an invoice created for a visit while its default payer is activated: activation waits for the insert, then refuses once (the set grew), and a retry withdraws it (committed fixture, second connection)', async () => {
+    const InvoiceService = require('../services/invoice');
+    const Payers = require('../services/payer');
+    const customerId = randomUUID();
+    const visitId = randomUUID();
+    const date = etDateString();
+    const [payerRow] = await database('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: false }).returning('id');
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Create', phone: '+12025550088', email: `${customerId}@example.invalid`, payer_id: payerRow.id, property_type: 'residential' });
+    await database('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
+    const realMock = mockPg;
+    mockPg = database; // the services under test use their own committed connections here
+    const createTrx = await database.transaction();
+    let activation;
+    try {
+      const invoice = await InvoiceService.create({
+        customerId, scheduledServiceId: visitId, title: 'Fixture', database: createTrx,
+        lineItems: [{ description: 'Fixture General Pest Control', amount: 90, quantity: 1, unit_price: 90 }],
+      });
+      // The create resolved the payer while inactive: a self-pay invoice, not yet committed.
+      expect((await createTrx('invoices').where({ id: invoice.id }).first('payer_id')).payer_id).toBeNull();
+      let settled = false;
+      activation = Payers.updatePayer(payerRow.id, { active: true }).finally(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      // The activation (payer row FOR UPDATE) is waiting behind the create's share lock on the payer row.
+      expect(settled).toBe(false);
+      await createTrx.commit();
+      const first = await activation;
+      expect(first).toMatchObject({ conflict: true, code: 'payer_references_changed' });
+      expect((await database('payers').where({ id: payerRow.id }).first('active')).active).toBe(false);
+      // The retry sees the committed invoice and withdraws it.
+      const retry = await Payers.updatePayer(payerRow.id, { active: true });
+      expect(retry.payer).toMatchObject({ active: true });
+      expect(await database('invoices').where({ id: invoice.id }).first()).toMatchObject({ scheduled_send_error: `payer_billed:${payerRow.id}` });
+    } finally {
+      try { await createTrx.rollback(); } catch { /* already committed */ }
+      mockPg = realMock;
+      await database('invoices').where({ customer_id: customerId }).del();
+      await database('scheduled_services').where({ id: visitId }).del();
+      await database('customers').where({ id: customerId }).del();
+      await database('payers').where({ id: payerRow.id }).del();
+    }
+  });
+
   test('a series of visits is withdrawn by visit id list', async () => {
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const a = await fixture({ link: 'visit' });

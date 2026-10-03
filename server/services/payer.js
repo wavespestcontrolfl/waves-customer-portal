@@ -186,6 +186,7 @@ async function updatePayer(id, body) {
   // commit and is then refused while the homeowner send it would redirect is
   // in flight (the same 409 the payer_id writers raise).
   if (Object.prototype.hasOwnProperty.call(dbUpdates, 'active')) {
+    let applySessionRelease = null;
     return db.transaction(async (trx) => {
       // OWNERSHIP ROWS FIRST (Codex #4311 r27 P2): the withdrawal below
       // (withdrawPacketInvoicesForOwner → resolvePacketOwnershipLocked) takes
@@ -287,7 +288,8 @@ async function updatePayer(id, body) {
         // does not roll back with this transaction, so an uninvolved
         // homeowner lost a live pay-page session for nothing. The batched
         // fence verifies every session before cancelling any.
-        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing, { invalidateLinked: true, pending: { payerPatch: { id: pid, active: true } } });
+        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing, { invalidateLinked: true, pending: { payerPatch: { id: pid, active: true } }, deferApply: true });
+        applySessionRelease = release.apply || null;
         if (release.inFlight > 0) {
           return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
             conflict: true, code: 'combined_payment_in_flight' };
@@ -322,6 +324,9 @@ async function updatePayer(id, body) {
       if (dbUpdates.active === false && current.active !== false) {
         await require('./visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: pid });
       }
+      // Every refusal (the withdrawal's credit reversal included) has passed: only now do the planned
+      // session cancels, which are external and cannot roll back, run.
+      if (applySessionRelease) await applySessionRelease();
       return { payer: row };
     });
   }

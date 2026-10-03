@@ -4770,6 +4770,18 @@ const InvoiceService = {
     // would fall back to the customer default (or self-pay) and bill the wrong
     // party. Reuse the same link resolved for the mint lock above; the row's own
     // scheduled_service_id linkage below is unchanged.
+    // A visit-linked create inside a transaction takes the payer rows its Bill-To resolves through (the
+    // visit's own and the customer default, active or not) FOR SHARE BEFORE it reads their active flag, and
+    // holds them through the insert below. A payer activation (payer row FOR UPDATE) then waits for this
+    // insert to commit, so its withdrawal scan finds the new invoice instead of missing a row committed
+    // after the scan; and a create that waited reads the payer as the activation left it (stamped, not
+    // self-pay). Order: customer and visit are already held by the mint chain above, then payers, then the
+    // invoice insert last - the order every Bill-To writer takes.
+    if (linkedScheduledServiceId && database?.isTransaction === true) {
+      const visitPayer = await database("scheduled_services").where({ id: linkedScheduledServiceId, customer_id: customerId }).first("payer_id");
+      const payerIdsToHold = [...new Set([visitPayer?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
+      if (payerIdsToHold.length) await database("payers").whereIn("id", payerIdsToHold).orderBy("id").forShare().select("id");
+    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
