@@ -37,7 +37,7 @@ jest.mock('../routes/admin-dispatch', () => mockDispatch);
 const fs = require('fs');
 const path = require('path');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation } = require('../routes/admin-schedule')._test;
+const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign } = require('../routes/admin-schedule')._test;
 
 const TODAY = etDateString();
 const FUTURE = etDateString(addETDays(new Date(), 10));
@@ -274,7 +274,40 @@ describe('what counts as a change', () => {
   });
 });
 
+describe('the reassignment is re-checked inside the save transaction', () => {
+  const trxWith = (row) => {
+    const trx = jest.fn(() => {
+      const chain = {};
+      for (const m of ['where', 'forUpdate']) chain[m] = () => chain;
+      chain.first = async () => row;
+      return chain;
+    });
+    return trx;
+  };
+  test('a row that joined a shared stop, or whose stop gained a live service, since the unlocked check is refused; an unchanged row passes', async () => {
+    const retry = { statusCode: 409, code: 'VISIT_CHANGED_RETRY' };
+    // Was ungrouped, now on a visit.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await expect(assertStillUnsharedForReassign(trxWith({ visit_id: 'v9' }), 'svc-a', null)).rejects.toMatchObject(retry);
+    // Same visit, but it now has two live services.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }, { id: 'svc-b' }]);
+    await expect(assertStillUnsharedForReassign(trxWith({ visit_id: 'v1' }), 'svc-a', 'v1')).rejects.toMatchObject(retry);
+    // Unchanged: ungrouped, or alone on its visit.
+    await assertStillUnsharedForReassign(trxWith({ visit_id: null }), 'svc-a', null);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await assertStillUnsharedForReassign(trxWith({ visit_id: 'v1' }), 'svc-a', 'v1');
+  });
+});
+
 describe('handler wiring (source guards)', () => {
+  test('the transaction re-checks membership right before the technician write', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const handler = src.indexOf("router.put('/:id/update-details'");
+    const guard = src.indexOf('await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);', handler);
+    expect(guard).toBeGreaterThan(handler);
+    expect(src.indexOf('const assignment = await assignScheduleJobs({', guard) - guard).toBeLessThan(200);
+  });
+
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   const handler = src.indexOf("router.put('/:id/update-details'");
   test('the combo plan runs before the series planner and before the body is destructured; the move runs after the edit, before the notice', () => {

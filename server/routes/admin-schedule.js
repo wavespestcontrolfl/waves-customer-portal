@@ -11046,6 +11046,22 @@ async function refuseUnchosenComboReassign(req) {
   );
 }
 
+// The same question inside the save's transaction, under the row's lock: a
+// row that joined a shared stop (or whose stop gained a live service) after
+// the unlocked check above must not be reassigned alone. `seenVisitId` is
+// the membership the unlocked check allowed.
+async function assertStillUnsharedForReassign(trx, serviceId, seenVisitId) {
+  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first('visit_id');
+  const nowVisitId = row ? (row.visit_id || null) : null;
+  const shared = !!nowVisitId && (await require('../services/visit-groups').openMembers(trx, nowVisitId)).length >= 2;
+  if (shared || String(nowVisitId || '') !== String(seenVisitId || '')) {
+    throw Object.assign(
+      httpError(409, 'This appointment was grouped with another service while saving — reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
 async function planComboEditMove(req) {
   const body = req.body || {};
   const choice = body.comboMove;
@@ -13376,15 +13392,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const normalizedAssignmentScope = normalizeAssignmentScope(assignmentScope);
     let assignmentNeedsChange = false;
     let assignmentShouldRun = false;
+    let reassignSeenVisitId;
     if (hasTechnicianIdUpdate) {
       if (technicianId !== null && typeof technicianId !== 'string') {
         return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
       }
       const existingAssignment = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('id', 'technician_id');
+        .first('id', 'technician_id', 'visit_id');
       if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
       assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      // The membership this reassignment was allowed on (planComboEditMove
+      // refused a shared stop with no choice); re-read under the row lock
+      // before the assignment writes.
+      if (assignmentNeedsChange) reassignSeenVisitId = existingAssignment.visit_id || null;
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
@@ -14358,6 +14379,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
+      if (reassignSeenVisitId !== undefined) await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);
       if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
@@ -27691,7 +27713,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation,
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
