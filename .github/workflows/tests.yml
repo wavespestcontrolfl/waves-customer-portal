@@ -196,7 +196,7 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
@@ -206,7 +206,7 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js tests/admin-customers-payer-linked-invoices-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:
@@ -238,7 +238,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-merge-linked-invoice-fence-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
       - name: Booking capacity commit transaction tests
         working-directory: server
         env:
