@@ -63,9 +63,56 @@ function hasCoords(stop) {
     && Number(stop.lat) !== 0 && Number(stop.lng) !== 0;
 }
 
+/** GATE_COMBO_ROUTE_CHECK: dark unless set, read at call time. On, a caller
+ *  that moves a WHOLE visit (`unit: true`) gets the visit placed as one stop
+ *  instead of `route_unverified`. Off, `unit` is ignored: byte-identical. */
+function comboRouteCheckLive() {
+  return gateEnvValue('GATE_COMBO_ROUTE_CHECK');
+}
+
+/** The whole visit as ONE target: the tapped row carrying its members'
+ *  summed work (the sum groupRouteStops uses for every other stop, exempt
+ *  from owner planning minutes like any target) and their ids. Null when the
+ *  members are not one clean stop — a different technician, different or
+ *  missing coordinates, another day, or a member already under way — and the
+ *  caller keeps today's answer (`grouped` → route_unverified). */
+function foldVisitUnit(target, stored, siblings) {
+  const clean = hasCoords(target) && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
+    && dateOnly(row.scheduled_date) === dateOnly(stored.scheduled_date)
+    && hasCoords(row) && Number(row.lat) === Number(target.lat) && Number(row.lng) === Number(target.lng)
+    && !['en_route', 'on_site'].includes(row.status));
+  if (!clean) return null;
+  const members = [stored, ...siblings];
+  return {
+    ...target,
+    memberIds: members.map(row => row.id),
+    estimated_duration_minutes: members.reduce((sum, row) => sum + workDuration({ ...row, planning_exempt: true }), 0),
+  };
+}
+
+/** The target's live siblings on its visit, located the way the target is. */
+async function loadVisitSiblings(conn, target, serviceId) {
+  const rows = await conn('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .where('scheduled_services.visit_id', target.visit_id)
+    .whereNot('scheduled_services.id', serviceId)
+    .whereNotIn('scheduled_services.status', TERMINAL_ROW_STATUSES)
+    .select(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn), ...CUSTOMER_PREMISE_ALIASES);
+  return Promise.all(rows.map(async (row) => {
+    const location = await resolveServiceLocation(row, undefined, { cacheOnly: conn.isTransaction === true });
+    return { ...row, lat: location.lat, lng: location.lng };
+  }));
+}
+
+/** The whole visit as one target, or null (gate off, or not one clean stop). */
+async function resolveVisitUnit(conn, target, stored, serviceId) {
+  if (!comboRouteCheckLive()) return null;
+  return foldVisitUnit(target, stored, await loadVisitSiblings(conn, target, serviceId));
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
-  changes = {}, now = new Date(), travel, preserveCapacity = false,
+  changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -124,12 +171,18 @@ async function loadArrivalRouteContext({
   const excluded = new Set([serviceId, ...(capacity && !prospective ? [] : excludeServiceIds)].map(String));
   // Grouped work needs the unit mover's complete duration/placement. Do not
   // certify a partial group by excluding siblings from the simulated route.
-  const grouped = !!target.visit_id && !!(await conn('scheduled_services')
+  const hasLiveSibling = !!target.visit_id && !!(await conn('scheduled_services')
     .where({ visit_id: target.visit_id }).whereNot('id', serviceId)
     .whereNotIn('id', capacity ? [] : excludeServiceIds)
     .whereNotIn('status', TERMINAL_ROW_STATUSES).first('id'));
+  // A caller moving the WHOLE visit: its members leave the day's rows and
+  // ride the target as one stop. Not one clean stop = `grouped` stands.
+  const unitTarget = hasLiveSibling && unit && !prospective
+    ? await resolveVisitUnit(conn, target, stored, serviceId) : null;
+  const grouped = hasLiveSibling && !unitTarget;
+  (unitTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
-  return { target, rows: rows.filter(row => !excluded.has(String(row.id))
+  return { target: unitTarget || target, rows: rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)),
   date, now, grouped, activeTarget, prospective: !!prospective,
@@ -655,5 +708,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace },
+  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive },
 };

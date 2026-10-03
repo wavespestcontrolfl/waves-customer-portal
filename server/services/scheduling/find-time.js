@@ -128,6 +128,9 @@ async function findArrivalWindowSlots(opts) {
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
         excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
+        // The hours offered for an existing visit are for moving its whole
+        // stop (GATE_COMBO_ROUTE_CHECK; ignored when off or when it is alone).
+        unit: true,
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);

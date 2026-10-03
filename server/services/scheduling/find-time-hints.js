@@ -217,6 +217,9 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
   try {
     const fit = await checkArrivalPlacement({
       serviceId, date: from, technicianId, excludeServiceIds,
+      // Every staff screen this verdict feeds moves a shared stop as a whole
+      // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+      unit: true,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
     });
