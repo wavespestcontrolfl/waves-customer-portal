@@ -419,6 +419,84 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect((await chargeState(db)).status).toBe('awaiting_installation');
   });
 
+  describe('the plan covers its own installation visit (no second bill beside the plan invoice)', () => {
+    // The real coverage chokepoint every completion / billing caller asks.
+    const covers = (db, visit, opts) => jest.requireActual('../services/annual-prepay-renewals')
+      .annualPrepayCoversVisit(visit, db, opts);
+    // The rule alone, for the "not covered" cases: past it the chokepoint
+    // goes on to the paid-coverage checks, which need the full billing schema.
+    const ruleCovers = (db, visit) => jest.requireActual('../services/annual-prepay-renewals')
+      .termiteDeferredInstallCoversVisit(visit, db, { throwOnError: true });
+
+    test('a priced installation visit is covered while the charge waits, in strict mode too, and stays covered after the charge', async () => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const visit = await addInstall(db);
+
+      expect(await covers(db, visit)).toBe(true);
+      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+
+      await sweep();
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'active' });
+      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+    });
+
+    test('still covered after a declined charge: the plan pay link collects it, never a visit bill', async () => {
+      const { atSigning, sweep, db } = load({
+        chargeImpl: async () => { throw Object.assign(new Error('Your card was declined.'), { code: 'card_declined' }); },
+      });
+      await atSigning();
+      const visit = await addInstall(db);
+      await sweep();
+
+      expect((await chargeState(db)).status).toBe('declined');
+      expect(await covers(db, visit, { throwOnError: true })).toBe(true);
+    });
+
+    test('another visit of the same customer is not covered by it', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      const pest = await addInstall(db, { service_type: 'Quarterly Pest Control' });
+      const liquid = await addInstall(db, { service_type: 'Termite Bora-Care Install' });
+
+      expect(await ruleCovers(db, pest)).toBe(false);
+      expect(await ruleCovers(db, liquid)).toBe(false);
+    });
+
+    test('an at-signing plan is unchanged: its unpaid installation visit is not covered by this rule', async () => {
+      const { atSigning, db } = load({ method: null });
+      await db('customer_contracts').where({ id: ids.contractId }).update({ contract_text_snapshot: r3.TEMPLATE_V3_ANNUAL_R3_BODY });
+      await atSigning();
+      const visit = await addInstall(db);
+
+      expect((await chargeState(db)).deferred_at).toBeUndefined();
+      expect(await ruleCovers(db, visit)).toBe(false);
+    });
+
+    test('a plan cancelled before installation covers nothing', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled' });
+      const visit = await addInstall(db);
+
+      expect(await ruleCovers(db, visit)).toBe(false);
+    });
+
+    test('a two-property customer: an installation at the other property is not covered', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      const [a] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
+      const [b] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
+      await db('estimates').where({ id: ids.estimateId }).update({ property_id: a.id });
+      const here = await addInstall(db, { property_id: a.id });
+      const there = await addInstall(db, { property_id: b.id });
+
+      expect(await ruleCovers(db, here)).toBe(true);
+      expect(await ruleCovers(db, there)).toBe(false);
+    });
+  });
+
   test('a customer who declined the NEXT renewal online still pays the installed first year', async () => {
     const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
     await atSigning();

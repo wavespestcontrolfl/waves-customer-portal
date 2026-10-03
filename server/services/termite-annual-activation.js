@@ -1247,6 +1247,43 @@ function awaitingInstallationRows(conn) {
     .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
 }
 
+// Is `visitId` the installation visit of a plan whose first-year charge was
+// deferred to the installation? Its setup + annual invoice already bills
+// that installation, so the visit must never ALSO mint a completion bill of
+// its own (annual-prepay-renewals.js annualPrepayCoversVisit reads this).
+// Keyed on the durable wait record (deferred_at stays on the charge record
+// through claim, paid, declined), so the answer is the same before, during
+// and after the charge — a declined charge sends the plan's pay link, never
+// a second bill for the visit. A plan cancelled before installation (term
+// neither payment_pending nor active) covers nothing: that visit bills
+// normally. By the same plan-scoped installation rule as the anchor.
+function installationVisitOfDeferredPlan(conn, visitId) {
+  return whereInstallationVisitForPlan(
+    conn('scheduled_services as ss')
+      .join('annual_prepay_terms as apt', 'apt.customer_id', 'ss.customer_id')
+      .join('estimates as e', 'e.id', 'apt.source_estimate_id')
+      .where('ss.id', visitId)
+      .where('e.annual_plan_activation_status', 'activated')
+      .whereRaw("e.annual_plan_signature_charge ->> 'deferred_at' IS NOT NULL")
+      .whereNull('apt.renewed_from_term_id')
+      .whereIn('apt.status', ['payment_pending', 'active']),
+    {
+      customerId: conn.raw('??', ['apt.customer_id']),
+      estimateId: conn.raw('??', ['e.id']),
+      estimatePropertyId: conn.raw('??', ['e.property_id']),
+      termId: conn.raw('??', ['apt.id']),
+      floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
+    },
+  ).first('ss.id');
+}
+
+// The service-type half of the installation rule, for a caller holding the
+// visit row (a cheap pre-check before any query).
+function isTermiteInstallationServiceType(serviceType) {
+  const type = String(serviceType || '').toLowerCase();
+  return type.includes('termite') && (type.includes('bait') || type.includes('station') || type.includes('installation setup'));
+}
+
 // A 'completed' visit is not always performed work: a closeout recorded as
 // inspection only, customer declined or incomplete, and a quiet backfill
 // (which must move no money), all leave scheduled_services.status
@@ -1758,6 +1795,8 @@ module.exports = {
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
   earliestPerformedInstallation,
+  installationVisitOfDeferredPlan,
+  isTermiteInstallationServiceType,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,

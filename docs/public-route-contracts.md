@@ -1808,10 +1808,17 @@ unchanged.
 **Termite annual plan charged after installation** (PR-F, `GATE_PAF_TERMITE` plus the master
 gate, dark): the PUT `/api/estimates/:token/accept` success payload (first accept and the
 already-accepted retry) carries `annualChargeAfterInstallation: true` (present only when true)
-when `nextStep` is `sign_agreement` AND the gate is on AND the ACTIVE annual agreement version
-carries the after-installation BILLING wording. The React success card then adds: "Nothing is
-charged when you sign. Your payment method on file is charged after your station installation is
-completed." Gate off, template draft, or at-signing wording: the field is absent and the card is
+when `nextStep` is `sign_agreement` AND this customer's agreement charges after installation.
+The agreement ALREADY ISSUED for the estimate decides, by its own snapshotted text (newest
+non-cancelled annual agreement whose `document_variables_snapshot.estimate.id` is the estimate):
+its after-installation BILLING wording gives `true` and its at-signing wording gives absent,
+WHATEVER the gate or the active template read at that moment. This is the one exception to the
+gate: an agreement issued while the gate was on keeps the field after the gate goes off, because
+that customer's document still says so. Only when no agreement is issued yet does the gate apply:
+the field is then present when the gate is on AND the ACTIVE annual agreement version carries the
+after-installation wording. The React success card then adds: "Nothing is charged when you sign.
+Your payment method on file is charged after your station installation is completed." While the
+gate has never been on, no agreement carries that wording, so the field is absent and the card is
 byte-identical to before. No message is sent because of this field.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved

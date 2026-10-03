@@ -4296,6 +4296,35 @@ async function deferredPrepayHoldCustomerIds(conn, customerIds) {
   return new Set(rows.map((r) => String(r.customer_id)));
 }
 
+// GATE_PAF_TERMITE (owner ruling 2026-09-30): a termite annual plan signed on
+// the charge-after-installation wording bills its setup + first annual fee
+// AFTER the installation visit, from the plan's own invoice. That visit is
+// therefore covered by the plan: it must never mint a completion bill of its
+// own beside the plan invoice (pre-push audit P0 on #5816). Scoped like
+// termiteGraceCoversVisit to a visit with NO prepay stamp, and to a termite
+// installation service type (checked on the row before any query, so no
+// other visit pays for this lookup). The plan-scoped match and the wait
+// record live in termite-annual-activation.js
+// (installationVisitOfDeferredPlan).
+async function termiteDeferredInstallCoversVisit(scheduledService, conn, { throwOnError = false } = {}) {
+  if (scheduledService.prepaid_method) return false;
+  if (!scheduledService.id || !scheduledService.customer_id) return false;
+  const TermiteActivation = require('./termite-annual-activation');
+  if (!TermiteActivation.isTermiteInstallationServiceType(scheduledService.service_type)) return false;
+  try {
+    if (throwOnError) {
+      if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+    } else if (!(await annualPrepayTableExists())) return false;
+    return !!(await TermiteActivation.installationVisitOfDeferredPlan(conn, scheduledService.id));
+  } catch (err) {
+    // Same contract as the checks around it: a strict (charging) caller must
+    // see an unverifiable lookup and refuse, never read it as "not covered".
+    if (throwOnError) throw err;
+    logger.warn(`[annual-prepay] termite deferred-installation coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
+    return false;
+  }
+}
+
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false, skipDeferredHold = false } = {}) {
   if (!scheduledService) return false;
 
@@ -4319,6 +4348,10 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // to an unstamped visit (see its own comment) — never waves through a
   // visit that already carries some other, even malformed, prepay stamp.
   if (await termiteGraceCoversVisit(scheduledService, conn, { throwOnError })) return true;
+
+  // The installation visit of a termite plan charged after installation is
+  // billed by the plan's own invoice — see termiteDeferredInstallCoversVisit.
+  if (await termiteDeferredInstallCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   // GATE_PAF_PREPAY: an unstamped visit of a year whose charge waits for (or
   // failed after) the first visit — see pafDeferredPrepayCoversVisit.
@@ -11113,6 +11146,7 @@ module.exports = {
   restoreWaveguardExtensionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
+  termiteDeferredInstallCoversVisit,
   pafDeferredPrepayCoversVisit,
   pafDeferredHoldingTerm,
   pafHeldStampCovers,
