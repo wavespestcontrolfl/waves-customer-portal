@@ -8,8 +8,8 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 // is the picked post. When no post holds every word of the search, the
 // picker says so, shows the closest posts, and (with the server's `suggest`
 // on) offers to suggest a post on it: `suggest(phrase)` answers { status:
-// 'queued' | 'already_queued' } (POST .../blog-suggestions; owner mockup
-// approval 2026-10-03, straight into the autonomous blog queue).
+// 'queued' | 'already_queued' } or a refusal (POST .../blog-suggestions;
+// owner mockup approval 2026-10-03, straight into the autonomous blog queue).
 
 const SEARCH_DELAY_MS = 250;
 const MIN_QUERY_CHARS = 2;
@@ -68,19 +68,21 @@ export function useBlogPostSearch(search) {
 
 // The server's final answer to a suggestion, by its status and code:
 // refused (422), limit (429 too_many_suggestions, the day's cap), unavailable
-// (404 with suggestions off, or 409 not_available), covered (409, a live post
-// now holds every word). Anything else may pass and can be sent again: a 429
+// (404 with suggestions off, or 409 not_available), declined (409 declined:
+// the blog queue tried the topic and skipped it; GitHub Codex P2 on
+// 322faf591d), covered (409, a live post now holds every word). Anything else
+// may pass and can be sent again: a 429
 // from the API's own rate limiter carries no code and is only a burst (GitHub
 // Codex P2s on 45144528b8 and 8a39d94de4).
 function suggestionAnswer(err) {
   if (err?.status === 422) return "refused";
   if (err?.status === 429) return err?.code === "too_many_suggestions" ? "limit" : "failed";
   if (err?.status === 404 || err?.code === "not_available") return "unavailable";
-  if (err?.status === 409) return "covered";
+  if (err?.status === 409) return err?.code === "declined" ? "declined" : "covered";
   return "failed";
 }
 // Answers a new tap cannot change: only a new search starts over.
-const FINAL_ANSWERS = new Set(["refused", "limit", "unavailable", "covered"]);
+const FINAL_ANSWERS = new Set(["refused", "limit", "unavailable", "declined", "covered"]);
 
 // One tap suggests the search as a new post. The answer stands while the
 // search text stays the same: idle, sending, queued, already (someone
@@ -110,6 +112,7 @@ export const SUGGESTION_COPY = {
   refused: { button: () => "Can’t suggest this one", note: "Use plain topic words, with no names, addresses or phone numbers." },
   limit: { button: () => "Today’s limit reached", note: "Suggest more tomorrow." },
   unavailable: { button: () => "Can’t suggest right now", note: "Suggestions aren’t open for this visit." },
+  declined: { button: () => "Passed on before", note: "The blog queue tried this topic and skipped it. Try other words." },
   covered: { button: () => "A post covers this now", note: "Search again to see it." },
 };
 

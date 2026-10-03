@@ -25,13 +25,13 @@
  *
  * A phrase that is no topic is refused before anything is written: a
  * "near me" (transactional) phrase, a place out of the service area, one
- * holding personal data (a phone, an email, an address, a name), or one with a
- * letter outside a-z. A phrase
- * already queued from any source (the same query on a live or finished
- * new-blog row) or suggested before answers already_queued; a suggestion
- * that expired unclaimed is revived; one the chain tried and skipped stays
- * as it is. Each person sends at most MAX_PER_DAY a day. The phrase is never
- * logged (ids only).
+ * holding personal data (a phone, an email, an address, a name, a customer's
+ * name in our records), or one with a letter outside a-z. A phrase already
+ * queued from any source (the same query on a live or finished new-blog row)
+ * or suggested before answers already_queued; a suggestion that expired
+ * unclaimed is revived; one the chain tried and skipped stays as it is and
+ * answers declined. Each person sends at most MAX_PER_DAY a day. The phrase
+ * is never logged (ids only).
  */
 
 const MIN_CHARS = 3;
@@ -73,6 +73,32 @@ function personContext(text) {
   const place = PLACE_CONTEXT_RE.exec(text);
   if (place && !place[1].split(/\s+/).every((word) => STRUCTURE_WORDS.has(word.toLowerCase()))) return true;
   return POSSESSIVE_RE.test(text) || TITLE_RE.test(text);
+}
+
+// A name in our own records: any word of the visit's own customer's name, or
+// any customer's whole name (first and last, in either order). A name made of
+// ordinary words the site's posts use ("ants summer wood") passes every check
+// above and below; these are the names a completion form puts in front of the
+// office (GitHub Codex P1 on 322faf591d). A failed read throws, so nothing is
+// written.
+const nameSql = (column) => `trim(regexp_replace(lower(coalesce(${column}, '')), '[^a-z0-9]+', ' ', 'g'))`;
+const nameWords = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 2);
+async function namesACustomer(knex, phrase, customerId = null) {
+  const words = phrase.split(/[^a-z0-9]+/).filter(Boolean);
+  if (customerId) {
+    const own = await knex('customers').where({ id: customerId }).first('first_name', 'last_name');
+    const ownWords = new Set([...nameWords(own?.first_name), ...nameWords(own?.last_name)]);
+    if (words.some((word) => ownWords.has(word))) return true;
+  }
+  if (words.length < 2) return false;
+  const padded = ` ${words.join(' ')} `;
+  const first = nameSql('first_name');
+  const last = nameSql('last_name');
+  const match = await knex('customers')
+    .whereRaw(`${first} <> '' AND ${last} <> ''`)
+    .whereRaw(`(strpos(?, ' ' || ${first} || ' ' || ${last} || ' ') > 0 OR strpos(?, ' ' || ${last} || ' ' || ${first} || ' ') > 0)`, [padded, padded])
+    .first('id');
+  return Boolean(match);
 }
 
 // Why a phrase cannot be a topic, or null. `typed` is the phrase as the
@@ -134,13 +160,14 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now 
  * holds every word, and { error } for a phrase that is no topic or a person
  * over the day's limit.
  */
-async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null }) {
+async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null, customerId = null }) {
   // Only text is a phrase: an object or a list would read as "[object
   // Object]" or a comma list (GitHub Codex P2 on 45144528b8).
   if (typeof raw !== 'string') return { error: 'not_a_topic' };
   const phrase = normalizePhrase(raw);
   const problem = phraseProblem(phrase, raw);
   if (problem) return { error: problem };
+  if (await namesACustomer(knex, phrase, customerId)) return { error: 'not_a_topic' };
   const { searchReportBlogPosts, wordsOnTheSite } = require('./report-blog-post');
   // Every word must be one the site's live posts already use, so a name the
   // checks above miss ("ants for john") or a stray word never becomes a
@@ -186,13 +213,30 @@ async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
      RETURNING id`,
     values,
   );
-  return (result?.rows || []).length ? { status: 'queued' } : { status: 'already_queued' };
+  if ((result?.rows || []).length) return { status: 'queued' };
+  // The phrase's own suggestion row stands. Held (a tap that raced this one)
+  // answers already_queued; one the chain tried and skipped, or that ended
+  // any other way, is a final no: declined, never queued work (GitHub Codex
+  // P2 on 322faf591d).
+  const standing = await trx('opportunity_queue').where({ dedupe_key: row.dedupe_key }).first('status');
+  return HELD_STATUSES.includes(standing?.status) ? { status: 'already_queued' } : { status: 'declined' };
+}
+
+// Whether a queue row is a "Suggest a post" row (this module's SOURCE).
+function isBlogSearchSuggestion(opportunity) {
+  let meta = opportunity?.signal_metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  return Boolean(meta && typeof meta === 'object' && meta.source === SOURCE);
 }
 
 module.exports = {
   suggestReportBlogPost,
   suggestionRow,
   phraseProblem,
+  namesACustomer,
+  isBlogSearchSuggestion,
   normalizePhrase,
   dedupeKeyFor,
   MAX_PER_DAY,

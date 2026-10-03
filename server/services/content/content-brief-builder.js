@@ -35,6 +35,7 @@ const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
+const { isBlogSearchSuggestion } = require('../service-report/report-blog-suggestion');
 const spokeSeeder = require('./spoke-seed-seeder');
 // Lazy: the seeder pulls in the quality gate; only backfill rows need it.
 const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
@@ -813,7 +814,12 @@ class ContentBriefBuilder {
       actionType: decision.action_type,
       pageType,
       query: opportunity.query,
-      operatorPinned: spokeSeeder.isSpokeSeed(opportunity) || interceptSeeder.isOperatorIntercept(opportunity),
+      // A "Suggest a post" row (report-blog-suggestion.js) shares the
+      // operator_intercept bucket for the chain's SERP/GSC exemption but
+      // carries no human-authored outline, so a list-shaped suggestion keeps
+      // the listicle contract (GitHub Codex P2 on 322faf591d).
+      operatorPinned: (spokeSeeder.isSpokeSeed(opportunity) || interceptSeeder.isOperatorIntercept(opportunity))
+        && !isBlogSearchSuggestion(opportunity),
       requiredSections: aeo.requiredSections,
       schemaTypes: aeo.schemaTypes,
       voiceConstraints: aeo.voiceConstraints,

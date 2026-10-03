@@ -144,6 +144,9 @@ describe('BlogPostPicker', () => {
       ['the day\'s limit', { status: 429, code: 'too_many_suggestions' }, 'Today’s limit reached', 'Suggest more tomorrow.'],
       ['suggestions off', { status: 404, code: 'suggestions_off' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
       ['a visit that carries no post', { status: 409, code: 'not_available' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
+      // GitHub Codex P2 on 322faf591d: a topic the blog queue tried and
+      // skipped is no queued work.
+      ['a topic the blog queue tried and skipped', { status: 409, code: 'declined' }, 'Passed on before', 'The blog queue tried this topic and skipped it. Try other words.'],
     ])('%s is a final answer, never a try-again (GitHub Codex P2 on 45144528b8)', async (_label, fields, button, note) => {
       const search = vi.fn(async () => ({ posts: [], suggest: true }));
       const suggest = vi.fn().mockRejectedValue(Object.assign(new Error('refused'), fields));

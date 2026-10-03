@@ -57,23 +57,37 @@ beforeEach(() => {
 afterEach(() => { siteWords.mockRestore(); });
 const router = require('../routes/admin-dispatch');
 
-// A knex fake for the search (no live post unless given), the day's count,
-// the held-topic lookup and the insert; it records every call.
-function queueKnex({ registry = [], sentToday = 0, held = null, inserted = true } = {}) {
+// A knex fake for the search (no live post unless given), the customer-name
+// lookups (the visit's own customer by id, any customer by name), the day's
+// count, the held-topic lookup, the insert, and the phrase's standing row when
+// the insert wrote nothing; it records every call.
+function queueKnex({
+  registry = [], sentToday = 0, held = null, inserted = true, standing = null,
+  ownCustomer = null, customerByName = null, customersFail = false,
+} = {}) {
   const calls = [];
   const knex = (table) => {
     calls.push(['table', table]);
     const chain = {};
+    const wheres = [];
     for (const m of ['where', 'whereIn', 'whereNotNull', 'whereRaw', 'orderByRaw', 'limit']) {
       chain[m] = (...args) => {
         if (typeof args[0] === 'function') args[0].call({ orWhereRaw() { return this; } });
-        else calls.push([`${table} ${m}`, ...args]);
+        else { calls.push([`${table} ${m}`, ...args]); wheres.push([m, ...args]); }
         return chain;
       };
     }
     chain.select = async () => (table === 'content_registry' ? registry : []);
     chain.count = () => ({ first: async () => ({ n: String(sentToday) }) });
-    chain.first = async () => (table === 'opportunity_queue' ? held : null);
+    chain.first = async () => {
+      if (table === 'customers') {
+        if (customersFail) throw new Error('customers read failed');
+        return wheres.some(([m]) => m === 'whereRaw') ? customerByName : ownCustomer;
+      }
+      if (table !== 'opportunity_queue') return null;
+      const byKey = wheres.some(([m, arg]) => m === 'where' && arg && typeof arg === 'object' && 'dedupe_key' in arg);
+      return byKey ? standing : held;
+    };
     return chain;
   };
   knex.raw = jest.fn(async (sql, values) => {
@@ -204,6 +218,39 @@ describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
   });
 });
 
+describe('a customer\'s name in our records (GitHub Codex P1 on 322faf591d)', () => {
+  test('any word of the visit\'s own customer\'s name is refused before the site words are read; nothing is written', async () => {
+    for (const phrase of ['ants summer wood', 'wood ants', 'summer ants']) {
+      const knex = queueKnex({ ownCustomer: { first_name: 'Summer', last_name: 'Wood' } });
+      expect(await suggestReportBlogPost(knex, { phrase, actorId: 'admin-1', customerId: 'cust-1' })).toEqual({ error: 'not_a_topic' });
+      expect(knex.calls).toEqual(expect.arrayContaining([['customers where', { id: 'cust-1' }]]));
+      expect(queueWrites(knex)).toEqual([]);
+    }
+    expect(siteWords).not.toHaveBeenCalled();
+  });
+
+  test('another customer\'s whole name is refused: one lookup by first and last name, either order', async () => {
+    const knex = queueKnex({ customerByName: { id: 'cust-2' } });
+    expect(await suggestReportBlogPost(knex, { phrase: 'Ants, summer-wood', actorId: 'admin-1' })).toEqual({ error: 'not_a_topic' });
+    const lookup = knex.calls.find(([name, sql]) => name === 'customers whereRaw' && /strpos/.test(String(sql)));
+    expect(lookup[2]).toEqual([' ants summer wood ', ' ants summer wood ']);
+    expect(String(lookup[1])).toMatch(/strpos\(\?, ' ' \|\| .*first_name.* \|\| ' ' \|\| .*last_name.* \|\| ' '\) > 0 OR strpos\(\?, ' ' \|\| .*last_name.* \|\| ' ' \|\| .*first_name.* \|\| ' '\) > 0/);
+    expect(queueWrites(knex)).toEqual([]);
+    expect(siteWords).not.toHaveBeenCalled();
+  });
+
+  test('a phrase that names no customer goes on to the site words and is queued', async () => {
+    const knex = queueKnex({ ownCustomer: { first_name: 'Pat', last_name: 'Lee' } });
+    expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1', customerId: 'cust-1' })).toEqual({ status: 'queued' });
+  });
+
+  test('a failed name read writes nothing', async () => {
+    const knex = queueKnex({ customersFail: true });
+    await expect(suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1', customerId: 'cust-1' })).rejects.toThrow('customers read failed');
+    expect(queueWrites(knex)).toEqual([]);
+  });
+});
+
 describe('suggestReportBlogPost', () => {
   test('the held check, the count and the write run in one transaction under the person\'s lock, held first (pre-push P1 on 1aaeaa36ab; GitHub Codex P2 on 45144528b8)', async () => {
     const knex = queueKnex();
@@ -238,8 +285,19 @@ describe('suggestReportBlogPost', () => {
   });
 
   test('a suggestion held already (not expired) answers already_queued', async () => {
-    const knex = queueKnex({ inserted: false });
+    const knex = queueKnex({ inserted: false, standing: { status: 'pending' } });
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });
+  });
+
+  test('a suggestion the chain tried and skipped answers declined and stays skipped (GitHub Codex P2 on 322faf591d)', async () => {
+    for (const status of ['skipped', 'failed', undefined]) {
+      const knex = queueKnex({ inserted: false, standing: status ? { status } : null });
+      expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1' })).toEqual({ status: 'declined' });
+      // Its standing row is read by the phrase's own key; the insert's
+      // conflict update revives only an expired row.
+      expect(knex.calls).toEqual(expect.arrayContaining([['opportunity_queue where', { dedupe_key: 'techsuggest:v1:standing-water' }]]));
+      expect(String(queueWrites(knex)[0][1])).toMatch(/WHERE opportunity_queue\.status = 'expired'/);
+    }
   });
 
   test('the same phrase held by any source answers already_queued with nothing written', async () => {
@@ -349,6 +407,27 @@ describe('POST /:serviceId/blog-suggestions', () => {
     expect(res.body).toEqual({ error: 'Admin access required' });
     expect(mockResolveProfile).not.toHaveBeenCalled();
     expect(queue.raw).not.toHaveBeenCalled();
+  });
+
+  test('the visit\'s own customer is read from the visit: their name is 422 not_a_topic (GitHub Codex P1 on 322faf591d)', async () => {
+    queue = queueKnex({ ownCustomer: { first_name: 'Summer', last_name: 'Wood' } });
+    mockDbCurrent = (table) => {
+      if (table === 'scheduled_services') return { where: () => ({ first: async () => ({ ...SERVICE, customer_id: 'cust-1' }) }) };
+      return queue(table);
+    };
+    mockDbCurrent.raw = queue.raw;
+    const res = await invoke({ phrase: 'ants summer wood' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'not_a_topic', code: 'not_a_topic' });
+    expect(queue.calls).toEqual(expect.arrayContaining([['customers where', { id: 'cust-1' }]]));
+  });
+
+  test('a topic the chain tried and skipped is 409 declined, a final answer (GitHub Codex P2 on 322faf591d)', async () => {
+    queue = queueKnex({ inserted: false, standing: { status: 'skipped' } });
+    mockDbCurrent.raw = queue.raw;
+    const res = await invoke({ phrase: 'standing water' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({ status: 'declined', code: 'declined' });
   });
 
   test('a visit that carries no blog post (WDO) is not_available', async () => {

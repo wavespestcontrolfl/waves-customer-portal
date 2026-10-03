@@ -548,7 +548,7 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 async function blogPostVisit(req, res) {
   const svc = await db('scheduled_services')
     .where({ id: req.params.serviceId })
-    .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
   if (!svc) {
     res.status(404).json({ error: 'Service not found' });
     return null;
@@ -595,7 +595,8 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
 // the autonomous blog queue). The visit's reach and blog rule are the
 // search's own. Answers 201 { status: 'queued' }, 200 { status:
 // 'already_queued' }, 409 { status: 'covered' } when a live post now holds
-// every word, 422 { error: 'not_a_topic' }, 429 { error:
+// every word, 409 { status: 'declined' } for a topic the chain tried and
+// skipped, 422 { error: 'not_a_topic' }, 429 { error:
 // 'too_many_suggestions' }, and 404 with suggestions off or 409 { error:
 // 'not_available' } for a visit that carries no post. Every refusal names
 // itself in `code`, so the form tells a final answer from a passing failure
@@ -616,10 +617,11 @@ router.post('/:serviceId/blog-suggestions', requireAdmin, async (req, res, next)
       phrase: req.body?.phrase,
       actorId: req.technicianId || null,
       scheduledServiceId: visit.svc.id,
+      customerId: visit.svc.customer_id || null,
     });
     if (answer.error === 'too_many_suggestions') return res.status(429).json({ ...answer, code: answer.error });
     if (answer.error) return res.status(422).json({ ...answer, code: answer.error });
-    if (answer.status === 'covered') return res.status(409).json({ ...answer, code: 'covered' });
+    if (answer.status === 'covered' || answer.status === 'declined') return res.status(409).json({ ...answer, code: answer.status });
     logger.info(`[blog-suggest] ${answer.status} from service ${visit.svc.id}`);
     return res.status(answer.status === 'queued' ? 201 : 200).json(answer);
   } catch (err) { return next(err); }
