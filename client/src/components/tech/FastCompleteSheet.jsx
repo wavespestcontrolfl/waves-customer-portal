@@ -548,6 +548,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // mic may be recording, a change saving, a removal to answer): Full form
   // waits for it the same way (codex local r3 on #5624).
   const [photoBusy, setPhotoBusy] = useState(false);
+  // Voice fill recording, transcribing or filling (the form's own hold, lifted
+  // so Full form and Close wait on it too).
+  const [voiceBusy, setVoiceBusy] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -578,13 +581,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -601,7 +604,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   if (reportFlow) {
     return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
   }
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
 }
 
 // The products on the sheet: the house mix it opened with, plus what the tech
@@ -662,7 +665,7 @@ const VOICE_SHEET_OPS = {
   activityValues: ACTIVITY_LEVELS.map((level) => level.value),
 };
 
-function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
   const [editAmounts, setEditAmounts] = useState(false);
@@ -703,6 +706,11 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   // voice mic keeps its own flag: the note's mic finishing first must not clear it.
   const [voiceMicPending, setVoiceMicPending] = useState(false);
   const busy = dictationPending || voiceMicPending || voice.filling;
+  const voiceBusy = voiceMicPending || voice.filling;
+  useEffect(() => {
+    onVoiceBusy?.(voiceBusy);
+  }, [voiceBusy, onVoiceBusy]);
+  useEffect(() => () => onVoiceBusy?.(false), [onVoiceBusy]);
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));

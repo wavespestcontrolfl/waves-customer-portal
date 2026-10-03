@@ -420,5 +420,21 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     setDictation({ listening: false });
     expect(completeButton().disabled).toBe(false);
   });
+
+  test('Full form waits while the voice mic is listening, as it does for the note\'s mic', async () => {
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest()} onClose={() => {}} onFullForm={() => {}} voiceFillEnabled />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+    React.act(() => {
+      dictation.perSlot[0] = { listening: true };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(true);
+    React.act(() => {
+      dictation.perSlot[0] = { listening: false };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+  });
 });
 
