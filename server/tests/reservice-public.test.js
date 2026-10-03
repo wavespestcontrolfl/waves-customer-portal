@@ -106,6 +106,7 @@ const {
   reserviceLanesForCustomer,
 } = require('../services/reservice-scheduler');
 const { buildReserviceLink, reserviceSmsLineFor } = require('../services/reservice-link');
+const db = require('../models/db');
 const reservicePublicRouter = require('../routes/reservice-public');
 const { createSelfBooking } = require('../routes/booking')._internals;
 
@@ -927,6 +928,29 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
       await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(true);
     },
   );
+
+  test('the portal reader keeps its customer, catalog, coverage, and callback reads on the supplied executor', async () => {
+    const database = jest.fn((table) => db(table));
+
+    await expect(reservicePublicRouter._internals.pageLaneState(token, database)).resolves.toEqual(expect.objectContaining({
+      customer: expect.objectContaining({ id: CUST_ID }),
+      bookableLanes: ['pest'],
+    }));
+
+    expect(database).toHaveBeenCalledWith('customers');
+    expect(database).toHaveBeenCalledWith('services');
+    expect(database).toHaveBeenCalledWith('scheduled_services as s');
+  });
+
+  test('the location-review reader forwards the supplied executor', async () => {
+    const database = jest.fn();
+    const reviewedServiceLocation = jest.spyOn(require('../services/customer-geocode-review'), 'reviewedServiceLocation')
+      .mockResolvedValue({ location: null, permanent: true, reason: 'address_review_required' });
+
+    await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer(), database)).resolves.toBe(true);
+
+    expect(reviewedServiceLocation).toHaveBeenCalledWith(expect.objectContaining({ customer_id: CUST_ID }), database);
+  });
 
   test('a complete stored pair and a dark review gate preserve the existing offer path', async () => {
     setReview(review('needs_pin'));

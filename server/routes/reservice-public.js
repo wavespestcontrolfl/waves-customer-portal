@@ -150,8 +150,8 @@ const findSlotsLimiter = rateLimit({
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
-async function loadByToken(token) {
-  return db('customers')
+async function loadByToken(token, database = db) {
+  return database('customers')
     .where('reservice_token', token)
     .whereNull('deleted_at')
     .first(
@@ -165,7 +165,7 @@ async function loadByToken(token) {
 // boundary on this surface: a matching permanent review block must not be
 // turned into another list of slots that commit will refuse, while a complete
 // stored pair and the dark review gate retain the existing flow.
-async function reserviceLocationReviewRequired(customer) {
+async function reserviceLocationReviewRequired(customer, database = db) {
   const hasStoredPair = ['latitude', 'longitude'].every((field) => customer?.[field] != null
     && String(customer[field]).trim() !== ''
     && Number.isFinite(Number(customer[field]))
@@ -178,7 +178,7 @@ async function reserviceLocationReviewRequired(customer) {
     service_address_city: customer.city || null,
     service_address_state: customer.state || null,
     service_address_zip: customer.zip || null,
-  });
+  }, database);
   return reviewed?.permanent === true
     && !reviewed.location
     && reviewed.reason === 'address_review_required';
@@ -223,9 +223,9 @@ function searchParseOpts(config, now = new Date()) {
 
 // Catalog rows for the two lanes, keyed by lane. A missing row (partial
 // seed) simply drops that lane — the office lane still exists by phone.
-async function loadLaneCatalog() {
+async function loadLaneCatalog(database = db) {
   const keys = Object.values(RESERVICE_LANES).map((l) => l.serviceKey);
-  const rows = await db('services')
+  const rows = await database('services')
     .whereIn('service_key', keys)
     .select('id', 'service_key', 'name', 'default_duration_minutes');
   const byLane = {};
@@ -324,12 +324,12 @@ function reserviceAvailabilityPayload(availability, range) {
 // Lane state for the payload: which lanes the customer holds, and per lane
 // whether an open callback already blocks it (with the tie-in reschedule
 // link). Returns { lanes: [...payload rows], bookableLanes: ['pest',...] }.
-async function resolveLaneState(customer, laneCatalog) {
+async function resolveLaneState(customer, laneCatalog, database = db) {
   // Churned/deactivated rows keep their token but lose eligibility — the
   // page renders the friendly not-eligible state with the office contacts.
   // Codex round-11 P2 (PR #5336): the SAME shared computation the SMS promise
   // validators use (reservice-scheduler.reserviceLaneAvailability).
-  const { eligible, open } = await reserviceLaneAvailability(customer);
+  const { eligible, open } = await reserviceLaneAvailability(customer, database);
   const lanes = eligible
     .filter((lane) => laneCatalog[lane])
     .map((lane) => ({
@@ -347,11 +347,11 @@ async function resolveLaneState(customer, laneCatalog) {
 // catalog, and which lanes are held, booked or bookable. null for an unknown
 // token. The GET below and the portal assistant's re-service offer both read
 // it, so the chat never offers what this page would refuse.
-async function pageLaneState(token) {
-  const customer = await loadByToken(token);
+async function pageLaneState(token, database = db) {
+  const customer = await loadByToken(token, database);
   if (!customer) return null;
-  const laneCatalog = await loadLaneCatalog();
-  return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog) };
+  const laneCatalog = await loadLaneCatalog(database);
+  return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog, database) };
 }
 
 router.get('/:token', async (req, res, next) => {

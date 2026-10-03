@@ -240,7 +240,7 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
       case 'get_recent_visits':
         return await getRecentVisits(contextCustomerId, actions, cards, turn);
       case 'offer_reservice':
-        return await offerReservice(contextCustomerId, input, actions, context);
+        return await offerReservice(contextCustomerId, input, actions, context, turn);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -292,10 +292,14 @@ function shortDateLabel(dateKey) {
 
 // The visit as the reschedule page loads it, when that page's own GET verdict
 // would let the customer move it; null otherwise. Any failure fails closed.
-async function movableVisit(id, database = null) {
+async function movableVisit(id, database = db) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
-  const svc = await (database ? loadById(id, database) : loadById(id)).catch(() => null);
-  const verdict = svc && await (database ? pageEligibility(svc, new Date(), database) : pageEligibility(svc)).catch((err) => {
+  const svc = await loadById(id, database).catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    return null;
+  });
+  const verdict = svc && await pageEligibility(svc, new Date(), database).catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
     return null;
   });
@@ -533,25 +537,26 @@ function reservicePageSwitchesOn() {
 
 // A re-service already open in the line: its date and window for the model,
 // and a button to move it only when the reschedule page would accept it.
-async function bookedReserviceResult(customerId, line, booked, actions) {
+async function bookedReserviceResult(customerId, line, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
-  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return bookedReserviceFacts(line, booked, false);
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
   // The button is optional: a failed lookup keeps the booked visit's facts.
-  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
+  const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
     return null;
   });
-  const movable = Boolean(row && await movableVisit(row.id));
-  if (movable) {
-    addAction(actions, {
+  const movable = Boolean(row && await movableVisit(row.id, database));
+  return {
+    result: bookedReserviceFacts(line, booked, movable),
+    action: movable ? {
       type: 'link',
       label: `Reschedule ${booked.serviceType}, ${shortDateLabel(booked.date)}`.slice(0, 80),
       href: booked.rescheduleUrl,
-    });
-  }
-  return bookedReserviceFacts(line, booked, movable);
+    } : null,
+  };
 }
 
 function bookedReserviceFacts(line, booked, movable) {
@@ -606,22 +611,36 @@ function reserviceLineOf(input, lawn) {
   return (lawn ? ['pest', 'lawn'] : ['pest']).includes(input.service_line) ? input.service_line : null;
 }
 
-async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}) {
+async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}, turn = null) {
   const line = reserviceLineOf(input, lawn);
   if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
   const refusal = reportRefusal(customerMessage, line, input);
   if (refusal) return refusal;
+  const read = (database) => offerReserviceResult(customerId, line, database);
+  const decision = turn
+    ? await turn.transaction('re-service offer', read)
+    : await read(db);
+  if (decision.action) {
+    turn?.assertActive('re-service button');
+    addAction(actions, decision.action);
+  }
+  return decision.result;
+}
+
+async function offerReserviceResult(customerId, line, database = db) {
   // An open re-service in the line is read on its own, as the page does: a
   // visit booked while the plan covered the line stays on the schedule after
   // coverage changes, and the customer is told about it.
-  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId).catch((err) => {
+  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId, database).catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
     return null;
   });
-  if (!open) return RESERVICE_HAND_OFF;
-  if (open[line]) return bookedReserviceResult(customerId, line, open[line], actions);
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
+  if (!open) return { result: RESERVICE_HAND_OFF };
+  if (open[line]) return bookedReserviceResult(customerId, line, open[line], database);
+  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
     return null;
   });
@@ -630,23 +649,29 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
   // customer load, lane catalog, coverage and open re-services), so the chat
   // offers exactly what the page would show. Any failure hands off.
   const page = require('../../routes/reservice-public')._internals;
-  if (!page.TOKEN_RE.test(token)) return RESERVICE_HAND_OFF;
-  const state = await page.pageLaneState(token).catch((err) => {
+  if (!page.TOKEN_RE.test(token)) return { result: RESERVICE_HAND_OFF };
+  const state = await page.pageLaneState(token, database).catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
     return null;
   });
-  if (!state || String(state.customer.id) !== String(customerId)) return RESERVICE_HAND_OFF;
-  if (!state.bookableLanes.includes(line)) return RESERVICE_HAND_OFF;
+  if (!state || String(state.customer.id) !== String(customerId)) return { result: RESERVICE_HAND_OFF };
+  if (!state.bookableLanes.includes(line)) return { result: RESERVICE_HAND_OFF };
   // An address held for staff review shows no times on the page, only
   // instructions to text or call: hand off rather than promise a time.
-  const reviewHold = await page.reserviceLocationReviewRequired(state.customer).catch(() => true);
-  if (reviewHold) return RESERVICE_HAND_OFF;
+  const reviewHold = await page.reserviceLocationReviewRequired(state.customer, database).catch((err) => {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    return true;
+  });
+  if (reviewHold) return { result: RESERVICE_HAND_OFF };
   // One label for both lines: the page lets the customer pick the line, and a
   // second call for the other line shares this href (one button).
-  addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
-    offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    action: { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` },
+    result: {
+      offered: true,
+      instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    },
   };
 }
 

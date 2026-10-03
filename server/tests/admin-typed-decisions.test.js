@@ -63,6 +63,8 @@ let baseUrl;
 beforeAll(() => {
   const app = express();
   app.use(express.json());
+  // Same order as server/index.js: the labeler-token router sits in front.
+  app.use('/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
   app.use('/admin/typed-decisions', router);
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
   server = app.listen(0);
@@ -322,5 +324,172 @@ describe('GET /status', () => {
     const { status, body } = await get('/status');
     expect(status).toBe(500);
     expect(body.error).toMatch(/relation missing/);
+  });
+});
+
+describe('machine labeler token (X-Labeler-Token)', () => {
+  const TOKEN = 'synthetic-labeler-token-0123456789abcdef';
+  const savedToken = process.env.TYPED_DECISIONS_LABELER_TOKEN;
+  beforeEach(() => { process.env.TYPED_DECISIONS_LABELER_TOKEN = TOKEN; });
+  afterAll(() => { if (savedToken === undefined) delete process.env.TYPED_DECISIONS_LABELER_TOKEN; else process.env.TYPED_DECISIONS_LABELER_TOKEN = savedToken; });
+  const send = async (method, path, token, body) => {
+    const r = await fetch(`${baseUrl}/admin/typed-decisions${path}`, {
+      method, headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': token }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return { status: r.status, body: await r.json() };
+  };
+
+  test('labels an unreviewed row as claude-labeler, never over a person, audit-logged as system', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const { status } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(200);
+    const [patch] = called(log, 'decision_reviews', 'update')[0];
+    expect(patch.labeled_by).toBe('claude-labeler');
+    expect(called(log, 'decision_reviews', 'where')).toContainEqual(['label_status', 'unreviewed']);
+    expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'system', actor_id: null, metadata: expect.objectContaining({ labeled_by: 'claude-labeler' }) }));
+  });
+
+  test('a row a person already labeled answers 409 already_labeled', async () => {
+    installDb({ decision_reviews: { returning: [], first: [baseRow(), { id: ID, label_status: 'disagreement' }] } });
+    const { status, body } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(409);
+    expect(body.code).toBe('already_labeled');
+  });
+
+  test('force is refused (403) before any write', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow()], first: [baseRow()] } });
+    const { status, body } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN, force: true });
+    expect(status).toBe(403);
+    expect(body.code).toBe('labeler_no_force');
+    expect(called(log, 'decision_reviews', 'update')).toHaveLength(0);
+  });
+
+  test('a wrong token, a short configured token, or no configured token is a generic 404 with no database read', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    const wrong = await send('POST', `/reviews/${ID}/label`, `${TOKEN}x`, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(wrong).toEqual({ status: 404, body: { error: 'Not found' } });
+    process.env.TYPED_DECISIONS_LABELER_TOKEN = 'short';
+    expect((await send('POST', `/reviews/${ID}/label`, 'short', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+    delete process.env.TYPED_DECISIONS_LABELER_TOKEN;
+    expect((await send('POST', `/reviews/${ID}/label`, '', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+    expect(log.decision_reviews || []).toHaveLength(0);
+  });
+
+  test('the token opens nothing but the label route', async () => {
+    installDb({ decision_reviews: { list: [baseRow()] } });
+    expect((await send('GET', '/reviews', TOKEN)).status).toBe(404);
+    expect((await send('GET', '/status', TOKEN)).status).toBe(404);
+    expect((await send('GET', `/reviews/${ID}/label`, TOKEN)).status).toBe(404);
+    expect((await send('POST', '/reviews/not-a-uuid/label', TOKEN, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+    // 36 hex/hyphen characters that are not a UUID never reach the handler.
+    expect(await send('POST', `/reviews/${'-'.repeat(36)}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN })).toEqual({ status: 404, body: { error: 'Not found' } });
+  });
+
+  test('the dark gate answers the same generic 404, and token responses carry privacy headers', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    process.env.GATE_TYPED_DECISIONS = 'false';
+    const r = await fetch(`${baseUrl}/admin/typed-decisions/reviews/${ID}/label`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN }, body: JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN }),
+    });
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'Not found' });
+    expect(r.headers.get('cache-control')).toBe('no-store');
+    expect(r.headers.get('x-robots-tag')).toBe('noindex');
+    expect(r.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(r.headers.get('ratelimit-limit')).toBeNull();
+    expect(log.decision_reviews || []).toHaveLength(0);
+  });
+});
+
+describe('labeler-token router wiring (server/index.js)', () => {
+  test('is mounted ahead of the global cors(), the /api/ limiter, the body parsers and the admin router', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const mount = src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'))");
+    expect(mount).toBeGreaterThan(-1);
+    expect(mount).toBeLessThan(src.indexOf('app.use(cors('));
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/', limiter)"));
+    expect(mount).toBeLessThan(src.indexOf('requireStaffTokenForLargeBody, express.json'));
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions'))"));
+  });
+
+  test('the admin router keeps its literal admin guard (the route census reads it)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-typed-decisions.js'), 'utf8');
+    expect(src).toContain('router.use(adminAuthenticate, requireAdmin);');
+  });
+
+  test('a request without the header never reaches the token branch: admin sign-in labels as the person', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(200);
+    expect(called(log, 'decision_reviews', 'update')[0][0].labeled_by).toBe('owner@example.test');
+    expect(called(log, 'decision_reviews', 'where')).not.toContainEqual(['label_status', 'unreviewed']);
+  });
+});
+
+describe('labeler-token router on its own (production order: no parser in front of it)', () => {
+  const TOKEN = 'synthetic-labeler-token-0123456789abcdef';
+  const savedToken = process.env.TYPED_DECISIONS_LABELER_TOKEN;
+  let bare; let bareUrl;
+  beforeAll(() => {
+    const app = express();
+    app.use('/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
+    app.use('/api/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
+    app.use((_req, res) => res.status(418).json({ error: 'fell through' }));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    bare = app.listen(0);
+    bareUrl = `http://127.0.0.1:${bare.address().port}/admin/typed-decisions`;
+  });
+  afterAll(() => new Promise((resolve) => {
+    if (savedToken === undefined) delete process.env.TYPED_DECISIONS_LABELER_TOKEN; else process.env.TYPED_DECISIONS_LABELER_TOKEN = savedToken;
+    bare.close(resolve);
+  }));
+  beforeEach(() => { process.env.TYPED_DECISIONS_LABELER_TOKEN = TOKEN; });
+  const raw = (body, headers = {}) => fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN, ...headers }, body });
+
+  test('parses its own body and labels', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const r = await raw(JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN }));
+    expect(r.status).toBe(200);
+    expect(called(log, 'decision_reviews', 'update')[0][0].labeled_by).toBe('claude-labeler');
+  });
+
+  test('malformed JSON is 400 and an oversized body is 413, with privacy headers and no database read', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    const bad = await raw('{"verdict": ');
+    expect(bad.status).toBe(400);
+    expect(bad.headers.get('cache-control')).toBe('no-store');
+    const big = await raw(JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN, note: 'x'.repeat(20 * 1024) }));
+    expect(big.status).toBe(413);
+    expect(log.decision_reviews || []).toHaveLength(0);
+  });
+
+  test('without the header the request leaves the router untouched (falls through to the next mount)', async () => {
+    const r = await fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    expect(r.status).toBe(418);
+    expect(r.headers.get('x-robots-tag')).toBeNull();
+  });
+
+  test('Staff maintenance mode freezes the labeler too: 503 before any write; a wrong token still reads 404', async () => {
+    const saved = process.env.STAFF_MAINTENANCE_MODE;
+    process.env.STAFF_MAINTENANCE_MODE = 'true';
+    try {
+      const log = installDb({ decision_reviews: { returning: [baseRow()], first: [baseRow()] } });
+      const url = `${bareUrl.replace('/admin/typed-decisions', '/api/admin/typed-decisions')}/reviews/${ID}/label`;
+      const body = JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN });
+      const frozen = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN }, body });
+      expect(frozen.status).toBe(503);
+      expect((await frozen.json()).code).toBe('STAFF_MAINTENANCE');
+      const wrong = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': `${TOKEN}x` }, body });
+      expect(wrong.status).toBe(404);
+      expect(log.decision_reviews || []).toHaveLength(0);
+    } finally {
+      if (saved === undefined) delete process.env.STAFF_MAINTENANCE_MODE; else process.env.STAFF_MAINTENANCE_MODE = saved;
+    }
+  });
+
+  test('an OPTIONS carrying the header gets the generic 404, not a preflight answer', async () => {
+    const r = await fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'OPTIONS', headers: { 'X-Labeler-Token': TOKEN } });
+    expect(r.status).toBe(404);
+    expect(r.headers.get('cache-control')).toBe('no-store');
   });
 });

@@ -380,7 +380,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'offer_reservice', 'escalate']);
     expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
     expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
-    expect(mockPageState).toHaveBeenCalledWith('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    expect(mockPageState).toHaveBeenCalledWith('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', db);
     // The one plan fact this lane may state is the tool's.
     expect(first.system[0].text).toMatch(/plan details \(apart from what offer_reservice tells you\)/);
     expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]);
