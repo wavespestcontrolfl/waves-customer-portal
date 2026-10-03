@@ -35,6 +35,7 @@
  */
 
 const { aftercareCustomerTask, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { RAINFAST_WATCH_LINE } = require('./lawn-rainfast-watch');
 const { issueRestatesAftercare } = require('./lawn-report-insights');
 
 // The client's static labels around the lead ("What we applied today", "Your
@@ -185,6 +186,8 @@ function v6CopyOf(copyV6) {
  * @param {object} [extras]
  * @param {{priorDate:string, lines:string[]}|null} [extras.sinceLast] the
  *   "Since your last visit" block (lawn-since-last-copy.js), when its gate is live
+ * @param {{line: string}|null} [extras.rainfastWatch] the live view's rainfast
+ *   breach sentence (lawn-rainfast-watch.js), when GATE_LAWN_RAINFAST_WATCH is live
  * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
  *   v6 copy's fixed-sentence fields (lawn-copy-v6.js), when its gate is live;
  *   each is a string or null (a null headline falls to the snapshot's)
@@ -194,7 +197,7 @@ function v6CopyOf(copyV6) {
  *   whatToExpect?: string, watching?: string } | null}
  *   null when there is no snapshot to lead with.
  */
-function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
+function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWatch = null } = {}) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
@@ -226,6 +229,15 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
       const text = pick([v6[field]], bannerPresent);
       if (text && countWords(text) <= FIELD_WORD_CAPS[field]) lead[field] = text;
     }
+  }
+  // GATE_LAWN_RAINFAST_WATCH (P31, live view only): the one fixed sentence joins
+  // the Watching line, after the writer's own sentence. Only the exact module
+  // sentence is accepted. It gives no watering advice, so the banner-ownership
+  // wording test (which would reject its "rain") does not apply. The budget
+  // loop below still governs it: Watching is given up whole when the region
+  // runs over.
+  if (rainfastWatch && rainfastWatch.line === RAINFAST_WATCH_LINE) {
+    lead.watching = lead.watching ? `${lead.watching} ${RAINFAST_WATCH_LINE}` : RAINFAST_WATCH_LINE;
   }
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;

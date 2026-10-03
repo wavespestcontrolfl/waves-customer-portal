@@ -5977,6 +5977,30 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
         } catch { /* best-effort: the report renders without the block */ }
       }
+      // GATE_LAWN_RAINFAST_WATCH (P31), LIVE VIEWS ONLY (the PDF and static
+      // builds never carry it, so their cache key is untouched): once a stated
+      // rainfast interval has ended, measured rain inside it records one
+      // retreat-check on the frozen visit memory and hands one fixed Watching
+      // sentence to the lead, the same non-enumerable way as sinceLastCopy.
+      // Fail closed and best-effort: any miss leaves the report as it was.
+      if (reportV2 && opts.mode === 'live' && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
+        try {
+          const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            assessmentId: lawnAssessment.assessmentId,
+            products,
+            completedAt: completionTime,
+            latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+            longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+            knex,
+            fetchForecast: require('./application-conditions').fetchPropertyForecast,
+          });
+          if (watch) {
+            Object.defineProperty(reportV2, 'rainfastWatch', { value: watch, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the sentence */ }
+      }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
