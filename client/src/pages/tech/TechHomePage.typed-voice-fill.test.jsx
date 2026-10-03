@@ -131,6 +131,7 @@ it.each([
   ['the switch off', { typedReportFlowEnabled: false }],
   ['the switch absent (an older payload)', { typedReportFlowEnabled: undefined }],
   ['a profile that could not be read', { completionProfileLookupFailed: true }],
+  ['a linked-project lookup that failed (a project may exist)', { linkedProjectLookupFailed: true }],
   ['a project-backed profile', { completionProfile: { category: 'pest_control', serviceKey: 'cockroach_control', findingsType: 'cockroach', projectBacked: true } }],
   ['a form that does not match the profile', { findingsSchema: { ...ROACH_SCHEMA, type: 'flea' } }],
   ['no form on the row', { findingsSchema: null }],

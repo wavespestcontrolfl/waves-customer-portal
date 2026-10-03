@@ -297,10 +297,15 @@ describe('what holds a lane visit\'s send', () => {
   });
 
   test('a perimeter spray with a saved trace goes on the record with its length, and the card says the trace is on the report', async () => {
-    const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 120, capture_mode: 'perimeter', updated_at: '2026-10-02T14:00:00Z' } } });
-    await openSheet(request);
+    // A tick visit: its record lists a place outside, which the trace needs.
+    const request = makeRequest({
+      visit: { ...VISIT, serviceType: 'Tick Control', serviceKey: 'tick_control' }, lane: 'tick_control',
+      trace: { enabled: true, treatmentZone: { linear_ft: 120, capture_mode: 'perimeter', updated_at: '2026-10-02T14:00:00Z' } },
+      laneFacts: { available: true, status: 'read', lane: 'tick_control', areas: [{ area: 'Front lawn', quote: 'front lawn' }], findings: [], unclearGroups: [] },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Tick Control', laneKey: 'tick_control' });
     addProduct('Temprid FX', '1', 'Perimeter spray');
-    await generate();
+    await generate('Sprayed around the house and the front lawn.');
     expect(screen.getByText('With the trace.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
@@ -387,6 +392,61 @@ describe('an "Interior spray too" trace on a lane visit (codex local r4 on #5629
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     expect(request.bodies('/complete')[0].products[0]).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150, areaUnit: 'linear_ft' });
+  });
+});
+
+describe('a saved outline or perimeter needs a place outside on the record (codex replay of #5629)', () => {
+  const OUTLINE = (mode) => ({ enabled: true, treatmentZone: { capture_mode: mode, updated_at: '2026-10-02T14:00:00Z' } });
+  const TICK_VISIT = { ...VISIT, serviceType: 'Tick Control', serviceKey: 'tick_control' };
+  const TICK_SERVICE = { ...SERVICE, serviceType: 'Tick Control', laneKey: 'tick_control' };
+  const tickRead = (areas) => ({ available: true, status: 'read', lane: 'tick_control', areas, findings: [], unclearGroups: [] });
+  const HOLD = 'Your trace would show the outside of the house on the customer’s report, but no place on the record is outside. Add the place outside (Change beside Where), or remove the trace.';
+
+  test('a lawn outline beside a broadcast spray holds while the record lists only a place inside', async () => {
+    const request = makeRequest({
+      visit: TICK_VISIT, lane: 'tick_control', trace: OUTLINE('lawn'),
+      laneFacts: tickRead([{ area: 'Interior pet areas', quote: 'the pet areas inside' }]),
+    });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Broadcast spray');
+    await generate('Broadcast the pet areas inside.');
+    expect(await screen.findByText(HOLD)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('the same outline stands once the record lists a place outside', async () => {
+    const request = makeRequest({
+      visit: TICK_VISIT, lane: 'tick_control', trace: OUTLINE('lawn'),
+      laneFacts: tickRead([{ area: 'Interior pet areas', quote: 'the pet areas inside' }, { area: 'Front lawn', quote: 'front lawn' }]),
+    });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Broadcast spray');
+    await generate('Broadcast the front lawn and the pet areas inside.');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    expect(screen.queryByText(HOLD)).toBeNull();
+  });
+
+  test('a perimeter trace with a perimeter spray holds while the record lists only a place inside', async () => {
+    const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 120, capture_mode: 'perimeter', updated_at: '2026-10-02T14:00:00Z' } } });
+    await openSheet(request);
+    addProduct('Temprid FX', '1', 'Perimeter spray');
+    await generate();
+    expect(await screen.findByText(HOLD)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('an "Interior spray too" trace still carries the perimeter: it holds while the record lists only a place inside', async () => {
+    const request = makeRequest({
+      visit: TICK_VISIT, lane: 'tick_control',
+      trace: { enabled: true, treatmentZone: { capture_mode: 'interior', linear_ft: 150, updated_at: '2026-10-02T14:00:00Z' } },
+      laneFacts: tickRead([{ area: 'Interior pet areas', quote: 'the pet areas inside' }]),
+    });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Perimeter spray');
+    await generate('Sprayed around the house and the pet areas inside.');
+    expect(await screen.findByText(HOLD)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 });
 

@@ -21,6 +21,7 @@ const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspect
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { promoteStagedServicePhotos } = require('./service-photos');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -982,6 +983,14 @@ async function completeProjectBackedService({
         if (refreshed) serviceRecord = refreshed;
       }
     }
+
+    // Attach photos captured before closeout while the visit lock is still
+    // held, so durable uploads cannot remain indefinitely in staging.
+    await promoteStagedServicePhotos({
+      scheduledServiceId: scheduledService.id,
+      serviceRecordId: serviceRecord.id,
+      knex: trx,
+    });
 
     const followupAlert = await createProjectFollowupAlert({
       scheduledService,
