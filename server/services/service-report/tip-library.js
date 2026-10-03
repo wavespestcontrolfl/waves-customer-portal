@@ -108,6 +108,49 @@ function lawnFindingsFromAssessment(row) {
   return [...found];
 }
 
+// Named findings: the technician-reviewed findings on the visit's assessment
+// run (lawn_assessment_runs.reviewed_findings / added_details). Each carries
+// the allowlisted customer label of lawn-diagnostic-report CONDITION_LABELS;
+// this table says which finding keys a label stands for. A label not listed
+// (overwatering, thinning, color, a generic or clean label) lifts nothing.
+// "Caterpillar activity" does not say which caterpillar, so it lifts both.
+const LAWN_LABEL_FINDINGS = Object.freeze({
+  'chinch bug activity': ['chinch_bugs'],
+  'caterpillar activity': ['sod_webworm', 'armyworm'],
+  'grub activity': ['white_grubs'],
+  'large patch (fungal) activity': ['large_patch'],
+  'gray leaf spot': ['gray_leaf_spot'],
+  'dollar spot': ['disease'],
+  'fungal activity': ['disease'],
+  'weed pressure': ['weeds'],
+  'drought stress': ['drought'],
+});
+
+// Finding keys from one assessment run's technician review. Only a finding
+// the technician KEPT counts (a rejected one has keep: false), and a
+// technician-added detail counts unless it rules the condition out. A run
+// not yet reviewed has neither list and gives nothing.
+function lawnFindingsFromRun(run) {
+  if (!run) return [];
+  const list = (value) => {
+    let rows = value;
+    if (typeof rows === 'string') {
+      try { rows = JSON.parse(rows); } catch { rows = null; }
+    }
+    return Array.isArray(rows) ? rows : [];
+  };
+  const kept = [
+    ...list(run.reviewed_findings).filter((row) => row && row.keep !== false),
+    ...list(run.added_details).filter((row) => row && row.negated !== true),
+  ];
+  const found = new Set();
+  for (const row of kept) {
+    const keys = Object.prototype.hasOwnProperty.call(LAWN_LABEL_FINDINGS, row.label) ? LAWN_LABEL_FINDINGS[row.label] : [];
+    for (const key of keys) found.add(key);
+  }
+  return [...found];
+}
+
 // 4 for a tip written for one of this visit's findings, 2 for the owner's
 // months, 1 for the wet/dry season (the old in-season-first order).
 function tipRank(tip, { season, month, findings }) {
@@ -1007,7 +1050,9 @@ module.exports = {
   LAWN_FINDINGS,
   monthForDate,
   seasonForDate,
+  LAWN_LABEL_FINDINGS,
   lawnFindingsFromAssessment,
+  lawnFindingsFromRun,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,

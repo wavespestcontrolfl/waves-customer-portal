@@ -17,6 +17,8 @@ const {
   seasonForDate,
   LAWN_FINDINGS,
   lawnFindingsFromAssessment,
+  lawnFindingsFromRun,
+  LAWN_LABEL_FINDINGS,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
@@ -465,6 +467,42 @@ describe('lawn tip library', () => {
 
     test('a blank score or unreadable flags add nothing', () => {
       expect(lawnFindingsFromAssessment({ confirmed_by_tech: true, fungus_control: null, thatch_level: '', weed_suppression: undefined, stress_flags: '{not json' })).toEqual([]);
+    });
+  });
+
+  describe('lawnFindingsFromRun', () => {
+    const known = new Set([...Object.keys(LAWN_FINDINGS), ...Object.values(LAWN_FINDINGS)]);
+
+    test('every label in the table is a customer label the visit pipeline can store, and maps to real finding keys', () => {
+      const { CONDITION_LABEL_VALUES } = require('../services/lawn-diagnostic-report');
+      for (const [label, keys] of Object.entries(LAWN_LABEL_FINDINGS)) {
+        expect(CONDITION_LABEL_VALUES).toContain(label);
+        for (const key of keys) expect(known.has(key)).toBe(true);
+      }
+    });
+
+    test('kept findings and non-negated technician details map; rejected, unknown and clean ones do not', () => {
+      const run = {
+        reviewed_findings: [
+          { label: 'chinch bug activity', keep: true },
+          { label: 'grub activity', keep: false },
+          { label: 'overwatering signal', keep: true },
+          { label: 'caterpillar activity' },
+        ],
+        added_details: [
+          { label: 'gray leaf spot', negated: false },
+          { label: 'weed pressure', negated: true },
+          { label: 'no major visible stress', negated: true },
+        ],
+      };
+      expect(lawnFindingsFromRun(run).sort()).toEqual(['armyworm', 'chinch_bugs', 'gray_leaf_spot', 'sod_webworm']);
+    });
+
+    test('a missing, unreviewed or unreadable run gives nothing', () => {
+      for (const run of [null, undefined, {}, { reviewed_findings: null, added_details: null }, { reviewed_findings: '{bad' }, { reviewed_findings: [null, 3, {}] }]) {
+        expect(lawnFindingsFromRun(run)).toEqual([]);
+      }
+      expect(lawnFindingsFromRun({ reviewed_findings: [{ label: 'constructor', keep: true }, { label: '__proto__' }] })).toEqual([]);
     });
   });
 });

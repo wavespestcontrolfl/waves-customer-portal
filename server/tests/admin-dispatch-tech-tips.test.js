@@ -88,7 +88,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // A scripted db: scheduled_services → the visit; service_records → optional
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
-function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], lawnAssessment = null, calls }) {
+function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], lawnAssessment = null, lawnRuns = {}, lawnRunError = false, calls }) {
   return (table) => {
     calls.push(table);
     const chain = {};
@@ -104,13 +104,21 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
       recommendationRead = columns.some((column) => column === 'id' || String(column).endsWith(' as id'));
       return chain;
     };
+    let runAssessmentId = null;
     chain.where = (...args) => {
+      if (table === 'lawn_assessment_runs') runAssessmentId = args[0]?.assessment_id ?? null;
       if (table === 'service_records' && ['service_date', 'service_records.service_date'].includes(args[0]) && args[1] === '<=') {
         throughDate = args[2];
       }
       return chain;
     };
-    chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : table === 'lawn_assessments' ? lawnAssessment : null);
+    chain.first = async () => {
+      if (table === 'lawn_assessment_runs') {
+        if (lawnRunError) throw new Error('runs unavailable');
+        return lawnRuns[runAssessmentId] || null;
+      }
+      return table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : table === 'lawn_assessments' ? lawnAssessment : null;
+    };
     chain.then = (resolve) => {
       if (table === 'scheduled_service_addons') return Promise.resolve(addons).then(resolve);
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
@@ -311,7 +319,7 @@ describe('GET /:serviceId/tech-tips', () => {
     const retake = await invoke({ serviceId: 'svc-1' });
     expect(lawnIds(retake)).toEqual(lawnIds(plain));
     const routeSource = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-    const read = routeSource.slice(routeSource.indexOf("? await db('lawn_assessments')"), routeSource.indexOf('findings: lawnFindingsFromAssessment(lawnAssessment)'));
+    const read = routeSource.slice(routeSource.indexOf("? await db('lawn_assessments')"), routeSource.indexOf('const lawnRun ='));
     expect(read).toContain(".orderBy('created_at', 'desc')");
     expect(read).not.toMatch(/where\([^)]*confirmed_by_tech/);
 
@@ -319,6 +327,45 @@ describe('GET /:serviceId/tech-tips', () => {
     mockDbCurrent = scriptedDb({ service: SERVICE, calls });
     await invoke({ serviceId: 'svc-1' });
     expect(calls).not.toContain('lawn_assessments');
+  });
+
+  // Codex r3 P2: named tip metadata (chinch, grubs, ...) is reachable only through
+  // the technician-reviewed findings on the CURRENT confirmed assessment's run.
+  test('a lawn visit lifts named tips from the findings the technician kept on the current confirmed assessment', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'lawn_care' });
+    const lawn = { ...SERVICE, service_type: 'Lawn Care Treatment', scheduled_date: '2026-08-15' };
+    const lawnIds = (res) => res.body.groups.find((group) => group.id === 'lawn').tips.map((tip) => tip.id);
+    const confirmed = { id: 'assess-2', confirmed_by_tech: true, fungus_control: 95, thatch_level: 85, weed_suppression: 99, stress_flags: {} };
+    const chinch = (extra = {}) => ({ finding_id: 'f1', label: 'chinch bug activity', keep: true, ...extra });
+    const ids = async (opts) => {
+      mockDbCurrent = scriptedDb({ service: lawn, calls: [], ...opts });
+      return lawnIds(await invoke({ serviceId: 'svc-1' }));
+    };
+
+    const plain = await ids({ lawnAssessment: confirmed });
+    expect(plain[0]).not.toBe('lawn_chinch_hot_edge');
+
+    // a kept chinch finding lifts the chinch tip to the top
+    expect((await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: [chinch()], added_details: [] } } }))[0]).toBe('lawn_chinch_hot_edge');
+    // the same finding as stored JSON text still counts
+    expect((await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: JSON.stringify([chinch()]), added_details: '[]' } } }))[0]).toBe('lawn_chinch_hot_edge');
+    // a rejected one does not
+    expect(await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: [chinch({ keep: false })], added_details: [] } } })).toEqual(plain);
+    // a label the table does not know does not
+    expect(await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: [chinch({ label: 'thinning turf' })], added_details: [] } } })).toEqual(plain);
+    // a technician-added detail counts, unless it rules the condition out
+    const added = (extra) => ({ finding_id: 't1', label: 'grub activity', negated: false, source: 'technician', ...extra });
+    expect((await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: [], added_details: [added()] } } }))[0]).toBe('lawn_digging_animals');
+    expect(await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-2': { reviewed_findings: [], added_details: [added({ negated: true, label: 'no major visible stress' })] } } })).toEqual(plain);
+    // a run that belongs to a superseded assessment is never read
+    expect(await ids({ lawnAssessment: confirmed, lawnRuns: { 'assess-1': { reviewed_findings: [chinch()], added_details: [] } } })).toEqual(plain);
+    // an unconfirmed newest row gives no lift, run or not
+    expect(await ids({ lawnAssessment: { ...confirmed, confirmed_by_tech: false }, lawnRuns: { 'assess-2': { reviewed_findings: [chinch()], added_details: [] } } })).toEqual(plain);
+    // a failed run read loses the named lift only: the score-derived keys stay
+    const thatchy = { ...confirmed, thatch_level: 40 };
+    expect((await ids({ lawnAssessment: thatchy, lawnRunError: true }))[0]).toBe('lawn_thatch_half_inch');
+    expect(await ids({ lawnAssessment: confirmed, lawnRunError: true })).toEqual(plain);
   });
 
   test('gate on: a service with no customer skips the per-customer reads', async () => {

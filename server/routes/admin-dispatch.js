@@ -51,7 +51,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment } = require('../services/service-report/tip-library');
+const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -730,14 +730,23 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       ? await db('lawn_assessments')
         .where({ service_id: svc.id, customer_id: svc.customer_id })
         .orderBy('created_at', 'desc')
-        .first('confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
+        .first('id', 'confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
+        .catch(() => null)
+      : null;
+    // The named findings the technician kept on that same confirmed
+    // assessment's run (one run per assessment row, so a superseded row's run
+    // is never read). A failed read loses only these keys.
+    const lawnRun = lawnAssessment?.confirmed_by_tech === true && lawnAssessment.id
+      ? await db('lawn_assessment_runs')
+        .where({ assessment_id: lawnAssessment.id, customer_id: svc.customer_id })
+        .first('reviewed_findings', 'added_details')
         .catch(() => null)
       : null;
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
-      findings: lawnFindingsFromAssessment(lawnAssessment),
+      findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current
