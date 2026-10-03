@@ -2,6 +2,7 @@ const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOr
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
+const { canonicalStoredPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const router = express.Router();
 const db = require('../models/db');
 const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
@@ -3667,7 +3668,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
       notes: cleanOptionalText(notes),
       companyName: cleanOptionalText(companyName),
-      propertyType: cleanOptionalText(propertyType),
+      propertyType: canonicalStoredPropertyType(cleanOptionalText(propertyType)),
       profileLabel: cleanOptionalText(profileLabel),
       contactRole: normalizeContactRole(contactRole),
     };
@@ -4014,6 +4015,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
         else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
         else if (v === 'address_line2') { updates[v] = normalizeUnitLine(cleanText(req.body[k])) || null; }
+        else if (v === 'property_type') { updates[v] = canonicalStoredPropertyType(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
     }

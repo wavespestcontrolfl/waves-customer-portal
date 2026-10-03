@@ -97,6 +97,15 @@ function applyLeadEstimateAutomationGate(readiness = {}) {
   };
 }
 
+// True when the readiness verdict carries the commercial marker (a structured
+// form flag, an explicit commercial service, or commercial-premises prose —
+// see evaluateLeadEstimateAutomationReadiness). Read off `review`, which the
+// automation gate wrapper leaves intact when the gate is off.
+function leadCommercialSignalFromReadiness(readiness) {
+  return Array.isArray(readiness?.review)
+    && readiness.review.includes('commercial_signal_on_residential_intake');
+}
+
 // Enrolls this submission in the local new_lead automation sequence
 // (SendGrid-backed). Runs AFTER leadRecord is resolved (both the call-lead
 // attach branch and the fresh-insert branch) so `leadId` is this
@@ -964,6 +973,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
 
       if (!leadRecord) {
+        // The readiness gate already decided whether this submission states
+        // or describes a commercial premises; record that verdict on the row
+        // so commercial web demand is countable and the lead's later readers
+        // (call estimator hint, booking-link text) see it. Fresh rows only —
+        // an attached call lead keeps what the call pipeline wrote.
+        const leadCommercialSignal = leadCommercialSignalFromReadiness(estimateAutomationReadiness);
         const [newLead] = await db('leads').insert({
           first_name: firstName, last_name: lastName,
           phone: phoneFormatted, email: email || null,
@@ -988,7 +1003,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           anon_id: anonId || null,
           heard_about: heardAbout || null,
           heard_about_prompt: heardAboutPrompt || null,
-          is_residential: true,
+          is_residential: !leadCommercialSignal,
+          is_commercial: leadCommercialSignal,
         }).returning('*');
         leadRecord = newLead;
       }
@@ -2128,6 +2144,7 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
 module.exports = router;
 module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
+  leadCommercialSignalFromReadiness,
   buildExistingCustomerLeadUpdates,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
