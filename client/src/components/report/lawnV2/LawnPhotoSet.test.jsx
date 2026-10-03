@@ -8,7 +8,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import LawnReportV2Section from './LawnReportV2Section';
-import { LawnPhotoStrip, PrintContext } from './LawnReportV2';
+import { LawnPhotoFindings, LawnPhotoStrip, PrintContext } from './LawnReportV2';
 
 afterEach(cleanup);
 
@@ -97,5 +97,70 @@ describe('LawnReportV2Section passes the set through', () => {
     const { container } = render(<LawnReportV2Section data={base} />);
     expect(container.querySelector('[data-testid="lawn-photo-set"]')).toBeNull();
     expect(container.querySelectorAll('img')).toHaveLength(STRIP.length);
+  });
+});
+
+const FINDINGS = [
+  { label: 'Weed pressure', photos: [{ url: 'https://example.test/front.jpg', label: 'Front yard' }, { url: 'https://example.test/close.jpg', label: 'Close-up' }] },
+  { label: 'General lawn stress', photos: [], confirm: 'The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.' },
+];
+
+describe('LawnPhotoFindings ("What the photos showed")', () => {
+  it('prints the heading, each label, its thumbnails and the one fixed sentence', () => {
+    const { container } = render(<LawnPhotoFindings findings={FINDINGS} />);
+    expect(screen.getByText('What the photos showed')).toBeInTheDocument();
+    expect(screen.getByText('Weed pressure')).toBeInTheDocument();
+    expect(screen.getByText('General lawn stress')).toBeInTheDocument();
+    expect(screen.getByText(FINDINGS[1].confirm)).toBeInTheDocument();
+    expect([...container.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual(['https://example.test/front.jpg', 'https://example.test/close.jpg']);
+  });
+
+  it('a finding with no photo prints with no thumbnail', () => {
+    const { container } = render(<LawnPhotoFindings findings={[FINDINGS[1]]} />);
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByText('General lawn stress')).toBeInTheDocument();
+  });
+
+  it('thumbnails link on the web and never in print, including the browser print of the live page', () => {
+    const web = render(<LawnPhotoFindings findings={FINDINGS} />);
+    expect(web.container.querySelectorAll('a')).toHaveLength(2);
+    cleanup();
+    const printed = render(<PrintContext.Provider value><LawnPhotoFindings findings={FINDINGS} /></PrintContext.Provider>);
+    expect(printed.container.querySelectorAll('a')).toHaveLength(0);
+    expect(printed.container.querySelectorAll('img')).toHaveLength(2);
+  });
+
+  it('text is at least 14px and nothing renders without findings', () => {
+    const { container } = render(<LawnPhotoFindings findings={FINDINGS} />);
+    for (const el of container.querySelectorAll('figcaption, p')) expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
+    cleanup();
+    expect(render(<LawnPhotoFindings findings={[]} />).container.firstChild).toBeNull();
+    expect(render(<LawnPhotoFindings />).container.firstChild).toBeNull();
+  });
+});
+
+describe('LawnReportV2Section places the block beside the set', () => {
+  const base = { photos: STRIP, insights: [], diagnosis: [], photoSet: SET, photoFindings: FINDINGS };
+
+  it('legacy and lead layouts both print it after the photos', () => {
+    const legacy = render(<LawnReportV2Section data={base} />);
+    expect(legacy.container.querySelector('[data-testid="lawn-photo-findings"]')).not.toBeNull();
+    legacy.unmount();
+    const lead = { headline: 'Stable', why: null, applied: null, yourPart: [], next: null };
+    const led = render(<LawnReportV2Section data={{ ...base, lead }} />);
+    expect(led.container.querySelector('[data-testid="lawn-photo-findings"]')).not.toBeNull();
+  });
+
+  it('prints nothing without a set, or without findings', () => {
+    const noSet = render(<LawnReportV2Section data={{ ...base, photoSet: undefined }} />);
+    expect(noSet.container.querySelector('[data-testid="lawn-photo-findings"]')).toBeNull();
+    noSet.unmount();
+    const noFindings = render(<LawnReportV2Section data={{ ...base, photoFindings: undefined }} />);
+    expect(noFindings.container.querySelector('[data-testid="lawn-photo-findings"]')).toBeNull();
+    noFindings.unmount();
+    // every finding hidden by its card: the server sends an empty list
+    const emptied = render(<LawnReportV2Section data={{ ...base, photoFindings: [] }} />);
+    expect(emptied.container.querySelector('[data-testid="lawn-photo-findings"]')).toBeNull();
+    expect(emptied.container.textContent).not.toContain('What the photos showed');
   });
 });

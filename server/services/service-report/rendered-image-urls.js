@@ -15,7 +15,8 @@
  * GATE_LAWN_REPORT_PHOTO_SET: when the payload carries a lawn photo set the
  * document prints the set in place of the `lawn-` turf copies in data.photos
  * and in place of the reportV2.photos strip copies, so the set is probed and
- * those copies are not.
+ * those copies are not. The thumbnails of the "What the photos showed" block
+ * (reportV2.photoFindings) are probed too, under the same condition.
  */
 function collectRenderedImageUrls(data) {
   const photoSet = (Array.isArray(data?.reportV2?.photoSet) ? data.reportV2.photoSet : [])
@@ -26,6 +27,9 @@ function collectRenderedImageUrls(data) {
       .filter((p) => !(hasPhotoSet && p && String(p.id || '').startsWith('lawn-')))
       .map((p) => p?.url),
     ...photoSet.map((p) => p.url),
+    // "What the photos showed": the thumbnails under each finding (the document
+    // prints that block only where a set renders).
+    ...(hasPhotoSet ? findingThumbnailUrls(data) : []),
     ...(hasPhotoSet ? [] : (Array.isArray(data?.reportV2?.photos) ? data.reportV2.photos : [])
       .map((p) => p?.url || p?.imageUrl)),
     ...((data?.proofMoments || data?.visualServiceMoments || [])
@@ -35,6 +39,13 @@ function collectRenderedImageUrls(data) {
     data?.treatmentMap?.traced?.snapshotUrl,
   ];
   return [...new Set(urls.filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)))];
+}
+
+function findingThumbnailUrls(data) {
+  return (Array.isArray(data?.reportV2?.photoFindings) ? data.reportV2.photoFindings : [])
+    .flatMap((finding) => (Array.isArray(finding?.photos) ? finding.photos : []))
+    .filter((p) => p && p.url)
+    .map((p) => p.url);
 }
 
 module.exports = { collectRenderedImageUrls };
