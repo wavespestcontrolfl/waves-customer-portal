@@ -84,7 +84,11 @@ const REGISTRY_LIVE = {
   live_status: 'live',
   reconciliation_status: 'matched',
   noindex_detected: false,
-  metadata: {},
+  // The deployed page's own words (an Astro-only row's frontmatter).
+  metadata: { frontmatter: {
+    title: 'Ghost Ant Control in Sarasota: What Actually Works',
+    meta_description: 'Tiny ghost ants trail along counters after rain. Here is how we treat them.',
+  } },
   published_at: '2026-08-01T00:00:00Z',
 };
 // A row whose frontmatter renders it on a spoke only.
@@ -99,6 +103,8 @@ const registryRow = (id, title, change = {}) => ({
   live_url: `https://www.wavespestcontrol.com/blog/${id}/`,
   canonical_url: `https://www.wavespestcontrol.com/blog/${id}/`,
   canonical_url_normalized: `/blog/${id}/`,
+  // No frontmatter title: the link shows the page's own heading.
+  metadata: {},
   ...change,
 });
 
@@ -165,7 +171,10 @@ describe('registryLink', () => {
     ['not published', { workflow_status: 'draft' }],
     ['noindex', { noindex_detected: true }],
     ['a spoke site only', { live_url: 'https://bradentonfllawncare.com/blog/ghost-ants/', canonical_url: 'https://bradentonfllawncare.com/blog/ghost-ants/' }],
-    ['no title', { title: ' ', h1: '' }],
+    // The title column is never the link's (a merged row may hold the
+    // portal's unpublished copy there; GitHub Codex P2 on d527cd5de1).
+    ['no title', { title: 'Ghost Ant Guide (draft)', h1: '', metadata: { frontmatter: { title: ' ' } } }],
+    ['no frontmatter title or heading', { h1: ' ', metadata: { astro: { frontmatter: {} } } }],
   ])('%s never links', (_label, change) => {
     expect(registryLink({ ...REGISTRY_LIVE, ...change })).toBeNull();
   });
@@ -265,8 +274,8 @@ describe('searchReportBlogPosts', () => {
       ['content_registry whereIn', 'live_status', ['live', 'live_visible']],
       ['content_registry whereIn', 'reconciliation_status', ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync']],
       ['content_registry whereRaw', 'COALESCE(noindex_detected, false) = false'],
-      ['content_registry inner orWhereRaw', "COALESCE(title, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
-      ['content_registry inner orWhereRaw', "COALESCE(meta_description, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
+      ['content_registry inner orWhereRaw', "COALESCE(COALESCE(NULLIF(metadata #>> '{frontmatter,title}', ''), NULLIF(metadata #>> '{astro,frontmatter,title}', '')), '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
+      ['content_registry inner orWhereRaw', "COALESCE(COALESCE(NULLIF(metadata #>> '{frontmatter,meta_description}', ''), NULLIF(metadata #>> '{frontmatter,description}', ''), NULLIF(metadata #>> '{astro,frontmatter,meta_description}', ''), NULLIF(metadata #>> '{astro,frontmatter,description}', '')), '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
       ['content_registry inner orWhereRaw', "COALESCE(h1, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
     ]));
     // The portal's own table is never read: its fields can be edited before a
@@ -329,6 +338,44 @@ describe('searchReportBlogPosts', () => {
       const deployed = registryRow('aaaaaaaa-0000-4000-8000-000000000064', 'Spring Yard Checklist', { metadata });
       expect((await searchReportBlogPosts(recordingKnex({ content_registry: [deployed] }), 'ghost ants')).map((post) => post.id)).toEqual([deployed.id]);
     }
+  });
+
+  test('an empty keyword alias never hides a populated one, in the SQL or the ranking (GitHub Codex P2 on d527cd5de1)', async () => {
+    const knex = recordingKnex({ content_registry: [] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    const sql = knex.calls.filter(([name]) => name.startsWith('content_registry')).map(([, text]) => String(text)).join('\n');
+    expect(sql).toContain("NULLIF(metadata #>> '{frontmatter,target_keyword}', '')");
+    expect(sql).toContain("NULLIF(metadata #>> '{astro,frontmatter,keyword}', '')");
+    for (const metadata of [
+      { frontmatter: { target_keyword: '', primary_keyword: 'ghost ant control' } },
+      { astro: { frontmatter: { target_keyword: '', primary_keyword: '', keyword: 'ghost ant control' } } },
+    ]) {
+      const row = registryRow('aaaaaaaa-0000-4000-8000-000000000066', 'Spring Yard Checklist', { metadata });
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: [row] }), 'ghost ants')).map((post) => post.id)).toEqual([row.id]);
+    }
+  });
+
+  test('a search reads, and a link shows, the deployed title and summary, never the database copy a merged row falls back to (GitHub Codex P2 on d527cd5de1)', async () => {
+    // A merged row whose page has no frontmatter title or description: the
+    // registry fills those columns from the portal's editable copy.
+    const merged = registryRow('aaaaaaaa-0000-4000-8000-000000000067', 'Spring Yard Checklist', {
+      title: 'Ghost Ant Guide (draft)', meta_description: 'Ghost ants after rain.', metadata: { astro: { frontmatter: {} } },
+    });
+    expect(await searchReportBlogPosts(recordingKnex({ content_registry: [merged] }), 'ghost ants')).toEqual([]);
+    expect(registryLink(merged).title).toBe('Spring Yard Checklist');
+    // The deployed frontmatter's title and description are read, and its title shown.
+    const titled = { ...merged, metadata: { astro: { frontmatter: { title: 'Ghost Ants After Rain' } } } };
+    expect(await searchReportBlogPosts(recordingKnex({ content_registry: [titled] }), 'ghost ants'))
+      .toEqual([{ id: titled.id, title: 'Ghost Ants After Rain', url: titled.live_url }]);
+    const described = { ...merged, metadata: { frontmatter: { title: '', description: 'Why ghost ants trail inside after a storm.' } } };
+    expect((await searchReportBlogPosts(recordingKnex({ content_registry: [described] }), 'ghost ants')).map((post) => post.title)).toEqual(['Spring Yard Checklist']);
+    // The search's SQL never reads the columns.
+    const knex = recordingKnex({ content_registry: [] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    const sql = knex.calls.filter(([name]) => name.startsWith('content_registry')).map(([, text]) => String(text)).join('\n');
+    expect(sql).not.toMatch(/COALESCE\((title|meta_description), ''\)/);
+    expect(sql).toContain("NULLIF(metadata #>> '{astro,frontmatter,title}', '')");
+    expect(sql).toContain("NULLIF(metadata #>> '{frontmatter,description}', '')");
   });
 
   test('a two-letter topic is a search word ("UV", "AI"); two-letter filler is not (GitHub Codex P2 on ffab3fb66a)', async () => {
@@ -401,7 +448,7 @@ describe('searchReportBlogPosts', () => {
     const knex = recordingKnex({
       content_registry: [
         registryRow('aaaaaaaa-0000-4000-8000-000000000001', 'Mosquitoes Love Standing Water After Rain'),
-        registryRow('aaaaaaaa-0000-4000-8000-000000000002', 'Lanai Mosquito Tips', { meta_description: 'Tip out standing water every week.', published_at: '2026-09-01T00:00:00Z' }),
+        registryRow('aaaaaaaa-0000-4000-8000-000000000002', 'Lanai Mosquito Tips', { meta_description: 'Tip out standing water every week.', metadata: { frontmatter: { meta_description: 'Tip out standing water every week.' } }, published_at: '2026-09-01T00:00:00Z' }),
         registryRow('aaaaaaaa-0000-4000-8000-000000000003', 'Water Your Lawn Less in Summer'),
         registryRow('aaaaaaaa-0000-4000-8000-000000000004', 'Ghost Ants After Rain'),
       ],

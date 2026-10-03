@@ -165,7 +165,9 @@ class MissedAppointment {
         this.whereNull('resolution').orWhere('resolution', '<>', 'not_a_miss');
       })
       .where(function personMarked() {
-        if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date');
+        // 'manual_no_show' notes: a dispatch-marked no-show logged before the
+        // confirmation columns existed (the migration marked it backlog, unconfirmed)
+        if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date').orWhere('notes', 'manual_no_show');
       })
       .select(conn.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
       .first();
@@ -260,7 +262,7 @@ class MissedAppointment {
    *     no longer has two misses is cancelled;
    *   - a customer with a confirmed miss in the last `days` days, two misses, and
    *     NO task from this workflow in those days (whatever raised it — a
-   *     confirmation or a no-show Quick Move — and whatever its status) gets one.
+   *     confirmation or a no-show Quick Move — pending or done, not withdrawn) gets one.
    *     Conservative on purpose: it never adds a second task in the window.
    * Never throws.
    * @returns {Promise<{withdrawn: number, raised: number}>}
@@ -294,6 +296,8 @@ class MissedAppointment {
               .where({ customer_id: row.customer_id, interaction_type: 'task' })
               .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
               .where('created_at', '>', t.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+              // a task withdrawn at a "Not a miss" is not one: a later miss still owes its own
+              .whereNot({ status: 'cancelled' })
               .first('id');
             if (has) return null;
             return this.evaluateThreshold(row.customer_id, 'confirmed_miss', t, { logId: row.id });

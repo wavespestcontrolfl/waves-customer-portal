@@ -137,7 +137,7 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
               whereNotNull(c) { built.push(c); return b; },
               orWhereNotNull(c) { built.push(c); return b; },
               whereNull(c) { built.push(`null:${c}`); return b; },
-              orWhere(c, op, v) { built.push(`${c}${op}${v}`); return b; },
+              orWhere(c, op, v) { built.push(v === undefined ? `${c}=${op}` : `${c}${op}${v}`); return b; },
             };
             arg.call(b);
           }
@@ -158,7 +158,8 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     mockQueueOn = true;
     try {
       await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn);
-      expect(built).toEqual([...NOT_DISMISSED, 'miss_confirmed_at', 'new_date']);
+      // ...including a dispatch no-show logged before the confirmation columns existed
+      expect(built).toEqual([...NOT_DISMISSED, 'miss_confirmed_at', 'new_date', 'notes=manual_no_show']);
     } finally { mockQueueOn = false; }
   });
 
@@ -271,6 +272,7 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
       const conn = (table) => {
         const chain = {
           where() { return chain; }, whereNotNull() { return chain; }, orderBy() { return chain; },
+          whereNot(c) { writes.push(['dedupe-ignores', c.status]); return chain; },
           whereRaw() { return chain; },
           select: () => (table === 'customer_interactions' ? Promise.resolve(pendingTasks) : (table === 'reschedule_log' ? Object.assign(Promise.resolve(confirmed), { first: async () => ({ count }) }) : chain)),
           first: async () => {
@@ -302,11 +304,12 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
     test('two misses and no task in the window: one task, linked to the latest confirmed miss; any recent task (a Quick Move\'s too) means none is added', async () => {
       let writes = world({ confirmed: [{ id: 'log-B', customer_id: 'c1' }, { id: 'log-A', customer_id: 'c1' }], count: '2' });
       expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 1 });
-      expect(writes).toEqual([['insert', 'log-B']]); // the latest row only: never a second task for the earlier miss
+      // the latest row only: never a second task for the earlier miss; a withdrawn (cancelled) task does not block it
+      expect(writes).toEqual([['dedupe-ignores', 'cancelled'], ['insert', 'log-B']]);
       // e.g. first miss confirmed, second a no-show Quick Move whose task carries no log id
       writes = world({ confirmed: [{ id: 'log-A', customer_id: 'c1' }], recentTask: { id: 't1' }, count: '2' });
       expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
-      expect(writes).toEqual([]);
+      expect(writes).toEqual([['dedupe-ignores', 'cancelled']]);
     });
 
     test('a database failure never throws', async () => {

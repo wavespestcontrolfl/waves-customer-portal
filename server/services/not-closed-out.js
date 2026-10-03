@@ -379,7 +379,9 @@ function settlementFromVisit(visit, log) {
 }
 
 /**
- * The nightly repair pass over open flagged rows of the last `days` days. Both
+ * The nightly repair pass over EVERY open flagged row (a card has no expiry, so
+ * neither does its repair; the migration settled the backlog, and this pass keeps
+ * the open set small). Both
  * the first card and settle-on-evidence are best-effort where they run (they
  * never fail a status change, a move or the check), so a failure there would
  * otherwise be permanent:
@@ -389,14 +391,13 @@ function settlementFromVisit(visit, log) {
  * Each repair runs under the visit's lock and re-reads the row.
  * @returns {Promise<{raised: number, settled: number}>}
  */
-async function reconcileOpenRows({ days = 7 } = {}) {
+async function reconcileOpenRows() {
   let raised = 0;
   let settled = 0;
   try {
     const open = await db('reschedule_log')
       .where({ reason_code: 'customer_noshow' })
       .whereNull('resolved_at')
-      .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
       .orderBy('created_at', 'desc')
       .select('id', 'scheduled_service_id', 'original_date', 'original_window');
     const seen = new Set();

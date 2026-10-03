@@ -32,7 +32,10 @@ const PRIOR_DATE = '2026-06-01';
 
 // A product per family (exact catalog names) and the tag that makes a family curative.
 const PRODUCT = {
-  broadleaf: { name: 'Celsius WG' },
+  broadleaf: { name: 'LESCO Three-Way Selective Herbicide' },
+  celsius: { name: 'Celsius WG' },
+  speedZone: { name: 'SpeedZone Southern' },
+  sedgeHammer: { name: 'SedgeHammer Plus' },
   sedge: { name: 'Dismiss' },
   preEmergent: { name: 'Prodiamine 65 WDG' },
   granular: { name: 'LESCO 24-0-11' },
@@ -65,7 +68,7 @@ describe('rule 1: too_early is never behind', () => {
   ));
 
   it('covers every family that can be judged (config-derived)', () => {
-    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'fungicideCurative', 'granular', 'insecticideCurative', 'sedge']);
+    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative']);
   });
 
   it.each(families)('%s: no behind on any day up to the close of the metric window, at any delta', (_name, app) => {
@@ -327,8 +330,6 @@ describe('state matrix (verdicts come from P10 judgeProgress, renamed)', () => {
     ['broadleaf', 30, -9, 'weed_suppression', 'behind', 'behind'],
     ['broadleaf', 30, 7, 'weed_suppression', 'behind', 'behind'], // under the band is not a gain
     ['broadleaf', 30, 8, 'weed_suppression', 'on_track', 'on_track'], // the band itself is
-    ['sedge', 10, 0, 'weed_suppression', 'too_early', 'in_window'],
-    ['sedge', 40, 0, 'weed_suppression', 'behind', 'behind'],
     ['granular', 10, 9, 'color_health', 'improving', 'ahead'],
     ['granular', 29, 9, 'color_health', 'on_track', 'on_track'],
     ['granular', 29, 0, 'color_health', 'behind', 'behind'],
@@ -424,8 +425,23 @@ describe('transient, absence and unmapped rows are never behind', () => {
   });
 
   it('two products of one family are one row', () => {
-    const progress = run({ days: 30, applied: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }], cur: { weed_suppression: 85 } });
+    const progress = run({ days: 30, applied: [{ name: 'LESCO Three-Way Selective Herbicide' }, { name: 'Atrazine 4L' }], cur: { weed_suppression: 85 } });
     expect(progress.items.filter((i) => i.rowId === 'herbicide_broadleaf')).toHaveLength(1);
+  });
+
+  it('a row with nothing to judge against builds no comparison at all, whatever the score did', () => {
+    // SpeedZone, SedgeHammer Plus and the no-timing sedge row: no label
+    // efficacy timeline, so not even "holding steady" is said for them.
+    for (const app of [PRODUCT.speedZone, PRODUCT.sedgeHammer, PRODUCT.sedge, { name: 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide' }]) {
+      for (const weed of [20, 70, 95]) {
+        const progress = run({ days: 30, applied: [app], cur: { weed_suppression: weed } });
+        expect(progress.items.filter((i) => i.kind === 'applied')).toEqual([]);
+        expect(progress.unmapped).toEqual([]);
+      }
+    }
+    // Beside Celsius, only Celsius is judged.
+    const both = run({ days: 30, applied: [PRODUCT.celsius, PRODUCT.speedZone], cur: { weed_suppression: 85 } });
+    expect(both.items.filter((i) => i.kind === 'applied').map((i) => i.rowId)).toEqual(['herbicide_celsius']);
   });
 });
 
