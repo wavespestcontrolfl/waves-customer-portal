@@ -36,11 +36,19 @@ function mockChain(table) {
       updates.push({ table, where: state.where, patch });
       return 1;
     }),
+    then: (resolve, reject) => Promise.resolve(
+      (tables[table] || []).filter((r) => !state.where
+        || Object.entries(state.where).every(([k, v]) => r[k] === v))
+    ).then(resolve, reject),
   };
   return c;
 }
 
 jest.mock('../models/db', () => jest.fn((table) => mockChain(table)));
+jest.mock('../config', () => ({
+  ...jest.requireActual('../config'),
+  s3: { bucket: 'photo-route-test', region: 'us-east-1' },
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockUploadServicePhotoForVisit = jest.fn();
 jest.mock('../services/service-photos', () => ({

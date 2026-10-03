@@ -73,7 +73,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   afterAll(async () => {
     if (!db) return;
     try {
-        await db('service_records').where({ id: recordId, customer_id: customerId }).del();
+      await db('service_records').where({ id: recordId, customer_id: customerId }).del();
       await db('scheduled_services').whereIn('id', [completedVisitId, stagedVisitId]).del();
       await db('customers').where({ id: customerId, email: `qa-photo-${customerId}@example.invalid` }).del();
       await db('technicians').where({ id: technicianId }).del();
