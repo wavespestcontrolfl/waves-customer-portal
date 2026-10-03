@@ -4,8 +4,8 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(), openAdminAlertMetadata: jest.fn() };
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
-const mockLock = { held: false };
-jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => (mockLock.held ? { skipped: true, reason: 'lease_held' } : fn()) }));
+const mockLock = { held: false, fail: false };
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => { if (mockLock.fail) throw new Error('advisory lock query failed'); return mockLock.held ? { skipped: true, reason: 'lease_held' } : fn(); } }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -195,6 +195,15 @@ describe('syncLowRatingReviewAlerts', () => {
     const { resolveRingOnRefresh } = jest.requireActual('../services/notification-service')._private;
     await expect(resolveRingOnRefresh(opts.ringOnRefresh, {}, {})).resolves.toBe(false);
     await expect(resolveRingOnRefresh(false, {}, {})).resolves.toBe(true);
+  });
+
+  test('a failing lock never fails the review sync: the pass returns an error result', async () => {
+    mockLock.fail = true;
+    try {
+      const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 2, reviewer_name: 'Pat', customer_id: null }] });
+      await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ error: true });
+      expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    } finally { mockLock.fail = false; }
   });
 
   test('one pass at a time: a pass that finds the lock held raises and closes nothing', async () => {

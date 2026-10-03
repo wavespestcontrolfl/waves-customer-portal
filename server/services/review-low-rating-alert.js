@@ -135,9 +135,16 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   // against THIS pass's snapshot, so an overlapping pass (a manual sync during
   // the hourly one) could close an item the other just raised. A pass that
   // finds the lock held does nothing; the holder or the next sync covers it.
-  const { runExclusive } = require('../utils/cron-lock');
-  const ran = await runExclusive('review-low-rating-alert', () => reconcile(conn, now, out), { recordHealth: false });
-  return ran && typeof ran === 'object' && 'raised' in ran ? ran : { ...out, skipped: 'busy' };
+  // The lock itself can fail (its advisory-lock query); a bell pass must never
+  // fail the review sync that called it.
+  try {
+    const { runExclusive } = require('../utils/cron-lock');
+    const ran = await runExclusive('review-low-rating-alert', () => reconcile(conn, now, out), { recordHealth: false });
+    return ran && typeof ran === 'object' && 'raised' in ran ? ran : { ...out, skipped: 'busy' };
+  } catch (err) {
+    logger.warn(`[review-alert] low-rating pass could not take its lock: ${err.message}`);
+    return { ...out, error: true };
+  }
 }
 
 async function reconcile(conn, now, out) {
