@@ -246,6 +246,26 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     ]));
   });
 
+  test('everything the lead would have held reaches the office: name, email, address, service, timing', async () => {
+    const ctx = recognised({ getEstimateFields: () => ({ first_name: 'Robin', last_name: 'Sample' }) });
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Wants a quote emailed.', email: 'robin@example.com', preferred_contact_method: 'email',
+      address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', requested_service: 'Lawn Care Program',
+      preferred_date_time: 'mornings', estimate_requested: true,
+    }, ctx);
+    const { notes } = bell.mock.calls[0][0];
+    expect(notes).toEqual(expect.arrayContaining([
+      'Gave their name as Robin Sample.', // from an earlier capture on this call
+      'Email: robin@example.com.',
+      'Address given: 12 Test Street, Bradenton, 34205.',
+      'Service: Lawn Care Program.',
+      'Timing: mornings.',
+      'Asked for a written estimate — none was queued.',
+      'Prefers: email.',
+    ]));
+    expect(out).toMatch(/NO written estimate was queued/);
+  });
+
   test('a card number in the summary is scrubbed before it reaches the bell', async () => {
     await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
     expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);

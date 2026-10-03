@@ -1290,12 +1290,23 @@ async function executeTool(name, input = {}, ctx = {}) {
         const belled = await alertOfficeContactFollowUp({
           customerId: ctx.customerId,
           callbackPhone: callerPhone,
-          summary: [extracted.call_summary, extracted.requested_service, extracted.preferred_date_time].filter(Boolean).join(' — '),
+          summary: extracted.call_summary || extracted.requested_service || '',
           callSid: ctx.callSid || null,
-          // What the lead row would have carried about HOW to reach them: the
-          // office must see a channel preference or a do-not-contact request,
-          // and whether the text opt-out already landed.
+          // ⭐ EVERYTHING THE LEAD ROW WOULD HAVE HELD rides the bell, since
+          // the bell is this call's only artifact: who they said they are and
+          // how to reach them (`extracted` already carries what earlier
+          // captures on this call gave), what they want and when, and HOW they
+          // asked to be contacted — with whether the text opt-out landed.
           notes: [
+            [extracted.first_name, extracted.last_name].filter(Boolean).length
+              ? `Gave their name as ${[extracted.first_name, extracted.last_name].filter(Boolean).join(' ')}.` : null,
+            extracted.email ? `Email: ${extracted.email}.` : null,
+            [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).length
+              ? `Address given: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}.` : null,
+            extracted.requested_service ? `Service: ${extracted.requested_service}.` : null,
+            extracted.preferred_date_time ? `Timing: ${extracted.preferred_date_time}.` : null,
+            extracted.pain_points ? `Problem: ${extracted.pain_points}.` : null,
+            estimateRequested ? 'Asked for a written estimate — none was queued.' : null,
             extracted.preferred_contact_method ? `Prefers: ${extracted.preferred_contact_method}.` : null,
             scrubbedField(extracted.contact_preference) ? `Contact preference: “${scrubbedField(extracted.contact_preference)}”.` : null,
             extracted.do_not_contact_request
@@ -1310,6 +1321,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             + 'lead was created and none should be. The office has their number and your summary. Tell '
             + 'the caller a Waves team member will follow up with THEM, and do not say a new request or appointment '
             + 'was created. Never promise that Waves will contact the account holder.'
+            + (estimateRequested ? ' NO written estimate was queued — do not promise one; the office will go over it with them.' : '')
             + (smsSuppressionApplied ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
         }
       }

@@ -663,6 +663,11 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
     }, {
       bell: true,
       dedupeKey: `sandy-contact-followup:${callSid}`,
+      // One bell per call; a later capture on the same call (a corrected
+      // number, an added email, a do-not-contact request) rewrites it in
+      // place without ringing again.
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       // The number to reach them on, the whole summary, and anything they
       // asked about HOW to be contacted (a channel, a do-not-contact request)
       // — read from "Show full text".
