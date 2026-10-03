@@ -27,7 +27,8 @@ const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const TRIAL_TABLE = 'sms_translation_trials';
-const PROMPT_VERSION = 'sms_translation_trial_v1';
+// v2 (2026-10-03): re-service wording for the translator and the meaning check; courtesy strength is not a difference
+const PROMPT_VERSION = 'sms_translation_trial_v2';
 const MAX_TEXT = 1600;
 const TRANSLATED_SEGMENT_LIMIT = 4;
 
@@ -176,7 +177,7 @@ async function translateInbound(inbound) {
 async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). Return only the translation. ${DATA_NOTE}`,
+    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). A \"re-service\" is a free return visit to treat the property again between regular visits: translate it as a return visit to treat again, never as a new or additional service. Return only the translation. ${DATA_NOTE}`,
     text: dataBlock(englishReply),
     jsonSchema: TRANSLATE_SCHEMA,
   });
@@ -244,7 +245,7 @@ function sameWrittenLanguage(asked, written) {
 async function meaningCheck({ englishReply, backTranslation }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
+    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. A "re-service" in ORIGINAL is a free return visit to treat again: "re-treatment visit" or "return visit to treat again" in BACK is the same thing, while "new service" or "another service" is not. How strongly a courtesy is worded ("sorry" / "very sorry", "thanks" / "thank you very much") is not a difference. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
     text: `ORIGINAL:\n${dataBlock(englishReply)}\n\nBACK:\n${dataBlock(backTranslation)}`,
     jsonSchema: MEANING_SCHEMA,
   });
@@ -313,14 +314,32 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.(?:\p{L}{2,}|xn--[a-z0-9-]+)/giu;
 // Other separated runs (dates like "10/14", "14/10") compare part by part.
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
 // Chinese / Japanese / Korean write the hour with a suffix: 14点, 14時, 14시
-const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|[時시点點])/iu;
+// (Vietnamese "9 giờ", Haitian Creole "9 è" / "9è", Russian "9 часов")
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|ore\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
 // a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
 const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b|[時시点點])/iu;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
 const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
-const LOCAL_PM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:tarde|noche)|da\s+(?:tarde|noite)|de\s+l['\u2019]apr[eè]s-midi|du\s+soir|in\s+the\s+(?:afternoon|evening)|at\s+night)\b/i;
-const LOCAL_AM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:ma[nñ]ana|madrugada)|da\s+manh[aã]|du\s+matin|in\s+the\s+morning)\b/i;
+// (an hour word may sit between the number and the half: "2 h du soir", "9 giờ sáng", "9 è nan maten", "2 часа дня")
+// Words that name NIGHT without saying which side of midnight ("đêm", "ночи", "nachts") are left out: such a
+// time keeps no half on its side and holds the trial.
+const HOUR_GAP = '(?:(?:h|uhr|ore|gi\\u1EDD|\\u00E8|\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?)\\s+)?';
+const END = '(?![\\p{L}\\p{N}])';
+const LOCAL_PM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
+  'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
+  'in\\s+the\\s+(?:afternoon|evening)', 'at\\s+night',
+  // Vietnamese, Haitian Creole, Russian, Italian, German, Tagalog
+  'chi\\u1EC1u', 't\\u1ED1i', 'tr\\u01B0a',
+  'nan\\s+apr[e\\u00E8]midi', 'apr[e\\u00E8]midi', 'nan\\s+asw[e\\u00E8]', 'di\\s?swa',
+  '\\u0434\\u043D\\u044F', '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
+  'del\\s+pomeriggio', 'di\\s+sera', 'nachmittags', 'abends', 'ng\\s+hapon', 'ng\\s+gabi',
+].join('|')})${END}`, 'iu');
+const LOCAL_AM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
+  'de\\s+la\\s+(?:ma[n\\u00F1]ana|madrugada)', 'da\\s+(?:manh[a\\u00E3]|madrugada)', 'du\\s+matin', 'in\\s+the\\s+morning',
+  's\\u00E1ng', 'nan\\s+maten', 'di\\s?maten', '\\u0443\\u0442\\u0440\\u0430',
+  'di\\s+mattina', 'del\\s+mattino', 'morgens', 'vormittags', 'ng\\s+umaga',
+].join('|')})${END}`, 'iu');
 // languages that name the half of the day BEFORE the number: Chinese 下午2点, Japanese 午後2時, Korean 오후 2시
 const PREFIX_PM_RE = /(?:下午|晚上|傍晚|中午|午後|夜|오후|저녁)\s*$/u;
 const PREFIX_AM_RE = /(?:上午|早上|凌晨|清晨|午前|朝|오전|새벽)\s*$/u;
@@ -534,7 +553,13 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   // strict mode (our reply): a number in words is a number ("two hours" = 2); the translator writes digits
   const en = protectedTokens(strictTimes ? require('./sms-shadow-drafter').normalizeNumberWords(String(englishReply || '')) : englishReply, { strictTimes });
   const tr = protectedTokens(translated, { strictTimes });
-  const missingDigits = diffCounts(en.digits, tr.digits);
+  // "one" is also how English says "a" ("I see one payment of $57.78" -> "Veo un pago de $57.78"): a 1 that
+  // the English wrote as the WORD may be left as the translation's article. Only that word and only that
+  // direction; a changed count ("un" -> "dos") is the read-back meaning check's to catch, and a digit the
+  // translation adds still holds.
+  const wordedOnes = strictTimes ? diffCounts(en.digits, protectedTokens(englishReply, { strictTimes }).digits).filter((d) => d === '1').length : 0;
+  let spareOnes = wordedOnes;
+  const missingDigits = diffCounts(en.digits, tr.digits).filter((d) => !(d === '1' && spareOnes-- > 0));
   const addedDigits = diffCounts(tr.digits, en.digits);
   const digits = strictTimes ? { missing: missingDigits, added: addedDigits } : pairTwentyFourHour(missingDigits, addedDigits, en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];

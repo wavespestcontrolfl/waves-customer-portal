@@ -85,6 +85,29 @@ beforeEach(() => {
 });
 
 describe('tokenParity', () => {
+  // From the made-up test of 2026-10-03 (24 texts, 4 held): three of the holds were gaps in these checks.
+  test('a customer\'s half of the day is read in more languages (Vietnamese, Russian, Haitian Creole), and still cannot flip', () => {
+    const loose = (en, tr) => tokenParity(en, tr, { strictTimes: false });
+    expect(loose('I would like to reschedule to Saturday at 9 AM, is that possible?', 'Tôi muốn đổi lịch hẹn sang thứ Bảy lúc 9 giờ sáng được không?').ok).toBe(true);
+    expect(loose('Can you come at 2 PM?', 'Bạn đến lúc 2 giờ chiều được không?').ok).toBe(true);
+    expect(loose('Come at 2 PM', 'Приходите в 2 часа дня').ok).toBe(true);
+    expect(loose('Come at 9 AM', 'Приходите в 9 утра').ok).toBe(true);
+    expect(loose('Come at 9 AM', 'Vini a 9è nan maten').ok).toBe(true);
+    expect(loose('Come at 3 PM', 'Vini a 3 è nan aprèmidi').ok).toBe(true);
+    // a flipped half holds
+    expect(loose('Can you come at 9 PM?', 'Bạn đến lúc 9 giờ sáng được không?')).toMatchObject({ ok: false, order: ['9 pm', '9 am'] });
+    // "đêm" (night) does not say which side of midnight: no half is read, so the English half is unmatched
+    expect(loose('Can you come at 11 PM?', 'Bạn đến lúc 11 giờ đêm được không?')).toMatchObject({ ok: false, order: ['11 pm'] });
+  });
+
+  test('"one" written as a word may be the translation\'s article; a digit 1, another count or an added digit still hold', () => {
+    expect(tokenParity('Hi Andres, I am sorry about that. I see one payment of $57.78 on Oct 1.', 'Hola Andres, lamentamos eso. Veo un pago de $57.78 el 1 de oct.').ok).toBe(true);
+    expect(tokenParity('I see one payment.', 'Veo 1 pago.').ok).toBe(true);
+    expect(tokenParity('I see one payment.', 'Veo 2 pagos.')).toMatchObject({ ok: false, added: ['2'] });
+    expect(tokenParity('I see two payments.', 'Veo dos pagos.')).toMatchObject({ ok: false, missing: ['2'] });
+    expect(tokenParity('You have 1 visit left.', 'Le queda una visita.')).toMatchObject({ ok: false, missing: ['1'] });
+  });
+
   test('a translation that keeps every figure passes, 12-hour times may read as 24-hour', () => {
     expect(tokenParity(REPLY, REPLY_ES)).toEqual({ ok: true, missing: [], added: [] });
   });
@@ -732,6 +755,17 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's0' })).toMatchObject({ verdict: 'ready' });
     scriptModels({ inbound: SPANISH_INBOUND, translated: `${REPLY_ES} ${'Gracias por su paciencia, ¡nos vemos pronto! '.repeat(8)}` });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_over_segment_limit' });
+  });
+
+  test('the translator and the meaning check are told what a re-service is, and that courtesy strength is not a difference', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    const translate = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Translate a text message'))[1].system;
+    expect(translate).toContain('free return visit to treat the property again');
+    expect(translate).toContain('never as a new or additional service');
+    const meaning = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'))[1].system;
+    expect(meaning).toContain('"new service" or "another service" is not');
+    expect(meaning).toContain('How strongly a courtesy is worded');
   });
 
   test('the language named in later prompts comes from the code table, never the model\'s free text', async () => {
