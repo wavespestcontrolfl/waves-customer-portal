@@ -1437,6 +1437,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // text; every other job under the v11 charge-now prepay text.
     const deferredToFirstVisit = job.deferred_to_first_visit === true;
     const jobConsentVariant = deferredToFirstVisit ? 'after_visit_prepay' : 'prepay_card';
+    // Payer scope for every payer resolution of this job: a deferred year is
+    // the ACCOUNT's bill (the charge's selfPayAccountScope), so enrollment,
+    // settlement checks and payer recovery resolve the account too, never one
+    // visit's Bill-To (GitHub Codex #5567 r19 pre-push).
+    const jobPayerScopeSsId = deferredToFirstVisit ? null : (job.payer_scope_scheduled_service_id || null);
     const resolve = async (status, extra = {}) => {
       try {
         // Atomic JSON-path merge — same rationale as the claim above.
@@ -1511,7 +1516,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           try {
             const coveragePayer = await require('./payer').resolveForInvoice({
               customerId: invoice.customer_id,
-              scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+              scheduledServiceId: jobPayerScopeSsId,
               throwOnError: true,
             });
             if (coveragePayer?.payerId && !invoice.payer_id) {
@@ -1804,7 +1809,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // payer-billed account must not have this recovery enrollment
           // resolve the account-default payer, refuse, and retire the job
           // to a pay link instead of the authorized charge.
-          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          scheduledServiceId: jobPayerScopeSsId,
           // The customer's authorization moment (Codex r16): an Auto Pay
           // opt-out AFTER acceptance must WIN — the enrollment refuses
           // opted_out_after_authorization and the sweep falls to the
@@ -1872,7 +1877,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           paymentMethodId: pmRow.id,
           source: 'estimate_accept',
           details: { via: 'prepay_recovery_sweep', estimate_id: row.id, invoice_id: invoice.id },
-          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          scheduledServiceId: jobPayerScopeSsId,
           // Post-accept Auto Pay revocations WIN (Codex r16): with the
           // job's authorization timestamp, a later autopay_disabled event
           // refuses opted_out_after_authorization instead of this sweep
@@ -1916,8 +1921,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           ...(deferredToFirstVisit ? {} : { expectedTotal: Number(job.authorized_total_cents) / 100 }),
           // …but the locked pre-credit bill never above what was approved, so
           // credit can't mask an increase (GitHub Codex #5567 r18).
-          ...(deferredToFirstVisit && Number.isInteger(job.authorized_subtotal_cents)
-            ? { maxAuthorizedSubtotal: job.authorized_subtotal_cents / 100 } : {}),
+          ...(deferredToFirstVisit && Number.isInteger(job.authorized_invoice_total_cents)
+            ? { maxAuthorizedInvoiceTotalCents: job.authorized_invoice_total_cents } : {}),
+          // The year is the account's bill: a visit-level Bill-To edit after
+          // the held closeout never routes it to that visit's payer (GitHub
+          // Codex #5567 r19).
+          ...(deferredToFirstVisit ? { selfPayAccountScope: true } : {}),
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
           requireAutopayForCustomerId: invoice.customer_id,
           // Live payer re-resolve IN the charge lock (Codex r9): the
@@ -2002,7 +2011,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
             const resolved = await require('./payer').resolveForInvoice({
               customerId: invoice?.customer_id,
               // Same scope basis the lane was admitted with (Codex r13).
-              scheduledServiceId: job.payer_scope_scheduled_service_id || invoiceRow?.scheduled_service_id || null,
+              scheduledServiceId: deferredToFirstVisit ? null : (job.payer_scope_scheduled_service_id || invoiceRow?.scheduled_service_id || null),
               throwOnError: true,
             });
             if (resolved?.payerId) {

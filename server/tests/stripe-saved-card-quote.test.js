@@ -651,6 +651,77 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('an invoice total raised above the approved pre-credit amount refuses under the lock (maxAuthorizedInvoiceTotalCents)', async () => {
+    // An invoice with NO scheduled service has nothing for the visit-keyed
+    // self-pay guard to key on — the default-payer resolve on the
+    // transaction connection is the binding check.
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      subtotal: '200.00', total: '200.00', discount_amount: '0.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        // Still completed, but its CURRENT closeout was re-closed as declined.
+        // Performed, but a re-closeout cleared the year's held stamp.
+        if (table === 'scheduled_services') return { id: 'svc-1', customer_id: 'cust-1', status: 'completed', paf_held_term_id: null };
+        if (table === 'service_records') return { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) };
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') {
+          chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        }
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/payer', () => ({
+      resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+    }));
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {
+      maxAuthorizedInvoiceTotalCents: 19000,
+    })).rejects.toThrow('exceeds the customer-accepted amount');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
   test('requireCompletedVisit without a visit id refuses before touching Stripe', async () => {
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     const StripeService = require('../services/stripe');

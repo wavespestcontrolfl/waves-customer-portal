@@ -4046,7 +4046,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
     expect(jobOf()).toMatchObject({
       status: 'awaiting_first_visit', deferred_to_first_visit: true, invoice_id: 'inv-prepay-1', authorized_total_cents: quote.totalCents,
-      authorized_subtotal_cents: Math.round(Number(db.__state.quotedBase) * 100),
+      authorized_invoice_total_cents: Math.round(Number(db.__state.quotedBase) * 100),
       consent_variant_version: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
     });
     expect(require('../services/payment-method-consents').recordConsent)

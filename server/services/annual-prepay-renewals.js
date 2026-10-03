@@ -4284,7 +4284,7 @@ async function deferredPrepayHoldCustomerIds(conn, customerIds) {
   return new Set(rows.map((r) => String(r.customer_id)));
 }
 
-async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
+async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false, skipDeferredHold = false } = {}) {
   if (!scheduledService) return false;
 
   // Codex round-7 P1 (owner ruling 2026-09-26, P2-4): an UNPAID termite
@@ -4319,7 +4319,9 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
     if (throwOnError) throw stampErr;
     logger.warn(`[annual-prepay] held-stamp coverage check failed for scheduled service ${scheduledService.id}: ${stampErr.message}`);
   }
-  if (await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
+  // `skipDeferredHold`: a quiet backfill closeout never takes the waiting
+  // year's hold (it keeps its review invoice); paid coverage still applies.
+  if (!skipDeferredHold && await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED

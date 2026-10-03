@@ -380,6 +380,33 @@ postgres('annual prepay charged after the first visit', () => {
     expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
   });
 
+  it('a quiet backfill closeout never takes the deferred hold (Codex r19)', async () => {
+    const f = await deferredAccept();
+    const renewals = require('../services/annual-prepay-renewals');
+    const spy = jest.spyOn(renewals, 'pafDeferredHoldingTerm');
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60, scheduled_date: day(-3) });
+    // The backfilled visit sits inside the waiting year's window.
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ term_start: day(-10) });
+    expect(await covers(f.parentId)).toBe(true);
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false, backfill: true } });
+    const record = await trx('service_records').where({ scheduled_service_id: f.parentId }).first('structured_notes');
+    const notes = typeof record?.structured_notes === 'string' ? JSON.parse(record.structured_notes) : (record?.structured_notes || {});
+    expect(notes.backfill).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+    // …and it keeps its normal open review invoice (pre-push audit).
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toHaveLength(1);
+    spy.mockRestore();
+  });
+
   it('a reopened held visit closed again as paid another way loses its stamp (Codex r16)', async () => {
     const f = await deferredAccept();
     const techId = randomUUID();
@@ -1009,7 +1036,7 @@ postgres('annual prepay charged after the first visit', () => {
         Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }));
       await sweep();
       expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true, requirePerformedVisit: true, requireHeldTermId: f.termId }));
-      // (authorized_subtotal_cents caps the pre-credit bill when the job carries it.)
+      // (authorized_invoice_total_cents caps the pre-credit bill when the job carries it.)
       expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', released_for_visit_id: null });
       expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
@@ -1055,8 +1082,8 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
     });
 
-    it('the deferred charge caps the pre-credit bill at the approved amount (Codex r18)', async () => {
-      const f = await deferredAccept({ jobPatch: { authorized_subtotal_cents: TOTAL_CENTS } });
+    it('the deferred charge caps the pre-credit bill total and checks only the account payer (Codex r18, r19)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_invoice_total_cents: TOTAL_CENTS } });
       await perform(f.parentId, f.customerId);
       expect(await release()).toMatchObject({ released: 1 });
       const StripeService = require('../services/stripe');
@@ -1065,7 +1092,27 @@ postgres('annual prepay charged after the first visit', () => {
         return { ok: true };
       });
       await sweep();
-      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ maxAuthorizedSubtotal: TOTAL_CENTS / 100 }));
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ maxAuthorizedInvoiceTotalCents: TOTAL_CENTS, selfPayAccountScope: true }));
+    });
+
+    it('a deferred year whose account gains a payer is re-routed at account scope by the recovery handler (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      // An account payer only (the held visit itself is self-pay).
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('payer'), { code: 'PAYER_BILLED_GUARD' }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
     });
 
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {

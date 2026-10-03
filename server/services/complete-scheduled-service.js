@@ -9469,7 +9469,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
       svc.paf_held_term_id = null;
     }
-    if (!visitIsPayerBilled && !svc.prepaid_method) {
+    // A quiet backfill closeout never takes the deferred hold: it keeps its
+    // normal open review invoice, since a backfill neither releases the year
+    // nor reaches the cancelled-year handoff (GitHub Codex #5567 r19).
+    if (!visitIsPayerBilled && !svc.prepaid_method && !isBackfillCompletion) {
       try {
         // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
         // (first run, or a visit reopened and completed again, possibly
@@ -9512,7 +9515,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
     const annualPrepayCovered = !visitIsPayerBilled
-      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db));
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion }));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
