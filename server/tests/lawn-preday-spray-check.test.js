@@ -54,28 +54,30 @@ const baseLine = (product, over = {}) => ({ raw: 'Broadleaf step', role: 'base',
 // A tiny knex stand-in: the visits query, the dedupe read, and a transaction.
 function fakeDb({ visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }], alerts = [], visitState = {} } = {}) {
   const store = alerts;
-  // Mirrors the SQL of supersedeStaleCards over an in-memory visit table.
-  const closed = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show', 'on_site'];
-  const staleCards = () => store.filter((a) => a.type === 'lawn_spray_hold' && !a.resolved_at).filter((a) => {
-    const v = visitState[a.job_id];
-    return a.payload.for_date < DAY || !v || v.scheduled_date !== a.payload.for_date || closed.includes(v.status)
-      || (v.window_start ?? null) !== (a.payload.window_start ?? null);
-  }).map((a) => ({ id: a.id }));
+  // The visit table: explicit visitState wins, else a live visit as the sweep query found it.
+  const stateOf = (id) => visitState[id] ?? (visits.find((v) => v.id === id)
+    ? { id, status: 'confirmed', scheduled_date: DAY, window_start: visits.find((v) => v.id === id).window_start } : undefined);
+  const openCards = () => store.filter((a) => a.type === 'lawn_spray_hold' && !a.resolved_at).map((a) => {
+    const v = stateOf(a.job_id);
+    return { id: a.id, payload: a.payload, visit_id: v ? a.job_id : null, visit_status: v?.status, visit_date: v?.scheduled_date, visit_window: v?.window_start };
+  });
   const chain = (table) => {
     const state = { where: {}, bindings: [] };
     const c = {
-      join: () => c, whereNull: () => c, whereNotIn: () => c, orderBy: () => c,
+      join: () => c, whereNull: () => c, orderBy: () => c,
+      whereIn: (col, vals) => { dbh.whereInCalls.push([col, vals]); return c; },
       where: (arg) => { if (arg && typeof arg === 'object') Object.assign(state.where, arg); return c; },
       whereRaw: (sql, b) => { state.bindings = b; return c; },
       // leftJoin/limit/orderBy are the stale-card read: read-only, no forUpdate on the fake.
       leftJoin: () => c, limit: () => c,
-      select: async () => (String(table).startsWith('dispatch_alerts') ? staleCards() : visits),
-      first: async () => store.find((a) => a.job_id === state.where.job_id && a.type === state.where.type
-        && a.payload.for_date === state.bindings[0] && (a.payload.window_start ?? null) === state.bindings[1]),
+      select: async () => (String(table).startsWith('dispatch_alerts') ? openCards() : visits),
+      first: async () => (table === 'scheduled_services' ? stateOf(state.where.id) : store.find((a) => a.job_id === state.where.job_id && a.type === state.where.type
+        && a.payload.for_date === state.bindings[0] && (a.payload.window_start ?? null) === state.bindings[1])),
     };
     return c;
   };
   const dbh = (table) => chain(table);
+  dbh.whereInCalls = [];
   dbh.raw = jest.fn(async () => ({}));
   dbh.transaction = async (fn) => { const trx = (t) => chain(t); trx.raw = dbh.raw; return fn(trx); };
   return dbh;
@@ -86,7 +88,7 @@ function deps({ ctx, fc, alerts }) {
     loadCatalog: jest.fn(async () => []),
     loadContext: jest.fn(async () => ctx),
     fetchForecast: jest.fn(async () => fc),
-    createAlert: jest.fn(async ({ type, severity, jobId, payload }) => { alerts.push({ id: `alert-${alerts.length + 1}`, type, severity, job_id: jobId, payload, resolved_at: null }); return {}; }),
+    createAlert: jest.fn(async ({ type, severity, jobId, payload }) => { const row = { id: `alert-${alerts.length + 1}`, type, severity, job_id: jobId, payload, resolved_at: null }; alerts.push(row); return row; }),
     resolveAlert: jest.fn(async ({ id }) => { const a = alerts.find((x) => x.id === id); a.resolved_at = 'NOW'; a.auto = true; return a; }),
   };
 }
@@ -229,7 +231,7 @@ describe('rain over a label interval that is not a whole number of hours', () =>
       fc: forecast({ rain: slot == null ? {} : { [slot]: 0.2 }, prob: 80 }),
       alerts,
     });
-    await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts, visits: [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: windowStart }] }), now: NOW, deps: d });
     return alerts.map((a) => a.payload.lines[0]);
   }
   const text = (inches, interval, time = '9:00 AM') => `Sample Herbicide: hold. ${inches} in of rain forecast in the ${interval} after the ${time} arrival. Move the visit to a clearer window.`;
@@ -267,7 +269,7 @@ describe('rain over a label interval that is not a whole number of hours', () =>
     const alerts = [];
     const half = new Date(ARRIVAL.getTime() + HOUR / 2);
     const d = deps({ ctx: ctxFor([baseLine(herbicide)], { windowStart: '09:30:00', arrival: half }), fc: forecast({ wind: (i) => (i === 0 ? 22 : 6) }), alerts });
-    await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts, visits: [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:30:00' }] }), now: NOW, deps: d });
     expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 22 mph in the 4 h after the 9:30 AM arrival/);
   });
 });
@@ -286,7 +288,7 @@ describe('a card never outlives the visit it was written for', () => {
   };
 
   test('visit moved to another day: card superseded, nothing written for the old date, no forecast read', async () => {
-    const { out, alerts, d } = await sweepWith({ cards: [card()], visitState: { 'visit-1': { scheduled_date: '2026-10-05', status: 'scheduled', window_start: '09:00:00' } } });
+    const { out, alerts, d } = await sweepWith({ cards: [card()], visitState: { 'visit-1': { scheduled_date: '2026-10-05', status: 'confirmed', window_start: '09:00:00' } } });
     expect(out.superseded).toBe(1);
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ id: 'old-card', resolved_at: 'NOW', auto: true });
@@ -298,7 +300,7 @@ describe('a card never outlives the visit it was written for', () => {
     const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '13:00:00' }];
     const ctx = ctxFor([baseLine(herbicide)], { windowStart: '13:00:00', arrival: new Date('2026-10-03T17:00:00Z') });
     const { out, alerts } = await sweepWith({ cards: [card()], visits, ctx,
-      visitState: { 'visit-1': { scheduled_date: DAY, status: 'scheduled', window_start: '13:00:00' } } });
+      visitState: { 'visit-1': { scheduled_date: DAY, status: 'confirmed', window_start: '13:00:00' } } });
     expect(out).toMatchObject({ superseded: 1, carded: 1 });
     expect(alerts.filter((a) => !a.resolved_at).map((a) => a.payload.window_start)).toEqual(['13:00:00']);
     expect(alerts.find((a) => a.id === 'old-card').resolved_at).toBe('NOW');
@@ -307,7 +309,7 @@ describe('a card never outlives the visit it was written for', () => {
   test('an unchanged visit keeps its open card (no churn)', async () => {
     const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }];
     const { out, alerts } = await sweepWith({ cards: [card()], visits,
-      visitState: { 'visit-1': { scheduled_date: DAY, status: 'scheduled', window_start: '09:00:00' } } });
+      visitState: { 'visit-1': { scheduled_date: DAY, status: 'confirmed', window_start: '09:00:00' } } });
     expect(out).toMatchObject({ superseded: 0, carded: 0, duplicate: 1 });
     expect(alerts[0].resolved_at).toBeNull();
   });
@@ -315,7 +317,7 @@ describe('a card never outlives the visit it was written for', () => {
   test('past-day, cancelled and deleted-visit cards are all superseded', async () => {
     const cards = [card({ for_date: '2026-10-02' }), { ...card(), id: 'c2', job_id: 'visit-2' }, { ...card(), id: 'c3', job_id: 'visit-3' }];
     const { out, alerts } = await sweepWith({ cards, visitState: {
-      'visit-1': { scheduled_date: '2026-10-02', status: 'scheduled', window_start: '09:00:00' },
+      'visit-1': { scheduled_date: '2026-10-02', status: 'confirmed', window_start: '09:00:00' },
       'visit-2': { scheduled_date: DAY, status: 'cancelled', window_start: '09:00:00' },
     } });
     expect(out.superseded).toBe(3);
@@ -328,6 +330,90 @@ describe('a card never outlives the visit it was written for', () => {
     d.resolveAlert = jest.fn(async () => { throw new Error('boom'); });
     const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visitState: {} }), now: NOW, deps: d });
     expect(out).toMatchObject({ superseded: 0, carded: 1 });
+  });
+});
+
+describe('a transition that lands while the forecast loads leaves no card', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  const live = () => ({ id: 'visit-1', status: 'confirmed', scheduled_date: DAY, window_start: '09:00:00' });
+  const transitions = {
+    cancelled: { status: 'cancelled' },
+    started: { status: 'on_site' },
+    rescheduled: { status: 'rescheduled' },
+    'moved to another day': { scheduled_date: '2026-10-06' },
+    'time moved': { window_start: '14:00:00' },
+  };
+
+  test.each(Object.entries(transitions))('%s during the forecast read: nothing is published', async (name, change) => {
+    const alerts = [];
+    const visitState = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    d.fetchForecast = jest.fn(async () => { Object.assign(visitState['visit-1'], change); return forecast({ wind: 30 }); });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visitState }), now: NOW, deps: d });
+    expect(out).toMatchObject({ held: 1, stale: 1, carded: 0 });
+    expect(d.createAlert).not.toHaveBeenCalled();
+    expect(alerts.filter((a) => !a.resolved_at)).toHaveLength(0);
+  });
+
+  test('a transition that commits after the pre-insert read is caught by the post-commit re-check', async () => {
+    const alerts = [];
+    const visitState = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    const insert = d.createAlert;
+    d.createAlert = jest.fn(async (args) => { const row = await insert(args); visitState['visit-1'].status = 'cancelled'; return row; });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visitState }), now: NOW, deps: d });
+    expect(out).toMatchObject({ stale: 1, carded: 0 });
+    expect(d.resolveAlert).toHaveBeenCalledWith({ id: 'alert-1', auto: true });
+    expect(alerts.filter((a) => !a.resolved_at)).toHaveLength(0);
+  });
+
+  test('on_site and every closed status are never queried', async () => {
+    const alerts = [];
+    const dbh = fakeDb({ alerts });
+    await Sweep.runSweep({ dbh, now: NOW, deps: deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast(), alerts }) });
+    const [col, statuses] = dbh.whereInCalls.find(([c]) => c === 's.status');
+    expect(statuses).toEqual(['pending', 'confirmed', 'en_route']);
+    expect(statuses).toBe(Sweep.OPEN_PRE_ARRIVAL_STATUSES);
+    expect(col).toBe('s.status');
+  });
+});
+
+describe('cardStillValid', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { TERMINAL_SCHEDULED_SERVICE_STATUSES: T, NONTERMINAL_SCHEDULED_SERVICE_STATUSES: N } = require('../services/scheduled-service-statuses');
+  // The status list comes from the code: the shared vocabulary, cross-checked against the CHECK constraint migration.
+  const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260615000005_scheduled_services_no_show_status.js'), 'utf8');
+  const checkList = [...migration.slice(migration.indexOf('STATUS_VALUES')).split(']')[0].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  const ALL = [...new Set([...N, ...T])];
+  const card = { for_date: DAY, window_start: '09:00:00' };
+  const visit = (over = {}) => ({ status: 'confirmed', scheduled_date: DAY, window_start: '09:00:00', ...over });
+
+  test('the status list used here is the system\'s: shared vocabulary equals the CHECK constraint', () => {
+    expect([...ALL].sort()).toEqual([...checkList].sort());
+    expect(ALL.length).toBeGreaterThanOrEqual(9);
+  });
+
+  test.each(ALL)('status %s', (status) => {
+    expect(Sweep.cardStillValid(visit({ status }), card)).toBe(['pending', 'confirmed', 'en_route'].includes(status));
+  });
+
+  test('missing visit, unknown or null status, another day, another window, a past day', () => {
+    expect(Sweep.cardStillValid(null, card)).toBe(false);
+    expect(Sweep.cardStillValid(visit({ status: null }), card)).toBe(false);
+    expect(Sweep.cardStillValid(visit({ status: 'mystery' }), card)).toBe(false);
+    expect(Sweep.cardStillValid(visit({ scheduled_date: '2026-10-04' }), card)).toBe(false);
+    expect(Sweep.cardStillValid(visit({ window_start: '10:00:00' }), card)).toBe(false);
+    expect(Sweep.cardStillValid(visit(), card, '2026-10-04')).toBe(false);
+    expect(Sweep.cardStillValid(visit(), card, DAY)).toBe(true);
+  });
+
+  test('a date column returned as a Date, and a no-window visit, compare by calendar day and wall time', () => {
+    expect(Sweep.cardStillValid(visit({ scheduled_date: new Date('2026-10-03T00:00:00Z') }), card)).toBe(true);
+    expect(Sweep.cardStillValid(visit({ window_start: null }), { for_date: DAY, window_start: null })).toBe(true);
+    expect(Sweep.cardStillValid(visit({ window_start: null }), card)).toBe(false);
   });
 });
 

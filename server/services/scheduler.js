@@ -4406,7 +4406,7 @@ function initScheduledJobs() {
         if (result.skipped === true) {
           logger.info(`Lawn pre-day spray check inert: ${result.reason}`);
         } else {
-          logger.info(`Lawn pre-day spray check done: ${result.carded} carded, ${result.held} held, ${result.checked} checked, ${result.duplicate} already carded, ${result.superseded} stale cleared, ${result.unavailable} unavailable, ${result.failed} failed of ${result.considered}${result.deadline ? ' (stopped at the time budget)' : ''}`);
+          logger.info(`Lawn pre-day spray check done: ${result.carded} carded, ${result.held} held, ${result.checked} checked, ${result.duplicate} already carded, ${result.superseded} stale cleared, ${result.stale} dropped as stale, ${result.unavailable} unavailable, ${result.failed} failed of ${result.considered}${result.deadline ? ' (stopped at the time budget)' : ''}`);
         }
       });
     } catch (err) {

@@ -418,12 +418,6 @@ const DECISION_ONLY_ALERT_TYPES = Object.freeze(['visit_not_closed_out']);
 // Same terminal-status set clears both.
 const OVERDUE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 
-// Cleared by the same terminal-status transitions as the overdue family but
-// NOT part of it (the no-show detector reads OVERDUE_ALERT_TYPES for its own
-// dedupe). The pre-day spray hold (services/lawn-preday-spray-check.js) is
-// moot once the visit starts, is done, or is off the day.
-const STATUS_CLEARED_ALERT_TYPES = [...OVERDUE_ALERT_TYPES, 'lawn_spray_hold'];
-
 /**
  * Resolve every open overdue-family alert (tech_late +
  * unassigned_overdue) for a job when the job's new status makes
@@ -457,7 +451,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
   }
   const t = trx || db;
   const openAlerts = await t('dispatch_alerts')
-    .whereIn('type', STATUS_CLEARED_ALERT_TYPES)
+    .whereIn('type', OVERDUE_ALERT_TYPES)
     .where({ job_id: jobId })
     .whereNull('resolved_at')
     .select('id');
@@ -470,28 +464,43 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
 }
 
 /**
- * Supersede (system-resolve, auto: true) the open pre-day spray hold for a job
- * whose status moved to 'rescheduled' (cancel-and-rebook leaves the old row
- * there). Its own function so the overdue family keeps the no-op it has on
- * 'rescheduled'. Date and time edits that do not change status are caught by
- * the 5:19 sweep itself (lawn-preday-spray-check.js, supersedeStaleCards).
+ * Supersede (system-resolve, auto: true) every open pre-day spray hold of a
+ * job that no longer passes cardStillValid (lawn-spray-card-validity.js: the
+ * visit is gone, closed, started, on another day or at another window). Run
+ * after every status transition, so a cancel, an arrival or a cancel-and-
+ * rebook retires the card in the transition's own trx. Its own function so
+ * the overdue family keeps its status table (a no-op on 'rescheduled'). Date
+ * and time edits that do not pass through here are caught by the 5:19 sweep
+ * (lawn-preday-spray-check.js, supersedeStaleCards), same predicate.
+ *
+ * Deliberately NO advisory lock shared with the sweep's publish step: this
+ * runs inside the transition's trx, which already holds the visit row's
+ * lock, and the sweep holds that advisory lock while it inserts a card whose
+ * job_id foreign key touches the same visit row. Taking the lock here would
+ * invert that order. The sweep closes the race from its side instead (it
+ * re-reads the visit before the insert and again after the commit).
  */
-async function supersedeSprayHoldsOnReschedule({ jobId, resolvedBy, trx, toStatus } = {}) {
-  if (!jobId || toStatus !== 'rescheduled') return { resolved: 0 };
-  const open = await (trx || db)('dispatch_alerts')
+async function supersedeInvalidSprayHolds({ jobId, resolvedBy, trx } = {}) {
+  if (!jobId) return { resolved: 0 };
+  const { cardStillValid, readVisit } = require('./lawn-spray-card-validity');
+  const t = trx || db;
+  const open = await t('dispatch_alerts')
     .where({ type: 'lawn_spray_hold', job_id: jobId })
     .whereNull('resolved_at')
-    .select('id');
+    .select('id', 'payload');
+  if (!open.length) return { resolved: 0 };
+  const visit = await readVisit(t, jobId);
   let resolved = 0;
-  for (const { id } of open) {
-    if (await resolveAlert({ id, resolvedBy, trx, auto: true })) resolved += 1;
+  for (const row of open) {
+    if (cardStillValid(visit, row.payload)) continue;
+    if (await resolveAlert({ id: row.id, resolvedBy, trx, auto: true })) resolved += 1;
   }
   return { resolved };
 }
 
 module.exports = {
   emitAlert,
-  supersedeSprayHoldsOnReschedule,
+  supersedeInvalidSprayHolds,
   createAlert,
   createAlertOnce,
   resolveAlert,

@@ -127,7 +127,7 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
-const { autoResolveOverdueAlertsForJob, supersedeSprayHoldsOnReschedule } = require('./dispatch-alerts');
+const { autoResolveOverdueAlertsForJob, supersedeInvalidSprayHolds } = require('./dispatch-alerts');
 
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -555,9 +555,15 @@ async function transitionJobStatus({
     await autoResolveOverdueAlertsForJob({
       jobId, resolvedBy: transitionedBy, trx: t, toStatus,
     });
-    await supersedeSprayHoldsOnReschedule({
-      jobId, resolvedBy: transitionedBy, trx: t, toStatus,
-    });
+    // The pre-day spray hold card lives only while its visit is still open,
+    // on its day and at its window (lawn-spray-card-validity.js). Savepoint-
+    // confined and best-effort, like the not-closed-out hook below: it never
+    // blocks or aborts the transition.
+    try {
+      await t.transaction((sp) => supersedeInvalidSprayHolds({ jobId, resolvedBy: transitionedBy, trx: sp }));
+    } catch (sprayErr) {
+      logger.warn(`[job-status] spray hold supersede failed for ${jobId}: ${sprayErr.message}`);
+    }
 
     // A flagged ("not closed out") visit that is now completed, cancelled or
     // skipped is settled: stamp its reschedule_log rows and close its card.

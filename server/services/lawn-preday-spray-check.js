@@ -23,6 +23,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { lawnPredaySprayCheckLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { OPEN_PRE_ARRIVAL_STATUSES, cardStillValid, readVisit } = require('./lawn-spray-card-validity');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { fetchPropertyForecast } = require('./service-report/application-conditions');
 const JobCard = require('./job-card');
@@ -40,7 +41,6 @@ const SWEEP_BUDGET_MS = Number(process.env.LAWN_PREDAY_SPRAY_CHECK_BUDGET_MS) > 
 // A rain reason needs measured rain: below one hundredth of an inch the
 // forecast probability alone does not make a card (rain is quantitative).
 const RAIN_MIN_INCHES = 0.01;
-const TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show'];
 
 const enabled = () => lawnPredaySprayCheckLive();
 
@@ -193,31 +193,25 @@ async function alreadyCarded(dbh, jobId, day, windowStart) {
   return Boolean(row);
 }
 
-// Open cards that no longer describe their visit are superseded (system
-// resolve, same stamp as the status hooks): the visit left the card's day,
-// its arrival window changed (the numbers were for the old arrival), it is in
-// a closed status or gone, or the card is from a previous day. Date and time
-// edits have no single write chokepoint, so this read is the catch-all.
-// Read-only on visits (a join, no row locks), bounded.
-const STALE_CARD_LIMIT = 200;
+// Open cards whose visit fails cardStillValid are superseded (system
+// resolve, same stamp as the status hooks). Date and time edits have no
+// single write chokepoint, so this read is the catch-all. The open cards are
+// few (one per lawn visit per day); the join is read-only on visits (no row
+// locks) and bounded.
+const STALE_CARD_LIMIT = 1000;
 async function supersedeStaleCards({ dbh, day, resolve }) {
-  const stale = await dbh('dispatch_alerts as a')
+  const open = await dbh('dispatch_alerts as a')
     .leftJoin('scheduled_services as s', 's.id', 'a.job_id')
     .where('a.type', TYPE)
     .whereNull('a.resolved_at')
-    .where(function staleCard() {
-      this.whereRaw("a.payload->>'for_date' < ?", [day])
-        .orWhereNull('s.id')
-        .orWhereRaw("to_char(s.scheduled_date, 'YYYY-MM-DD') <> a.payload->>'for_date'")
-        .orWhereIn('s.status', [...TERMINAL_STATUSES, 'on_site'])
-        .orWhereRaw("s.window_start::text IS DISTINCT FROM a.payload->>'window_start'");
-    })
     .orderBy('a.created_at', 'asc')
     .limit(STALE_CARD_LIMIT)
-    .select('a.id');
+    .select('a.id', 'a.payload', 's.id as visit_id', 's.status as visit_status', 's.scheduled_date as visit_date', 's.window_start as visit_window');
   let count = 0;
-  for (const { id } of stale) {
-    if (await (resolve || resolveAlert)({ id, auto: true })) count += 1;
+  for (const row of open) {
+    const visit = row.visit_id ? { status: row.visit_status, scheduled_date: row.visit_date, window_start: row.visit_window } : null;
+    if (cardStillValid(visit, row.payload, day)) continue;
+    if (await (resolve || resolveAlert)({ id: row.id, auto: true })) count += 1;
   }
   return count;
 }
@@ -235,16 +229,31 @@ async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
       alternative: h.alternative,
     })),
   };
-  return dbh.transaction(async (trx) => {
+  // Publish: inside the per-visit advisory lock (a lock key, never a visit
+  // row), re-read the visit and write only if the card is still valid for the
+  // date, window and status the forecast was computed for.
+  const mine = { for_date: day, window_start: ctx.windowStart || null };
+  const published = await dbh.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn-preday-spray-check:${jobId}:${day}`]);
-    if (await alreadyCarded(trx, jobId, day, ctx.windowStart)) return false;
-    await (deps.createAlert || createAlert)({ type: TYPE, severity: 'warn', jobId, payload, trx });
-    return true;
+    if (await alreadyCarded(trx, jobId, day, ctx.windowStart)) return { outcome: 'duplicate' };
+    if (!cardStillValid(await readVisit(trx, jobId), mine, day)) return { outcome: 'stale' };
+    const row = await (deps.createAlert || createAlert)({ type: TYPE, severity: 'warn', jobId, payload, trx });
+    return { outcome: 'carded', id: row?.id };
   });
+  if (published.outcome !== 'carded') return published.outcome;
+  // The status hook (dispatch-alerts.js supersedeInvalidSprayHolds) does not
+  // take our advisory lock, so one that committed between the re-read and this commit could not see the card.
+  // Re-read once more now that the card is visible and supersede it if the
+  // visit has moved on.
+  if (!cardStillValid(await readVisit(dbh, jobId), mine, day)) {
+    if (published.id) await (deps.resolveAlert || resolveAlert)({ id: published.id, auto: true });
+    return 'stale';
+  }
+  return 'carded';
 }
 
 // One visit → { counter, checked, held }: the result counter it moves
-// (duplicate / unavailable / carded, or null), whether a forecast was judged,
+// (duplicate / unavailable / stale / carded, or null), whether a forecast was judged,
 // and whether a hold was found. Throws are the caller's to count.
 async function checkVisit({ dbh, visit, day, now, catalog, deps }) {
   if (await alreadyCarded(dbh, visit.id, day, visit.window_start)) return { counter: 'duplicate' };
@@ -263,14 +272,14 @@ async function checkVisit({ dbh, visit, day, now, catalog, deps }) {
   if (forecast?.status !== 'ok') return { counter: 'unavailable' };
   const holds = holdsForVisit({ ctx, forecast });
   if (!holds.length) return { checked: true };
-  return { counter: (await writeCard({ dbh, jobId: visit.id, day, ctx, holds, deps })) ? 'carded' : 'duplicate', checked: true, held: true };
+  return { counter: await writeCard({ dbh, jobId: visit.id, day, ctx, holds, deps }), checked: true, held: true };
 }
 
 async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
   if (!enabled()) return { skipped: true, reason: 'gate_off' };
   const day = etDateString(now);
   const deadline = Date.now() + SWEEP_BUDGET_MS;
-  const result = { considered: 0, checked: 0, held: 0, carded: 0, duplicate: 0, unavailable: 0, failed: 0, superseded: 0, deadline: false };
+  const result = { considered: 0, checked: 0, held: 0, carded: 0, duplicate: 0, stale: 0, unavailable: 0, failed: 0, superseded: 0, deadline: false };
   try {
     result.superseded = await supersedeStaleCards({ dbh, day, resolve: deps.resolveAlert });
   } catch (err) {
@@ -280,7 +289,7 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
     .join('customers as c', 's.customer_id', 'c.id')
     .whereNull('c.deleted_at')
     .where('s.scheduled_date', day)
-    .whereNotIn('s.status', TERMINAL_STATUSES)
+    .whereIn('s.status', OPEN_PRE_ARRIVAL_STATUSES)
     .orderBy('s.window_start', 'asc')
     .orderBy('s.id', 'asc')
     .select('s.id', 's.service_type', 's.window_start');
@@ -311,4 +320,4 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
   return result;
 }
 
-module.exports = { enabled, runSweep, supersedeStaleCards, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };
+module.exports = { enabled, runSweep, supersedeStaleCards, cardStillValid, OPEN_PRE_ARRIVAL_STATUSES, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };
