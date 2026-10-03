@@ -1381,18 +1381,18 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   } else if (!rateWritten) {
     patch.status = 'draft';
     patch.sent_at = null;
-    if (live.applied_at && prepay) {
-      // The renewal amount the apply staged from this notice goes with it. Even when the
-      // 30-day renewal reminder has already gone out: that generic reminder does not quote
-      // the new amount, so a retained amount would be enforced at renewal (the renewal
-      // guard keys on it) as an increase the customer never received.
-      const term = meta.term_id ? await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first() : null;
-      if (term && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents)) {
-        await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
-        next.prepay_unstaged = true;
-      }
-      Object.assign(patch, { applied_at: null, apply_hold_reason: null, applies_from_visit_id: null });
+  }
+  // Either way (clean failure or parked as uncertain) the customer holds no confirmed
+  // notice, so a prepaid increase the apply staged from this notice goes with it —
+  // even after the 30-day reminder (which does not quote the new amount): a retained
+  // amount would be enforced at renewal as an increase the customer never received.
+  if (!rateWritten && live.applied_at && prepay) {
+    const term = meta.term_id ? await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first() : null;
+    if (term && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents)) {
+      await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
+      next.prepay_unstaged = true;
     }
+    Object.assign(patch, { applied_at: null, apply_hold_reason: null, applies_from_visit_id: null });
   }
   await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
   const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();

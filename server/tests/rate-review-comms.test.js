@@ -1309,6 +1309,27 @@ describe('customer surfaces', () => {
       expect(JSON.parse(snapshots()[0].flags || '[]')).not.toContain('delivery_bounced');
     });
 
+    test('prepaid + unknown channel: when the confirmed channel fails and the letter parks as uncertain, the staged increase is still cleared and the notice unapplied', async () => {
+      const prepay = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+      });
+      const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+      b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+      mockDb.reset(b);
+      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // unknown
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      Object.assign(notices()[0], { applied_at: NOW });
+      mockDb.store.annual_prepay_terms[0].next_term_prepay_amount = '484.00';
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh: mockDb });
+      expect(notices()[0]).toMatchObject({ status: 'send_uncertain', sent_at: null, applied_at: null });
+      expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+      expect(meta().pending_letter).toBeTruthy();
+    });
+
     test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
       mockDb.reset(book());
       emailLeg.mockResolvedValue({ sent: false, attempted: true });
