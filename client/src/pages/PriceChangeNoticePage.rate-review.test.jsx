@@ -41,6 +41,9 @@ describe('PriceChangeNoticePage v2', () => {
     expect(screen.getByText('$121 / application')).toBeInTheDocument();
     expect(screen.getByText('$117 / application')).toBeInTheDocument();
     expect(screen.getByText('up $4')).toBeInTheDocument();
+    // the policy floor is 30 days (a notice delivered exactly 30 days ahead is valid): never "more than"
+    expect(document.body.textContent).toMatch(/written notice, at least 30 days ahead/);
+    expect(document.body.textContent).not.toMatch(/more than 30 days/);
     expect(screen.getByText('Technician pay is up [test]%.')).toBeInTheDocument();
     expect(screen.getByText(/below what we charge a new customer/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open my portal' })).toHaveAttribute('href', '/');

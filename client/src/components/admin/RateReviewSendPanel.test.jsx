@@ -41,6 +41,9 @@ describe('RateReviewSendPanel', () => {
     render(<RateReviewSendPanel batchKey="2026-12" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Send 1 letter' }));
     const dialogSend = (await screen.findAllByRole('button', { name: 'Send 1 letter' })).at(-1);
+    // true for all three billing lanes: per application, monthly dues, prepaid renewal
+    expect(screen.getByRole('dialog').textContent).toMatch(/the first application, the first monthly charge or the prepaid renewal on or after that date/);
+    expect(screen.getByRole('dialog').textContent).toMatch(/at least 30 days from today \(32 for a prepaid renewal\)/);
     fireEvent.click(dialogSend);
     await waitFor(() => expect(mockAdminFetch).toHaveBeenCalledWith('/admin/rate-review/batches/2026-12/send', { method: 'POST', body: JSON.stringify({ expectedDigest: DIGEST }) }));
     expect(await screen.findByText('1 letter sent (1 emailed, 1 texted).')).toBeInTheDocument();

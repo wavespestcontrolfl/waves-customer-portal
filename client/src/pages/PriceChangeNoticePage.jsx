@@ -88,7 +88,7 @@ function RateReviewNotice({ data }) {
         Your rate from {first.effectiveDate}
       </h1>
       <p style={BODY}>
-        Hi {data.firstName}, this is your written notice, more than 30 days ahead, as promised when you signed up.
+        Hi {data.firstName}, this is your written notice, at least 30 days ahead, as promised when you signed up.
         {several ? ' Your rates are going up on the dates below.' : ` Your ${(first.service || 'service').toLowerCase()} rate is going up on ${first.effectiveDate}.`}
         {' '}The reasons are below.
       </p>

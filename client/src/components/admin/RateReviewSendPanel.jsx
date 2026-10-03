@@ -187,8 +187,9 @@ export default function RateReviewSendPanel({ batchKey, disabled = false, refres
         <DialogHeader><DialogTitle>Send {lettersLabel}</DialogTitle></DialogHeader>
         <DialogBody className="space-y-3">
           <p className="m-0">
-            {view.counts.email} by email and {view.counts.sms} by text go out now. Each customer's new rate applies to
-            their first application on or after the date in their letter, at least 30 days from today.
+            {view.counts.email} by email and {view.counts.sms} by text go out now. Each letter names the date its new rate
+            starts: the first application, the first monthly charge or the prepaid renewal on or after that date. Every date
+            is at least 30 days from today (32 for a prepaid renewal).
           </p>
           <p className="m-0 text-ink-secondary">
             {plural(view.counts.suppressedLines, "line")} held back stay unsent. If the list or the cost block changed
