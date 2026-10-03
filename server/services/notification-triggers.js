@@ -1099,7 +1099,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // dispatcher after the canonical send already delivered. promise_chaser:
     // its sweep is stateless and never retries a push, so a dedupe hit can
     // only be a concurrent dispatch of the same (promise, ET day) that
-    // already pushed.
+    // already pushed. property_lookup_canary_failed: keyed per ET day, and a
+    // hit is the deploy-kill retry of a run that already alerted.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1169,7 +1170,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellWritten = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
