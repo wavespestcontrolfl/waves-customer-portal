@@ -265,27 +265,56 @@ async function reconcileFailedManualAttempt(customerId, period, attemptRow, { co
   }
 }
 
-// A card needing 3D Secure leaves its PaymentIntent LIVE in Stripe (stripe.js does not cancel it), so
-// collecting a replacement without neutralizing it can collect twice if the original is later completed
-// (its succeeded webhook would flip the original row to paid). Called by Charge now INSIDE the customer
-// billing lock, BEFORE the replacement charge: cancel the live intent of each of the customer's parked
-// (requires_action) failed rows for the month through the shared PI guard (prepaid-pi-guard.js:
-// cancels a cancelable intent, refuses when money is in flight, fails closed when unverifiable).
-//   { ok: true }                                  - nothing parked, or all neutralized: safe to charge
-//   { ok: false, reason: 'payment_in_flight' }    - the original is processing/succeeded: do NOT charge
+// A card needing 3D Secure leaves its PaymentIntent LIVE in Stripe (stripe.js does not cancel it), and an
+// off-session charge nobody can authenticate has no legitimate use for it. Left live it can be completed
+// later and collect on top of a replacement (its succeeded webhook would pay the original row too).
+//
+// INVARIANT: before ANY collector creates a new charge for a customer's month (Charge now, the monthly
+// cron charge, the monthly retry-ladder charge), every still-live requires-auth PaymentIntent for that
+// customer + month is neutralized first, whether its row is superseded, armed or unarmed. Also neutralized
+// at the source: when a charge parks on 3DS (the cron's two branches) and when a Charge now attempt itself
+// fails with requires-auth. The collector-time fence is the backstop for any of those that did not land.
+//
+// neutralizeScaIntent cancels one PaymentIntent through the shared PI guard (prepaid-pi-guard.js: cancels a
+// cancelable intent, refuses when money is in flight, fails closed when unverifiable) and, on success,
+// records it on the payments row (metadata.sca_intent_neutralized_at; no schema change) so later fences
+// skip it instead of calling Stripe again forever. The canceled webhook leaves a requires-auth failed row
+// as 'failed' (still owed), so canceling does not drop the debt from the balance.
+//   { ok: true }                                  - canceled (or already dead)
+//   { ok: false, reason: 'payment_in_flight' }    - processing / succeeded: money is moving; do NOT charge
 //   { ok: false, reason: 'payment_session_unverifiable' } - fail closed
+const NEUTRALIZED_KEY = 'sca_intent_neutralized_at';
+async function neutralizeScaIntent(paymentIntentId, paymentRowId = null, { conn = db } = {}) {
+  if (!paymentIntentId) return { ok: true, piId: null };
+  const { neutralizeOpenPaymentIntent } = require('./prepaid-pi-guard');
+  const result = await neutralizeOpenPaymentIntent(paymentIntentId);
+  if (result.ok && paymentRowId != null) {
+    try {
+      await conn('payments').where({ id: paymentRowId }).update({
+        metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [NEUTRALIZED_KEY]: new Date().toISOString() })]),
+      });
+    } catch (markErr) {
+      // the intent IS canceled; an unmarked row only costs one more (idempotent) Stripe read at the next fence
+      logger.warn(`[autopay-sca] canceled PI ${paymentIntentId} but could not mark payment ${paymentRowId}: ${markErr.message}`);
+    }
+  }
+  return result;
+}
+
+// The collector-time fence over every requires-auth row of the customer's month. NO superseded / armed
+// filters: a row superseded to a newer attempt or an armed retry still owns a live intent. Rows already
+// marked neutralized are skipped (no Stripe call). Runs inside the collector's customer billing lock.
+//   { ok: true }, or the failing neutralizeScaIntent result plus { paymentId }.
 async function fenceParkedIntentsForReplacement(customerId, period, { conn = db } = {}) {
   const rows = await conn('payments')
     .where({ customer_id: customerId, status: 'failed' })
-    .whereNull('superseded_by_payment_id')
-    .whereNull('next_retry_at')
     .whereNotNull('stripe_payment_intent_id')
     .whereRaw("metadata->>'requires_action' = 'true'")
+    .whereRaw(`COALESCE(metadata->>'${NEUTRALIZED_KEY}', '') = ''`)
     .where(monthScope(period))
     .select('id', 'stripe_payment_intent_id');
-  const { neutralizeOpenPaymentIntent } = require('./prepaid-pi-guard');
   for (const row of rows || []) {
-    const result = await neutralizeOpenPaymentIntent(row.stripe_payment_intent_id);
+    const result = await neutralizeScaIntent(row.stripe_payment_intent_id, row.id, { conn });
     if (!result.ok) return { ...result, paymentId: row.id };
   }
   return { ok: true };
@@ -440,4 +469,4 @@ async function reconcileScaParkedAlerts({ conn = db } = {}) {
 }
 
 module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment, reconcileScaParkedAlerts,
-  reconcileFailedManualAttempt, fenceParkedIntentsForReplacement };
+  reconcileFailedManualAttempt, fenceParkedIntentsForReplacement, neutralizeScaIntent, NEUTRALIZED_KEY };

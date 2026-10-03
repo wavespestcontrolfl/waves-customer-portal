@@ -125,6 +125,11 @@ function monthlyFailedPayment(overrides = {}) {
 
 let coveredSpy;
 let pendingSpy;
+// B16: the retry ladder's charge is preceded by the parked-intent fence, and parking cancels the live
+// intent. Both are Stripe-backed; the sweep tests below stub them (the fence / cancel logic itself is
+// covered in autopay-sca-parked-reconcile.test.js and the Charge now route test) and drive the outcomes.
+let fenceSpy;
+let neutralizeSpy;
 
 beforeEach(() => {
   mockFailedPayments = [];
@@ -145,11 +150,16 @@ beforeEach(() => {
   pendingSpy = jest
     .spyOn(AnnualPrepayRenewals, 'getPaymentPendingCustomerIds')
     .mockResolvedValue(new Set());
+  const Sca = require('../services/autopay-sca-parked');
+  fenceSpy = jest.spyOn(Sca, 'fenceParkedIntentsForReplacement').mockResolvedValue({ ok: true });
+  neutralizeSpy = jest.spyOn(Sca, 'neutralizeScaIntent').mockResolvedValue({ ok: true });
 });
 
 afterEach(() => {
   coveredSpy.mockRestore();
   pendingSpy.mockRestore();
+  fenceSpy.mockRestore();
+  neutralizeSpy.mockRestore();
 });
 
 describe('processPaymentRetries — suppression guards', () => {
@@ -750,6 +760,45 @@ describe('B16: retry ladder parked on card authentication (3DS)', () => {
     expect(result.retried).toBe(2); // the first row's failed park did not abort the sweep
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'sca_required', expect.anything());
+  });
+
+  // ---- the invariant, at the retry-ladder collector ----
+  describe('parked-intent fence before the retry rung charges (monthly rows)', () => {
+    test('the fence runs for the row\'s obligation month, inside the lock, BEFORE the charge', async () => {
+      mockFailedPayments = [monthlyFailedPayment()];
+      StripeService.charge.mockResolvedValue({ id: 'pay-ok', status: 'paid', amount: '33.00' });
+      await BillingCron.processPaymentRetries();
+      expect(fenceSpy).toHaveBeenCalledWith('cust-1', { monthKey: '2026-06', monthStart: '2026-06-01', monthEnd: '2026-06-30' });
+      expect(fenceSpy.mock.invocationCallOrder[0]).toBeLessThan(StripeService.charge.mock.invocationCallOrder[0]);
+    });
+
+    test('an original intent in flight (processing / succeeded): NOT charged, row left armed', async () => {
+      mockFailedPayments = [monthlyFailedPayment()];
+      fenceSpy.mockResolvedValue({ ok: false, reason: 'payment_in_flight', piStatus: 'processing', piId: 'pi_orig' });
+      await BillingCron.processPaymentRetries();
+      expect(StripeService.charge).not.toHaveBeenCalled();
+      expect(mockPaymentUpdates).toHaveLength(0); // no retry_count bump, no disarm, no supersede
+    });
+
+    test('unverifiable (Stripe error) or a fence that throws: NOT charged (fail closed), and the sweep continues to the next customer', async () => {
+      mockFailedPayments = [monthlyFailedPayment({ id: 'pay-a' }), monthlyFailedPayment({ id: 'pay-b' })];
+      fenceSpy.mockRejectedValueOnce(new Error('stripe unreachable'))
+        .mockResolvedValueOnce({ ok: true });
+      StripeService.charge.mockResolvedValue({ id: 'pay-ok', status: 'paid', amount: '33.00' });
+      const result = await BillingCron.processPaymentRetries();
+      expect(result.retried).toBe(2);
+      expect(StripeService.charge).toHaveBeenCalledTimes(1); // only the second row was charged
+    });
+  });
+
+  // ---- park time: cancel the live intent at the source ----
+  test('parking cancels the live 3DS intent (PI + row id); a failed cancel never aborts the sweep or the alert', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAllCharges(scaErr());
+    neutralizeSpy.mockRejectedValue(new Error('stripe down'));
+    await BillingCron.processPaymentRetries();
+    expect(neutralizeSpy).toHaveBeenCalledWith('pi_retry_sca', 'pay-retry-sca');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1); // still alerted
   });
 
   // B: a retry row that is not a WaveGuard Monthly row cannot be tied to an explicit-amount

@@ -340,3 +340,71 @@ describe('B16: monthly autopay parked on card authentication (3DS)', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   }, 15000);
 });
+
+// B16 invariant at the monthly cron collector: before chargeMonthly creates a charge, every live
+// requires-auth PaymentIntent for the customer + month is neutralized (the fence). In flight or
+// unverifiable: NOT charged this run (fail closed), the catch-up marker keeps the month due tomorrow,
+// the office is told, and the loop continues for the next customer.
+describe('B16: parked-intent fence before the monthly charge', () => {
+  const Sca = require('../services/autopay-sca-parked');
+  let fenceSpy;
+  let neutralizeSpy;
+  beforeEach(() => {
+    logAutopay.mockResolvedValue(undefined);
+    fenceSpy = jest.spyOn(Sca, 'fenceParkedIntentsForReplacement').mockResolvedValue({ ok: true });
+    neutralizeSpy = jest.spyOn(Sca, 'neutralizeScaIntent').mockResolvedValue({ ok: true });
+  });
+  afterEach(() => {
+    fenceSpy.mockRestore();
+    neutralizeSpy.mockRestore();
+    StripeService.chargeMonthly.mockReset();
+    logAutopay.mockReset();
+  });
+
+  test('the fence runs for this customer + billing month BEFORE the charge', async () => {
+    StripeService.chargeMonthly.mockResolvedValueOnce({ id: 'pay-1', status: 'paid', amount: 89 });
+    await BillingCron.processMonthlyBilling();
+    expect(fenceSpy).toHaveBeenCalledWith('cust-held', expect.objectContaining({ monthKey: expect.stringMatching(/^\d{4}-\d{2}$/) }));
+    expect(fenceSpy.mock.invocationCallOrder[0]).toBeLessThan(StripeService.chargeMonthly.mock.invocationCallOrder[0]);
+  }, 15000);
+
+  test.each([
+    ['in flight (processing / succeeded)', { ok: false, reason: 'payment_in_flight', piStatus: 'processing', piId: 'pi_orig' }, /being collected/],
+    ['unverifiable', { ok: false, reason: 'payment_session_unverifiable', piId: 'pi_orig' }, /could not be verified/],
+  ])('%s: NOT charged, office told, month kept due for tomorrow, no retry row', async (_label, blocked, titleRe) => {
+    fenceSpy.mockResolvedValue(blocked);
+    const result = await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(result.charged).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockHealthAlertInserts).toEqual([expect.objectContaining({ customer_id: 'cust-held', alert_type: 'billing_collection_deferred', title: expect.stringMatching(titleRe) })]);
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'skipped_parked_intent', expect.anything());
+    expect(mockPaymentsInserts).toHaveLength(0);
+    // the catch-up marker: tomorrow (not the billing day) the customer is due again for the same month
+    mockBillingDayMatches = false;
+    fenceSpy.mockResolvedValue({ ok: true });
+    StripeService.chargeMonthly.mockResolvedValueOnce({ id: 'pay-2', status: 'paid', amount: 89 });
+    await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
+  }, 15000);
+
+  test('a fence that THROWS fails closed for that customer only: the next customer is still charged', async () => {
+    mockCustomers = [{ ...baseCustomer }, { ...baseCustomer, id: 'cust-next', first_name: 'Next', last_name: 'Customer' }];
+    fenceSpy.mockRejectedValueOnce(new Error('stripe unreachable')).mockResolvedValueOnce({ ok: true });
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-n', status: 'paid', amount: 89 });
+    const result = await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1); // only the second customer
+    expect(result.charged).toBe(1);
+    expect(result.skipped).toBe(1);
+  }, 15000);
+
+  test('parking on 3DS cancels the live intent at the source (PI + row id); a failed cancel never aborts the loop or the alert', async () => {
+    neutralizeSpy.mockRejectedValue(new Error('stripe down'));
+    StripeService.chargeMonthly.mockRejectedValueOnce(Object.assign(new Error('Customer authentication required'), {
+      code: 'STRIPE_REQUIRES_ACTION', stripePaymentIntentId: 'pi_sca_1', paymentRecord: { id: 'pay-sca-1', amount: '89.00', stripe_payment_intent_id: 'pi_sca_1' },
+    }));
+    await BillingCron.processMonthlyBilling();
+    expect(neutralizeSpy).toHaveBeenCalledWith('pi_sca_1', 'pay-sca-1');
+    expect(require('../services/notification-service').notifyAdmin).toHaveBeenCalledTimes(1);
+  }, 15000);
+});

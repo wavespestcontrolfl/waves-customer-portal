@@ -333,6 +333,14 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           // per obligation month (failed-payments.js sums every unsuperseded failed row, so a parked or
           // earlier failed row plus this attempt would double the debt): link them the way the retry
           // ladder does. Orphan / ambiguous outcomes park their own rows and are left alone.
+          // A human-initiated off-session charge that needs 3D Secure can never be completed by
+          // anyone, so its live PaymentIntent is canceled right here, BEFORE any linking. If the
+          // cancel fails the row stays unmarked and the next collector's fence retries it.
+          if (err.code === 'STRIPE_REQUIRES_ACTION' && err.stripePaymentIntentId) {
+            await require('../services/autopay-sca-parked')
+              .neutralizeScaIntent(err.stripePaymentIntentId, err.paymentRecord?.id ?? null)
+              .catch((cancelErr) => logger.error(`[admin-billing-health] could not cancel the failed Charge now 3DS intent ${err.stripePaymentIntentId}: ${cancelErr.message}`));
+          }
           if (err.paymentRecord?.id && !['STRIPE_CHARGED_DB_FAILED', 'STRIPE_AMBIGUOUS_OUTCOME'].includes(err.code)) {
             await require('../services/autopay-sca-parked')
               .reconcileFailedManualAttempt(customerId, { monthKey, monthStart, monthEnd }, err.paymentRecord, { conn: db });

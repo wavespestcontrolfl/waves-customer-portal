@@ -36,6 +36,7 @@ jest.mock('../services/autopay-sca-parked', () => ({
   settleParkedForPaidPayment: jest.fn(async () => []),
   fenceParkedIntentsForReplacement: jest.fn(async () => ({ ok: true })),
   reconcileFailedManualAttempt: jest.fn(async () => null),
+  neutralizeScaIntent: jest.fn(async () => ({ ok: true })),
 }));
 const mockCloseAdminAlertKeys = jest.fn(async () => 1);
 jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...a) => mockCloseAdminAlertKeys(...a) }));
@@ -305,13 +306,19 @@ describe('charge-now already-collected guard', () => {
     function ledgerQB() {
       const qb = {};
       const tags = new Set();
-      ['where', 'whereIn', 'whereNull', 'whereNot', 'orWhere', 'andWhere', 'orderBy', 'limit'].forEach((m) => {
+      ['where', 'whereIn', 'whereNot', 'orWhere', 'andWhere', 'orderBy', 'limit'].forEach((m) => {
         qb[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0].call(qb, qb); return qb; });
       });
-      qb.whereRaw = jest.fn((sql) => { if (/requires_action/.test(sql)) tags.add('fence'); return qb; });
+      qb._nulls = [];
+      qb._raws = [];
+      qb._tags = tags;
+      ledger.qbs.push(qb);
+      qb.whereNull = jest.fn((col) => { qb._nulls.push(col); return qb; });
+      qb.whereRaw = jest.fn((sql) => { qb._raws.push(sql); if (/requires_action/.test(sql)) tags.add('fence'); return qb; });
       qb.whereNotNull = jest.fn((col) => { if (col === 'next_retry_at') tags.add('armed'); return qb; });
       qb.first = jest.fn(() => Promise.resolve(tags.has('armed') ? ledger.armedRow : ledger.firstResult));
-      qb.update = jest.fn((payload) => { ledger.updated += 1; ledger.updates.push(payload); return qb; });
+      // the neutralized-intent marker (a metadata merge) is bookkeeping, not a supersede
+      qb.update = jest.fn((payload) => { if (!payload.metadata) { ledger.updated += 1; ledger.updates.push(payload); } else ledger.markers = (ledger.markers || 0) + 1; return qb; });
       qb.returning = jest.fn(() => Promise.resolve(ledger.updated === 1 ? (ledger.supersedeRows || [PARKED]) : []));
       qb.select = jest.fn(() => { if (tags.has('fence')) return Promise.resolve(ledger.fenceRows || []); return qb; });
       qb.then = (resolve, reject) => Promise.resolve(ledger.updated >= 1 ? [PARKED] : []).then(resolve, reject);
@@ -319,10 +326,11 @@ describe('charge-now already-collected guard', () => {
     }
 
     beforeEach(() => {
-      ledger = { firstResult: null, armedRow: null, updated: 0, updates: [], fenceRows: [], supersedeRows: null };
+      ledger = { firstResult: null, armedRow: null, updated: 0, updates: [], fenceRows: [], supersedeRows: null, qbs: [] };
       mockedSettle.mockImplementation(actualSettle);
       Mocked.fenceParkedIntentsForReplacement.mockImplementation(Actual.fenceParkedIntentsForReplacement);
       Mocked.reconcileFailedManualAttempt.mockImplementation(Actual.reconcileFailedManualAttempt);
+      Mocked.neutralizeScaIntent.mockImplementation(Actual.neutralizeScaIntent);
       StripeService.retrievePaymentIntent.mockReset();
       StripeService.cancelPaymentIntent.mockReset();
       mockCloseAdminAlertKeys.mockReset();
@@ -344,6 +352,7 @@ describe('charge-now already-collected guard', () => {
       mockedSettle.mockImplementation(async () => []);
       Mocked.fenceParkedIntentsForReplacement.mockImplementation(async () => ({ ok: true }));
       Mocked.reconcileFailedManualAttempt.mockImplementation(async () => null);
+      Mocked.neutralizeScaIntent.mockImplementation(async () => ({ ok: true }));
     });
 
     const post = (baseUrl) => fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
@@ -437,6 +446,20 @@ describe('charge-now already-collected guard', () => {
         expect(chargeMock).not.toHaveBeenCalled();
       });
 
+      test('a SUPERSEDED or ARMED requires-auth row is still fenced: the fence query has no superseded / armed / unarmed filter, and skips rows already marked neutralized', async () => {
+        ledger.fenceRows = [SCA_ROW];
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_orig', status: 'requires_action' });
+        StripeService.cancelPaymentIntent.mockResolvedValue({});
+        chargeMock.mockResolvedValue(PAID);
+        await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
+        const fenceQ = ledger.qbs.find((q) => q._tags.has('fence'));
+        expect(fenceQ).toBeTruthy();
+        expect(fenceQ._nulls).not.toContain('superseded_by_payment_id');
+        expect(fenceQ._nulls).not.toContain('next_retry_at');
+        expect(fenceQ.whereNotNull).not.toHaveBeenCalledWith('next_retry_at');
+        expect(fenceQ._raws.some((sql) => /sca_intent_neutralized_at/.test(sql))).toBe(true);
+      });
+
       test('no parked intent for the month: no Stripe call at all', async () => {
         chargeMock.mockResolvedValue(PAID);
         await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
@@ -447,7 +470,44 @@ describe('charge-now already-collected guard', () => {
     // ---- B16 finding 2: a FAILED Charge now keeps one canonical failed row per month ----
     describe('failed Charge now attempt: one canonical failed row per obligation month', () => {
       const failure = () => Object.assign(new Error('Customer authentication required'), {
-        code: 'STRIPE_REQUIRES_ACTION', paymentRecord: { id: 'pay-fail-new', amount: '89.00', stripe_payment_intent_id: 'pi_fail_new' },
+        code: 'STRIPE_REQUIRES_ACTION', stripePaymentIntentId: 'pi_fail_new', paymentRecord: { id: 'pay-fail-new', amount: '89.00', stripe_payment_intent_id: 'pi_fail_new' },
+      });
+
+      test('a Charge now attempt that itself fails with requires-auth cancels the NEW intent first, then links; a failed cancel still links (the next fence retries)', async () => {
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_fail_new', status: 'requires_action', next_action: { type: 'use_stripe_sdk' } });
+        StripeService.cancelPaymentIntent.mockResolvedValue({});
+        chargeMock.mockRejectedValue(failure());
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_fail_new', { cancellation_reason: 'abandoned' });
+        expect(ledger.updates.some((u) => u.superseded_by_payment_id === 'pay-fail-new')).toBe(true);
+
+        StripeService.cancelPaymentIntent.mockReset();
+        StripeService.cancelPaymentIntent.mockRejectedValue(new Error('cancel refused'));
+        ledger.updates.length = 0;
+        ledger.updated = 0;
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(ledger.updates.some((u) => u.superseded_by_payment_id === 'pay-fail-new')).toBe(true);
+      });
+
+      test('requires-auth while an ARMED retry exists: the new intent is canceled BEFORE the attempt row is superseded to the armed row', async () => {
+        ledger.armedRow = { id: 'pay-armed-1' };
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_fail_new', status: 'requires_action' });
+        StripeService.cancelPaymentIntent.mockResolvedValue({});
+        const order = [];
+        StripeService.cancelPaymentIntent.mockImplementation(async () => { order.push('cancel'); return {}; });
+        chargeMock.mockRejectedValue(failure());
+        const origUpdate = (ledger.updates).push.bind(ledger.updates);
+        ledger.updates.push = (u) => { order.push(u.superseded_by_payment_id ? 'link' : 'update'); return origUpdate(u); };
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(order.indexOf('cancel')).toBeGreaterThanOrEqual(0);
+        expect(order.indexOf('cancel')).toBeLessThan(order.indexOf('link'));
+        expect(ledger.updates).toEqual(expect.arrayContaining([{ superseded_by_payment_id: 'pay-armed-1' }]));
+      });
+
+      test('a non-3DS decline does not touch Stripe intents', async () => {
+        chargeMock.mockRejectedValue(Object.assign(new Error('declined'), { paymentRecord: { id: 'pay-fail-new' } }));
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
       });
 
       test('older unarmed (parked) rows are superseded to the new failed attempt; nothing is closed (still owed)', async () => {

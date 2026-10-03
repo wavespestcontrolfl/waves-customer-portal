@@ -21,7 +21,7 @@ const {
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 const { isCollectionHoldRefusal } = require('./collections/collection-hold');
-const { alertAutopayScaParked } = require('./autopay-sca-parked');
+const ScaParked = require('./autopay-sca-parked');
 
 /**
  * Billing Cron Service
@@ -227,6 +227,14 @@ function collectMonthlyDuesUnderLock(customer, period) {
     // Stripe outcome — do not charge again until it reconciles.
     const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customer.id, period.monthKey, db);
     if (unresolvedOutcome.blocked) return { unresolvedOutcome };
+
+    // B16 invariant: neutralize every live requires-auth PaymentIntent for this customer + month BEFORE
+    // creating a new charge. Money in flight / unverifiable = do NOT charge this run (fail closed); the
+    // caller defers to tomorrow's run (the catch-up marker) and alerts the office. Best-effort per
+    // customer: a Stripe error here never aborts the loop, it just refuses THIS customer's charge.
+    const fence = await ScaParked.fenceParkedIntentsForReplacement(customer.id, period)
+      .catch((fenceErr) => ({ ok: false, reason: 'payment_session_unverifiable', detail: fenceErr.message }));
+    if (!fence.ok) return { fenceBlocked: fence };
 
     const service = await require('./stripe');
     // Codex round-1 P1: shared attempt-scoped key derivation
@@ -635,10 +643,33 @@ const BillingCron = {
         // The catch-up marker is cleared only once the month is resolved. A held-elsewhere
         // claim keeps it until a confirmed collection or a durable deferral row (below); a
         // hold skip manages it inside deferMonthlyForCollectionHold.
-        if (!lockOutcome.holdSkipped && !lockOutcome.claimHeldElsewhere) pendingHoldDeferrals.delete(String(customer.id));
+        if (!lockOutcome.holdSkipped && !lockOutcome.claimHeldElsewhere && !lockOutcome.fenceBlocked) pendingHoldDeferrals.delete(String(customer.id));
 
         if (lockOutcome.unresolvedOutcome) {
           await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
+          skipped++;
+          continue;
+        }
+
+        if (lockOutcome.fenceBlocked) {
+          // A parked 3DS intent for this month is processing / succeeded (money moving) or could not be
+          // verified canceled, so nothing was charged. billing_day only recurs monthly: keep the catch-up
+          // marker so tomorrow's run reconsiders this customer (an already-collected month ends it), and
+          // tell the office.
+          const blocked = lockOutcome.fenceBlocked;
+          const inFlight = blocked.reason === 'payment_in_flight';
+          pendingHoldDeferrals.set(String(customer.id), monthKey);
+          logger.error(`[billing-cron] Monthly charge for customer ${customer.id} (${monthKey}) NOT attempted: parked card-authentication intent ${blocked.piId || ''} ${inFlight ? `is ${blocked.piStatus || 'in flight'}` : 'could not be verified or canceled'}`);
+          await insertHealthAlert(customer.id, {
+            alert_type: 'billing_collection_deferred',
+            severity: 'high',
+            title: inFlight ? 'Monthly dues not charged — an earlier card charge is being collected' : 'Monthly dues not charged — earlier card charge could not be verified canceled',
+            description: `${monthKey}'s autopay was not charged because an earlier card-authentication attempt for the same month ${inFlight ? `is still ${blocked.piStatus || 'in flight'} at Stripe (it may collect on its own)` : 'could not be confirmed canceled at Stripe (charging again could collect twice)'}. The next daily run reconsiders this customer; Customer 360 "Charge now" also re-checks it.`,
+            trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_parked_intent_fence', reason: blocked.reason, stripe_payment_intent_id: blocked.piId || null }),
+          }, 'Parked-intent-fence');
+          await logAutopay(customer.id, 'skipped_parked_intent', {
+            details: { source: 'autopay', billed_month: monthKey, reason: blocked.reason, stripe_payment_intent_id: blocked.piId || null },
+          }).catch(() => {});
           skipped++;
           continue;
         }
@@ -804,7 +835,12 @@ const BillingCron = {
           }).catch(() => {});
           // alertAutopayScaParked resolves false (and has already logged at error
           // level, with a health-alert fallback) when no bell row was written.
-          const alerted = await alertAutopayScaParked(customer, err, { amount: customer.monthly_rate, source: 'autopay', kind: 'monthly', billedMonth: monthStart.slice(0, 7) });
+          // Cancel the live intent at the source: an off-session charge nobody can authenticate has no
+          // legitimate use for it. (The canceled webhook leaves this still-owed row 'failed'.) Best
+          // effort: if it fails, the collector-time fence retries before any replacement is charged.
+          await ScaParked.neutralizeScaIntent(err.stripePaymentIntentId, err.paymentRecord?.id ?? null)
+            .catch((cancelErr) => logger.error(`[billing-cron] could not cancel parked 3DS intent ${err.stripePaymentIntentId}: ${cancelErr.message}`));
+          const alerted = await ScaParked.alertAutopayScaParked(customer, err, { amount: customer.monthly_rate, source: 'autopay', kind: 'monthly', billedMonth: monthStart.slice(0, 7) });
           logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — parked, no retry, ${alerted ? 'office alerted' : 'office bell NOT filed (see error above)'}`);
           continue;
         }
@@ -1319,6 +1355,24 @@ const BillingCron = {
                 return { deferred: true, deferredReason: recheck.reason };
               }
             }
+            // B16 invariant: neutralize every live requires-auth PaymentIntent for this customer +
+            // month BEFORE this rung creates a charge. In flight (a later success is picked up by
+            // the already-collected verdict next tick) or unverifiable: do not charge, leave the row
+            // armed (the existing defer); never fail open. Best-effort for the sweep: a Stripe error
+            // here refuses only THIS customer's charge.
+            if (obligationMonth) {
+              const [fy, fm] = obligationMonth.split('-').map(Number);
+              const fenceLast = new Date(Date.UTC(fy, fm, 0)).getUTCDate();
+              const fence = await ScaParked.fenceParkedIntentsForReplacement(payment.customer_id, {
+                monthKey: obligationMonth,
+                monthStart: `${obligationMonth}-01`,
+                monthEnd: `${obligationMonth}-${String(fenceLast).padStart(2, '0')}`,
+              }).catch((fenceErr) => ({ ok: false, reason: 'payment_session_unverifiable', detail: fenceErr.message }));
+              if (!fence.ok) {
+                logger.error(`[billing-cron] Retry for payment ${payment.id} NOT charged: parked card-authentication intent ${fence.piId || ''} ${fence.reason === 'payment_in_flight' ? `is ${fence.piStatus || 'in flight'}` : 'could not be verified or canceled'}; left armed`);
+                return { deferred: true, deferredReason: `parked_intent_${fence.reason}` };
+              }
+            }
             // Month-of-obligation stamp: this retry collects the ORIGINAL
             // failed attempt's month (obligationMonth, resolved above), not
             // the month the rung happens to land in — a July decline
@@ -1513,7 +1567,9 @@ const BillingCron = {
             paymentId: payment.id,
             details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          const alerted = await alertAutopayScaParked(customer, err, {
+          await ScaParked.neutralizeScaIntent(err.stripePaymentIntentId, err.paymentRecord?.id ?? null)
+            .catch((cancelErr) => logger.error(`[billing-cron] could not cancel parked 3DS intent ${err.stripePaymentIntentId}: ${cancelErr.message}`));
+          const alerted = await ScaParked.alertAutopayScaParked(customer, err, {
             amount: payment.amount,
             source: 'autopay_retry',
             kind: verdict.isMonthlyObligation ? 'monthly' : 'one_time',

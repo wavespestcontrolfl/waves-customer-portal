@@ -21,10 +21,13 @@ function mockPaymentsQuery() {
       orWhere: (a, v) => { if (typeof a === 'function') { const sub = mk({}); a.call(sub, sub); add('or', sub.pred); } else add('or', (r) => String(r[a]) === String(v)); return g; },
       andWhere: (col, op, v) => { add('and', (r) => (op === '>=' ? String(r[col]) >= v : op === '<=' ? String(r[col]) <= v : op === 'like' ? String(r[col] || '').includes(String(v).replace(/%/g, '')) : false)); return g; },
       whereNull: (c) => { add('and', (r) => r[c] == null); return g; },
+      whereNotNull: (c) => { add('and', (r) => r[c] != null); return g; },
       whereNot: (o) => { add('and', (r) => !Object.entries(o).every(([k, x]) => String(r[k]) === String(x))); return g; },
       whereRaw: (sql, b2) => {
         if (/^metadata->>'billed_month' = \?/.test(sql)) add('and', (r) => mockMeta(r).billed_month === b2[0]);
         else if (/metadata IS NULL OR metadata->>'billed_month' IS NULL/.test(sql)) add('and', (r) => !mockMeta(r).billed_month);
+        else if (/metadata->>'requires_action' = 'true'/.test(sql)) add('and', (r) => String(mockMeta(r).requires_action) === 'true');
+        else if (/sca_intent_neutralized_at/.test(sql)) add('and', (r) => !mockMeta(r).sca_intent_neutralized_at);
         else add('and', () => true);
         return g;
       },
@@ -36,8 +39,18 @@ function mockPaymentsQuery() {
   const rows = () => mockS.payments.filter((r) => q.pred(r));
   q.select = () => Promise.resolve(rows().map((r) => ({ ...r })));
   q.first = () => Promise.resolve(rows()[0] ? { ...rows()[0] } : undefined);
-  q.update = (payload) => { q._payload = payload; return q; };
-  q.returning = () => { const hit = rows(); hit.forEach((r) => Object.assign(r, q._payload, { failure_reason: 'resolved' })); return Promise.resolve(hit.map((r) => ({ id: r.id, customer_id: r.customer_id, stripe_payment_intent_id: r.stripe_payment_intent_id }))); };
+  q.update = (payload) => { q._payload = payload; q._pending = true; return q; };
+  // a bare awaited update (no .returning): apply a metadata-merge or plain payload to the matching rows
+  q.then = (resolve, reject) => {
+    const hit = q._pending ? rows() : [];
+    hit.forEach((r) => {
+      const { metadata, ...rest } = q._payload || {};
+      Object.assign(r, rest);
+      if (metadata && metadata.b) r.metadata = JSON.stringify({ ...mockMeta(r), ...JSON.parse(metadata.b[0]) });
+    });
+    return Promise.resolve(hit.length).then(resolve, reject);
+  };
+  q.returning = () => { q._pending = false; const hit = rows(); hit.forEach((r) => Object.assign(r, q._payload, { failure_reason: 'resolved' })); return Promise.resolve(hit.map((r) => ({ id: r.id, customer_id: r.customer_id, stripe_payment_intent_id: r.stripe_payment_intent_id }))); };
   void preds;
   return q;
 }
@@ -71,6 +84,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockStripe = { retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn() };
+jest.mock('../services/stripe', () => mockStripe);
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async (_cat, title, body, opts) => {
     const row = { title, body, opts, metadata: { ...opts.metadata, dedupeKey: opts.dedupeKey }, cleared: false };
@@ -122,6 +137,8 @@ const S_failedAttempt = () => {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockStripe.retrievePaymentIntent.mockReset();
+  mockStripe.cancelPaymentIntent.mockReset();
   Object.assign(mockS, { payments: [], health: [], notifications: [], closeFailures: 0, healthSeq: 0 });
 });
 
@@ -272,5 +289,71 @@ describe('reconcileScaParkedAlerts', () => {
     mockS.closeFailures = 5;
     await expect(Sca.reconcileScaParkedAlerts()).resolves.toBeDefined(); // close failures are logged, never thrown
     expect(logger.error).toHaveBeenCalled();
+  });
+});
+
+// INVARIANT: before any collector charges a customer's month, every still-live requires-auth intent for
+// that customer + month is neutralized, regardless of whether its row is superseded, armed or unarmed.
+describe('fenceParkedIntentsForReplacement / neutralizeScaIntent', () => {
+  const PERIOD = { monthKey: '2026-10', monthStart: '2026-10-01', monthEnd: '2026-10-31' };
+  const live = { id: 'pi_x', status: 'requires_action', next_action: { type: 'use_stripe_sdk' } };
+
+  test('cancels the live intent of EVERY requires-auth row of the month, including a superseded one and an armed one', async () => {
+    mockS.payments = [
+      parkedRow({ id: 'pay-superseded', stripe_payment_intent_id: 'pi_a', superseded_by_payment_id: 'pay-armed' }), // superseded
+      parkedRow({ id: 'pay-armed', stripe_payment_intent_id: 'pi_b', next_retry_at: '2026-10-05T00:00:00Z' }), // armed
+      parkedRow({ id: 'pay-plain', stripe_payment_intent_id: 'pi_c' }), // unarmed, unsuperseded
+      parkedRow({ id: 'pay-other-month', stripe_payment_intent_id: 'pi_d', metadata: JSON.stringify({ billed_month: '2026-09', requires_action: true }) }),
+      parkedRow({ id: 'pay-other-cust', customer_id: 'cust-2', stripe_payment_intent_id: 'pi_e' }),
+      parkedRow({ id: 'pay-not-sca', stripe_payment_intent_id: 'pi_f', metadata: JSON.stringify({ billed_month: '2026-10' }) }),
+    ];
+    mockStripe.retrievePaymentIntent.mockResolvedValue(live);
+    mockStripe.cancelPaymentIntent.mockResolvedValue({ status: 'canceled' });
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toEqual({ ok: true });
+    expect(mockStripe.cancelPaymentIntent.mock.calls.map((c) => c[0]).sort()).toEqual(['pi_a', 'pi_b', 'pi_c']);
+    // each is recorded on its row so it is never re-called
+    ['pay-superseded', 'pay-armed', 'pay-plain'].forEach((id) => expect(JSON.parse(mockS.payments.find((r) => r.id === id).metadata)[Sca.NEUTRALIZED_KEY]).toBeTruthy());
+    expect(JSON.parse(mockS.payments.find((r) => r.id === 'pay-other-month').metadata)[Sca.NEUTRALIZED_KEY]).toBeUndefined();
+  });
+
+  test('a row already marked neutralized makes NO Stripe call', async () => {
+    mockS.payments = [parkedRow({ metadata: JSON.stringify({ billed_month: '2026-10', requires_action: true, sca_intent_neutralized_at: '2026-10-02T00:00:00Z' }) })];
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toEqual({ ok: true });
+    expect(mockStripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(mockStripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    // and a second run after a real cancel is also silent
+    mockS.payments = [parkedRow()];
+    mockStripe.retrievePaymentIntent.mockResolvedValue(live);
+    mockStripe.cancelPaymentIntent.mockResolvedValue({});
+    await Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD);
+    mockStripe.retrievePaymentIntent.mockClear();
+    await Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD);
+    expect(mockStripe.retrievePaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test('an intent already canceled in Stripe is fine (no cancel call) and is marked', async () => {
+    mockS.payments = [parkedRow()];
+    mockStripe.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_1', status: 'canceled' });
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toEqual({ ok: true });
+    expect(mockStripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(JSON.parse(mockS.payments[0].metadata)[Sca.NEUTRALIZED_KEY]).toBeTruthy();
+  });
+
+  test('in flight (processing / succeeded): refuses, cancels nothing, marks nothing', async () => {
+    mockS.payments = [parkedRow()];
+    mockStripe.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_1', status: 'processing' });
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toMatchObject({ ok: false, reason: 'payment_in_flight', piStatus: 'processing', paymentId: 'pay-sca-1' });
+    expect(mockStripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(JSON.parse(mockS.payments[0].metadata)[Sca.NEUTRALIZED_KEY]).toBeUndefined();
+  });
+
+  test('unverifiable (Stripe error) or a failed cancel fails closed and leaves the row unmarked so the next fence retries', async () => {
+    mockS.payments = [parkedRow()];
+    mockStripe.retrievePaymentIntent.mockRejectedValue(new Error('stripe unreachable'));
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toMatchObject({ ok: false, reason: 'payment_session_unverifiable' });
+    mockStripe.retrievePaymentIntent.mockResolvedValue(live);
+    mockStripe.cancelPaymentIntent.mockRejectedValue(new Error('cancel refused'));
+    await expect(Sca.fenceParkedIntentsForReplacement('cust-1', PERIOD)).resolves.toMatchObject({ ok: false, reason: 'payment_session_unverifiable' });
+    expect(JSON.parse(mockS.payments[0].metadata)[Sca.NEUTRALIZED_KEY]).toBeUndefined();
   });
 });
