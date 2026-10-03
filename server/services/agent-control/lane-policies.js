@@ -429,6 +429,8 @@ const LANE_RUNTIME = {
   inventory_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 180_000 },
   // M1 (Codex r16): every application is screened automatically for owner ranking; no status change or applicant outcome depends on it.
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M1' },
+  // draft_for_human: the answer only pre-fills taps a technician reviews and completes themselves; nothing is saved or sent. offline: one Anthropic call, no second provider; a failure leaves the typed sheet.
+  fast_complete_voice_fill: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0' },
 };
 
 /**
