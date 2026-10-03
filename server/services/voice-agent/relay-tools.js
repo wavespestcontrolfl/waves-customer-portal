@@ -461,6 +461,41 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
 }
 
 /**
+ * ⭐ WHAT IS ALREADY ON FILE IS NOT ASKED FOR AGAIN. The matched account's own
+ * name, email and service address, for a FULL-tier caller only (a verified
+ * call from the account's own customers.phone). The tools fill a missing
+ * location or estimate field from it, so "do not ask a known customer for
+ * their address" is something the tools make true rather than a prompt line
+ * the next lookup contradicts. A recognised-only (secondary slot) or
+ * looked-up caller gets nothing. Fail-soft: a failed read is "not on file".
+ */
+async function accountContactFor(ctx = {}) {
+  if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('customers').where({ id: ctx.customerId })
+      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip');
+    return row || null;
+  } catch (err) {
+    logger.warn(`[voice-relay] account contact read failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    return null;
+  }
+}
+
+/** The caller's stated location, else the service address on their own account. */
+async function availabilityLocation(input = {}, ctx = {}) {
+  const stated = { address_line1: input.address_line1, city: input.city, zip: input.zip };
+  if ([stated.address_line1, stated.city, stated.zip].some((v) => v != null && String(v).trim() !== '')) return { ...stated, fromAccount: false };
+  const account = await accountContactFor(ctx);
+  if (!account || ![account.address_line1, account.city, account.zip].some((v) => v != null && String(v).trim() !== '')) return { ...stated, fromAccount: false };
+  return { address_line1: account.address_line1, city: account.city, zip: account.zip, fromAccount: true };
+}
+
+// The address itself is never put in the result — the agent must not recite it.
+const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account; if the visit is '
+  + 'for a different property, ask for that address and call this tool again.';
+
+/**
  * Shared read-only availability lookup. `when` (optional) routes through the
  * natural-language parser (find_slots); omit it for the soonest-windows path
  * (get_availability). Returns a status the executor turns into model-facing text.
@@ -917,6 +952,17 @@ async function executeTool(name, input = {}, ctx = {}) {
         requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
         pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
       };
+      // A written estimate for a customer already on file needs nothing asked
+      // twice: whatever the caller did not give on this call comes from their
+      // own account (full tier only), so only what is genuinely absent there
+      // is reported missing below.
+      const account = estimateRequested ? await accountContactFor(ctx) : null;
+      if (account) {
+        for (const k of ['first_name', 'last_name', 'address_line1', 'city', 'zip']) {
+          if (!estimateFields[k] && nz(account[k])) estimateFields[k] = nz(account[k]);
+        }
+        if (!estimateFields.email && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
+      }
       if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
@@ -1606,14 +1652,16 @@ async function executeTool(name, input = {}, ctx = {}) {
     }
 
     if (name === 'get_availability') {
-      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res, ctx);
+      const { fromAccount, ...where } = await availabilityLocation(input, ctx);
+      const res = await resolveAvailability(where);
+      return availabilityResultToText(res, ctx) + (fromAccount && res.status !== 'unavailable' && res.status !== 'need_location' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
     if (name === 'find_slots') {
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
-      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip });
-      return availabilityResultToText(res, ctx);
+      const { fromAccount, ...where } = await availabilityLocation(input, ctx);
+      const res = await resolveAvailability({ when: input.when, ...where });
+      return availabilityResultToText(res, ctx) + (fromAccount && res.status !== 'unavailable' && res.status !== 'need_location' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
     // The name is MODEL-supplied; bound and flatten it rather than echoing an
