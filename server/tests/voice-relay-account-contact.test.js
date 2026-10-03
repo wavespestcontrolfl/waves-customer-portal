@@ -169,7 +169,7 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     let bag = {};
     const notePromise = jest.fn();
-    const ctx = fullTier({ notePromise, getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
+    const ctx = fullTier({ notePromise, getPromise: () => (notePromise.mock.calls.length ? { verdict: notePromise.mock.calls.at(-1)[1] } : null), getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
     const first = await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, ctx);
     expect(first).toMatch(/IS on the office queue/);
     expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true, expect.anything());
@@ -184,6 +184,41 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     expect(notePromise).toHaveBeenCalledTimes(1);
     const third = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true }, ctx);
     expect(third).toMatch(/still missing: email/); // the account email does not come back
+  });
+
+  test('a location part that replaces an earlier one is a different property: the earlier location goes whole, and a part that only adds still accumulates', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    let bag = {};
+    const notePromise = jest.fn();
+    const promises = new Map();
+    const ctx = fullTier({
+      getEstimateFields: () => ({ ...bag }),
+      noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
+      clearEstimateFields: (keys) => { for (const k of keys) delete bag[k]; },
+      getPromise: (k) => promises.get(k) || null,
+      notePromise: (k, verdict) => { notePromise(k, verdict); promises.set(k, { verdict }); },
+    });
+    await executeTool('capture_lead', { call_summary: 'Estimate for the rental.', estimate_requested: true, address_line1: '9 Rental Rd', city: 'Venice', zip: '34285' }, ctx);
+    expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true);
+    // A new street and city, no ZIP: the old ZIP must not complete them.
+    await executeTool('capture_lead', { call_summary: 'Actually the Sarasota house.', estimate_requested: true, address_line1: '4 Other Ave', city: 'Sarasota' }, ctx);
+    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ address_line1: '4 Other Ave', city: 'Sarasota', zip: null });
+    expect(bag.zip).toBeUndefined();
+    // Adding the missing part accumulates; restating the same street is not a change.
+    await executeTool('capture_lead', { call_summary: 'Actually the Sarasota house.', estimate_requested: true, address_line1: '4 other ave', zip: '34231' }, ctx);
+    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ address_line1: '4 other ave', city: 'Sarasota', zip: '34231' });
+  });
+
+  test('a promise already spoken stays owed when a later correction is incomplete, even if the card write fails', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    const notePromise = jest.fn();
+    const ctx = fullTier({ sessionKey: 'sk-1', notePromise, getPromise: () => ({ verdict: true }) });
+    surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false });
+    const out = await executeTool('capture_lead', { call_summary: 'For the Venice rental.', estimate_requested: true, city: 'Venice' }, ctx);
+    expect(out).toMatch(/still missing: address_line1/);
+    expect(notePromise).not.toHaveBeenCalled();
+    // The card write carries the session's claim nonce, so it is fenced against a takeover.
+    expect(surfaceEstimateRequestForCustomer.mock.calls[0][2]).toMatchObject({ callSid: 'CA-acct-1', sessionKey: 'sk-1' });
   });
 
   test('a capture that opens a LEAD gets no account defaults: a customer still in the lead pipeline, or a different person on the line, is asked', async () => {

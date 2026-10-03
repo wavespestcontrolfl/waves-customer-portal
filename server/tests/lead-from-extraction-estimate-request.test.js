@@ -6,6 +6,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/voice-agent/relay-context', () => ({ claimOwnedElsewhere: jest.fn() }));
 
 const db = require('../models/db');
 const { notifyAdmin } = require('../services/notification-service');
@@ -99,5 +100,37 @@ describe('a later capture on the same call rewrites the card (#5751)', () => {
     expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', city: 'Venice' }, { callSid: 'CA1', stillMissing: ['email', 'address_line1'] })).toEqual({ persisted: false, suppressed: false });
     expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', city: 'Venice' }, { stillMissing: ['address_line1'] })).toEqual({ persisted: false, suppressed: false });
     expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('the card write is fenced against a session takeover (#5751)', () => {
+  const { claimOwnedElsewhere } = require('../services/voice-agent/relay-context');
+  const trx = Object.assign(jest.fn(), { marker: 'trx' });
+  beforeEach(() => { db.transaction = jest.fn(async (cb) => cb(trx)); });
+
+  test('the owning session writes on the fence\'s transaction; a superseded socket writes nothing', async () => {
+    claimOwnedElsewhere.mockResolvedValue(false);
+    notifyAdmin.mockResolvedValue({ id: 'n-1' });
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat' }, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: true, suppressed: false });
+    expect(claimOwnedElsewhere).toHaveBeenCalledWith(trx, 'CA1', 'sk-1');
+    expect(notifyAdmin.mock.calls[0][3].trx).toBe(trx);
+
+    notifyAdmin.mockClear();
+    claimOwnedElsewhere.mockResolvedValue(true);
+    expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'stale@example.com' }, { callSid: 'CA1', sessionKey: 'sk-old' })).toEqual({ persisted: false, suppressed: false, superseded: true });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a failed write inside the fence is not persisted and never throws', async () => {
+    claimOwnedElsewhere.mockResolvedValue(false);
+    notifyAdmin.mockRejectedValue(new Error('boom'));
+    expect(await surfaceEstimateRequestForCustomer('c-1', {}, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: false, suppressed: false });
+  });
+
+  test('no session key (no claim to prove) keeps the unfenced write', async () => {
+    notifyAdmin.mockResolvedValue({ id: 'n-1' });
+    await surfaceEstimateRequestForCustomer('c-1', {}, { callSid: 'CA1' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(notifyAdmin.mock.calls[0][3].trx).toBeUndefined();
   });
 });

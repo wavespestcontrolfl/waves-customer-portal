@@ -944,6 +944,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // address never stands in for it. Remembered for the call until a
       // readable one arrives.
       const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || priorEstimateFields.email_unreadable === 'true');
+      // A location component that REPLACES one the caller gave earlier means
+      // a different property: the earlier location goes, whole, and what this
+      // capture did not restate is asked for. A retry that only ADDS a missing
+      // part (the street after the city) still accumulates.
+      const sameText = (x, y) => String(x).trim().toLowerCase() === String(y).trim().toLowerCase();
+      if (['address_line1', 'city', 'zip'].some((k) => nz(extracted[k]) && nz(priorEstimateFields[k]) && !sameText(extracted[k], priorEstimateFields[k]))) {
+        for (const k of ['address_line1', 'city', 'zip']) delete priorEstimateFields[k];
+        if (typeof ctx.clearEstimateFields === 'function') ctx.clearEstimateFields(['address_line1', 'city', 'zip']);
+      }
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -1596,9 +1605,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about — file the estimate-request card, and let the result below tell
       // the model whether the promise may be spoken.
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
-      // A card already standing for this call was revised: the estimate was
-      // promised aloud on the earlier capture and is still owed.
-      let standingCardRevised = false;
+      // An estimate an earlier capture on this call queued was promised aloud
+      // and is still owed, whatever happens to this capture's card write.
+      const priorPromise = typeof ctx.getPromise === 'function' ? ctx.getPromise('send_estimate') : null;
+      const promiseStands = estimateRequested && estimateMissing.length > 0 && Boolean(priorPromise && priorPromise.verdict === true);
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
         // A card an earlier capture on this call queued (complete then, from
@@ -1607,8 +1617,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (!leadCreated && leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           if (typeof surfaceEstimateRequestForCustomer === 'function') {
-            const revised = await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount, stillMissing: estimateMissing });
-            standingCardRevised = Boolean(revised && revised.persisted === true);
+            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount, stillMissing: estimateMissing });
           }
         }
       } else if (estimateRequested) {
@@ -1617,7 +1626,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, locationFromAccount, emailFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1627,8 +1636,8 @@ async function executeTool(name, input = {}, ctx = {}) {
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
       // An incomplete correction never withdraws a promise already spoken:
-      // the standing card keeps it, so the session's earlier verdict stands.
-      if (!standingCardRevised) {
+      // the session's earlier verdict stands.
+      if (!promiseStands) {
         if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
       }
       const expectationCopy = {

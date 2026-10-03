@@ -6,6 +6,8 @@
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
+  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
+  nameConflicts: jest.requireActual('../services/lead-from-extraction').nameConflicts,
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../routes/booking', () => ({

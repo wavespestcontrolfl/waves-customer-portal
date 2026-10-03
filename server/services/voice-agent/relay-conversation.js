@@ -2731,6 +2731,13 @@ class RelayConversation {
       getContactFollowUp: () => ({ ...(convo._contactFollowUp || {}) }),
       noteContactFollowUp: (fields = {}) => { convo._contactFollowUp = { ...fields }; },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
+      // noteEstimateFields only adds; a location the caller REPLACED is
+      // dropped here first so its old parts cannot rejoin the new ones.
+      clearEstimateFields: (keys = []) => {
+        const next = { ...(convo._estimateFields || {}) };
+        for (const k of keys) delete next[k];
+        convo._estimateFields = next;
+      },
       noteEstimateFields: (fields = {}) => {
         const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
         convo._estimateFields = { ...(convo._estimateFields || {}), ...kept };
@@ -2757,6 +2764,7 @@ class RelayConversation {
       markOwnerAlerted: () => { this._ownerAlerted = true; },
       // Promises the tools confirmed to the caller (capture_lead: a queued
       // estimate). Recorded as owed commitments at close.
+      getPromise: (kind) => { const p = this._promises.get(String(kind || '')); return p ? { ...p } : null; },
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
       // ── PR 2A transfer ─────────────────────────────────────────────────

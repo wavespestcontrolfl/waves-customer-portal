@@ -342,9 +342,30 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
     const NotificationService = require('./notification-service');
     const dedupeKey = opts.callSid ? `relay-estimate-request:${opts.callSid}` : null;
     const stillMissing = Array.isArray(opts.stillMissing) ? opts.stillMissing.filter(Boolean) : [];
+    // ⭐ FENCED LIKE EVERY OTHER RELAY WRITE. The card is rewritten in place by
+    // a later capture, so a stalled capture from a superseded socket must not
+    // land over the replacement session's corrected email or address:
+    // ownership is re-proven under the call row's lock in the SAME
+    // transaction as the write (claimOwnedElsewhere).
+    if (opts.callSid && opts.sessionKey && !opts.trx) {
+      let superseded = false;
+      const fenced = await db.transaction(async (trx) => {
+        if (await require('./voice-agent/relay-context').claimOwnedElsewhere(trx, opts.callSid, opts.sessionKey)) {
+          superseded = true;
+          return null;
+        }
+        return surfaceEstimateRequestForCustomer(customerId, extracted, { ...opts, trx, throwOnError: true });
+      });
+      if (superseded) {
+        logger.warn(`[voice-agent-lead] estimate request for customer ${customerId} NOT written: another session owns the call`);
+        return { persisted: false, suppressed: false, superseded: true };
+      }
+      return fenced;
+    }
+    const q = opts.trx || db;
     if (stillMissing.length) {
       const standing = dedupeKey
-        ? await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')
+        ? await q('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')
         : null;
       if (!standing) return { persisted: false, suppressed: false };
     }
@@ -387,6 +408,7 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         // notifyAdmin's own dedupe (advisory lock + metadata dedupeKey):
         // one card per call, replays return the existing row.
         ...(dedupeKey ? { dedupeKey } : {}),
+        ...(opts.trx && dedupeKey ? { trx: opts.trx } : {}),
         // A later capture on the same call rewrites the card in place. It
         // rings again only when where the estimate goes changed, or the
         // office had already marked it done.
@@ -424,6 +446,8 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
     logger.info(`[voice-agent-lead] estimate request surfaced for existing customer ${customerId}`);
     return { persisted: true, suppressed: false };
   } catch (err) {
+    // Inside the fence's transaction a swallowed error would leave it aborted.
+    if (opts.throwOnError) throw err;
     logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.message}`);
     return { persisted: false, suppressed: false };
   }
