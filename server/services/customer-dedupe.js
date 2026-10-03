@@ -577,7 +577,7 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
     for (const { ids } of edges.values()) {
       if (ids.includes(winner.id)) losers.push(byId.get(ids[0] === winner.id ? ids[1] : ids[0]));
     }
-    const members = new Set([winner.id, ...losers.map((l) => l.id)]);
+    const verdicts = new Map(losers.map((loser) => [loser.id, classifyPair(winner, loser, blockersById.get(loser.id) || [])]));
     const viaOf = (loserId) => {
       const [lo, hi] = pairKey(winner.id, loserId);
       return edges.get(`${lo}:${hi}`).via;
@@ -587,7 +587,7 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
       phone10: null,
       winner: decorateSameAddress(sanitizeCustomer(winner), winner, upcomingVisits),
       candidates: losers.map((loser) => {
-        const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
+        const verdict = verdicts.get(loser.id);
         const via = viaOf(loser.id);
         return {
           loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
@@ -604,8 +604,15 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
         };
       }),
     });
+    // Spend the winner's own edges (all shown above), plus an edge between two
+    // of its candidates ONLY when merging both into the winner can cover it —
+    // a red candidate cannot be merged, so an edge that touches one stays for
+    // a later round (it may be the only mergeable pair among the three).
+    const coverable = new Set(losers.filter((l) => verdicts.get(l.id).tier !== 'red').map((l) => l.id));
     for (const [key, { ids }] of [...edges]) {
-      if (members.has(ids[0]) && members.has(ids[1])) edges.delete(key);
+      const [x, y] = ids;
+      const winnerEdge = x === winner.id || y === winner.id;
+      if (winnerEdge || (coverable.has(x) && coverable.has(y))) edges.delete(key);
     }
   }
   return groups;

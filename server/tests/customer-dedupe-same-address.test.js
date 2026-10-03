@@ -148,6 +148,33 @@ describe('same-address grouping', () => {
     expect(groups.reduce((n, g) => n + g.candidates.length, 0)).toBe(2);
   });
 
+  test('an edge the winner cannot cover is kept: red candidates must not swallow the only mergeable pair', () => {
+    // A is the strongest row, saved at another street with a property at the
+    // shared premise; B and C (different surnames) live at that premise. A-B and
+    // A-C read red (different surname, different primary address), so the one
+    // pair a person can actually merge is B-C.
+    const a = cust({ first_name: 'Ann', last_name: 'Alpha', address_line1: '999 Elsewhere Rd', zip: '34202', stripe_customer_id: 'cus_x', password_hash: 'h', pipeline_stage: 'active_customer' });
+    const b = cust({ first_name: 'Bo', last_name: 'Beta' });
+    const c = cust({ first_name: 'Cy', last_name: 'Gamma' });
+    const groups = buildSameAddressGroups({
+      customers: [a, b, c],
+      properties: [{ customer_id: a.id, address_line1: '100 Example Loop', city: 'Sarasota', zip: '34231', property_type: 'single_family' }],
+    });
+    const tierByPair = new Map();
+    for (const g of groups) for (const cand of g.candidates) tierByPair.set([g.winner.id, cand.loser.id].sort().join(':'), cand.tier);
+    const key = (x, y) => [x.id, y.id].sort().join(':');
+    expect(tierByPair.get(key(a, b))).toBe('red');
+    expect(tierByPair.get(key(a, c))).toBe('red');
+    expect(tierByPair.get(key(b, c))).toBe('yellow');
+  });
+
+  test('when the winner CAN merge both candidates, the edge between them is covered (no duplicate card)', () => {
+    const rows = [cust({ pipeline_stage: 'active_customer', stripe_customer_id: 'cus_y' }), cust(), cust()];
+    const groups = buildSameAddressGroups({ customers: rows });
+    expect(groups).toHaveLength(1);
+    expect(groups[0].candidates).toHaveLength(2);
+  });
+
   test('credential material never ships; visit counts ride along when supplied', () => {
     const a = cust({ stripe_customer_id: 'cus_synthetic', password_hash: 'hash' });
     const b = cust();
