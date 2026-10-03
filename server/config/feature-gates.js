@@ -106,6 +106,7 @@
  *   GATE_PORTAL_CHAT_FACTS=true (portal Waves Assistant payment card: a charge / payment / receipt question shows the customer a server-rendered card of their last three payments from the Billing tab's own read, plus an Open Billing button; the model is told only that it was shown and the status words. Off unless exactly 'true', read at call time via portalChatFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on). Off = the self-serve chat alone, byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_CHAT_VISIT_FACTS=true (portal Waves Assistant past-visit answers: a question about what was done at a visit, when the last visit was, or where the report is reads the customer's last three completed visits from the Completed tab's own read; the model answers from the structured facts — date, service, technician first name, kinds of product applied — and the customer sees a server-rendered card with each visit's reviewed summary and report link; the owner-approved company facts join the portal prompt. The summary text, prices, product brands and addresses never reach the model. Off unless exactly 'true', read at call time via portalChatVisitFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of GATE_PORTAL_CHAT_FACTS. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
+ *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
@@ -5036,6 +5037,15 @@ function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
 
+// GATE_PERMIT_DETAIL_SYNC read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the Manatee permit detail collector
+// (services/property-lookup/manatee-permit-detail.js): off, the weekly cron
+// step returns {skipped:'gated'} before any network or DB read. Independent
+// of GATE_PERMIT_SYNC (the report sync). Collection only.
+function permitDetailSyncLive() {
+  return process.env.GATE_PERMIT_DETAIL_SYNC === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5145,3 +5155,5 @@ module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
+// GATE_PERMIT_DETAIL_SYNC reader, on its own line so gate PRs never conflict.
+module.exports.permitDetailSyncLive = permitDetailSyncLive;
