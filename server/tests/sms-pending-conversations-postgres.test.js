@@ -194,67 +194,83 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
   });
 
+  // An outbound row defaults to a staff-placed call whose reviewed recording
+  // heard a live conversation; an inbound row to one a person answered.
   async function seedCall({
     phone = '+19415550100', ours = '+19415550190', direction = 'inbound', status = 'completed',
     answeredBy = direction === 'inbound' ? 'human' : null, duration = 99,
-    amd = direction === 'outbound' ? 'human' : null, pickedUpAfter = 10, amdAt = undefined,
+    source = direction === 'outbound' ? 'admin-click' : null,
+    extraction = 'valid', voicemail = false, customerLeg = null, startedSecondsAgo = 0,
   } = {}) {
-    const createdAt = tick;
+    const createdAt = new Date(tick.getTime() - startedSecondsAgo * 1000);
     tick = new Date(tick.getTime() + 1000);
     await mockTrx('call_log').insert({
-      id: randomUUID(), direction, status, answered_by: answeredBy, duration_seconds: duration,
+      id: randomUUID(), direction, status, answered_by: answeredBy, duration_seconds: duration, source,
       from_phone: direction === 'inbound' ? phone : ours,
       to_phone: direction === 'inbound' ? ours : phone,
-      // Stamped when staff presses 1, before the customer's phone rings.
-      bridged_at: direction === 'outbound' ? createdAt : null,
-      metadata: amd ? JSON.stringify({ amd: {
-        answered_by: amd,
-        at: amdAt === undefined ? new Date(createdAt.getTime() + pickedUpAfter * 1000).toISOString() : amdAt,
-      } }) : null,
+      v2_extraction_status: direction === 'outbound' ? extraction : null,
+      ai_extraction_enriched: direction === 'outbound' ? JSON.stringify({ meta: { is_voicemail: String(voicemail) } }) : null,
+      metadata: customerLeg ? JSON.stringify({ customer_leg: customerLeg }) : null,
       created_at: createdAt,
     });
   }
+  const pendingCount = () => countPendingSmsConversations();
+  const none = { conversations: 0, messages: 0 };
+  const one = { conversations: 1, messages: 1 };
 
   test('a later call a person answered closes the text; a newer text reopens it', async () => {
     await seed({ body: 'Is it 1pm today or can you come later?' });
-    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    await expect(pendingCount()).resolves.toEqual(one);
     // The customer calls in on a different Waves line, written without +1.
     await seedCall({ phone: '(941) 555-0100', ours: '+19415550191' });
-    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(pendingCount()).resolves.toEqual(none);
     await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+    // After that call has ended.
+    tick = new Date(tick.getTime() + 5 * 60 * 1000);
     await seed({ body: 'Can you also check the nest over the door?' });
-    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    await expect(pendingCount()).resolves.toEqual(one);
   });
 
-  test('an outbound call the customer picked up closes the text', async () => {
+  test('a text sent while the call was ringing or under way is answered by it', async () => {
+    await seed({ body: 'Calling you now about today' });
+    // Dialing began 40 s before the text; the conversation ran past it.
+    await seedCall({ startedSecondsAgo: 40, duration: 300 });
+    await expect(pendingCount()).resolves.toEqual(none);
+  });
+
+  test.each([
+    ['the office', { source: 'admin-click' }],
+    ['a callback card, customer leg 60 s or more', { source: 'admin-callback', customerLeg: { status: 'completed', duration_seconds: 107 } }],
+    ['a technician line', { source: 'tech-click' }],
+  ])('an outbound call from %s that reached the customer closes the text', async (_label, call) => {
     await seed({ body: 'Can you call me?' });
-    await seedCall({ direction: 'outbound', duration: 133 });
-    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await seedCall({ direction: 'outbound', ...call });
+    await expect(pendingCount()).resolves.toEqual(none);
   });
 
   test('calls where nobody spoke leave the text pending', async () => {
-    // Before the text: says nothing about it.
-    await seedCall();
+    // Over before the text arrived: says nothing about it.
+    await seedCall({ startedSecondsAgo: 600, duration: 120 });
+    await seedCall({ direction: 'outbound', startedSecondsAgo: 600, duration: 120 });
     await seed({ body: 'Can you call me?' });
     await seedCall({ answeredBy: 'voicemail', duration: 26 });
     await seedCall({ answeredBy: 'ai_agent', duration: 41 });
     await seedCall({ status: 'no-answer', answeredBy: null, duration: 0 });
     await seedCall({ answeredBy: null, duration: 1 });
-    await seedCall({ direction: 'outbound', answeredBy: 'voicemail', duration: 42 });
-    // Staff waited on a ringing line: the row is completed, bridged and long,
-    // but the customer leg never answered.
-    await seedCall({ direction: 'outbound', duration: 75, amd: null });
-    await seedCall({ direction: 'outbound', duration: 61, amd: 'machine_start' });
-    await seedCall({ direction: 'outbound', duration: 30, amd: 'unknown' });
-    await seedCall({ direction: 'outbound', duration: 21 });
-    // Long staff leg, but the customer picked up late and hung up at once.
-    await seedCall({ direction: 'outbound', duration: 75, pickedUpAfter: 60 });
-    await seedCall({ direction: 'outbound', duration: 300, amdAt: null });
-    await seedCall({ direction: 'outbound', duration: 300, amdAt: 'soon' });
+    // Staff waited on a ringing line: completed and long, but no recording
+    // was reviewed as a live conversation.
+    await seedCall({ direction: 'outbound', duration: 75, extraction: null });
+    await seedCall({ direction: 'outbound', duration: 42, voicemail: true });
     await seedCall({ direction: 'outbound', status: 'initiated', duration: null });
+    await seedCall({ direction: 'outbound', source: 'admin-callback', customerLeg: { status: 'completed', duration_seconds: 25 } });
+    await seedCall({ direction: 'outbound', source: 'admin-callback', customerLeg: { status: 'no-answer', duration_seconds: 0 } });
+    // Not staff-placed: an automated call, and a lead bridge whose to_phone
+    // is the staff cell rather than the prospect.
+    await seedCall({ direction: 'outbound', source: 'collections_voice' });
+    await seedCall({ direction: 'outbound', source: 'lead-webhook-auto-bridge' });
     // A real conversation with someone else.
     await seedCall({ phone: '+19415550101' });
-    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    await expect(pendingCount()).resolves.toEqual(one);
   });
 
   test('legacy-only inbound work remains watcher-only', async () => {

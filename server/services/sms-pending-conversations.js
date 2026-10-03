@@ -10,6 +10,7 @@ const {
   draftIdSql,
   draftReplyToMessageIdSql,
 } = require('./sms-response-policy');
+const { personCallBackSql } = require('./staff-contact');
 
 // Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
 // Unanswered-filtered inbox only count inbound texts from this instant
@@ -21,18 +22,6 @@ const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
 // Outbound rows older than this before an inbound cannot answer it or give it
 // context (outbound_events joins on it).
 const REPLY_LOOKBACK = "INTERVAL '24 hours'";
-
-// An outbound row's status, duration and bridged_at all describe the STAFF
-// leg (bridged_at is stamped when staff presses 1, before the customer's
-// phone rings), so none of them proves the customer picked up. The proof is
-// the customer leg's own answering-machine detection, metadata.amd, written
-// by /outbound-amd: only 'human' counts, and a row without it fails closed.
-// duration_seconds also covers the prompt and the ringing, so talk time is
-// measured from that detection stamp (amd.at) to the end of the staff leg; the
-// floor drops a pickup that ended before anything was said. created_at is the
-// row's insert at 'initiated', at or before the staff leg starts, so this
-// can only undercount.
-const MIN_SPOKEN_OUTBOUND_SECONDS = 30;
 
 // Shared source for the Messages needs-response badge, filtered inbox, and
 // unanswered-text watcher. The watcher opts into legacy-only rows so a failed
@@ -60,11 +49,6 @@ async function loadPendingSmsConversations({
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
-  // The pattern has no "?" and no ":word": db.raw reads either as a binding.
-  const outboundTalkSeconds = `EXTRACT(EPOCH FROM (
-    spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0))
-    - CASE WHEN spoken.metadata->'amd'->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
-        THEN CAST(spoken.metadata->'amd'->>'at' AS timestamptz) END))`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -222,20 +206,21 @@ async function loadPendingSmsConversations({
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
     ), spoken_inbound AS MATERIALIZED (
       -- Owner ruling 2026-10-03: a text is answered once a person at Waves
-      -- has SPOKEN with that number after it arrived — the customer who
-      -- texts and then calls in must not sit in the needs-reply list. Either
-      -- direction counts. Voicemail, the AI agent, a missed call and an
-      -- outbound leg nobody picked up are not a conversation.
+      -- has SPOKEN with that number — the customer who texts and then calls
+      -- in must not sit in the needs-reply list. Inbound: a person answered.
+      -- Outbound: the shared staff-contact definition (a staff-placed call
+      -- whose reviewed recording heard a live conversation, not voicemail);
+      -- the row's own status and duration are the staff leg's and prove
+      -- nothing. The call must END after the text arrived: a row is inserted
+      -- when dialing starts, so a text sent while the phone rings, or during
+      -- the conversation, is answered by it.
       SELECT DISTINCT li.id AS inbound_id
       FROM enriched_inbound li
-      JOIN call_log spoken ON spoken.created_at > li.created_at
-        AND ${callPeer} = li.peer
+      JOIN call_log spoken ON ${callPeer} = li.peer
+        AND spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) > li.created_at
       WHERE spoken.status = 'completed'
         AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
-          OR (spoken.direction = 'outbound'
-            AND spoken.metadata->'amd'->>'answered_by' = 'human'
-            AND COALESCE(spoken.answered_by, '') NOT IN ('voicemail', 'ai_agent')
-            AND ${outboundTalkSeconds} >= ${MIN_SPOKEN_OUTBOUND_SECONDS}))
+          OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
