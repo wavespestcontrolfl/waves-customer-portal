@@ -4261,6 +4261,108 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     } finally { templateSpy.mockRestore(); }
   });
 
+  // The preflight verdict is formed first (root handle); a customers touch AFTER it (the 2nd access)
+  // lets a test move the candidate before the transaction's authoritative match.
+  function driftAfterPreflight(mutate) {
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'customers') return;
+      touches += 1;
+      if (touches === 2) mutate();
+    };
+  }
+
+  test('identity drift (match -> contradiction) between preflight and the transaction aborts for a reload, nothing committed, no alert', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-d1', token: 'tok-b18-d1-x0123456789' }));
+    // Preflight: Bob's email AGREES with the estimate -> matched (his Auto Pay would exempt the card).
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    // Before the transaction's match, his email and street change -> the SAME estimate now contradicts.
+    driftAfterPreflight(() => { bob.email = 'bob@example.com'; });
+    conversionOk();
+    const res = await putAccept('tok-b18-d1-x0123456789');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('identity drift (contradiction -> match) between preflight and the transaction aborts for a reload, nothing committed', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-d2', token: 'tok-b18-d2-x0123456789' }));
+    const bob = sharedPhoneRow();
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    // Preflight: contradicted (accepter owes their own card). Then the profile's email becomes the accepter's.
+    driftAfterPreflight(() => { bob.email = 'pat@example.com'; });
+    conversionOk();
+    const res = await putAccept('tok-b18-d2-x0123456789');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('no drift: the verdict formed at preflight equals the transaction verdict and the accept proceeds', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-d3', token: 'tok-b18-d3-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    const res = await putAccept('tok-b18-d3-x0123456789');
+    expect(res.status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(1);
+  });
+
+  test('a lost alert is replayed by an idempotent re-POST of the accepted estimate, and stops once the phone is fixed', async () => {
+    const notify = require('../services/notification-service').notifyAdmin;
+    resetStore(recurringPestEstimate({ id: 'est-b18-r1', token: 'tok-b18-r1-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    // The alert fails (both attempts) after the commit; the accept itself must still succeed.
+    notify.mockImplementation(async (category, headline, why, opts) => {
+      if (String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:')) throw new Error('notifications down');
+      return {};
+    });
+    const first = await putAccept('tok-b18-r1-x0123456789');
+    expect(first.status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(2);
+    const newId = storedEstimate().customer_id;
+    expect(db.__state.tables.customers.find((c) => c.id === newId).internal_notes).toContain('Other customer id: cust-bob');
+
+    // Notifications recover; the customer's retry (already-accepted branch) raises it once.
+    notify.mockImplementation(async () => ({}));
+    const retry = await putAccept('tok-b18-r1-x0123456789');
+    expect(retry.status).toBe(200);
+    const replayed = contradictionAlerts().slice(2);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0][3].dedupeKey).toBe('accept-phone-contradicted:est-b18-r1');
+    expect(replayed[0][3].metadata).toMatchObject({ customerId: newId, rejectedCustomerId: 'cust-bob' });
+
+    // Once the office has added the real phone there is nothing left to replay.
+    db.__state.tables.customers.find((c) => c.id === newId).phone = '(941) 555-0188';
+    await putAccept('tok-b18-r1-x0123456789');
+    expect(contradictionAlerts()).toHaveLength(3);
+  });
+
+  test('re-POST of an ordinary accepted estimate (no marker) raises nothing', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-r2', token: 'tok-b18-r2-x0123456789' }));
+    conversionOk();
+    expect((await putAccept('tok-b18-r2-x0123456789')).status).toBe(200);
+    expect((await putAccept('tok-b18-r2-x0123456789')).status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
   test('a rolled-back contradicted accept raises no alert and leaves no profile or account behind', async () => {
     resetStore(recurringPestEstimate({ id: 'est-b18-4', token: 'tok-b18-4-x0123456789' }));
     db.__state.tables.customers.push(sharedPhoneRow());

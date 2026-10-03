@@ -168,6 +168,57 @@ describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts'
   });
 });
 
+describe('matchAcceptCustomerByPhone: the contradiction uses the canonical address comparison', () => {
+  // The estimate's email always differs from the profile's here, so ONLY the address decides.
+  const same = async (candidate, address) => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, ...candidate }];
+    const res = await matchAcceptCustomerByPhone(janeEstimate({ address }));
+    return res.contradicted !== true && res.match !== null;
+  };
+  const differs = async (candidate, address) => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, ...candidate }];
+    const res = await matchAcceptCustomerByPhone(janeEstimate({ address }));
+    return res.contradicted === true && res.match === null;
+  };
+
+  it('suffix variants of the same address are NOT a contradiction (Street/St, Avenue/Ave, Drive/Dr)', async () => {
+    expect(await same({ address_line1: '123 Main St' }, '123 Main Street, Bradenton, FL 34205')).toBe(true);
+    expect(await same({ address_line1: '123 Main Street' }, '123 Main St')).toBe(true);
+    expect(await same({ address_line1: '88 Bayview Ave' }, '88 Bayview Avenue, Sarasota, FL 34236')).toBe(true);
+    expect(await same({ address_line1: '45 Oak Dr' }, '45 Oak Drive')).toBe(true);
+  });
+
+  it('unit formatting, case and punctuation are NOT a contradiction', async () => {
+    expect(await same({ address_line1: '45 Oak Dr', address_line2: 'Apt 2' }, '45 Oak Drive #2, Sarasota, FL 34236')).toBe(true);
+    expect(await same({ address_line1: '45 Oak Dr', address_line2: '#2' }, '45 Oak Drive Apt 2')).toBe(true);
+    expect(await same({ address_line1: '123 Main St' }, '123 MAIN ST.')).toBe(true);
+    expect(await same({ address_line1: '123 Main St.' }, '123 main street,  bradenton , fl')).toBe(true);
+  });
+
+  it('trailing city/state/ZIP on the estimate address is NOT a contradiction (candidate city/ZIP agree or are blank)', async () => {
+    expect(await same({ address_line1: '123 Main St', city: 'Bradenton', zip: '34205' }, '123 Main Street, Bradenton, FL 34205')).toBe(true);
+    expect(await same({ address_line1: '123 Main St', city: null, zip: null }, '123 Main Street, Bradenton, FL 34205')).toBe(true);
+  });
+
+  it('a genuinely different street or house number IS a contradiction', async () => {
+    expect(await differs({ address_line1: '100 Palm Ave' }, '742 Evergreen Ter, Sarasota, FL 34236')).toBe(true);
+    expect(await differs({ address_line1: '100 Palm Ave' }, '100 Oak Ave, Sarasota, FL 34236')).toBe(true);
+    expect(await differs({ address_line1: '100 Palm Ave' }, '102 Palm Ave')).toBe(true);
+    expect(await differs({ address_line1: '45 Oak Dr', address_line2: 'Apt 2' }, '45 Oak Drive Apt 9')).toBe(true);
+  });
+
+  it('when the comparison cannot decide it is NOT a contradiction (no street number on either side)', async () => {
+    expect(await same({ address_line1: '100 Palm Ave' }, 'Sarasota, FL')).toBe(true);
+    expect(await same({ address_line1: '100 Palm Ave' }, 'Palm Avenue, Sarasota')).toBe(true);
+    expect(await same({ address_line1: 'PO Box 12' }, '742 Evergreen Ter, Sarasota, FL 34236')).toBe(true);
+    expect(await same({ address_line1: 'Unit 7' }, '742 Evergreen Ter')).toBe(true);
+  });
+
+  it('the narrow raw-prefix agreement still keeps a match the canonical comparison would split (city spelled differently)', async () => {
+    expect(await same({ address_line1: '100 Palm Ave', city: 'Sarasota' }, '100 Palm Ave, Tampa, FL')).toBe(true);
+  });
+});
+
 describe('matchAcceptCustomerByPhone: several phone candidates (unchanged)', () => {
   const LANDLORD = { ...BOB, id: 'cust-landlord', email: 'owner@example.com', address_line1: '10 Oak Ln' };
   const RENTAL = { ...BOB, id: 'cust-rental', email: 'owner@example.com', address_line1: '55 Pine Ct' };

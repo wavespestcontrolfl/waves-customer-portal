@@ -515,13 +515,33 @@ function acceptAddressMatchesCandidate(estAddr, candidate) {
 // email AND a street line, and neither agrees. Agreeing on either one (an
 // existing customer adding a second property, or using a new email) keeps the
 // match; missing data on either side cannot contradict, so it stays reused.
+// Strong evidence the estimate's service address is a DIFFERENT street address than the
+// candidate's profile address, for the contradiction test only. It uses the repository's
+// canonical comparator (sameStreetAddress: suffix/directional/unit/route normalization,
+// city and ZIP), so "123 Main Street" and "123 Main St, Bradenton, FL 34205" agree. A false
+// "different" costs a real customer their phone on the new profile, so it must clear every
+// guard: both sides need a primary street number (otherwise the comparison cannot decide),
+// the canonical comparison must disagree, AND the narrow raw-prefix agreement used by the
+// multi-candidate rule must also fail (agreement on either keeps the match). The candidate's
+// other properties live in customer_properties, which this in-memory check does not read.
+function acceptAddressProvablyDiffers(estimateAddress, candidate) {
+  const { hasPrimaryStreetNumber } = require('../services/estimator-engine/unit-scope-model');
+  const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+  const estAddress = String(estimateAddress || '').trim();
+  const line1 = String(candidate.address_line1 || '').trim();
+  if (!hasPrimaryStreetNumber(estAddress) || !hasPrimaryStreetNumber(line1)) return false;
+  // Street-first with the unit appended by a space (a comma would read "Apt 2" as the city).
+  const candidateAddress = [[line1, candidate.address_line2].filter((part) => String(part || '').trim()).join(' '), candidate.city, candidate.zip]
+    .filter((part) => String(part || '').trim()).join(', ');
+  if (sameStreetAddress(estAddress, candidateAddress)) return false;
+  return !acceptAddressMatchesCandidate(normalizeAddressForMatch(estAddress), candidate);
+}
+
 function acceptLoneCandidateContradicted(candidate, estimate) {
   const email = String(estimate.customer_email || '').trim().toLowerCase();
-  const estAddr = normalizeAddressForMatch(estimate.address);
   const candEmail = String(candidate.email || '').trim().toLowerCase();
-  const candHasStreet = normalizeAddressForMatch(candidate.address_line1).length >= 5;
-  return !!(email && estAddr && candEmail && candHasStreet
-    && candEmail !== email && !acceptAddressMatchesCandidate(estAddr, candidate));
+  if (!email || !candEmail || candEmail === email) return false;
+  return acceptAddressProvablyDiffers(estimate.address, candidate);
 }
 
 function pickAcceptCustomerMatch(candidates, estimate) {
@@ -550,8 +570,27 @@ function pickAcceptCustomerMatch(candidates, estimate) {
 // with a saved consented card / active Auto Pay is re-asked for a card the
 // auto-satisfy contract says they never re-enter). Read-only; pass the accept
 // transaction as `database` to keep the in-trx behavior identical.
-async function matchAcceptCustomerByPhone(estimate, database = db) {
+//
+// One verdict per accept request for the preflight consumers (B18): the card policy,
+// hold auto-satisfy and prepay quote each call this on the root handle, and the accept
+// transaction then re-resolves authoritatively under its own handle. The first root-handle
+// verdict for an estimate object is kept (WeakMap, request-scoped by object identity) so every
+// preflight decision sees the SAME identity, and the transaction compares its fresh verdict to
+// it (acceptPhoneVerdictDrifted) and aborts for a reload on any difference. The transaction's
+// own call passes { authoritative: true } and is never cached.
+const acceptPhoneVerdicts = new WeakMap();
+
+function acceptPhoneVerdictDrifted(estimate, fresh) {
+  const pre = acceptPhoneVerdicts.get(estimate);
+  if (!pre) return false;
+  return (pre.match?.id || null) !== (fresh.match?.id || null)
+    || (pre.contradicted === true) !== (fresh.contradicted === true);
+}
+
+async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false } = {}) {
   if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
+  const cacheable = database === db && !authoritative && typeof estimate === 'object';
+  if (cacheable && acceptPhoneVerdicts.has(estimate)) return acceptPhoneVerdicts.get(estimate);
   const matchDigits = phoneLast10(estimate.customer_phone);
   const candidates = await database('customers')
     .where((q) => {
@@ -573,11 +612,81 @@ async function matchAcceptCustomerByPhone(estimate, database = db) {
   // sharing the account as before. Existing callers read only match /
   // candidateCount.
   const contradicted = candidates.length === 1 && !match;
-  return {
+  const verdict = {
     match,
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// B18: the durable marker the contradicted accept writes into the new profile's internal_notes
+// (the office-visible record of the disputed number), and the alert it backs.
+const CONTRADICTED_PHONE_NOTE_MARK = 'belongs to another customer, so it was not saved on this profile';
+
+function contradictedPhoneNote({ estimate, rejectedCustomerId }) {
+  return `Phone on the estimate (${estimate.customer_phone}) ${CONTRADICTED_PHONE_NOTE_MARK} and this customer is not texted. `
+    + `Add their real number, or merge the two profiles if they are the same person. Estimate ${estimate.id}. Other customer id: ${rejectedCustomerId}.`;
+}
+
+// Raises (idempotently, by dedupe key) the one Customers needs-you alert for a contradicted accept.
+// Never throws: callers are post-commit. Two attempts, then the replay in the already-accepted
+// branch is the recovery.
+async function raiseContradictedPhoneAlert({ estimate, customerId, rejectedCustomerId }) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const { fitAction } = require('../services/admin-alert-names');
+      const rejected = await db('customers').where({ id: rejectedCustomerId }).first('id', 'first_name', 'last_name');
+      const rejectedName = [rejected?.first_name, rejected?.last_name].filter(Boolean).join(' ') || 'another customer';
+      await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+        area: 'Customers',
+        action: fitAction('Customers', estimate.customer_name || 'the new customer', [
+          (n) => `add ${n}'s phone number`,
+          (n) => `add ${n}'s phone`,
+        ]),
+        why: 'Their estimate\u2019s phone is another customer\u2019s, so they were saved without one and are not texted.',
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        subject: { type: 'customer', id: String(customerId) },
+        doneWhen: 'phone_corrected',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `accept-phone-contradicted:${estimate.id}`,
+        dedupeVersion: 'v1',
+        detail: `The phone number on this estimate belongs to another customer (${rejectedName}, customer id ${rejectedCustomerId}). `
+          + 'The person who accepted was set up as a separate customer and was asked for their own card. '
+          + 'They were created without a phone number, so they are not texted and cannot sign in to the portal by phone: '
+          + 'add their real number on the new customer, or merge the two if they are the same person. '
+          + 'The number staff typed is kept on the estimate and in the new customer\'s internal notes.',
+        metadata: { estimateId: estimate.id, customerId: String(customerId), rejectedCustomerId: String(rejectedCustomerId) },
+      });
+      return true;
+    } catch (e) {
+      logger.error(`[estimate-accept] contradicted-phone office alert attempt ${attempt} failed for estimate ${estimate.id}: ${e.message}`);
+    }
+  }
+  return false;
+}
+
+// Replay for the already-accepted branch: the accepted estimate's customer carries the marker note
+// for THIS estimate and is still phone-less -> raise the (idempotent) alert again. Silent no-op for
+// every other accepted estimate; never throws.
+async function replayContradictedPhoneAlert(estimate) {
+  try {
+    if (!estimate?.customer_id) return false;
+    const row = await db('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').first('id', 'phone', 'internal_notes');
+    const notes = String(row?.internal_notes || '');
+    if (!row || String(row.phone || '').trim() !== ''
+      || !notes.includes(CONTRADICTED_PHONE_NOTE_MARK) || !notes.includes(`Estimate ${estimate.id}.`)) return false;
+    const rejectedCustomerId = (notes.match(/Other customer id: ([\w-]+)/) || [])[1];
+    if (!rejectedCustomerId) return false;
+    return await raiseContradictedPhoneAlert({ estimate, customerId: row.id, rejectedCustomerId });
+  } catch (e) {
+    logger.warn(`[estimate-accept] contradicted-phone alert replay skipped for estimate ${estimate?.id}: ${e.message}`);
+    return false;
+  }
 }
 
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
@@ -9623,6 +9732,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
+    // B18: form the preflight phone-identity verdict ONCE, before any card policy / hold / prepay
+    // decision reads it (they get this same verdict from the cache); the accept transaction
+    // compares its authoritative verdict to it. A failed lookup here just leaves no verdict to
+    // compare, and each consumer fails closed as before.
+    if (!estimate.customer_id && estimate.customer_phone && estimate.status !== 'accepted') {
+      try { await matchAcceptCustomerByPhone(estimate); } catch { /* consumers fail closed on their own */ }
+    }
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
     // gate to still be live — acceptance bills/schedules from stored rows
     // without re-entering priceLawnCare, so a save-then-gate-off sequence
@@ -9683,6 +9799,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
         }
       }
+      // B18: recover a contradicted-phone office alert that was lost after the first commit (idempotent).
+      await replayContradictedPhoneAlert(estimate);
       try {
         return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
       } catch (e) {
@@ -11898,7 +12016,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(estimate, trx);
+        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true });
+        // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT
+        // identity (matched customer / none / contradicted). If this authoritative match differs
+        // (the candidate's email/address or the candidate set moved in between), an Auto Pay or
+        // saved-card exemption could belong to the wrong person, or a captured SetupIntent could
+        // enroll on a newly matched customer. Abort with the existing reloadable 409; the reloaded
+        // page recomputes the policy on today's identity. Nothing is committed.
+        if (acceptPhoneVerdictDrifted(estimate, { match: existing, contradicted: phoneContradicted })) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          const driftErr = new Error('Your account just changed. Please reload the page and confirm again.');
+          driftErr.status = 409;
+          driftErr.isOperational = true;
+          driftErr.code = 'ACCEPT_BILLING_CHANGED';
+          throw driftErr;
+        }
         if (phoneContradicted) {
           phoneContradictionRejectedId = phoneRejectedCustomerId || null;
           logger.warn(`[estimate-accept] phone on estimate ${estimate.id} belongs to a customer whose email and address both disagree with the estimate — creating a new profile on its own account`);
@@ -11976,7 +12110,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             phone: acceptProfilePhone,
             email: newProfileEmail,
             // The disputed number stays visible to the office on the profile it was kept off.
-            ...(phoneContradicted ? { internal_notes: `Phone on the estimate (${estimate.customer_phone}) belongs to another customer, so it was not saved on this profile and this customer is not texted. Add their real number, or merge the two profiles if they are the same person. Estimate ${estimate.id}.` } : {}),
+            ...(phoneContradicted ? { internal_notes: contradictedPhoneNote({ estimate, rejectedCustomerId: phoneRejectedCustomerId }) } : {}),
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
             // Canonicalized unit segment (codex #3244 r7): without it the
             // primary-property backfill and every addressKey compare see a
@@ -14290,40 +14424,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
     }
     // B18: the accept took the contradicted-phone branch (the phone on the estimate belongs to
-    // another customer, so the accepter got their own profile and account). They cannot sign in by
-    // phone until it is corrected, so the office is told once, post-commit like the other deferred
-    // alerts (a rolled-back accept never gets here). Fail-soft: the accept already committed.
+    // another customer, so the accepter got their own profile and account, saved without a phone).
+    // The office is told once, post-commit like the other deferred alerts (a rolled-back accept never
+    // gets here). Fail-soft: the accept already committed. A lost alert (a throw here, or a crash
+    // between commit and now) is replayed by the already-accepted branch of this route, which finds
+    // the profile by the marker in its internal notes; the dedupe key keeps either path idempotent.
     if (txResult.phoneContradictionRejectedId && customerId) {
-      try {
-        const { fitAction } = require('../services/admin-alert-names');
-        const rejected = await db('customers').where({ id: txResult.phoneContradictionRejectedId }).first('id', 'first_name', 'last_name');
-        const rejectedName = [rejected?.first_name, rejected?.last_name].filter(Boolean).join(' ') || 'another customer';
-        await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
-          area: 'Customers',
-          action: fitAction('Customers', estimate.customer_name || 'the new customer', [
-            (n) => `add ${n}'s phone number`,
-            (n) => `add ${n}'s phone`,
-          ]),
-          why: 'Their estimate\u2019s phone is another customer\u2019s, so they were saved without one and are not texted.',
-          severity: 'needs-you',
-          link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-          subject: { type: 'customer', id: String(customerId) },
-          doneWhen: 'phone_corrected',
-          who: 'person',
-        }, {
-          bell: true,
-          dedupeKey: `accept-phone-contradicted:${estimate.id}`,
-          dedupeVersion: 'v1',
-          detail: `The phone number on this estimate belongs to another customer (${rejectedName}, customer id ${txResult.phoneContradictionRejectedId}). `
-            + 'The person who accepted was set up as a separate customer and was asked for their own card. '
-            + 'They were created without a phone number, so they are not texted and cannot sign in to the portal by phone: '
-            + 'add their real number on the new customer, or merge the two if they are the same person. '
-            + 'The number staff typed is kept on the estimate and in the new customer\'s internal notes.',
-          metadata: { estimateId: estimate.id, customerId: String(customerId), rejectedCustomerId: String(txResult.phoneContradictionRejectedId) },
-        });
-      } catch (e) {
-        logger.error(`[estimate-accept] contradicted-phone office alert failed for estimate ${estimate.id}: ${e.message}`);
-      }
+      await raiseContradictedPhoneAlert({ estimate, customerId, rejectedCustomerId: txResult.phoneContradictionRejectedId });
     }
     // The converter deferred the commercial-schedule admin notification
     // (deferCommercialScheduleNotification) so a rolled-back accept can't page

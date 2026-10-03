@@ -1552,7 +1552,10 @@ accept changes nothing and a failed check fails the accept (retryable) rather
 than dropping the input. Customer resolution (phone match) runs on the
 pre-fill identity, so a submitted email never steers which profile the accept
 lands on (a lone phone hit is reused unless the estimate's stored email AND
-address are both present and both disagree with the profile's, in which case the
+address are both present and both provably disagree with the profile's — the
+address by the canonical street comparison, so `Street`/`St`, unit formats and a
+trailing city/ZIP agree, and an address with no street number on either side
+cannot disagree — in which case the
 accept mints a fresh profile on its own account and the accepter gets the
 normal card rules. That profile and its account are stored WITHOUT a phone
 (`customers.phone = ''`, the usual phone-less shape): the number is another
@@ -1561,7 +1564,11 @@ accept-time text (booking link, appointment confirmation, prepay notice) goes to
 it; the accepter's own email is unchanged. The number staff typed stays on the
 estimate and in the new profile's internal notes, and once the accept commits the
 office gets one Customers needs-you alert (dedupe `accept-phone-contradicted:<estimateId>`)
-to add the accepter's real number or merge the two profiles; this covers the lone-candidate case only, and when several
+to add the accepter's real number or merge the two profiles (the alert is replayed,
+idempotently, by a re-POST of the already-accepted estimate while the profile is
+still phone-less); the preflight phone-identity verdict is formed once and the
+accept transaction's authoritative match must equal it, else the accept aborts
+with the reloadable 409 `ACCEPT_BILLING_CHANGED` and nothing commits; this covers the lone-candidate case only, and when several
 profiles share the phone and none matches uniquely the fresh profile still
 joins the phone-matched account as before); an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
