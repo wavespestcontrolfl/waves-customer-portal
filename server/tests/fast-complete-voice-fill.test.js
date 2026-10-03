@@ -1822,9 +1822,11 @@ describe('Codex #5698 round 7: which mention a quote points at', () => {
 describe('voice test findings (real recordings, 2026-10-03)', () => {
   const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
 
-  test('"four ounces per meter" (a misheard "ounces, perimeter") is not a rate: the amount stays', () => {
+  test('"four ounces per meter" (possibly a misheard "perimeter") is treated as a rate: a Check, never a guess', () => {
     const t = 'Treated the front only. Taurus four ounces per meter.';
-    expect(validateFill(answer({ products: [row(4, 'Taurus four ounces per meter')] }), ctx, t).products[0].amount).toBe(4);
+    const out = validateFill(answer({ products: [row(4, 'Taurus four ounces per meter')] }), ctx, t);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear.map((u) => u.reason)).toContain('amount_not_spoken');
   });
 
   test('real rates are still rates', () => {
@@ -1842,8 +1844,9 @@ describe('voice test findings (real recordings, 2026-10-03)', () => {
 
 test('"per meter squared" is a rate; "no weight" with no replacement number corrects nothing', () => {
   const row = (amount, heard) => ({ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
-  const rate = 'Taurus four ounces per meter squared.';
-  expect(validateFill(answer({ products: [row(4, rate.replace(/\.$/, ''))] }), ctx, rate).products[0].amount).toBeNull();
+  for (const rate of ['Taurus four ounces per meter squared.', 'Applied Taurus at four ounces per minute for ten minutes.']) {
+    expect(validateFill(answer({ products: [row(4, rate.replace(/\.$/, ''))] }), ctx, rate).products[0].amount).toBeNull();
+  }
   const kept = 'Taurus four ounces, no weight limit on the truck.';
   expect(validateFill(answer({ products: [row(4, 'Taurus four ounces')] }), ctx, kept).products[0].amount).toBe(4);
 });
