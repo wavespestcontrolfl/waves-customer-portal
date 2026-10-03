@@ -37,6 +37,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useVisitPrepPhotoState } from "../../hooks/useVisitPrepPhotoUrls";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
@@ -7198,45 +7199,14 @@ const JOB_CARD_PREP_LOCATIONS = {
   front_yard: "Front yard", back_yard: "Back yard", side_yard: "Side yard", inside_home: "Inside home",
   garage_lanai: "Garage / lanai", garden_beds: "Garden beds", other: "Other",
 };
-// Signed for one hour server-side (visit-prep.js); re-fetched before then.
-const JOB_CARD_PREP_URL_REFRESH_MS = 50 * 60 * 1000;
-const JOB_CARD_PREP_RETRY_MS = 15 * 1000;
-
 // Photos the customer sent before the visit. Thumbnails come from the
-// ownership-scoped GET /admin/schedule/:id/visit-prep-photos; a failed
-// fetch leaves the topic, place and note, never an error over them.
+// ownership-scoped GET /admin/schedule/:id/visit-prep-photos through the
+// Visit Brief's own link hook: refreshed before the one-hour links expire,
+// withheld on resume once stale. A failed fetch is said, with a Retry; the
+// topic, place and note always show.
 export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFetch }) {
-  const [urls, setUrls] = useState({});
-  const [failed, setFailed] = useState(false);
-  const [tick, setTick] = useState(0);
-  const autoRetriesRef = useRef(0);
   const photoSignature = (submissions || []).flatMap((s) => s.photoIds || []).join(",");
-  useEffect(() => {
-    if (!serviceId || !photoSignature) return undefined;
-    let cancelled = false;
-    let retry = null;
-    request(`/admin/schedule/${serviceId}/visit-prep-photos`)
-      .then((data) => {
-        if (cancelled) return;
-        const next = {};
-        for (const p of data?.photos || []) { if (p?.id && p?.url) next[p.id] = p.url; }
-        setUrls(next);
-        setFailed(false);
-        autoRetriesRef.current = 0;
-      })
-      // Said on the card, with a Retry and ONE short automatic retry —
-      // never a silent "loading" until the 50-minute refresh.
-      .catch(() => {
-        if (cancelled) return;
-        setFailed(true);
-        if (autoRetriesRef.current < 1) {
-          autoRetriesRef.current += 1;
-          retry = setTimeout(() => setTick((n) => n + 1), JOB_CARD_PREP_RETRY_MS);
-        }
-      });
-    const refresh = setTimeout(() => setTick((n) => n + 1), JOB_CARD_PREP_URL_REFRESH_MS);
-    return () => { cancelled = true; clearTimeout(refresh); clearTimeout(retry); };
-  }, [serviceId, photoSignature, request, tick]);
+  const { urls, failed, retry } = useVisitPrepPhotoState(serviceId, !!photoSignature, request, photoSignature, { retryOnFailure: true });
   if (!submissions?.length) return null;
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
@@ -7244,7 +7214,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
       {failed && (
         <div style={{ color: D.muted, marginBottom: 6 }}>
           Photos unavailable right now.{" "}
-          <button type="button" onClick={() => setTick((n) => n + 1)} style={{ background: "none", border: "none", padding: 0, color: D.text, textDecoration: "underline", cursor: "pointer", fontSize: 14 }}>Retry</button>
+          <button type="button" onClick={retry} style={{ background: "none", border: "none", padding: 0, color: D.text, textDecoration: "underline", cursor: "pointer", fontSize: 14 }}>Retry</button>
         </div>
       )}
       {submissions.map((s, i) => {

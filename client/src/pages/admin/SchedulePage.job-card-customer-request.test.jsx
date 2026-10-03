@@ -3,7 +3,7 @@
 // Job card "Why they booked" box (GATE_JOB_CARD_CUSTOMER_CONTEXT, owner
 // "ok go" 2026-10-03). Typed and texted words are quoted; a call's AI
 // summary and the office's wording are not; nothing recorded renders nothing.
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JobCardCustomerRequest, JobCardCustomerTexts, JobCardPrepPhotos } from './SchedulePage';
 
@@ -69,6 +69,21 @@ describe('JobCardPrepPhotos', () => {
     await waitFor(() => expect(screen.getByAltText('Customer photo 1').getAttribute('src')).toBe('https://example.test/p1.jpg'));
     // A photo the endpoint did not sign stays a placeholder.
     expect(screen.getByLabelText('Customer photo 2 loading')).toBeTruthy();
+  });
+
+  it('withholds expired links on resume and fetches fresh ones (Codex r2)', async () => {
+    const request = vi.fn(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/old.jpg' }] }));
+    render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={submissions} request={request} />);
+    await waitFor(() => expect(screen.getByAltText('Customer photo 1')).toBeTruthy());
+    // The phone was locked past the one-hour signed links.
+    const later = Date.now() + 61 * 60 * 1000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    request.mockImplementationOnce(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/new.jpg' }] }));
+    try {
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      expect(screen.queryByAltText('Customer photo 1')?.getAttribute('src')).not.toBe('https://example.test/old.jpg');
+      await waitFor(() => expect(screen.getByAltText('Customer photo 1').getAttribute('src')).toBe('https://example.test/new.jpg'));
+    } finally { clock.mockRestore(); }
   });
 
   it('a failed photo fetch still shows the note; nothing sent renders nothing', async () => {

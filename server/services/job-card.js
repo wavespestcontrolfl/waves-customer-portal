@@ -320,42 +320,58 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
+// Where the texts stop. window_start only opens a two-hour arrival range,
+// so a text sent inside it (gate instructions at 9:30 for a 9–11 arrival)
+// still belongs on the card: the cutoff is the technician's recorded
+// arrival, else now while the visit is still ahead. A finished visit with
+// no arrival stamp falls back to its nominal start.
+const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
+function textsCutoff(svc, visitStart) {
+  const stamps = ARRIVAL_STAMPS.map((k) => (svc[k] ? new Date(svc[k]).getTime() : NaN)).filter(Number.isFinite);
+  if (stamps.length) return new Date(Math.min(...stamps));
+  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(svc.status) && visitStart) return visitStart;
+  return null;
+}
+
 // The customer's own recent texts — since the last visit (else the last 30 days),
-// up to the visit's start — the calls line's window. Inbound only; a
+// up to the technician's arrival (textsCutoff). Inbound only; a
 // tapback quotes a Waves text and is never their words; an unresolved
 // review-ask reservation is not a delivered message. null = unreadable
 // (the card says so), never an empty history.
 const TEXTS_FALLBACK_DAYS = 30;
 const TEXTS_MAX = 3;
 const TEXTS_PAGE = 25;
-const TEXTS_MAX_PAGES = 8;
 async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
   const until = untilInstant ? new Date(untilInstant) : new Date();
   const since = sinceInstant ? new Date(sinceInstant) : new Date(until.getTime() - TEXTS_FALLBACK_DAYS * 86400000);
   try {
-    // Tapbacks are filtered here, not in SQL, so pages are read until three
-    // real texts are kept or the window runs out — a run of reactions
-    // never hides the text they followed.
+    // Typed reactions are dropped in SQL; a tapback that only its body
+    // gives away is dropped here, so pages are read (newest first, each
+    // from where the last ended) until three real texts are kept or the
+    // window itself runs out — no run of reactions hides the text before it.
     const kept = [];
-    for (let page = 0; page < TEXTS_MAX_PAGES && kept.length < TEXTS_MAX; page += 1) {
+    let before = until;
+    for (;;) {
       const rows = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: customerId }))
         .where('direction', 'inbound')
+        .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
         .where('created_at', '>', since)
-        .where('created_at', '<', until)
+        .where('created_at', '<', before)
         .select('created_at', 'message_body', 'message_type')
         .orderBy('created_at', 'desc')
-        .orderBy('id', 'desc')
-        .limit(TEXTS_PAGE)
-        .offset(page * TEXTS_PAGE);
+        .limit(TEXTS_PAGE);
       for (const r of rows) {
         if (r.message_type === 'sms_reaction' || isSmsReaction(r.message_body)) continue;
         const text = clean(r.message_body, 300);
         if (text) kept.push({ date: etDateString(new Date(r.created_at)), text });
-        if (kept.length >= TEXTS_MAX) break;
+        if (kept.length >= TEXTS_MAX) return kept;
       }
-      if (rows.length < TEXTS_PAGE) break;
+      if (rows.length < TEXTS_PAGE) return kept;
+      const last = new Date(rows[rows.length - 1].created_at);
+      // A page that cannot move the cursor back would loop; it ends here.
+      if (!(last < before)) return kept;
+      before = last;
     }
-    return kept;
   } catch (err) {
     logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
     return null;
@@ -516,6 +532,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
       dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
       'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests',
+      'ss.arrived_at', 'ss.actual_start_time', 'ss.check_in_time',
     )
     .first();
   if (!svc) return null;
@@ -536,7 +553,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
   const [calls, rain7d, texts, prepPhotos] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
-    customerContext ? loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, visitStart) : Promise.resolve(undefined),
+    customerContext ? loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, textsCutoff(svc, visitStart)) : Promise.resolve(undefined),
     customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
