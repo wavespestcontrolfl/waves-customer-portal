@@ -1669,11 +1669,13 @@ async function loadEstimates(dbh, estimateIds) {
 //     ONE_TIME_ADDON_SERVICE_KEYS treats as one-time whatever their
 //     pattern column says — waveguard_membership is the signup fee, not
 //     a program): a second program the plan-line count cannot see.
-// Per-PROGRAM signal: a non-live row (cancelled — a program swept before
-// its first completion keeps status cancelled, cancellation-processor.js —
-// skipped, or simply past) of a program OTHER than the line's own, judged
-// on normalized identities (palm ≠ tree/shrub; a composite key is each
-// family it names). The same
+// Per-PROGRAM signal: a non-live RECURRING-PLAN row (DATING_ROW_SQL — a
+// cancelled one-time job in the family is not a program; cancelled — a
+// program swept before its first completion keeps status cancelled,
+// cancellation-processor.js — skipped, or simply past) of a program OTHER
+// than the line's own, judged on normalized identities (palm ≠ tree/shrub;
+// a composite key is each family it names; an add-on's frozen category
+// snapshot outranks the mutable catalog row). The same
 // family's cancelled rows are that one program being rescheduled (prod
 // read 2026-10-03: every one of the 10 no-history import accounts carries
 // cancelled 2026 pest series and nothing else), not a second program.
@@ -1694,8 +1696,8 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
       ) AS account_activity,
       (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
         FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
-        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_lines,
-      (SELECT COALESCE(array_agg(DISTINCT COALESCE(asv.category, 'other') || '|' || COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '')), '{}')
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${DATING_ROW_SQL}) AS non_live_lines,
+      (SELECT COALESCE(array_agg(DISTINCT COALESCE(scheduled_service_addons.service_category_snapshot, asv.category, 'other') || '|' || COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '')), '{}')
         FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
         LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
         WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${ADDON_LINE_IS_PLAN_SQL}
@@ -2311,12 +2313,13 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
   // active PROGRAMS per account, counted as normalized program identities:
   // one plan line (account_lines), whose linePrograms() is exactly one (a
   // keyless tree_shrub line is of unknown composition = two; tree/shrub +
-  // palm = two), with no retired combined catalog identity (two programs
-  // in one row) and at most one catalog key
+  // palm = two), with no composite catalog identity (two programs in one
+  // row); several keys naming the same program are still one program
   const onlyProgramFor = (entry) => {
     if (Number(entry.planLine && entry.planLine.account_lines) !== 1) return false;
     const keys = (entry.serviceKeys || []).map((k) => String(k || '').toLowerCase());
-    if (keys.length > 1 || keys.some(isCompositeCatalogKey)) return false;
+    if (keys.some(isCompositeCatalogKey)) return false;
+    // several catalog keys for ONE program (a frozen legacy key beside the current one) still count as one
     return linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys }).length === 1;
   };
   const selected = [];

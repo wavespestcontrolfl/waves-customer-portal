@@ -835,6 +835,9 @@ describe('anniversary and tenure', () => {
     const bundled = mk({ account_lines: 1 }, ['tree_shrub', 'palm_injection']); // two programs in one family entry
     P.selectReviewEntries([bundled], win);
     expect(bundled.anniversary).toMatchObject({ date: null });
+    const twoKeysOneProgram = { ...mk({ account_lines: 1 }, ['quarterly_pest_control', 'pest_control_quarterly_legacy']), familyKey: 'pest_control' }; // a frozen legacy key beside the current one
+    P.selectReviewEntries([twoKeysOneProgram], win);
+    expect(twoKeysOneProgram.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
     const twoLines = mk({ account_lines: 2 }, ['tree_shrub']);
     P.selectReviewEntries([twoLines], win);
     expect(twoLines.anniversary).toMatchObject({ date: null });
@@ -874,7 +877,10 @@ describe('anniversary and tenure', () => {
     // per-family: non-live rows (cancelled / skipped / past) are listed by family; another family's = a second program
     // non-live rows are aggregated as family|catalog-key and normalized to PROGRAM identities (palm ≠ tree/shrub; composites split)
     expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\} \|\| '\|' \|\| COALESCE\(s\.service_key_snapshot, sv\.service_key, ''\)\)/);
-    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\) AS non_live_lines/);
+    // only recurring-plan history counts as a prior program (a cancelled one-time job in the family is not one)
+    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\) AND \$\{DATING_ROW_SQL\}\) AS non_live_lines/);
+    // an add-on's frozen category snapshot outranks the mutable catalog row
+    expect(body).toMatch(/COALESCE\(scheduled_service_addons\.service_category_snapshot, asv\.category, 'other'\)/);
     // recurring add-ons on non-live visits are program history too (minus the one-time signup-fee key)
     expect(body).toMatch(/AND \$\{ADDON_LINE_IS_PLAN_SQL\}\n\s+AND COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)\) AS non_live_addons/);
     expect(body).toMatch(/\[today, today, today, customerIds\]/); // three date bindings, in order
