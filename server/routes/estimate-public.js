@@ -645,7 +645,7 @@ async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false,
 // 'quote_required' | 'termite_trenching_review' | 'contact_review' (the last carries rejectedCustomerId, for the
 // office alert only). `database` + `lock` (a transaction handle, FOR SHARE NOWAIT) are for the slot reserve / extend
 // revalidation on the locked estimate row. Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
-async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock, fresh } = {}) {
+async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock, fresh, suppressionGated = false } = {}) {
   const data = estData || parseEstimateDataSafe(estimate);
   if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
   const trenching = estimateTrenchingReviewRequired(data);
@@ -655,6 +655,10 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
   // same resolver /data uses), and only when one of the review states below would otherwise be reported, so the
   // common clean estimate costs nothing extra. Quote-required wins over both.
   let quote = quoteRequirement;
+  // `suppressionGated` (a Bermuda-suppression estimate the caller refuses anyway): never build its pricing bundle - the quote
+  // requirement is unresolvable, so the helper reports only the state it CAN establish (the same posture as a trenching
+  // estimate whose pricing lookup fails). The slot / intent routes then answer contact_review (the park) or their own gated 409.
+  if (quote === undefined && suppressionGated) quote = null;
   if (quote === undefined) {
     try {
       quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);

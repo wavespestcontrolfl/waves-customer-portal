@@ -831,6 +831,79 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     for (const cols of estimateReads) expect(cols).toContain('estimate_group_id');
   });
 
+  describe('the card-intent routes judge the park BEFORE the Bermuda gate, without pricing a suppression-shaped estimate (r9 follow-up)', () => {
+    const { refuseParkedWrite, retireOrDenyDroppedCapture, buildPricingBundle } = require('../routes/estimate-public');
+    const SUPPRESSED = { ...PARKED_ESTIMATE, estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }) };
+    const BERMUDA = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'BERMUDA_SUPPRESSION_GATED' };
+    const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+    beforeEach(() => {
+      delete process.env.GATE_BERMUDA_SUPPRESSION;
+      currentEstimate = SUPPRESSED;
+      refuseParkedWrite.mockClear(); retireOrDenyDroppedCapture.mockClear(); buildPricingBundle.mockClear();
+      estimatePublicBlockingState.mockClear();
+      createCardHoldSetupIntentForEstimate.mockClear();
+    });
+    afterEach(() => {
+      estimatePublicBlockingState.mockResolvedValue(null);
+      if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION; else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+    });
+
+    test.each(['card-hold-intent', 'recurring-card-intent'])('%s: Bermuda-gated AND parked -> the park (coded 409, alert + release), and the estimate is never priced', async (leg) => {
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      const res = await post(leg, leg === 'recurring-card-intent' ? { replaceSetupIntentId: ' seti_old ' } : {});
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(SUPPRESSED, expect.objectContaining({ suppressionGated: true }));
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+      if (leg === 'recurring-card-intent') expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(SUPPRESSED, 'seti_old');
+      expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    });
+
+    test.each(['card-hold-intent', 'recurring-card-intent'])('%s: Bermuda-gated, NOT parked -> main\'s gated 409 exactly (any other state the helper might report is ignored for it)', async (leg) => {
+      for (const reported of [null, { state: 'quote_required' }, { state: 'termite_trenching_review' }]) {
+        estimatePublicBlockingState.mockResolvedValue(reported);
+        const res = await post(leg, {});
+        expect([res.status, await res.json()]).toEqual([409, BERMUDA]);
+      }
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+    });
+
+    test('the same holds on the slot routes: a gated parked estimate is never priced for the park, a gated trenching/quote one is main\'s gated 409', async () => {
+      estimatePublicBlockingState.mockResolvedValue(PARKED);
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(SUPPRESSED, expect.objectContaining({ suppressionGated: true }));
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+      for (const reported of [{ state: 'quote_required' }, { state: 'termite_trenching_review' }]) {
+        estimatePublicBlockingState.mockResolvedValue(reported);
+        const res = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+        expect([res.status, await res.json()]).toEqual([409, BERMUDA]);
+      }
+    });
+
+    test('source order: on both intent routes the blocking decision precedes the Bermuda gate and any pricing; the gate answers only from inside that block', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const routes = {
+        'card-hold-intent': src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'")),
+        'recurring-card-intent': src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'")),
+      };
+      for (const [name, route] of Object.entries(routes)) {
+        const gatedBlock = route.indexOf('if (isSuppressionGatedEstimate(estimate)) {');
+        expect([name, gatedBlock > 0]).toEqual([name, true]);
+        expect(gatedBlock).toBeLessThan(route.indexOf('buildPricingBundle(estimate)'));
+        expect(gatedBlock).toBeLessThan(route.indexOf('reconcileFrozenMembershipSnapshot(estimate)'));
+        expect(route.indexOf('isEstimateAcceptActive(estimate)')).toBeLessThan(gatedBlock);
+        expect(route.indexOf("contactReviewState(estimate, {})", gatedBlock)).toBeGreaterThan(gatedBlock);
+        // The gate's answer is only reachable after the park decision inside that block, and nowhere else in the route.
+        expect(route.split('rejectGatedSuppressionEstimate(res, estimate)').length - 1).toBe(1);
+        expect(route.indexOf('rejectGatedSuppressionEstimate(res, estimate)')).toBeGreaterThan(route.indexOf("contactReviewState(estimate, {})"));
+      }
+    });
+  });
+
   describe('the shared blocking-state check runs BEFORE every no-booking / alternative-payload shortcut on the four slot routes (r9: ordering class)', () => {
     const { refuseParkedWrite, isRodentGuaranteeOnlyEstimate } = require('../routes/estimate-public');
     const HOLD = '11111111-1111-4111-8111-111111111111';

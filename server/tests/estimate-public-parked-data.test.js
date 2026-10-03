@@ -352,6 +352,20 @@ describe('the one helper decides trenching vs quote_required (r7: no ordering de
   });
 });
 
+describe('suppressionGated: a suppression-shaped estimate is never priced for the blocking state (r9 follow-up)', () => {
+  const { estimatePublicBlockingState } = estimatePublicRouter;
+  test('parked + suppressionGated -> contact_review without any pricing work; without the flag the same lookup would need (and fail on) pricing', async () => {
+    phoneCandidates = [BOB];
+    const broken = makeEstimate();
+    Object.defineProperty(broken, 'estimate_data', { get() { throw new Error('pricing input unreadable'); } });
+    expect(await estimatePublicBlockingState(broken, { estData: {}, suppressionGated: true })).toMatchObject({ state: 'contact_review', rejectedCustomerId: 'cust-bob' });
+    await expect(estimatePublicBlockingState(broken, { estData: {} })).rejects.toThrow('pricing input unreadable');
+    // Not parked: nothing to report (and still no pricing).
+    phoneCandidates = [];
+    expect(await estimatePublicBlockingState(broken, { estData: {}, suppressionGated: true, fresh: true })).toBeNull();
+  });
+});
+
 describe('the bulk hold release is judged on the estimate as it is now, under the estimate row lock (r6 P2)', () => {
   const { refuseParkedWrite } = estimatePublicRouter;
   const estimateChains = () => db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).filter((c) => c.table === 'estimates');

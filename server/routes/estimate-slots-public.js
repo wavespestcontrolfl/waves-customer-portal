@@ -159,10 +159,13 @@ const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void'])
 // PaymentIntent minted gate-on must never finalize gate-off). Returns a
 // sent 409 (caller must `return` it) or null when unaffected. Callers'
 // row loads all carry estimate_data (`.first()` or an explicit column).
-function rejectGatedSuppressionEstimate(res, estimate = {}) {
+function isSuppressionGatedEstimate(estimate = {}) {
   const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+  return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+}
+function rejectGatedSuppressionEstimate(res, estimate = {}) {
+  if (isSuppressionGatedEstimate(estimate)) {
     return res.status(409).json({
       error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
       code: 'BERMUDA_SUPPRESSION_GATED',
@@ -247,7 +250,7 @@ const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'est
 // the ONE precedence helper in estimate-public.js - the existing quote-required / trenching refusals each caller
 // already makes come first). The same shapes the trenching refusals answer on each path.
 async function contactReviewState(estimate, opts) {
-  const state = await estimatePublicBlockingState(estimate, opts);
+  const state = await blockingStateFor(estimate, opts);
   return state?.state === 'contact_review' ? state : null;
 }
 // What a slot route answers for each state the ONE blocking-state helper reports - never "unblocked" for a state it
@@ -257,6 +260,15 @@ async function contactReviewState(estimate, opts) {
 // quote-required refusal of their own: the helper only reports that state when a review state would otherwise apply,
 // so a quote-required estimate alone is answered exactly as on main), the trenching 409 / browse shape, and the
 // office-review 409 / browse shape. Only contact_review carries `park` (the office alert and hold release).
+// The blocking state every route here judges, through the ONE helper. A Bermuda-suppression estimate (refused with its own
+// gated 409 by every route here) is never priced for it, so the quote requirement is unresolvable and only the state the
+// matcher alone can establish counts: contact_review (the park). For such an estimate any other reported state is ignored,
+// so its answer stays main's gated 409 byte-identical when it is not parked.
+async function blockingStateFor(estimate, opts = {}) {
+  if (!isSuppressionGatedEstimate(estimate)) return estimatePublicBlockingState(estimate, opts);
+  const state = await estimatePublicBlockingState(estimate, { ...opts, suppressionGated: true });
+  return state?.state === 'contact_review' ? state : null;
+}
 const ESTIMATE_INACTIVE_409 = { error: 'Estimate is no longer active' };
 const TRENCHING_BROWSE_BODY = {
   primary: [], expander: [], availableSlots: [], summary: null,
@@ -274,7 +286,7 @@ function blockingStateRefusal(state, { browse = false } = {}) {
     : { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } };
 }
 async function slotBlockingRefusal(estimate, opts, shape) {
-  return blockingStateRefusal(await estimatePublicBlockingState(estimate, opts), shape);
+  return blockingStateRefusal(await blockingStateFor(estimate, opts), shape);
 }
 // The re-check a card-intent route runs AFTER its Stripe mint, before a client secret leaves the server: the
 // ESTIMATE row is re-read (staff can edit its phone, email or address, or deactivate it, during the mint) and judged
@@ -292,6 +304,19 @@ async function postMintRefusal(estimate) {
 // or was asked to replace is retired with the accept's own helper first (503 if Stripe cannot confirm); a card-hold
 // intent's pending row is never exposed and is simply withheld. No route may answer with such content any other way
 // (pinned by a source-level test).
+// The recurring intent's park answer: a replace-payment-method request names an already-succeeded capture
+// (`replaceSetupIntentId`) the client drops on this 409, so it is retired with the accept's own helper BEFORE the 409, or
+// the abandoned intent stays eligible for later recovery (Stripe unable to confirm = the existing 503).
+async function refuseParkedRecurringIntent(res, estimate, parkState, replaceSetupIntentId) {
+  if (replaceSetupIntentId) {
+    try {
+      await retireOrDenyDroppedCapture(estimate, replaceSetupIntentId);
+    } catch (retireErr) {
+      return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+    }
+  }
+  return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+}
 async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null } = {}) {
   const blocked = await postMintRefusal(estimate);
   if (blocked) {
@@ -331,7 +356,7 @@ async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {})
   try {
     return trx
       ? await savepointScope(trx, async (scoped) => blockingStateRefusal(
-        await estimatePublicBlockingState(row, { database: scoped, lock: true })))
+        await blockingStateFor(row, { database: scoped, lock: true })))
       : await slotBlockingRefusal(row, {});
   } catch (err) {
     if (err?.code === '55P03') return skipOnBusy ? null : CUSTOMER_BUSY_REFUSAL;
@@ -792,10 +817,17 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     if (!estimate) return res.status(404).json({ error: 'Not found' });
     const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
     if (callBlocked) return callBlocked;
-    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
-    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    // ORDER (same as the slot routes): the blocking-state decision comes BEFORE the Bermuda gate. A suppression-shaped
+    // estimate is never priced here (its quote requirement cannot be resolved), so only the state the matcher alone can
+    // establish - contact_review - is judged for it (`suppressionGated`): parked -> the park (alert, hold release,
+    // coded 409); not parked -> main's gated 409, byte-identical.
+    if (isSuppressionGatedEstimate(estimate)) {
+      const gatedPark = await contactReviewState(estimate, {});
+      if (gatedPark) return res.status(409).json(await refuseParkedWrite(estimate, gatedPark.rejectedCustomerId));
+      return rejectGatedSuppressionEstimate(res, estimate);
+    }
     await reconcileFrozenMembershipSnapshot(estimate);
 
     const estData = parseEstimateData(estimate);
@@ -912,10 +944,20 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     if (!estimate) return res.status(404).json({ error: 'Not found' });
     const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
     if (callBlocked) return callBlocked;
-    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
-    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    // "Use a different payment method" names an already-succeeded capture to replace (handled after the policy checks); it
+    // is also what a park (early or late) retires.
+    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
+      ? req.body.replaceSetupIntentId.trim()
+      : '';
+    // ORDER (same as the slot routes and card-hold-intent): the blocking-state decision comes BEFORE the Bermuda gate,
+    // and a suppression-shaped estimate is never priced here, so only contact_review is judged for it (see card-hold-intent).
+    if (isSuppressionGatedEstimate(estimate)) {
+      const gatedPark = await contactReviewState(estimate, {});
+      if (gatedPark) return refuseParkedRecurringIntent(res, estimate, gatedPark, replaceSetupIntentId);
+      return rejectGatedSuppressionEstimate(res, estimate);
+    }
     await reconcileFrozenMembershipSnapshot(estimate);
 
     const estData = parseEstimateData(estimate);
@@ -929,26 +971,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
     const recurringParkState = await contactReviewState(estimate, { estData, quoteRequirement });
-    if (recurringParkState) {
-      // A replace-payment-method request names an already-succeeded capture (`replaceSetupIntentId`) the client drops
-      // on this 409: retire it here (main's own helper, the one the accept's park uses) BEFORE the 409, or the
-      // abandoned intent stays eligible for later recovery. Stripe unable to confirm = the existing 503.
-      const parkedReplaceId = typeof req.body?.replaceSetupIntentId === 'string' ? req.body.replaceSetupIntentId.trim() : '';
-      if (parkedReplaceId) {
-        try {
-          await retireOrDenyDroppedCapture(estimate, parkedReplaceId);
-        } catch (retireErr) {
-          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
-        }
-      }
-      return res.status(409).json(await refuseParkedWrite(estimate, recurringParkState.rejectedCustomerId));
-    }
+    if (recurringParkState) return refuseParkedRecurringIntent(res, estimate, recurringParkState, replaceSetupIntentId);
 
-    // "Use a different payment method" names an already-succeeded capture to replace (handled after the policy checks); it
-    // is also what a late park retires (sendRecheckedIntentResponse).
-    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
-      ? req.body.replaceSetupIntentId.trim()
-      : '';
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
     const treatAsOneTime = req.body?.serviceMode === 'one_time'

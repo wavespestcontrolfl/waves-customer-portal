@@ -1708,7 +1708,7 @@ answers:
   run that call FIRST: only true viewability refusals (not found, not customer-viewable, call-side block, terminal) stay ahead of it, and
   every no-booking / alternative-payload shortcut (the Bermuda gate, commercial auto, guarantee-only renewal) runs after it, on
   `available-slots`, `find-slots`, `reserve` and `extend` (pre-transaction and locked), so a parked commercial or guarantee-only
-  estimate still gets the park. Main's bodies for those shortcuts are unchanged when the helper reports no state. The slot routes
+  estimate still gets the park. Main's bodies for those shortcuts are unchanged when the helper reports no state. `card-hold-intent` and `recurring-card-intent` follow the same order (call-side block, accepted, inactive, then the blocking state, then the Bermuda gate): a Bermuda-suppression estimate is never priced for it (`suppressionGated`: its quote requirement is unresolvable, so only the park, which needs the matcher alone, is judged), so a gated AND parked estimate gets the park (alert, hold release, coded 409; a replace intent is retired) and a gated, unparked one gets the gated 409 exactly as before. The slot routes
   answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
   is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
   the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
