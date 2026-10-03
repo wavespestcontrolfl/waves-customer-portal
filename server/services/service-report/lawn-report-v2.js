@@ -745,7 +745,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
   // An uncredited required water-in keeps its own line as the task through
   // the shared resolver (aftercareCustomerTask).
-  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
+  // New-sod mode: the "Your next step" task is never the product's watering task: the banner
+  // owns the watering instruction, and the product's own note stays in the aftercare block.
+  const aftercareTask = newSod ? null : aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
   // A credited water-in the water/damp cards phrase generically ("as
   // directed") already carries this same task in different words — the
   // literal-instruction `includes` check below misses that semantic

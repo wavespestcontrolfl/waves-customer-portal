@@ -3,7 +3,7 @@
 // water story, the lead, and the watering text. Synthetic data only.
 
 const {
-  newSodMode, validateSodLaidOn, sodLaidLabel, weedControlMayHaveBeenApplied,
+  newSodMode, validateSodLaidOn, sodLaidLabel,
   buildNewSodBanner, buildNewSodWeekPlan, NEW_SOD_COPY, NEW_SOD_WINDOW_DAYS,
 } = require('../services/service-report/lawn-new-sod');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
@@ -94,18 +94,15 @@ describe('the fixed customer sentences', () => {
     expect(NEW_SOD_COPY.expect).not.toMatch(WATERING_WORDS);
   });
 
-  test('the banner: water, mow, and weed control only when none was applied', () => {
-    const without = buildNewSodBanner({ weedControlApplied: false });
-    expect(without).toEqual({
+  test('the banner: the watering and mowing sentences only, and no claim about weed control', () => {
+    const banner = buildNewSodBanner();
+    expect(banner).toEqual({
       state: 'new_sod',
-      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.', 'We are holding weed control until the sod has rooted.'],
+      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.'],
       holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'new_sod',
     });
-    const withWeed = buildNewSodBanner({ weedControlApplied: true });
-    expect(withWeed.lines).toEqual(['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.']);
-    // Unknown is treated as applied: the default never prints the weed sentence.
-    expect(buildNewSodBanner().lines).toHaveLength(2);
-    expect(Object.keys(without)).not.toEqual(expect.arrayContaining(['forecastLine', 'observedRain', 'mowHold']));
+    expect(Object.keys(banner)).not.toEqual(expect.arrayContaining(['forecastLine', 'observedRain', 'mowHold']));
+    expect(Object.values(NEW_SOD_COPY).join(' ')).not.toMatch(/weed/i);
   });
 
   test('the week plan card', () => {
@@ -120,23 +117,6 @@ describe('the fixed customer sentences', () => {
     expect(sodLaidLabel('2026-10-01')).toBe('New sod laid Oct 1');
     expect(sodLaidLabel(new Date('2026-10-01T00:00:00Z'))).toBe('New sod laid Oct 1');
     expect(sodLaidLabel(null)).toBeNull();
-  });
-});
-
-describe('weedControlMayHaveBeenApplied: never contradict the record', () => {
-  test('a herbicide or a pre-emergent on the record', () => {
-    expect(weedControlMayHaveBeenApplied({ kinds: ['herbicide'], products: [] })).toBe(true);
-    expect(weedControlMayHaveBeenApplied({ kinds: ['pre_emergent'], products: [] })).toBe(true);
-  });
-  test('a product whose recorded targets name weeds', () => {
-    expect(weedControlMayHaveBeenApplied({ kinds: ['other'], products: [{ name: 'X', targets: ['Dollarweed'] }] })).toBe(true);
-  });
-  test('products that could not be read count as possibly applied', () => {
-    expect(weedControlMayHaveBeenApplied(null, { productsUnknown: true })).toBe(true);
-  });
-  test('only a readable visit with no weed control (or no products) is clear', () => {
-    expect(weedControlMayHaveBeenApplied({ kinds: ['fertilizer'], products: [{ name: 'Y', targets: ['Color'] }] })).toBe(false);
-    expect(weedControlMayHaveBeenApplied(null)).toBe(false);
   });
 });
 
@@ -186,7 +166,7 @@ describe('the lead keeps the new-sod expectation line under the new-sod banner',
   test('lead.whatToExpect is the fixed sentence', () => {
     const reportV2 = {
       snapshot: { statusHeadline: 'Looking healthy', nextVisit: null },
-      banner: buildNewSodBanner({ weedControlApplied: true }),
+      banner: buildNewSodBanner(),
       insights: [],
       aftercare: {},
       water: { weekPlan: buildNewSodWeekPlan() },
@@ -215,7 +195,7 @@ describe('the watering text never goes to an active new-sod property', () => {
 });
 
 describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
-  const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
+  const { sendLawnWateringSms, lawnWateringSmsAlreadyHandled } = require('../services/service-report/lawn-watering-sms');
   const KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_NEW_SOD_MODE'];
   let saved;
   beforeEach(() => {
@@ -299,6 +279,65 @@ describe('sendLawnWateringSms with new-sod mode (mocked IO)', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  // The office records sod_laid_on AFTER the first verdict was read but BEFORE the provider
+  // handoff: the check inside the provider-boundary preSendCheck is what stops the text.
+  describe('the verdict is re-run at the provider handoff', () => {
+    // A db whose preference row changes between reads: the first read sees no date.
+    function flipping() {
+      const facts = visitFacts({ prefs: { sod_laid_on: null } });
+      const h = harness(facts);
+      h.facts = facts;
+      return h;
+    }
+
+    test('a date recorded after the first read refuses the handoff; the refusal is final and stamped', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      const facts = visitFacts({ prefs: { sod_laid_on: null } });
+      const h = harness(facts);
+      h.sendCustomerMessage.mockImplementationOnce(async (input) => {
+        facts.prefs = { sod_laid_on: '2026-10-01' }; // the office records it while the send is in flight
+        const verdict = await input.preSendCheck({ channel: 'sms' });
+        expect(verdict).toMatchObject({ ok: false, code: 'LAWN_WATERING_NEW_SOD', retryable: false });
+        return { sent: false, blocked: true, code: verdict.code };
+      });
+      expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_new_sod' });
+      expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_new_sod', lawnWateringSmsDeliveryUnverifiedAt: null });
+      expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
+    });
+
+    test('the handoff check passes when still no date, and the text goes out', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      const h = flipping();
+      let verdict;
+      h.sendCustomerMessage.mockImplementationOnce(async (input) => { verdict = await input.preSendCheck({ channel: 'sms' }); return { sent: true }; });
+      expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
+      expect(verdict).toEqual({ ok: true });
+    });
+
+    test('an unreadable verdict at the handoff fails closed: refused, final, stamped', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      const facts = visitFacts({ prefs: { sod_laid_on: null } });
+      const h = harness(facts);
+      h.sendCustomerMessage.mockImplementationOnce(async (input) => {
+        facts.throwOn = 'property_preferences'; // the read fails at the handoff
+        const verdict = await input.preSendCheck({ channel: 'sms' });
+        expect(verdict).toMatchObject({ ok: false, code: 'LAWN_WATERING_NEW_SOD_UNREADABLE', retryable: false });
+        return { sent: false, blocked: true, code: verdict.code };
+      });
+      expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_new_sod_unreadable' });
+      expect(h.state.notes.lawnWateringSmsStatus).toBe('skipped_new_sod_unreadable');
+    });
+
+    test('gate off: the handoff check does not read the property at all', async () => {
+      const h = flipping();
+      let verdict;
+      h.sendCustomerMessage.mockImplementationOnce(async (input) => { verdict = await input.preSendCheck({ channel: 'sms' }); return { sent: true }; });
+      await sendLawnWateringSms(h.state, h.deps);
+      expect(verdict).toEqual({ ok: true });
+      expect(h.db).not.toHaveBeenCalled();
+    });
   });
 
   test('gate on, anything unreadable: fail closed, nothing sent and no marker written', async () => {

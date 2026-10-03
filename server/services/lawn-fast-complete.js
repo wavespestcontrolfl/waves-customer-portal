@@ -341,11 +341,10 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
   };
   // New-sod mode: the report prints its fixed new-sod banner whatever the watering
   // rule gate says, so the preview shows the lines the report ALWAYS prints for
-  // such a visit (the weed-control sentence depends on the products and is left
-  // to the report) and never the engine's own instruction.
+  // such a visit, and never the engine's own instruction.
   const newSod = await loadNewSodNote(svc, knex);
   if (newSod) {
-    const banner = buildNewSodBanner({ weedControlApplied: true });
+    const banner = buildNewSodBanner();
     out.state = banner.state;
     out.lines = banner.lines;
     out.sentence = banner.lines.join(' ');

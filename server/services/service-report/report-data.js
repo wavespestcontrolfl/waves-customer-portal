@@ -43,7 +43,7 @@ const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const {
-  buildNewSodBanner, buildNewSodWeekPlan, weedControlMayHaveBeenApplied, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
+  buildNewSodBanner, buildNewSodWeekPlan, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
 } = require('./lawn-new-sod');
 const { resolveNewSodVerdict } = require('./lawn-new-sod-visit');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
@@ -5674,14 +5674,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         ...(newSodActive ? { newSod: true } : {}),
       });
       if (reportV2 && newSodActive) {
-        // The weed-control sentence is printed only when the visit demonstrably
-        // applied none; products that could not be read are "unknown", so it is
-        // left out (never contradict the record).
-        reportV2.banner = buildNewSodBanner({
-          weedControlApplied: weedControlMayHaveBeenApplied(reportV2.treatment, {
-            productsUnknown: !!(productsLoadFailed || products.catalogEnrichmentFailed),
-          }),
-        });
+        reportV2.banner = buildNewSodBanner();
       } else if (reportV2 && wateringInstruction) {
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;

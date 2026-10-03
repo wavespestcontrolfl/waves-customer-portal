@@ -182,7 +182,7 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
     expect(await sig(SOD_PREFS('2026-09-25'))).toBe(noDate);
   });
 
-  test('gate on, inside the window, herbicide applied: water and mow lines only, no weed-control sentence', async () => {
+  test('gate on, inside the window: the watering and mowing banner, the plan card and the expectation line', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
     const data = await render(HOLD, SOD_PREFS('2026-09-25'));
     const v2 = data.reportV2;
@@ -201,32 +201,17 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
     expect(v2.water.status).toBe('unknown');
     expect(v2.water.explanation).toBeNull();
     expect(v2.mowing).toBeNull();
-    expect(JSON.stringify(data)).not.toMatch(/weed control until|hold off on weed|21 days|forecastLine|observedRain/);
+    // The mode says nothing about weed control, whatever the products were (a herbicide here).
+    expect(JSON.stringify(data)).not.toMatch(/holding weed control|weed control until|21 days|forecastLine|observedRain/);
     // No public key gains a flag: the verdict rides the in-process object only.
     expect(JSON.stringify(data.lawnAssessment)).not.toMatch(/"newSod"/);
   });
 
-  test('gate on, inside the window, no weed control on the visit: the third sentence prints', async () => {
+  test('the banner is the same two sentences whatever the products were, or when they cannot be read', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: { ...facts(null), name: 'Iron Plus', category: 'supplement', activeIngredient: 'iron' } } });
-    const service = { ...serviceWith(null), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
-    const knex = makeKnex({
-      ...withIdentity(SOD_PREFS('2026-09-25')),
-      service_products: [{ id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Iron Plus', product_category: 'supplement', created_at: '2026-09-30T18:00:00Z' }],
-    });
-    const v2 = (await buildReportV1Data(service, 'token-w1', knex)).reportV2;
-    expect(v2.banner.lines).toEqual([
-      'Water your new sod lightly every day.',
-      'Please hold off on mowing until the sod has rooted.',
-      'We are holding weed control until the sod has rooted.',
-    ]);
-  });
-
-  test('gate on but the products cannot be read: the weed-control sentence is left out', async () => {
-    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
-    const v2 = (await render(HOLD, SOD_PREFS('2026-09-25'), { service_products: FAIL })).reportV2;
-    expect(v2.banner.state).toBe('new_sod');
-    expect(v2.banner.lines).toHaveLength(2);
+    const two = ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.'];
+    expect((await render(HOLD, SOD_PREFS('2026-09-25'))).reportV2.banner.lines).toEqual(two);
+    expect((await render(HOLD, SOD_PREFS('2026-09-25'), { service_products: FAIL })).reportV2.banner.lines).toEqual(two);
   });
 
   test('gate on, the visit is past day 21 or before the sod went down: the normal report', async () => {
@@ -302,6 +287,7 @@ describe('GATE_LAWN_NEW_SOD_MODE: the documented payload keys, with a product th
   test('control: without new-sod mode the product\'s watering restriction fills the card explanation', async () => {
     const v2 = (await needsWateringIn()).reportV2;
     expect(v2.water.explanation).toBeTruthy();
+    expect(v2.snapshot.customerAction).toBe(v2.water.explanation);
   });
 
   test('new-sod mode pins every documented key, and no late assignment brings watering text back', async () => {
@@ -310,7 +296,7 @@ describe('GATE_LAWN_NEW_SOD_MODE: the documented payload keys, with a product th
     const v2 = data.reportV2;
     expect(v2.banner).toEqual({
       state: 'new_sod',
-      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.', 'We are holding weed control until the sod has rooted.'],
+      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.'],
       holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'new_sod',
     });
     expect(v2.water).toMatchObject({
@@ -322,11 +308,44 @@ describe('GATE_LAWN_NEW_SOD_MODE: the documented payload keys, with a product th
     expect(v2.snapshot.seasonalNoteSource).toBeUndefined();
     expect(v2.mowing).toBeNull();
     expect(v2.insights.filter((c) => c.category === 'water' || c.category === 'mowing')).toEqual([]);
+    // "Your next step" is not the product's watering task (the control above carries it).
+    expect(v2.snapshot.customerAction).toBeNull();
     // The product's own aftercare note is the separate legacy block, and it stays.
     expect(v2.aftercare.watering).toBeTruthy();
     // No engine watering voice anywhere else in the reconciled customer text.
     const customerText = JSON.stringify({ water: v2.water, snapshot: { ...v2.snapshot, treatmentSummary: null }, insights: v2.insights });
     expect(customerText).not.toMatch(/ease back|easing back|too much water|dry out between|skip your|lower the mower|raise the mower/i);
+  });
+});
+
+describe('GATE_LAWN_NEW_SOD_MODE: no remaining card or sentence talks about watering or mowing, or claims weed control', () => {
+  const saved = process.env.GATE_LAWN_NEW_SOD_MODE;
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_NEW_SOD_MODE; else process.env.GATE_LAWN_NEW_SOD_MODE = saved; });
+
+  // Weed pressure and stress both flagged, a feeding on the record and NO herbicide: the weed card
+  // is retained ("Spot-treated where appropriate"), and nothing in the mode may disagree with it.
+  test('a weedy, stressed new-sod visit with a feeding and no herbicide', async () => {
+    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: { ...facts(null), name: 'Iron Plus', category: 'supplement', activeIngredient: 'iron' } } });
+    const service = { ...serviceWith(null), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
+    const fx = withIdentity(SOD_PREFS('2026-09-25'));
+    fx.lawn_assessments = [{ ...fx.lawn_assessments[0], weed_suppression: 35, stress_damage: 80 }];
+    fx.service_products = [{ id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Iron Plus', product_category: 'supplement', created_at: '2026-09-30T18:00:00Z' }];
+    const v2 = (await buildReportV1Data(service, 'token-w1', makeKnex(fx))).reportV2;
+    expect(v2.banner.lines).toEqual(['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.']);
+    const weedCard = v2.insights.find((c) => c.category === 'weeds');
+    expect(weedCard).toBeTruthy();
+    // Everything the engine printed other than the fixed new-sod blocks and the product's own aftercare note.
+    const printed = JSON.stringify({
+      insights: v2.insights,
+      diagnosis: v2.diagnosis,
+      snapshot: { ...v2.snapshot, treatmentSummary: null, seasonalNote: null },
+      smsSummary: v2.smsSummary,
+      card: { status: v2.water.status, explanation: v2.water.explanation },
+    });
+    expect(printed).not.toMatch(/water|irrigat|sprinkl|moist|\bmow|mower|\bdry\b|drought|damp|ease back|holding weed control|hold(?:ing)? off on weed/i);
+    // And no sentence claims weed control is on hold anywhere in the payload.
+    expect(JSON.stringify(v2)).not.toMatch(/holding weed control|weed control until/i);
   });
 });
 

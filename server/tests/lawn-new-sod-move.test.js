@@ -121,7 +121,7 @@ describe('a move inside the new-sod window', () => {
     expect(store.prefs.sod_laid_on).toBe(date);
   });
 
-  test('the primary-residence promotion, the different-homes merge and the fan-out all clear it through the one writer', async () => {
+  test('the primary-residence promotion and the fan-out clear it through the one writer (the merge deliberately does not, below)', async () => {
     const store = makeStore({ customer_id: 'cust-1', sod_laid_on: daysAgo(5) });
     await markSprinklerSettingsMoved('cust-1', store.db);
     expect(store.prefs.sod_laid_on).toBeNull();
@@ -132,7 +132,28 @@ describe('a move inside the new-sod window', () => {
     const fs = require('fs');
     const path = require('path');
     expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
-    expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp\)/);
+  });
+
+  // The different-homes merge: no before-image exists for the move stamp (an undo leaves it in
+  // place), so the merge must not clear the date, and the loser's date is never copied.
+  test('the merge path stamps the move WITHOUT clearing the date, so an undo returns the row with its date', async () => {
+    const date = daysAgo(5);
+    const store = makeStore({ customer_id: 'cust-1', sod_laid_on: date, irrigation_run_minutes: 20 });
+    await markSprinklerSettingsMoved('cust-1', store.db, { clearSodLaidOn: false });
+    expect(store.prefs.irrigation_home_changed_at).toBeInstanceOf(Date); // the sprinkler-settings guard still applies
+    expect(store.prefs.sod_laid_on).toBe(date); // nothing to restore on an undo: nothing was cleared
+    // A plain repoint-back (the undo of a no-collision merge) moves the row; the date is intact.
+    const undone = { ...store.prefs, customer_id: 'cust-loser' };
+    expect(undone.sod_laid_on).toBe(date);
+  });
+
+  test('the merge executor calls the stamp with clearSodLaidOn:false, and every other caller keeps the default', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const read = (f) => fs.readFileSync(path.join(__dirname, '../services', f), 'utf8');
+    expect(read('customer-dedupe.js')).toMatch(/markSprinklerSettingsMoved\(winnerId, sp, \{ clearSodLaidOn: false \}\)/);
+    expect(read('property-role-proposals.js')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(read('customer-address-fanout.js').match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
   });
 
   test('a date entered AFTER the move (the office sets it for the new home) is honored', async () => {

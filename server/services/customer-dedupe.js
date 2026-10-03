@@ -1044,6 +1044,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
     // Settled above: receipts are always on after a merge.
     if (table === 'notification_prefs' && col === 'payment_receipt') continue;
+    // The new-sod date (P35) describes the loser's HOME. It is never copied onto the winner, whose
+    // own date (or none) stands because the winner's primary home did not move.
+    if (table === 'property_preferences' && col === 'sod_laid_on') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -3101,7 +3104,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
       try {
         await trx.transaction(async (sp) => {
-          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp);
+          // sod_laid_on is NOT cleared here: the merge journals no before-image for the stamp (an undo
+          // leaves it in place), so a clear could not be undone. The winner's own date stands (its
+          // home did not move) and the loser's is never copied (mergeSingletonPrefRow).
+          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp, { clearSodLaidOn: false });
           if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
         });
       } catch (e) {

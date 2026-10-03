@@ -37,6 +37,10 @@ const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']
 // retried or requeued; the report banner still carries the instruction. 'sending' is covered by the uncertainty
 // fence below, which is written in the same claim.
 const STALE_CODE = 'LAWN_WATERING_STALE';
+// New-sod mode (GATE_LAWN_NEW_SOD_MODE) found at the provider boundary: the office recorded a sod date
+// after the first verdict was read, or the verdict could not be read. Both are final skips.
+const NEW_SOD_CODE = 'LAWN_WATERING_NEW_SOD';
+const NEW_SOD_UNREADABLE_CODE = 'LAWN_WATERING_NEW_SOD_UNREADABLE';
 const TERMINAL_STATUSES = Object.freeze(['sent', 'failed', 'skipped_blocked', 'skipped_quiet_hours']);
 
 function parseNotes(value) {
@@ -220,9 +224,21 @@ async function sendLawnWateringSms(args, deps) {
       const sendInput = {
         // The template read, claim write and policy lookups can cross ET
         // midnight or the instruction's deadline: recheck at the handoff.
-        preSendCheck: async () => (wateringInstructionFresh(instruction, completedAt, Date.now())
-          ? { ok: true }
-          : { ok: false, code: STALE_CODE, reason: 'watering instruction went stale before handoff', retryable: false }),
+        preSendCheck: async () => {
+          if (!wateringInstructionFresh(instruction, completedAt, Date.now())) {
+            return { ok: false, code: STALE_CODE, reason: 'watering instruction went stale before handoff', retryable: false };
+          }
+          // The same shared verdict, run again at the actual provider handoff: the office can
+          // record a sod date between the first read and here. Same fail-closed rule.
+          if (typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()) {
+            const verdict = await resolveNewSodVerdict(deps.db, { customerId: svc.customer_id, serviceRecordId: record.id, scheduledServiceId: svc.id });
+            if (verdict.reason === 'read_failed') {
+              return { ok: false, code: NEW_SOD_UNREADABLE_CODE, reason: 'new-sod verdict unreadable at handoff', retryable: false };
+            }
+            if (verdict.active) return { ok: false, code: NEW_SOD_CODE, reason: 'new-sod mode active at handoff', retryable: false };
+          }
+          return { ok: true };
+        },
         to: svc.cust_phone,
         body,
         channel: 'sms',
@@ -296,6 +312,17 @@ async function sendLawnWateringSms(args, deps) {
           lawnWateringSmsDeliveryUnverifiedAt: null,
         }).catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
         return { status: 'skipped_stale' };
+      }
+
+      // New-sod mode appeared (or could not be read) between the plan and the handoff:
+      // final and never resent. The report banner owns the watering story.
+      if (result && (result.code === NEW_SOD_CODE || result.code === NEW_SOD_UNREADABLE_CODE)) {
+        const status = result.code === NEW_SOD_CODE ? 'skipped_new_sod' : 'skipped_new_sod_unreadable';
+        await stamp({
+          lawnWateringSmsStatus: status,
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] new-sod status write failed for service_record ${record.id}: ${e.message}`));
+        return { status };
       }
 
       // A retryable block (consent / suppression lookup failed, a liftable

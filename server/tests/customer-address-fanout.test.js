@@ -601,7 +601,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     const fs = require('fs');
     const path = require('path');
     expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
-    expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp, \{ clearSodLaidOn: false \}\)/);
     const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
     expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
   });

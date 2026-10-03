@@ -2206,25 +2206,26 @@ that home (the unit-aware visit-property-scope chain: stamp, else property link,
 source estimate, matched to the primary address; a visit with none counts only on a
 proven single-premises account); a visit at another property, or one that cannot be
 proven, gets the normal report; a move of the primary home (address edit or removal,
-different-homes merge, primary-property promotion) clears the sod date in the same
-transaction, so the next visit at the new home is the normal report; a failed read of the visit gives the normal report
+primary-property promotion) clears the sod date in the same transaction, so the next
+visit at the new home is the normal report (the different-homes customer merge does not
+clear it: it never copies the loser's date onto the winner and leaves the winner's own
+date, because the winner's home did not move); a failed read of the visit gives the normal report
 too, uncacheable, with an emailed PDF deferred. One resolver
 (`lawn-new-sod-visit.js`) serves the report, the Fast Complete sheet, the job card and
 the watering text. It adds no key; it replaces the content of
 existing ones with FIXED sentences (no model, no number the business has not stated, no
 "21 days"): `reportV2.banner` becomes `{ state: 'new_sod', lines, holdUntil: null,
 waterInBy: null, expiresAt: null, ruleSource: 'new_sod' }` with `lines` = "Water your
-new sod lightly every day." / "Please hold off on mowing until the sod has rooted." /
-"We are holding weed control until the sod has rooted." (the third line only when the
-visit applied no herbicide or pre-emergent and its products were readable; no `mowHold`,
-`forecastLine` or `observedRain` key is ever present); `reportV2.water.weekPlan` and
+new sod lightly every day." / "Please hold off on mowing until the sod has rooted." (two
+lines, always; the mode makes no claim about weed control; no `mowHold`, `forecastLine`
+or `observedRain` key is ever present); `reportV2.water.weekPlan` and
 `lawnAssessment.waterContext.weekPlan` become `{ title: 'New sod: water lightly every
 day', detail: 'Keep the sod moist with a light watering each day until it has rooted.',
 action: 'new_sod', visitInPlanWeek: true, prescribesRun: false }` (no `afterHold`,
 `afterTreatment` or `depthInches`); `reportV2.water.status` is `'unknown'`,
 `reportV2.water.explanation` is `null` (also for a product whose label needs watering in; that
 note stays in `reportV2.aftercare`) and `water.coverageWatch` is `false`;
-`reportV2.snapshot.seasonalNote` is "Once the sod has rooted, you can start mowing and we
+`reportV2.snapshot.customerAction` is never the product's watering task (the product's note stays in `reportV2.aftercare`); `reportV2.snapshot.seasonalNote` is "Once the sod has rooted, you can start mowing and we
 can begin your regular lawn care." (no `seasonalNoteSource`), and under the v6 copy gate
 `reportV2.lead.whatToExpect` carries the same sentence, while the v6 durable freeze
 (`structured_notes.lawnCopyV6`) is neither written nor replayed for an active visit (the

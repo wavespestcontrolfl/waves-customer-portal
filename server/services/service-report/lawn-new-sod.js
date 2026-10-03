@@ -10,19 +10,16 @@
  * lawn report stops telling the customer what the normal engine would:
  *
  *   - the watering banner, the week plan and the expectation lines are replaced
- *     by the FIXED sentences below (no model text): water lightly every day,
- *     hold off on mowing until the sod has rooted, and we hold weed control
- *     until it has rooted;
+ *     by the FIXED sentences below (no model text): water lightly every day and
+ *     hold off on mowing until the sod has rooted;
  *   - the "skip watering" forecast sentence, the observed-rain close-out and the
  *     separate watering text never fire (the engine's own watering instruction
  *     is not built, so there is nothing frozen to forecast against or to send).
  *
  * Copy rules (pinned by server/tests/lawn-new-sod.test.js): plain, under 25
  * words a sentence, and NO number the business has not stated: no minutes, no
- * inches, no day counts ("21 days" never prints). The weed-control sentence is
- * only printed when the visit demonstrably applied no weed control: a herbicide
- * or pre-emergent on the record (or products that could not be read) means the
- * sentence would contradict the record, so it is left out.
+ * inches, no day counts ("21 days" never prints). The mode makes NO claim about
+ * weed control: whatever the visit did or the weed card says stands on its own.
  *
  * Pure: no database, no clock except the optional `now` the validator takes.
  */
@@ -44,7 +41,6 @@ const NEW_SOD_RULE_SOURCE = 'new_sod';
 const NEW_SOD_COPY = Object.freeze({
   water: 'Water your new sod lightly every day.',
   mow: 'Please hold off on mowing until the sod has rooted.',
-  weed: 'We are holding weed control until the sod has rooted.',
   planTitle: 'New sod: water lightly every day',
   planDetail: 'Keep the sod moist with a light watering each day until it has rooted.',
   expect: 'Once the sod has rooted, you can start mowing and we can begin your regular lawn care.',
@@ -118,31 +114,12 @@ function sodLaidLabel(laidOn) {
   return `New sod laid ${label}`;
 }
 
-const WEED_TARGET = /weed|sedge|crabgrass|dollarweed|broadleaf|kyllinga|nutsedge/i;
-
-/**
- * Could weed control have been applied on this visit? True for a herbicide or
- * pre-emergent on the record (reportV2.treatment.kinds), for any product whose
- * recorded targets name weeds, and ALSO when the products could not be read:
- * an unknown visit never prints a sentence that might contradict it.
- */
-function weedControlMayHaveBeenApplied(treatment, { productsUnknown = false } = {}) {
-  if (productsUnknown) return true;
-  if (!treatment || typeof treatment !== 'object') return false;
-  const kinds = Array.isArray(treatment.kinds) ? treatment.kinds : [];
-  if (kinds.includes('herbicide') || kinds.includes('pre_emergent')) return true;
-  const products = Array.isArray(treatment.products) ? treatment.products : [];
-  return products.some((p) => Array.isArray(p && p.targets) && p.targets.some((t) => WEED_TARGET.test(String(t || ''))));
-}
-
 // reportV2.banner for an active new-sod visit. Same shape the watering banner
 // uses, with state 'new_sod': no clock times, no expiry, no mow-hold object.
-function buildNewSodBanner({ weedControlApplied = true } = {}) {
-  const lines = [NEW_SOD_COPY.water, NEW_SOD_COPY.mow];
-  if (!weedControlApplied) lines.push(NEW_SOD_COPY.weed);
+function buildNewSodBanner() {
   return {
     state: NEW_SOD_STATE,
-    lines,
+    lines: [NEW_SOD_COPY.water, NEW_SOD_COPY.mow],
     holdUntil: null,
     waterInBy: null,
     expiresAt: null,
@@ -171,7 +148,6 @@ module.exports = {
   validateSodLaidOn,
   sodLaidLabel,
   ymdOrNull,
-  weedControlMayHaveBeenApplied,
   buildNewSodBanner,
   buildNewSodWeekPlan,
 };
