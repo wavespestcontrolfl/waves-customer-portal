@@ -106,8 +106,9 @@ Everything else — architecture, the context→tools mapping, design decisions,
 
 ## Environment Variables (Railway)
 
-The catalogue of documented `GATE_*` flags and env vars (default, where it is read, what on and off do, kill behavior) is `docs/gates-and-env.md`. It is not exhaustive: a variable with no entry there may still exist, so check `server/config/feature-gates.js` and grep the code before concluding it does not. It is not loaded into sessions:
+The catalogue of documented `GATE_*` flags and env vars (default, where it is read, what on and off do, kill behavior) is `docs/gates-and-env.md`. Not every gate has a paragraph, but every `GATE_*` the code reads has a line in the generated index at the end of that file (the files that read it). It is not loaded into sessions:
 
 - Look a variable up by name: `grep -n 'GATE_NAME' docs/gates-and-env.md`. Each entry is one paragraph on one line; never read the whole file.
 - Document a new or changed variable there, in the same PR. Not here.
+- After adding, renaming or removing a `GATE_*` variable, run `npm run gates:index` and commit the file; `npm run check:domain-rules` fails on a gate with no index line.
 - This file has a 24 KB budget (`npm run check:domain-rules`); it loads into every session.
