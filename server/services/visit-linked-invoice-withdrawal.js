@@ -22,6 +22,14 @@
 // only send-adjacent effect is the release below putting an invoice that was waiting in the send
 // queue BACK in it when the payer is removed - exactly what the packet release does.
 //
+// Lock order: scope of this PR
+//   The Bill-To writers this module serves (the job and customer Bill-To routes, series children, payer
+//   activation, the customer merge and its undo, unvoid) take customer -> visit -> payer -> invoice, and
+//   this module's fence, withdrawal and release run inside them in that order. The charge, account-credit,
+//   void, refund and settlement paths are UNCHANGED by this PR and may take the invoice first. A deadlock
+//   between the two families is detected by PostgreSQL, which aborts one request; the aborted request is
+//   retryable. Reordering the money paths is deliberately out of scope here (owner ruling 2026-10-03).
+//
 // Not covered, on purpose: a visit-group packet (the packet path owns it), an annual-prepay
 // invoice (the renewal fence owns it), a statement-accrued invoice, and an invoice with no visit
 // linkage at all (a manual or project invoice): there is no visit to resolve a payer for.

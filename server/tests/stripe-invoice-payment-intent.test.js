@@ -10,11 +10,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   let customerAccountCredits;
   let applyCreditSideEffect;
   let savedCardAttempt;
-  let rowLockOrder;
 
   beforeEach(() => {
     jest.resetModules();
-    rowLockOrder = [];
     customerAccountCredits = '0.00';
     applyCreditSideEffect = null;
     savedCardAttempt = null;
@@ -63,7 +61,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     const lockedInvoiceQuery = {
       where: jest.fn(() => lockedInvoiceQuery),
-      forUpdate: jest.fn(() => { rowLockOrder.push('invoices'); return lockedInvoiceQuery; }),
+      forUpdate: jest.fn(() => lockedInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
       whereNotIn: jest.fn(() => lockedInvoiceQuery),
       update: updateInvoice,
@@ -91,7 +89,6 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // cases have no credit, so the original PI lifecycle must run untouched.
     const customersQuery = {
       where: jest.fn(() => customersQuery),
-      forUpdate: jest.fn(() => { rowLockOrder.push('customers'); return customersQuery; }), // the customer row is locked before the invoice when credit will apply
       // opted in to automatic credit application (owner ruling 2026-08-28: default OFF, this harness models a customer who turned the slider on)
       first: jest.fn(async () => ({ account_credits: customerAccountCredits, auto_apply_account_credit: true })),
     };
@@ -708,19 +705,6 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // Replacement is minted at AMOUNT DUE ($25 = 2500 cents), not the $75 gross.
     expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
     expect(result.paymentIntentId).toBe('pi_fresh_credit');
-  });
-
-  test('a setup that will apply the customer\'s account credit locks the customer row BEFORE the invoice row (the Bill-To writers\' order)', async () => {
-    customerAccountCredits = '50.00';
-    applyCreditSideEffect = () => { invoiceRow.credit_applied = '50.00'; };
-    invoiceRow.stripe_payment_intent_id = 'pi_stale_card_order';
-    stripeClient.paymentIntents.retrieve.mockResolvedValue({ id: 'pi_stale_card_order', status: 'requires_action', metadata: { waves_invoice_id: invoiceRow.id } });
-    stripeClient.paymentIntents.cancel.mockResolvedValue({ id: 'pi_stale_card_order', status: 'canceled' });
-    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({ id: 'pi_fresh_order', status: 'requires_payment_method', client_secret: 'pi_fresh_order_secret' });
-    const StripeService = require('../services/stripe');
-    await StripeService.createInvoicePaymentIntent(invoiceRow.id);
-    expect(rowLockOrder.indexOf('customers')).toBeGreaterThanOrEqual(0);
-    expect(rowLockOrder.indexOf('customers')).toBeLessThan(rowLockOrder.indexOf('invoices'));
   });
 
   test('does NOT cancel an ACH micro-deposit PI in the credit triage even with credit available', async () => {
