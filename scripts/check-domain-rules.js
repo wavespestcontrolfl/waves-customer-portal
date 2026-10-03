@@ -42,8 +42,8 @@
  *      now lives in docs/gates-and-env.md and is read on demand.
  *
  *   7. gate-index — every GATE_* variable the code reads has a line in the
- *      generated index at the end of docs/gates-and-env.md, so a lookup by
- *      name never comes back empty for a gate that exists. 448 of 555 gates
+ *      generated docs/gate-index.md, so a lookup by name never comes back
+ *      empty for a gate that exists. 448 of 555 gates
  *      had no entry when the index was added. Fix: `npm run gates:index`.
  *      On Railway the rule only warns: a PR that was green before the rule
  *      landed must not block a production deploy.
@@ -239,21 +239,16 @@ if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
 // Gate index (rule 7) — every gate the code reads has a generated index line.
 // =========================================================================
 const { scanGates } = require('./lib/gate-scan');
-const { START: GATE_INDEX_START, END: GATE_INDEX_END } = require('./generate-gate-index');
-const gatesDoc = fs.readFileSync(path.join(ROOT, 'docs/gates-and-env.md'), 'utf8');
-const gateIndexStart = gatesDoc.indexOf(GATE_INDEX_START);
-const gateIndexEnd = gatesDoc.indexOf(GATE_INDEX_END);
-const gateIndex = gateIndexStart !== -1 && gateIndexEnd > gateIndexStart
-  ? gatesDoc.slice(gateIndexStart, gateIndexEnd)
-  : '';
-const indexedGates = new Set([...gateIndex.matchAll(/^- `(GATE_[A-Z0-9_]+)`/gm)].map((m) => m[1]));
-const unindexedGates = [...scanGates().entries()].filter(([name]) => !indexedGates.has(name));
+const { INDEX_FILE: GATE_INDEX_FILE, indexedGates } = require('./generate-gate-index');
+const gateIndexPath = path.join(ROOT, GATE_INDEX_FILE);
+const gateIndex = indexedGates(fs.existsSync(gateIndexPath) ? fs.readFileSync(gateIndexPath, 'utf8') : '');
+const unindexedGates = [...scanGates().entries()].filter(([name]) => !gateIndex.has(name));
 if (unindexedGates.length) {
   const onRailway = Object.keys(process.env).some((key) => key.startsWith('RAILWAY_'));
   for (const [name, gateFiles] of unindexedGates) {
     console.error(`${gateFiles[0]}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
-    console.error(`    ${name} is read by the code but has no line in the docs/gates-and-env.md index.`);
-    console.error('    Run `npm run gates:index` and commit docs/gates-and-env.md.\n');
+    console.error(`    ${name} is read by the code but has no line in ${GATE_INDEX_FILE}.`);
+    console.error('    Run `npm run gates:index` and commit the file.\n');
   }
   if (!onRailway) violations += unindexedGates.length;
 }
