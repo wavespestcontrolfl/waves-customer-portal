@@ -378,6 +378,20 @@ describe('buildLawnFastWateringPreview', () => {
     expect(preview.products[1]).toMatchObject({ productId: P_MISSING, name: null, rule: null });
   });
 
+  test('an uppercase product id finds its row (ids are canonicalized before lookup)', async () => {
+    // Postgres returns uuid columns in lowercase; the client may send any case.
+    const id = 'abcdef12-0000-4000-8000-0000000000ab';
+    const row = { ...herbicide, id };
+    const lower = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [id], knex: knexFor([row]), now });
+    const upper = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [id.toUpperCase(), id], knex: knexFor([row]), now });
+    expect(id.toUpperCase()).not.toBe(id);
+    expect(lower.products[0].rule).toEqual(resolveWateringRule(row));
+    expect(upper.products).toHaveLength(1);
+    expect(upper.products).toEqual(lower.products);
+    expect(upper.lines).toEqual(lower.lines);
+    expect(upper.sentence).toEqual(lower.sentence);
+  });
+
   test('with GATE_LAWN_WATERING_RULE off the report prints none, so the preview lists rules but no sentence', async () => {
     delete process.env.GATE_LAWN_WATERING_RULE;
     const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [P_HERB], knex: knexFor([herbicide]), now });

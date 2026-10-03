@@ -207,7 +207,9 @@ function parsePreviewRequest(serviceId, productIds) {
   if (!Array.isArray(productIds) || productIds.some((id) => typeof id !== 'string' || !isUuid(id.trim()))) {
     return { ok: false, reason: 'invalid_product_ids' };
   }
-  const ids = [...new Set(productIds.map((id) => id.trim()))];
+  // Postgres returns uuid columns in canonical lowercase, so ids are
+  // lowercased before dedupe and map lookup: an uppercase id must find its row.
+  const ids = [...new Set(productIds.map((id) => id.trim().toLowerCase()))];
   if (ids.length > MAX_PREVIEW_PRODUCTS) return { ok: false, reason: 'too_many_products' };
   if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
   return { ok: true, ids };
