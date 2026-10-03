@@ -6709,6 +6709,14 @@ const ReviewService = {
     const skipStep = async (reason, detail = null) => {
       const step = seq.current_step;
       const nextStep = step + 1;
+      // The skipped step was the last: the cadence is done, as after a send.
+      if (nextStep >= plan.length) {
+        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+          status: "completed", stop_reason: "completed", current_step: nextStep, next_run_at: null,
+          completed_at: new Date(), decision: sequenceDecision({ reason, detail }), updated_at: new Date(),
+        });
+        return { ran: true, sent: false, stepSkipped: true, completed: true, reason, step };
+      }
       const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[step] || null });
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
@@ -6960,13 +6968,18 @@ const ReviewService = {
     // recorded with its reason (the review page shows it).
     if (stepIsAsk && require("../config/feature-gates").isEnabled("reviewAskTechVoice")) {
       const Holds = require("./review-ask-holds");
-      // The customer said they already left a review: no more asks.
+      // The customer said they already left a review: no more asks, through
+      // the same customer-wide stop a tracked click takes (this caller holds
+      // review-send:<customer>). A cadence with a later private check-in
+      // stays active for it and skips this ask.
       const said = await Holds.customerSaysReviewed(seq.customer_id, { since: seq.started_at || seq.created_at });
       if (said.claim) {
-        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
-          decision: sequenceDecision({ reason: "customer_says_reviewed", detail: { quote: said.claim.quote, at: said.claim.at } }),
-        });
-        return stop("customer_says_reviewed");
+        const detail = { quote: said.claim.quote, at: said.claim.at };
+        await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
+        const after = await db("review_sequences").where({ id: seq.id }).first("status");
+        if (after?.status === "active") return skipStep("ask_skipped_customer_says_reviewed", detail);
+        await db("review_sequences").where({ id: seq.id }).update({ decision: sequenceDecision({ reason: "customer_says_reviewed", detail }) });
+        return { ran: false, stopped: true, reason: "customer_says_reviewed" };
       }
       // An overdue bill, or an overdue-payment reminder in the last 3 days:
       // the ask waits for it to clear, for up to PAYMENT_HOLD_MAX_WAIT_MS
@@ -7438,7 +7451,7 @@ const ReviewService = {
    */
   async _seriesEngagement(seriesIds = []) {
     if (!seriesIds.length) return false;
-    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
+    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked", "customer_says_reviewed"]).first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())

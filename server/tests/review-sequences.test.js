@@ -7782,6 +7782,30 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSaysReviewed.mock.calls[0]).toEqual(['hold-1', { since: seqRow(mock).started_at }]);
   });
 
+  test('a claim during a cadence with a later private check-in skips this ask and keeps the check-in; the claim counts as series engagement', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]) });
+    db.mockImplementation(mock);
+    mockSaysReviewed.mockResolvedValueOnce({ claim: { quote: 'left you a review', at: new Date() } });
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2 });
+    seqRow(mock).status = 'stopped';
+    seqRow(mock).stop_reason = 'customer_says_reviewed';
+    expect(await ReviewService._seriesEngagement(['seq-hold'])).toBe(true);
+  });
+
+  test('a held final step completes the cadence at once (never left active past its plan)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ current_step: 2, touches_sent: 2, payment_hold_step: 2, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, completed: true, reason: 'ask_dropped_payment_hold' });
+    expect(seqRow(mock)).toMatchObject({ status: 'completed', stop_reason: 'completed', current_step: 3, next_run_at: null });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+  });
+
   test('an overdue bill holds the ask a day at a time; past three days from the first hold the step is dropped and the cadence moves on', async () => {
     mockGates.reviewAskTechVoice = true;
     const mock = book();

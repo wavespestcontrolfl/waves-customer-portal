@@ -25,7 +25,6 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
-const { etDateString } = require('../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -33,10 +32,6 @@ const PAYMENT_TEXT_HOLD_MS = 3 * DAY_MS;
 const MAX_TEXTS = 20;
 const MAX_TEXT_CHARS = 300;
 const CLAIM_TIMEOUT_MS = 20 * 1000;
-
-// Not owed (paid, settled, withdrawn) or never delivered (draft, scheduled):
-// neither is an overdue bill the customer is being chased for.
-const NOT_OVERDUE_STATUSES = ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'draft', 'scheduled'];
 
 const REVIEWED_CLAIM_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['says_reviewed', 'quote'],
@@ -104,15 +99,23 @@ async function customerSaysReviewed(customerId, { since }) {
  * { reason: 'payment_reminder_recent', at, until }. A failed read holds
  * ({ reason: 'payment_lookup_unavailable' }): the ruling is "no review ask
  * while", so no evidence is never a clear.
+ *
+ * The customer's own open bills are the pay page's authority
+ * (open-balance.js openBalanceInvoices: delivered, a positive amount due
+ * after credit, not payer- or statement-billed, not withdrawn); overdue is
+ * dunning's rule (account-anchor.js: status overdue, or past its due day,
+ * a legacy invoice with no due date by its created day).
  */
 async function paymentHold(customerId, { now = new Date() } = {}) {
   try {
-    const overdue = await db('invoices')
-      .where({ customer_id: customerId })
-      .whereNotIn('status', NOT_OVERDUE_STATUSES)
-      .where((q) => q.where('status', 'overdue').orWhere('due_date', '<', etDateString(now)))
-      .first('id');
+    const { openBalanceInvoices } = require('./open-balance');
+    const { invoiceDaysOverdue } = require('./collections/account-anchor');
+    let resolveFailed = false;
+    const open = await openBalanceInvoices(customerId, { database: db, onResolveFailure: () => { resolveFailed = true; } });
+    const overdue = open.find((inv) => inv.status === 'overdue' || invoiceDaysOverdue(now, inv) > 0);
     if (overdue) return { reason: 'overdue_invoice', invoiceId: overdue.id };
+    // A bill dropped because its payer could not be resolved may be theirs.
+    if (resolveFailed) return { reason: 'payment_lookup_unavailable' };
     const { lastOverdueReminderWithin7d } = require('./collections/dunning-spacing');
     const last = await lastOverdueReminderWithin7d(customerId, { now, database: db });
     if (last && now.getTime() - new Date(last.occurred_at).getTime() < PAYMENT_TEXT_HOLD_MS) {
@@ -129,5 +132,4 @@ module.exports = {
   customerSaysReviewed,
   paymentHold,
   PAYMENT_TEXT_HOLD_MS,
-  NOT_OVERDUE_STATUSES,
 };

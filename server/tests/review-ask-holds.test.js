@@ -2,6 +2,7 @@
 
 const mockDispatch = jest.fn();
 const mockLastReminder = jest.fn(async () => null);
+const mockOpenBalance = jest.fn(async () => []);
 const mockTables = {};
 const mockQueries = [];
 
@@ -10,6 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
 jest.mock('../services/messaging/review-ask-reservation', () => ({ excludeUnresolvedSendReservations: (q) => q }));
 jest.mock('../services/collections/dunning-spacing', () => ({ lastOverdueReminderWithin7d: (...a) => mockLastReminder(...a) }));
+jest.mock('../services/open-balance', () => ({ openBalanceInvoices: (...a) => mockOpenBalance(...a) }));
 
 const db = require('../models/db');
 const Holds = require('../services/review-ask-holds');
@@ -33,6 +35,7 @@ function builder(table) {
 beforeEach(() => {
   mockDispatch.mockReset();
   mockLastReminder.mockReset().mockResolvedValue(null);
+  mockOpenBalance.mockReset().mockResolvedValue([]);
   Object.keys(mockTables).forEach((k) => delete mockTables[k]);
   mockQueries.length = 0;
   db.mockImplementation(builder);
@@ -75,13 +78,23 @@ describe('customerSaysReviewed', () => {
 describe('paymentHold', () => {
   const now = new Date('2026-10-02T14:00:00Z');
 
-  test('an open overdue invoice holds; paid, void, draft and scheduled invoices are never overdue', async () => {
-    mockTables.invoices = [{ id: 'inv-7' }];
-    expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'overdue_invoice', invoiceId: 'inv-7' });
-    const calls = mockQueries.find((x) => x.table === 'invoices').calls;
-    expect(calls).toContainEqual(['whereNotIn', 'status', Holds.NOT_OVERDUE_STATUSES]);
-    expect(Holds.NOT_OVERDUE_STATUSES).toEqual(expect.arrayContaining(['paid', 'void', 'draft', 'scheduled', 'refunded']));
-    expect(calls).toContainEqual(['orWhere', 'due_date', '<', '2026-10-02']);
+  test('the customer\'s own open bills come from the pay page\'s authority; overdue is dunning\'s rule (legacy no-due-date bills by their created day)', async () => {
+    mockOpenBalance.mockResolvedValueOnce([
+      { id: 'inv-due-later', status: 'sent', due_date: '2026-10-10', created_at: new Date('2026-09-30T12:00:00Z') },
+      { id: 'inv-legacy', status: 'sent', due_date: null, created_at: new Date('2026-09-20T12:00:00Z') },
+    ]);
+    expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'overdue_invoice', invoiceId: 'inv-legacy' });
+    expect(mockOpenBalance.mock.calls[0][0]).toBe('c-1');
+    mockOpenBalance.mockResolvedValueOnce([{ id: 'inv-flag', status: 'overdue', due_date: '2026-10-10', created_at: now }]);
+    expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'overdue_invoice', invoiceId: 'inv-flag' });
+    // nothing the authority returns is overdue: no hold
+    mockOpenBalance.mockResolvedValueOnce([{ id: 'inv-due-later', status: 'sent', due_date: '2026-10-10', created_at: now }]);
+    expect(await Holds.paymentHold('c-1', { now })).toBeNull();
+  });
+
+  test('a bill dropped because its payer could not be resolved holds (it may be theirs)', async () => {
+    mockOpenBalance.mockImplementationOnce(async (_id, { onResolveFailure }) => { onResolveFailure(new Error('payer down')); return []; });
+    expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'payment_lookup_unavailable' });
   });
 
   test('an overdue-payment reminder holds for three days after it went out, then clears', async () => {
@@ -95,7 +108,7 @@ describe('paymentHold', () => {
   });
 
   test('a failed read holds (no evidence is never a clear)', async () => {
-    mockTables.invoices = new Error('db down');
+    mockOpenBalance.mockRejectedValueOnce(new Error('db down'));
     expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'payment_lookup_unavailable' });
   });
 });
