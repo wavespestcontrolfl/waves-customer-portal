@@ -39,6 +39,7 @@ const path = require('path');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation } = require('../routes/admin-schedule')._test;
 
+const TODAY = etDateString();
 const FUTURE = etDateString(addETDays(new Date(), 10));
 const TARGET = etDateString(addETDays(new Date(), 12));
 const ROW = { id: 'svc-a', visit_id: 'v1', scheduled_date: FUTURE, window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, technician_id: 'tech-1' };
@@ -129,6 +130,23 @@ describe("comboMove 'together'", () => {
     mockRow = { ...ROW, window_start: null, window_end: null };
     await planComboEditMove(request({ windowStart: '10:00', windowEnd: '11:00', comboMove: 'together' }));
     expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: { start: '10:00' } }));
+  });
+
+  test('a same-day window that has already passed is refused before any write: the new time, or the stored one on a technician-only change', async () => {
+    // 00:00 has always passed; 23:59 never has (the test would need to run in the last minute of the day).
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '23:58:00', window_end: '23:59:00' };
+    const moved = request({ windowStart: '00:00', windowEnd: '00:01', notes: 'x', comboMove: 'together' });
+    await expect(planComboEditMove(moved)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: 'That time has already passed today. Pick a later time. Nothing was changed.' });
+    expect(moved.body.windowStart).toBe('00:00');
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '00:00:00', window_end: '00:01:00' };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '00:00:00', window_end: '00:01:00' }, { id: 'svc-b', window_start: '00:01:00', window_end: '00:02:00' }]);
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // A stop later today is reassigned.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '23:58:00', window_end: '23:59:00' }, { id: 'svc-b', window_start: '23:58:00', window_end: '23:59:00' }]);
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '23:58:00', window_end: '23:59:00' };
+    await planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledTimes(1);
   });
 
   test('every refusal comes before any write: length change, address change, cleared time, and a refused plan', async () => {

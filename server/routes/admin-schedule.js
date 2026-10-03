@@ -11079,6 +11079,23 @@ async function planComboEditMove(req) {
   return planComboTogetherMove(req, row, changes, live);
 }
 
+// The mover refuses a same-day window that has already passed, for every
+// service it touches (rebooker: sameDayWindowElapsed). Asked here first, so
+// that refusal comes before the edit is saved, not after. A technician-only
+// change keeps each service's own window, so each one is asked; a date or
+// time change is asked about the new window.
+async function comboTargetElapsed(row, changes, newDate, newWindow) {
+  const { sameDayWindowElapsed } = require('../utils/datetime-et');
+  if (changes.date || changes.start) {
+    const cutoff = newWindow ? (newWindow.end || newWindow.start) : (row.window_end || row.window_start);
+    return sameDayWindowElapsed(newDate, cutoff) ? 'That time has already passed today. Pick a later time.' : null;
+  }
+  const members = await require('../services/visit-groups').openMembers(db, row.visit_id);
+  return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
+    ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+    : null;
+}
+
 // 'together': every refusal comes before any write.
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
@@ -11096,6 +11113,8 @@ async function planComboTogetherMove(req, row, changes, shown) {
   const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
   if (!newDate) refuse(400, 'That date is not a current or future date.');
   const newWindow = comboMoveWindow(row, changes);
+  const elapsed = await comboTargetElapsed(row, changes, newDate, newWindow);
+  if (elapsed) refuse(409, elapsed, 'SLOT_TAKEN');
   // A text is about a new date or time, never a technician change alone.
   const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
   const actor = { techRole: req.techRole, technicianId: req.technicianId };
