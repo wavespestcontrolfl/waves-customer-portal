@@ -12779,6 +12779,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !isBackfillCompletion;
     // The completion text's pay-link terms, BEFORE the hold and the sender
     // hand-over (evaluated lazily, where the text is composed).
+    // Whether this month's dues coverage is SETTLED money (a collected payment or
+    // a paid / prepaid / processing stamped invoice), not merely an open invoice
+    // that bills the month. Lazy, read once; an unreadable lookup is "not
+    // settled" (the plain text, never a false "paid").
+    let duesCoverageSettledMemo = null;
+    const duesCoverageIsSettled = async () => {
+      if (duesCoverageSettledMemo === null) {
+        try {
+          duesCoverageSettledMemo = !!(await monthlyDuesCollected(
+            db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+            { excludeScheduledServiceId: svc.id, openInvoiceCovers: false },
+          ));
+        } catch (e) {
+          logger.warn(`[dispatch] dues settled lookup failed for service ${svc.id}: ${e.message}`);
+          duesCoverageSettledMemo = false;
+        }
+      }
+      return duesCoverageSettledMemo;
+    };
     const completionPayLinkAllowedSansHold = () => !suppressCompletionInvoiceLink
       && includePayLink !== false
       // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
@@ -13528,11 +13547,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // open (account credit can still settle it above → alreadyPaid), while
         // add-ons are owed but only alerted to the office, or while a voided
         // invoice's other charges wait for the office to re-bill them.
+        // COVERED is not SETTLED: a month billed on another visit's still-open
+        // stamped dues invoice covers this visit (nothing more is billed for it),
+        // but nothing is paid, so the "you're all paid up" template is only for
+        // dues coverage that is actually settled (a paid / prepaid / processing
+        // stamped invoice or a collected payment). Autopay coverage keeps its
+        // meaning. A covered-but-open visit takes the existing no-bill
+        // service_complete text below, exactly like a visit with no invoice.
+        const duesCoverageClaimsPaid = (autopayCoversVisit || membershipDuesCoveredAtMint)
+          && (customerAutopayActive || await duesCoverageIsSettled());
         const usePaidCompletionTemplate = !(annualPrepayExtrasCollectible && !alreadyPaid) && !annualPrepayOwedUnbilled
           && (alreadyPaid
           || prepaidCovered
-          || autopayCoversVisit
-          || membershipDuesCoveredAtMint
+          || duesCoverageClaimsPaid
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same

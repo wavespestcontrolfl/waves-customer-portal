@@ -506,6 +506,17 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
   return { restored: restore };
 }
 
+// Run `fn` once the caller's transaction has COMMITTED (never on a rollback):
+// knex's executionPromise settles with the transaction (the dispatch-alerts
+// pattern). Without a transaction handle (a bare test double) it runs inline.
+function afterCommit(trx, fn) {
+  if (trx && trx.executionPromise && typeof trx.executionPromise.then === 'function') {
+    trx.executionPromise.then(fn).catch(() => {});
+  } else {
+    Promise.resolve().then(fn).catch(() => {});
+  }
+}
+
 /**
  * Settle a FULLY refunded invoice: TERMINALIZE it to 'refunded' AND (if it carried
  * account credit) return that credit to the customer's balance. The status flip runs
@@ -565,6 +576,19 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
      
     const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
     await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
+    // A fully refunded STAMPED membership-dues invoice stops covering its month
+    // exactly like a void does: visits that completed under it are unbilled.
+    // Raise the same "rebill the month" office alert AFTER the caller's
+    // transaction commits (never on a rollback), best effort.
+    if (String(inv.line_items || '').includes('membership_dues_month')) {
+      afterCommit(trx, async () => {
+        try {
+          await require('./invoice').alertIfMembershipDuesCoverageReleased({ ...inv, status: 'refunded' }, { releasedBy: 'refunded' });
+        } catch (e) {
+          logger.warn(`[account-credit] dues-coverage-released alert after refund failed for ${invoiceId}: ${e.message}`);
+        }
+      });
+    }
   }
   if (restore > 0) {
     await postCreditMovement({

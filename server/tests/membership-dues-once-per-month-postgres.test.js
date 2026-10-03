@@ -1334,6 +1334,162 @@ postgres('membership dues — add-ons totaling the rate never carry the dues sta
   });
 });
 
+// Round 6: prepaid markers, refunds, payer resolution, owner re-read, completion copy.
+postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (B08 round 6)', () => {
+  const InvoiceSvc = require('../services/invoice');
+  const { duesInvoiceCoveringPlanVisit, duesCoversPrepaidRefusal } = require('../routes/admin-schedule')._test;
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 10 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+  async function mintDues(f, label) {
+    const visit = await seedVisit(f, { label });
+    expect(await complete(f, visit)).toMatchObject({ status: 200 });
+    return { visit, invoice: await mockPg('invoices').where({ customer_id: f.customerId, scheduled_service_id: visit }).first() };
+  }
+  async function alertRows(invoiceId) {
+    return mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_coverage_released:${invoiceId}%`]);
+  }
+
+  // ── Finding 1: a prepaid marker on a covered plan visit ──
+  test('a second same-month plan visit is covered by the dues invoice: the prepaid pre-check names that invoice; the dues invoice\'s own visit, a priced visit and a month with no dues invoice are not refused', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const second = await seedVisit(f, { label: 'Pest Control' });
+      const covering = await duesInvoiceCoveringPlanVisit(second);
+      expect(covering).toMatchObject({ id: a.invoice.id });
+      const refusal = duesCoversPrepaidRefusal(covering);
+      expect(refusal).toMatchObject({ code: 'membership_dues_invoice_covers', invoice_id: a.invoice.id, invoice_number: a.invoice.invoice_number });
+      expect(refusal.error).toContain(a.invoice.invoice_number);
+      expect(await duesInvoiceCoveringPlanVisit(a.visit)).toBeNull(); // its own invoice is not "covering" it
+      const priced = await seedVisit(f, { label: 'Add-on Treatment', estimatedPrice: 85 });
+      await mockPg('scheduled_services').where({ id: priced }).update({ is_recurring: false });
+      expect(await duesInvoiceCoveringPlanVisit(priced)).toBeNull();
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
+      expect(await duesInvoiceCoveringPlanVisit(second)).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  // ── Finding 2: a full refund releases coverage like a void ──
+  test('a fully refunded stamped dues invoice raises the rebill alert for the visits it covered, once the refund transaction commits', async () => {
+    const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const covered = await seedVisit(f, { label: 'Pest Control' });
+      expect(await complete(f, covered)).toMatchObject({ status: 200 });
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+      await mockPg.transaction(async (trx) => { await returnAppliedCreditOnRefund({ invoiceId: a.invoice.id }, trx); });
+      for (let i = 0; i < 40 && !(await alertRows(a.invoice.id)).length; i += 1) await new Promise((r) => setTimeout(r, 100));
+      const rows = await alertRows(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0])).toContain(covered);
+      expect(JSON.stringify(rows[0])).toMatch(/refunded/);
+    } finally { await cleanup(f); }
+  });
+
+  // ── Finding 3: payer ownership is resolved like completion does ──
+  test('a covered visit whose payer is INACTIVE is self-pay and is named by the void alert; one with an ACTIVE payer is not', async () => {
+    const f = await seedMember();
+    const payerIds = [];
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const inactiveVisit = await seedVisit(f, { label: 'Pest Control' });
+      const activeVisit = await seedVisit(f, { label: 'Mosquito' });
+      expect(await complete(f, inactiveVisit)).toMatchObject({ status: 200 });
+      expect(await complete(f, activeVisit)).toMatchObject({ status: 200 });
+      const mkPayer = async (active) => {
+        const [{ id }] = await mockPg('payers').insert({ display_name: `Fixture Payer ${randomUUID().slice(0, 6)}`, active }).returning('id');
+        payerIds.push(id);
+        return id;
+      };
+      await mockPg('scheduled_services').where({ id: inactiveVisit }).update({ payer_id: await mkPayer(false) });
+      await mockPg('scheduled_services').where({ id: activeVisit }).update({ payer_id: await mkPayer(true) });
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      const rows = await alertRows(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      const text = JSON.stringify(rows[0]);
+      expect(text).toContain(inactiveVisit);
+      expect(text).not.toContain(activeVisit);
+    } finally {
+      await mockPg('scheduled_services').where({ customer_id: f.customerId }).update({ payer_id: null }).catch(() => {});
+      await cleanup(f);
+      await mockPg('payers').whereIn('id', payerIds).del().catch(() => {});
+    }
+  });
+
+  // ── Finding 4: the month lock follows the invoice's CURRENT owner ──
+  // Run `fn` once, just before the void's first dues-month lock statement: after the
+  // writer's pre-transaction read and the transaction's own unlocked owner read.
+  function beforeFirstMonthLock(fn) {
+    const driver = Object.getPrototypeOf(mockPg.client);
+    const originalQuery = driver._query;
+    let armed = true;
+    driver._query = function patched(connection, obj) {
+      if (armed && /pg_advisory_xact_lock/i.test(String(obj?.sql || ''))
+        && JSON.stringify(obj?.bindings || []).includes('membership.dues_month')) {
+        armed = false;
+        return Promise.resolve(fn()).then(() => originalQuery.call(this, connection, obj));
+      }
+      return originalQuery.call(this, connection, obj);
+    };
+    return () => { driver._query = originalQuery; };
+  }
+
+  test('a customer merge that repoints the invoice after the void took the lock: the void refuses retryably and voids nothing; the retry locks the NEW owner\'s month and voids', async () => {
+    const f = await seedMember();
+    const g = await seedMember();
+    let restore;
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      // (the merge also drops the visit link here so the void's linked-visit guards stay out of this test)
+      restore = beforeFirstMonthLock(() => mockPg('invoices').where({ id: a.invoice.id }).update({ customer_id: g.customerId, scheduled_service_id: null }));
+      await expect(InvoiceSvc.voidInvoice(a.invoice.id)).rejects.toThrow(/ownership changed/i);
+      restore(); restore = null;
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).not.toBe('void');
+      // The retry reads the new owner and takes THAT customer's month lock: held elsewhere, it waits.
+      const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+      const hold = await mockPg.transaction();
+      try {
+        await acquireMembershipDuesMonthLock(hold, g.customerId, monthOf(etDateString()));
+        let state = 'pending';
+        const voiding = InvoiceSvc.voidInvoice(a.invoice.id).then(() => { state = 'done'; }, () => { state = 'failed'; });
+        await new Promise((r) => setTimeout(r, 700));
+        expect(state).toBe('pending');
+        await hold.commit();
+        await voiding;
+        expect(state).toBe('done');
+      } finally { await hold.rollback().catch(() => {}); }
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).toBe('void');
+    } finally {
+      if (restore) restore();
+      await cleanup(g);
+      await cleanup(f);
+    }
+  });
+
+  // ── Finding 5: covered is not settled ──
+  // The completion text picks the paid template only for SETTLED dues coverage;
+  // the settled test is this lookup (openInvoiceCovers: false). The wiring itself
+  // is pinned in admin-dispatch-autoinvoice-gate.test.js.
+  test('an OPEN stamped dues invoice covers the month but is not settled; a paid / prepaid / processing one is', async () => {
+    const { monthlyDuesCollected } = require('../services/billing-lane');
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const now = new Date();
+      const covered = () => monthlyDuesCollected(mockPg, f.customerId, now);
+      const settled = () => monthlyDuesCollected(mockPg, f.customerId, now, { openInvoiceCovers: false });
+      expect(await covered()).toBe(true);
+      expect(await settled()).toBe(false);
+      for (const status of ['paid', 'prepaid', 'processing']) {
+        await mockPg('invoices').where({ id: a.invoice.id }).update({ status });
+        expect(await settled()).toBe(true);
+      }
+    } finally { await cleanup(f); }
+  });
+});
+
 // The dues-month lock rule (billing-lane.js, THE LOCK RULE): a transaction that
 // already holds a customer / visit / mint lock never WAITS on the month lock.
 // The deadlock this pins: a credit-applied stamped invoice's void takes the

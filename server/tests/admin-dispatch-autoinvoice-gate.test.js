@@ -384,6 +384,11 @@ describe('completion route wires dues-collected coverage', () => {
     // The authoritative confirmation is inside the completion transaction, under a
     // transaction-scoped TRY lock, before the status flip; packets are not exempt.
     expect(source).toMatch(/if \(duesCollectedThisMonth && autopayCoversVisit\) \{[\s\S]{0,500}tryAcquireMembershipDuesMonthLock\(trx, svc\.customer_id, dueMonth\)[\s\S]{0,900}MEMBERSHIP_DUES_COVERAGE_CHANGED[\s\S]{0,700}await transitionJobStatus\(\{\s*\n\s*jobId: svc\.id,/);
+    // Covered is not settled: the paid completion template needs SETTLED dues coverage
+    // (a collected payment or a paid / prepaid / processing stamped invoice), not an open one.
+    expect(source).toMatch(/openInvoiceCovers: false/);
+    expect(source).toMatch(/const duesCoverageClaimsPaid = \(autopayCoversVisit \|\| membershipDuesCoveredAtMint\)\s*\n\s*&& \(customerAutopayActive \|\| await duesCoverageIsSettled\(\)\);/);
+    expect(source).toMatch(/\|\| duesCoverageClaimsPaid\s*\n\s*\|\| \['paid', 'prepaid'\]\.includes/);
     // The covered visit reads like one covered before the mint at every later reader.
     expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
   });

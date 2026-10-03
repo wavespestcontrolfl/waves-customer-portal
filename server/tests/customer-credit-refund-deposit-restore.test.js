@@ -29,6 +29,12 @@ jest.mock('../services/estimate-deposits', () => ({
   restoreDepositCreditForVoidedInvoice: (...args) => mockRestoreDepositCredit(...args),
 }));
 
+const mockDuesAlert = jest.fn(async () => undefined);
+jest.mock('../services/invoice', () => ({
+  ...jest.requireActual('../services/invoice'),
+  alertIfMembershipDuesCoverageReleased: (...args) => mockDuesAlert(...args),
+}));
+
 const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
 
 function makeTrx(invRow) {
@@ -109,5 +115,57 @@ describe('returnAppliedCreditOnRefund — deposit restore', () => {
     const trx = makeTrx(undefined);
     await returnAppliedCreditOnRefund({ invoiceId: 'nope' }, trx);
     expect(mockRestoreDepositCredit).not.toHaveBeenCalled();
+  });
+});
+
+// B08: a full refund of a STAMPED membership-dues invoice ends its month's
+// coverage like a void, so the same office "rebill the month" alert is raised,
+// after the caller's transaction commits and never on a rollback.
+describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const stamped = () => invoice({
+    status: 'paid',
+    scheduled_service_id: 'visit-1',
+    line_items: JSON.stringify([{ description: 'Lawn', amount: 49, membership_dues_month: '2026-09' }]),
+  });
+  function trxWithCommit(row) {
+    const trx = makeTrx(row);
+    let settle;
+    trx.executionPromise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    trx.executionPromise.catch(() => {});
+    trx.settle = settle;
+    return trx;
+  }
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it('alerts once the transaction commits, with the refunded invoice row', async () => {
+    const trx = trxWithCommit(stamped());
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
+    await flush();
+    expect(mockDuesAlert).not.toHaveBeenCalled(); // not before the commit
+    trx.settle.resolve();
+    await flush();
+    expect(mockDuesAlert).toHaveBeenCalledTimes(1);
+    expect(mockDuesAlert.mock.calls[0][0]).toMatchObject({ id: 'inv-1', status: 'refunded', customer_id: 'cust-1' });
+    expect(mockDuesAlert.mock.calls[0][1]).toEqual({ releasedBy: 'refunded' });
+  });
+
+  it('never alerts when the transaction rolls back', async () => {
+    const trx = trxWithCommit(stamped());
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
+    trx.settle.reject(new Error('rolled back'));
+    await flush();
+    expect(mockDuesAlert).not.toHaveBeenCalled();
+  });
+
+  it('an unstamped invoice, or a replay of an already-refunded one, raises nothing', async () => {
+    const plain = trxWithCommit(invoice({ status: 'paid' }));
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, plain);
+    plain.settle.resolve();
+    const replay = trxWithCommit({ ...stamped(), status: 'refunded' });
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, replay);
+    replay.settle.resolve();
+    await flush();
+    expect(mockDuesAlert).not.toHaveBeenCalled();
   });
 });

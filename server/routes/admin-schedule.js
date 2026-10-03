@@ -17078,6 +17078,39 @@ function membershipDuesMintRequest(svc, amount) {
   return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
 }
 
+// The live stamped dues invoice that already bills this plan visit's month, or
+// null. A prepayment marked on such a visit has nowhere to land: the visit mints
+// no invoice of its own (the month's dues are the covering invoice), so cash or
+// Zelle recorded on the visit would sit off the payment ledger while that
+// invoice keeps dunning. Judged by the mint's own dues-shape test
+// (membershipDuesMintRequest) and the shared live-invoice lookup.
+async function duesInvoiceCoveringPlanVisit(serviceId) {
+  const svc = await db('scheduled_services')
+    .where('scheduled_services.id', serviceId)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(
+      'scheduled_services.*',
+      'customers.monthly_rate as cust_monthly_rate',
+      'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
+    )
+    .first();
+  if (!svc) return null;
+  const request = membershipDuesMintRequest(svc, Number(svc.cust_monthly_rate));
+  if (!request) return null;
+  const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return findLiveStampedDuesInvoice(db, svc.customer_id, request.month, { excludeScheduledServiceId: svc.id });
+}
+function duesCoversPrepaidRefusal(duesInvoice) {
+  const label = duesInvoice.invoice_number || duesInvoice.id;
+  return {
+    error: `This month's membership dues are already billed on invoice ${label}, so this visit has no invoice of its own to take the payment. Record the payment on invoice ${label} instead of marking this visit prepaid.`,
+    code: 'membership_dues_invoice_covers',
+    invoice_id: duesInvoice.id,
+    invoice_number: duesInvoice.invoice_number || null,
+  };
+}
+
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   // ONE canonical per-visit collection verdict, resolved BEFORE this visit's
@@ -17439,6 +17472,12 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // A plan visit whose month a stamped dues invoice already bills takes no
+    // prepaid marker: refused BEFORE anything is written, naming the invoice the
+    // payment belongs on (the covered visit mints no invoice to apply it to).
+    // (A zero amount records no money, so it is never refused.)
+    const coveringDues = amt > 0 ? await duesInvoiceCoveringPlanVisit(req.params.id) : null;
+    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
     // Terminal rows never take a stamp (same set the series fan-out
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
@@ -17489,6 +17528,19 @@ router.post('/:id/prepaid', async (req, res, next) => {
     } else if (emailReceipt === true) {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
+    }
+    // The month got covered between the check above and the receipt's mint (a
+    // sibling visit's dues invoice): the marker just written has nowhere to
+    // land, so it is undone in this request (only if it is still the one we
+    // wrote) and refused with the same message.
+    if (receipt && receipt.reason === 'membership_dues_covered') {
+      await db('scheduled_services')
+        .where({ id: req.params.id, prepaid_at: updated[0].prepaid_at })
+        .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      const covering = await duesInvoiceCoveringPlanVisit(req.params.id);
+      return res.status(409).json(covering
+        ? duesCoversPrepaidRefusal(covering)
+        : { error: 'This month\'s membership dues are already billed on another invoice — record the payment there instead of marking this visit prepaid.', code: 'membership_dues_invoice_covers' });
     }
     res.json({ success: true, ...updated[0], receipt });
   } catch (err) {
@@ -27517,6 +27569,8 @@ router._test = {
   planSeriesExtendDates,
   seriesExtendAnchor,
   mintOrReuseScheduledServiceInvoice,
+  duesInvoiceCoveringPlanVisit,
+  duesCoversPrepaidRefusal,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,

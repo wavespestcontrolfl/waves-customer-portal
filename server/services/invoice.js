@@ -2003,8 +2003,31 @@ function membershipDuesStampMonth(lineItems) {
 // FOR UPDATE rows while holding it, so every taker that already holds a row
 // lock (the mint, the completion) only tries the month lock, never waits.
 async function lockMembershipDuesMonthOfInvoice(trx, invoiceRow) {
-  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
-  if (month && invoiceRow.customer_id) await acquireMembershipDuesMonthLock(trx, invoiceRow.customer_id, month);
+  // The writer's pre-transaction read can predate a customer merge that
+  // repointed the invoice, so the lock key comes from a FRESH, UNLOCKED read of
+  // the invoice's owner and stamp taken here (it takes no lock, so the month
+  // lock stays the first lock of the transaction). Only a stamped invoice pays
+  // for the extra read. The caller re-verifies the owner on the row it updates
+  // (assertDuesOwnerUnmoved) and aborts retryably if a merge moved it between.
+  if (!(invoiceRow && invoiceRow.customer_id && membershipDuesStampMonth(invoiceRow.line_items))) return null;
+  const fresh = invoiceRow.id
+    ? await trx("invoices").where({ id: invoiceRow.id }).first("customer_id", "line_items")
+    : null;
+  const source = fresh || invoiceRow;
+  const month = membershipDuesStampMonth(source.line_items);
+  if (!month || !source.customer_id) return null;
+  await acquireMembershipDuesMonthLock(trx, source.customer_id, month);
+  return { customerId: String(source.customer_id), month };
+}
+
+// After the writer's status-conditional update: the invoice still belongs to
+// the customer whose month lock was taken (a merge in between would have put
+// the stamp outside the serialization domain). Retryable, like unvoid's own
+// ownership check.
+function assertDuesOwnerUnmoved(locked, updatedRow) {
+  if (locked && String(updatedRow?.customer_id) !== locked.customerId) {
+    throw new Error("Invoice ownership changed while releasing its dues coverage — re-check and retry");
+  }
 }
 
 // Restoring a voided stamped dues invoice re-opens a bill for its month. The
@@ -2059,17 +2082,21 @@ async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
 // office alert asks a person to bill the month again if it is still owed. The
 // alert is an episode (admin-alert-episodes): restoring the invoice closes it
 // (unvoidInvoice), and a later void raises a fresh one with its own details.
-// Never mints. Best effort after the void commits; a failure here never fails
-// the void.
+// Never mints. Best effort after the void (or the full refund) commits; a
+// failure here never fails it. A full refund (returnAppliedCreditOnRefund)
+// raises it too, and for a refund this alert is also the recovery path for an
+// armed monthly retry the sweep resolved while the invoice was paid: that row
+// stays disarmed (nothing re-arms it), the office rebills the month.
 const duesCoverageReleasedKey = (invoiceId) => `dues_coverage_released:${invoiceId}`;
-async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
+async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = "voided" } = {}) {
   const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
   if (!month || !invoiceRow.customer_id) return;
   try {
     if (await monthlyDuesCollected(db, invoiceRow.customer_id, new Date(`${month}-15T12:00:00Z`))) return;
     const customer = await db("customers").where({ id: invoiceRow.customer_id })
-      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier", "payer_id");
+      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier");
     const { membershipDuesCoverVisit } = require("./billing-lane");
+    const PayerService = require("./payer");
     const candidates = await db("scheduled_services as s")
       .where({ "s.customer_id": invoiceRow.customer_id, "s.status": "completed" })
       .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
@@ -2078,9 +2105,24 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       .whereNotExists(db("invoices as i")
         .whereRaw("i.scheduled_service_id = s.id")
         .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
-      .select("s.id", "s.estimated_price", "s.is_recurring", "s.payer_id", "s.self_pay_override");
+      .select("s.id", "s.estimated_price", "s.is_recurring");
+    // Payer ownership is resolved the way completion resolves it
+    // (PayerService.resolveForInvoice: a concrete ACTIVE payer wins, an inactive
+    // one or a self-pay pin falls back to self-pay), one call per visit: the
+    // alert is post-commit and best effort, and a month holds a handful of
+    // visits. An unreadable resolution counts as self-pay (over-reports).
+    const payerBilled = new Map();
+    for (const v of candidates) {
+      try {
+        const resolved = await PayerService.resolveForInvoice({ customerId: invoiceRow.customer_id, scheduledServiceId: v.id });
+        payerBilled.set(v.id, !!resolved?.payerId);
+      } catch (e) {
+        logger.warn(`[invoice] dues-coverage-released payer resolve failed for visit ${v.id}: ${e.message}`);
+        payerBilled.set(v.id, false);
+      }
+    }
     const rows = candidates.filter((v) => membershipDuesCoverVisit({
-      visitIsPayerBilled: !v.self_pay_override && !!(v.payer_id || customer?.payer_id),
+      visitIsPayerBilled: payerBilled.get(v.id) === true,
       perApplicationBilling: customer?.billing_mode === "per_application",
       annualPrepayBilling: customer?.billing_mode === "annual_prepay",
       customerAutopayActive: false,
@@ -2104,7 +2146,7 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
         (who) => `rebill ${who}'s ${monthName} dues`,
         (who) => `rebill ${who}'s dues`,
       ]),
-      why: `The ${monthName} dues invoice was voided; ${n} other visit${n > 1 ? "s" : ""} that month went unbilled because of it.`,
+      why: `The ${monthName} dues invoice was ${releasedBy === "refunded" ? "refunded" : "voided"}; ${n} other visit${n > 1 ? "s" : ""} that month went unbilled because of it.`,
       severity: "needs-you",
       link: `/admin/customers?customerId=${invoiceRow.customer_id}`,
       subject: { type: "invoice", id: String(invoiceRow.id) },
@@ -2112,7 +2154,7 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       who: "person",
     };
     const opts = {
-      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided or cancelled, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} that month (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
+      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided, cancelled or refunded, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} that month (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
       bell: true,
       dedupeKey: duesCoverageReleasedKey(invoiceRow.id),
     };
@@ -10024,7 +10066,14 @@ const InvoiceService = {
     const runEdit = async (client) => {
       // The dues-month lock is the FIRST lock of the edit (before the invoice
       // row lock) whenever either side carries a marker.
-      if (duesLockMonth) await acquireMembershipDuesMonthLock(client, existing.customer_id, duesLockMonth);
+      // The owner comes from a fresh UNLOCKED read (a customer merge may have
+      // repointed the invoice since `existing` was read); the lock stays first.
+      let duesLockCustomerId = existing.customer_id;
+      if (duesLockMonth) {
+        const freshOwner = await client("invoices").where({ id }).first("customer_id");
+        if (freshOwner?.customer_id) duesLockCustomerId = freshOwner.customer_id;
+        await acquireMembershipDuesMonthLock(client, duesLockCustomerId, duesLockMonth);
+      }
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —
@@ -10044,6 +10093,13 @@ const InvoiceService = {
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.
       const lockedDuesMonth = membershipDuesStampMonth(lockedRow.line_items);
+      if (duesLockMonth && String(lockedRow.customer_id) !== String(duesLockCustomerId)) {
+        // A merge moved the invoice between the owner read and the row lock:
+        // the month lock taken was the old owner's. Refuse, retryable.
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
       if (lockedDuesMonth && lockedDuesMonth !== duesLockMonth) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
@@ -10342,7 +10398,7 @@ const InvoiceService = {
     await db.transaction(async (trx) => {
       // A stamped dues invoice's void removes the month's coverage: commit
       // under the dues-month lock (first lock of this transaction).
-      await lockMembershipDuesMonthOfInvoice(trx, current);
+      const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, current);
       // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
       // ('prepaid') termite annual invoice restores its account credit and
       // COMMITS here, before the term sync below ever runs. A renewal charge
@@ -10389,6 +10445,7 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
+      assertDuesOwnerUnmoved(lockedDues, updated);
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
@@ -10440,7 +10497,7 @@ const InvoiceService = {
       }
       invoice = updated;
     });
-    await alertIfMembershipDuesCoverageReleased(current);
+    await alertIfMembershipDuesCoverageReleased(invoice, { releasedBy: "voided" });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -12720,7 +12777,7 @@ const InvoiceService = {
           const result = await db.transaction(async (trx) => {
             // A cancelled visit's void of a stamped dues invoice removes the
             // month's coverage: dues-month lock first.
-            await lockMembershipDuesMonthOfInvoice(trx, candidate);
+            const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, candidate);
             // Codex #4971 pre-push P0 (lock order): this void can take a
             // credit-settled ('prepaid') invoice and restore its credit, so
             // a termite renewal parent-decision gate tied to it is this
@@ -12801,6 +12858,7 @@ const InvoiceService = {
               .update({ status: "void", send_claim_token: null, updated_at: new Date() })
               .returning("*");
             if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+            assertDuesOwnerUnmoved(lockedDues, voidedInvoice);
             // Same-transaction ledger restore, matching voidInvoice: a
             // cancelled job's pre-minted first invoice may carry the
             // estimate's deposit credit, which must become available again
@@ -12839,7 +12897,7 @@ const InvoiceService = {
             `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
           );
           // Post-commit side effects, matching voidInvoice.
-          await alertIfMembershipDuesCoverageReleased(candidate);
+          await alertIfMembershipDuesCoverageReleased(result.invoice, { releasedBy: "voided" });
           await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
           try {
             await require("./annual-prepay-renewals").syncTermForInvoicePayment(
@@ -13129,6 +13187,8 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 // Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
 InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
+// Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
+InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
