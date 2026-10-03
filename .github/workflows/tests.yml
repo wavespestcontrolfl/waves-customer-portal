@@ -84,6 +84,12 @@ jobs:
         env:
           PEST_FORECAST_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand --no-coverage tests/pest-forecast-history-postgres.test.js
+      - name: Portal chat durable-turn PostgreSQL tests
+        working-directory: server
+        env:
+          PORTAL_CHAT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/portal-chat-reliability-postgres.test.js
+
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
