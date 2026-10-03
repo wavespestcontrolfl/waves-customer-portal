@@ -25847,7 +25847,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const readRows = await db('products_catalog').select('name', 'active_ingredient');
+        const readRows = await db('products_catalog').select('name', 'display_name', 'active_ingredient');
         catalogRows = Array.isArray(readRows) ? readRows : [];
         for (const row of catalogRows) {
           const named = Boolean(row?.name)

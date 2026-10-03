@@ -402,8 +402,13 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 // returned in mentionedNames and joins the visit's own full screen, so its
 // other aliases ("T-Rex traps") are caught too. A note that only uses a
 // brand's word in its ordinary sense ("suspend treatment") names nothing.
+// In an all-capitals line every word is capitalized, so a brand word inside
+// it is caught and an ordinary use there ("PLEASE SUSPEND WATERING") is too.
 // Known limit, accepted: a brand word the prompt never names that opens a
 // sentence, or is written lowercase, is not caught by this screen.
+const REPORT_SECTION_HEADINGS = new Set([
+  'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE DID AND WHY', 'WHAT TO EXPECT', 'WHATS NEXT',
+]);
 function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
   const tokensOf = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const generic = new Set(genericTokens);
@@ -418,11 +423,23 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
   // "Bora-Care", "TZone" for "T-Zone SE" (the visit screen's collapsedEcho
   // rule: four letters or more, or a digit).
   const collapsible = (word) => word.length >= 4 || /\d/.test(word);
+  // A name made only of plain words ("Non-ionic Surfactant", where the pair
+  // collapses to the generic "nonionic") is ordinary copy, not a name.
+  const whollyPlain = (tokens) => tokens.every((token, i) => isPlain(token)
+    || (i + 1 < tokens.length && isPlain(`${token}${tokens[i + 1]}`))
+    || (i > 0 && isPlain(`${tokens[i - 1]}${token}`)));
   const entries = [];
+  // The short display name is what a technician sees on the product card
+  // ("Arena 0.25G Granular" for the Nufarm row): it is a name of the same
+  // product and is screened as one.
+  const named = [];
   for (const row of rows) {
-    const tokens = tokensOf(row?.name);
-    if (!tokens.length) continue;
-    const entry = { name: row.name, brand: null, phrases: [], collapsed: [] };
+    for (const label of new Set([row?.name, row?.display_name].filter(Boolean))) named.push({ name: row.name, label });
+  }
+  for (const { name, label } of named) {
+    const tokens = tokensOf(label);
+    if (!tokens.length || whollyPlain(tokens)) continue;
+    const entry = { name, brand: null, phrases: [], collapsed: [] };
     if (tokens[0].length >= 4 && !isPlain(tokens[0])) entry.brand = tokens[0];
     if (tokens.length >= 2) {
       entry.phrases.push(` ${tokens.join(' ')} `);
@@ -450,8 +467,9 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
       const lineStart = raw.lastIndexOf('\n', match.index) + 1;
       const lineEndAt = raw.indexOf('\n', match.index);
       const line = raw.slice(lineStart, lineEndAt === -1 ? raw.length : lineEndAt);
-      // An all-capitals line is a section heading, not a sentence.
-      if (!/[a-z]/.test(line)) continue;
+      // The report's own section headings are not sentences. Any other
+      // all-capitals line is copy and is read like the rest.
+      if (REPORT_SECTION_HEADINGS.has(line.replace(/[^A-Za-z ]+/g, '').trim().replace(/\s+/g, ' ').toUpperCase())) continue;
       const before = raw.slice(lineStart, match.index).replace(/[\s"'“”‘’(\[*_•\-–—]+$/u, '');
       // Opens the line, a sentence, or a list item: reads as an ordinary word.
       if (!before || /[.!?:;]$/.test(before) || /^\d+$/.test(before)) continue;
@@ -533,7 +551,7 @@ async function buildReportTradeNameScreen({
     let rows = catalogRows;
     if (!Array.isArray(rows)) {
       if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
-      rows = await savepointRead(db, (k) => k('products_catalog').select('name', 'active_ingredient'));
+      rows = await savepointRead(db, (k) => k('products_catalog').select('name', 'display_name', 'active_ingredient'));
     }
     const built = buildCatalogBrandScreen(Array.isArray(rows) ? rows : [], genericTokens, mentionedText);
     catalogScreen = built.screen;

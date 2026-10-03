@@ -14,6 +14,8 @@ const CATALOG = [
   { name: 'Pesticide application sign 4x5 (yard sign card)', active_ingredient: null },
   { name: 'Termite protection notice sticker 5.5x4', active_ingredient: null },
   { name: 'Permethrin SFR', active_ingredient: 'Permethrin' },
+  { name: 'Non-ionic Surfactant', active_ingredient: null },
+  { name: 'Nufarm Arena 0.25G Clothianidin 0.25 Systemic Granular Insecticide', display_name: 'Arena 0.25G Granular', active_ingredient: 'Clothianidin' },
 ];
 
 const build = (extra = {}) => buildReportTradeNameScreen({ wholeCatalog: true, catalogRows: CATALOG, ...extra });
@@ -25,6 +27,8 @@ describe('catalog-wide brand screen', () => {
     'We applied Demand CS around the foundation.',
     'The weeds got a T-Zone application.',
     'We applied BoraCare to the sill plate.',
+    'We applied Arena 0.25G to the beds.',
+    'WE APPLIED TERMIDOR AROUND THE FOUNDATION.',
     'The weeds got a tzone application.',
     'The full name, trapper t-rex rat snap trap, went in the attic.',
   ])('a brand word or a product name is caught: %s', async (text) => {
@@ -37,6 +41,8 @@ describe('catalog-wide brand screen', () => {
     'Customer demand for a second visit was noted; keep your distance from wet surfaces.',
     'We saw southern chinch bug damage along the driveway.',
     'A pesticide application sign was posted and termite protection was discussed.',
+    'We added a non-ionic surfactant to the tank.',
+    'WHAT WE DID AND WHY\nWe treated the thresholds.',
     'WHAT WE FOUND\nGhost ants were trailing along the kitchen threshold.',
     '- Exterior perimeter treatment\n- Granular ant bait in the lawn',
   ])('ordinary wording passes: %s', async (text) => {
