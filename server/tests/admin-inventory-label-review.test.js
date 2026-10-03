@@ -21,7 +21,7 @@ beforeAll(async () => {
 });
 afterAll(() => new Promise(resolve => server.close(resolve)));
 beforeEach(() => { jest.clearAllMocks(); process.env.GATE_LABEL_PIPELINE = 'true'; });
-afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
+afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; delete process.env.GATE_LABEL_RATE_REVIEW; });
 const call = (path, { method = 'GET', role = 'admin', body } = {}) => fetch(base + path, {
   method, headers: { ...(role ? { Authorization: role } : {}), 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}),
 });
@@ -43,7 +43,7 @@ test.each(['', 'technician'])('requires authenticated admin for label reads and 
 });
 test('gate-off and invalid ids stop before service work', async () => {
   delete process.env.GATE_LABEL_PIPELINE;
-  expect(await (await call('/label-pipeline')).json()).toEqual({ enabled: false });
+  expect(await (await call('/label-pipeline')).json()).toEqual({ enabled: false, rates: false });
   expect((await call(`/${PRODUCT}/label-review/extract`, { method: 'POST', body: {} })).status).toBe(404);
   process.env.GATE_LABEL_PIPELINE = 'true';
   expect((await call('/invalid/label-review')).status).toBe(400);
@@ -57,9 +57,55 @@ test('GET loads evidence without running extraction', async () => {
 test('explicit extract and approval forward the authenticated actor', async () => {
   reviews.extractLabelReview.mockResolvedValue({ enabled: true, review: { draft: { id: PRODUCT } } });
   expect((await call(`/${PRODUCT}/label-review/extract`, { method: 'POST', body: {} })).status).toBe(200);
-  expect(reviews.extractLabelReview).toHaveBeenCalledWith(PRODUCT, '22222222-2222-4333-8444-555555555555');
+  expect(reviews.extractLabelReview).toHaveBeenCalledWith(PRODUCT, '22222222-2222-4333-8444-555555555555', 'weather');
   const body = { candidateId: PRODUCT, decision: 'approve', identityConfirmed: true };
   reviews.decideLabelReview.mockResolvedValue({ enabled: true });
   expect((await call(`/${PRODUCT}/label-review/decision`, { method: 'POST', body })).status).toBe(200);
-  expect(reviews.decideLabelReview).toHaveBeenCalledWith(PRODUCT, '22222222-2222-4333-8444-555555555555', body);
+  expect(reviews.decideLabelReview).toHaveBeenCalledWith(PRODUCT, '22222222-2222-4333-8444-555555555555', body, 'weather');
 });
+
+// The rate review mounts the same four routes under /label-rate-review and
+// needs both gates.
+describe('label rate review routes', () => {
+  const ACTOR = '22222222-2222-4333-8444-555555555555';
+  const paths = [[`/${PRODUCT}/label-rate-review`, 'GET'], [`/${PRODUCT}/label-rate-review/extract`, 'POST'], [`/${PRODUCT}/label-rate-review/decision`, 'POST'], [`/${PRODUCT}/label-rate-review/revoke`, 'POST']];
+  test.each(['', 'technician'])('require an authenticated admin (%s)', async role => {
+    process.env.GATE_LABEL_RATE_REVIEW = 'true';
+    for (const [path, method] of paths) {
+      expect((await call(path, { role, method, body: method === 'POST' ? {} : undefined })).status).toBe(role ? 403 : 401);
+    }
+    expect(reviews.getLabelReview).not.toHaveBeenCalled(); expect(reviews.extractLabelReview).not.toHaveBeenCalled();
+  });
+  test('are 404 until both gates are on, and the weather routes are untouched by the rate gate', async () => {
+    for (const [path, method] of paths) {
+      expect((await call(path, { method, body: method === 'POST' ? {} : undefined })).status).toBe(404);
+    }
+    expect(await (await call('/label-pipeline')).json()).toEqual({ enabled: true, rates: false });
+    reviews.getLabelReview.mockResolvedValue({ enabled: true, review: null });
+    expect((await call(`/${PRODUCT}/label-review`)).status).toBe(200);
+    process.env.GATE_LABEL_RATE_REVIEW = 'true';
+    delete process.env.GATE_LABEL_PIPELINE;
+    expect((await call(`/${PRODUCT}/label-rate-review`)).status).toBe(404);
+    expect(reviews.extractLabelReview).not.toHaveBeenCalled(); expect(reviews.decideLabelReview).not.toHaveBeenCalled();
+  });
+  test('forward the actor and the rates kind', async () => {
+    process.env.GATE_LABEL_RATE_REVIEW = 'true';
+    expect(await (await call('/label-pipeline')).json()).toEqual({ enabled: true, rates: true });
+    reviews.getLabelReview.mockResolvedValue({ enabled: true, review: null });
+    expect((await call(`/${PRODUCT}/label-rate-review`)).status).toBe(200);
+    expect(reviews.getLabelReview).toHaveBeenCalledWith(PRODUCT, 'rates');
+    reviews.extractLabelReview.mockResolvedValue({ enabled: true });
+    expect((await call(`/${PRODUCT}/label-rate-review/extract`, { method: 'POST', body: {} })).status).toBe(200);
+    expect(reviews.extractLabelReview).toHaveBeenCalledWith(PRODUCT, ACTOR, 'rates');
+    const body = { candidateId: PRODUCT, decision: 'approve', identityConfirmed: true };
+    reviews.decideLabelReview.mockResolvedValue({ enabled: true });
+    expect((await call(`/${PRODUCT}/label-rate-review/decision`, { method: 'POST', body })).status).toBe(200);
+    expect(reviews.decideLabelReview).toHaveBeenCalledWith(PRODUCT, ACTOR, body, 'rates');
+    expect((await call(`/${PRODUCT}/label-rate-review/decision`, { method: 'POST', body: { decision: 'approve' } })).status).toBe(400);
+    reviews.revokeLabelReview.mockResolvedValue({ enabled: true });
+    expect((await call(`/${PRODUCT}/label-rate-review/revoke`, { method: 'POST', body: { reviewId: PRODUCT } })).status).toBe(200);
+    expect(reviews.revokeLabelReview).toHaveBeenCalledWith(PRODUCT, ACTOR, PRODUCT, 'rates');
+    expect((await call('/invalid/label-rate-review')).status).toBe(400);
+  });
+});
+

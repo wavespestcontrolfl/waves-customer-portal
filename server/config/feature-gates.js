@@ -3534,6 +3534,11 @@ const gates = {
   // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
   // EPA label weather review; request-time checks use gateEnvValue.
   labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
+  // EPA label application-rate review (Inventory → product). Default off;
+  // needs GATE_LABEL_PIPELINE too. Stores approved label directions in
+  // products_catalog.label_rate_review only; nothing reads them for a dose
+  // yet. Request-time checks use gateEnvValue. Kill switch: unset.
+  labelRateReview: gateEnvValue('GATE_LABEL_RATE_REVIEW'),
 
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
