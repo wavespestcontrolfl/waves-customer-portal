@@ -164,6 +164,7 @@
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
+ *   GATE_LAWN_WATERING_FORECAST=true (lawn watering banner forecast + rain close-out, needs GATE_LAWN_WATERING_RULE: at completion a water-in instruction whose property forecast says at least the water-in amount of rain falls inside its window freezes ONE conditional sentence (instruction.forecast, in INCHES, never a probability) that the LIVE web banner shows beside the unchanged lines; on the live view only, radar-measured (MRMS) rain on whole days inside the window that reaches the water-in amount closes the banner with a measured-inches line. Holds never get either. The PDF, email, watering text, hero and assistant never change; ships DARK, read at call time via lawnWateringForecastLive(); off = byte-identical payload)
  *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the program focuses on this month, built from server/config/protocols.json months (lawn-program-line.js), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
@@ -3977,6 +3978,12 @@ const gates = {
   // time via lawnWateringRuleLive().
   lawnWateringRule: gateEnvValue('GATE_LAWN_WATERING_RULE'),
 
+  // Lawn watering banner forecast + observed-rain close-out (lawn report
+  // rebuild P30). Ships DARK. This entry is for logGateStatus only: the write
+  // gate and report-data.js read GATE_LAWN_WATERING_FORECAST at call time via
+  // lawnWateringForecastLive().
+  lawnWateringForecast: gateEnvValue('GATE_LAWN_WATERING_FORECAST'),
+
   // Lawn report lead (lawn report rebuild P7): a derived above-the-fold block
   // (reportV2.lead) the web report renders instead of the snapshot hero and the
   // follow-up card. Ships DARK. This entry is for logGateStatus only:
@@ -4669,6 +4676,15 @@ function lawnWateringRuleLive() {
   return gateEnvValue('GATE_LAWN_WATERING_RULE');
 }
 
+// GATE_LAWN_WATERING_FORECAST read at CALL time (same 1/true/on convention as
+// gateEnvValue). Lawn report rebuild P30: the forecast-aware water-in sentence
+// frozen at completion and the live-view rain close-out. Needs the watering
+// instruction (GATE_LAWN_WATERING_RULE) to exist at all. Off = the write gate
+// reads no forecast, the payload and PDF are byte-identical.
+function lawnWateringForecastLive() {
+  return gateEnvValue('GATE_LAWN_WATERING_FORECAST');
+}
+
 // GATE_LAWN_REPORT_LEAD read at CALL time (same 1/true/on convention as
 // gateEnvValue). The one canonical reader for the lawn report lead: the tail of
 // applyLawnReportReconciliation derives reportV2.lead from the final reconciled
@@ -5274,6 +5290,7 @@ module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
+module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;

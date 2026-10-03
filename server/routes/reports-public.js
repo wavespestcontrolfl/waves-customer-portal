@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -522,6 +522,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Defaulting to off means a future caller cannot inherit that cost by
   // accident either.
   pestExpectationsWeather = false,
+  // OPT-IN on the same terms: only the /data live render shows the lawn
+  // watering banner's rain close-out (GATE_LAWN_WATERING_FORECAST), so only it
+  // pays for the radar lookup. Applied for mode === 'live' only.
+  lawnWateringCloseOut = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -553,6 +557,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // which builds its payload outside this function (audit 2026-07-18 P2 +
   // codex r2).
   if (mode !== 'live') stripLiveOnlyScheduleFields(data);
+  else if (lawnWateringCloseOut) {
+    // Gate read at call time; a partial gates module (route test doubles) reads as off.
+    const gates = require('../config/feature-gates');
+    if (typeof gates.lawnWateringForecastLive === 'function' && gates.lawnWateringForecastLive()) await attachLawnWateringCloseOut(data, service);
+  }
 
   // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
   // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a
@@ -2614,6 +2623,7 @@ router.get('/:token/data', async (req, res, next) => {
         // lookups (codex P2 #5137 deferred finding a) — see
         // pestExpectationsWeather's own doc above.
         pestExpectationsWeather: true,
+        lawnWateringCloseOut: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

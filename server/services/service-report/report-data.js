@@ -41,6 +41,7 @@ const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
+const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2150,6 +2151,13 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.planSummary;
   delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  // The watering banner's forecast sentence and rain close-out
+  // (GATE_LAWN_WATERING_FORECAST) are live-view additions: the printed record
+  // keeps only the instruction as written at the visit.
+  if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
+    delete data.reportV2.banner.forecastLine;
+    delete data.reportV2.banner.observedRain;
+  }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
   // non-live render prints "What to expect" without them (lawn-copy-v6.js
   // staticWhatToExpect). The carrier stays a non-enumerable hand-off.
@@ -2175,6 +2183,27 @@ function stripLiveOnlyReportProductCopy(data) {
     if (app?.product && 'report_copy' in app.product) delete app.product.report_copy;
   });
   return data;
+}
+
+// GATE_LAWN_WATERING_FORECAST, LIVE web view only: when radar-measured (MRMS)
+// rain on whole days inside a frozen water-in window reached the water-in
+// amount, the banner carries observedRain (the close-out line). The caller
+// guards the mode; this reads the FROZEN instruction only (an unfrozen render
+// has no window to measure), never a forecast, and fails open.
+async function attachLawnWateringCloseOut(data, service) {
+  if (!featureGates.lawnWateringForecastLive() || !featureGates.lawnWateringRuleLive()) return data;
+  if (!data?.reportV2?.banner || data.reportV2.banner.state !== 'water_in') return data;
+  const instruction = readFrozenWateringInstruction(parseJsonObject(service?.structured_notes));
+  if (!instruction) return data;
+  const { fetchMrmsDailyRain } = require('../mrms-qpe');
+  return attachLiveCloseOut(data, {
+    instruction,
+    latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+    longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+    fetchMrmsDailyRain,
+    etDayWindow: require('./application-conditions').etDayWindow,
+    etDateString,
+  });
 }
 
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {}, interiorOnlyLane = false } = {}) {
@@ -3826,6 +3855,13 @@ function applyAfterHoldOverlay(waterContext, instruction) {
   return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
 }
 
+// GATE_LAWN_WATERING_FORECAST: the water-in sentence frozen with the instruction,
+// as the banner's extra key (empty when the gate is off or nothing was frozen).
+function bannerForecastExtras(instruction) {
+  const forecastLine = featureGates.lawnWateringForecastLive() ? frozenForecastLine(instruction) : null;
+  return forecastLine ? { forecastLine } : {};
+}
+
 // The banner payload: one server-built object the client, PDF and (later)
 // the completion text all read. expiresAt is when the instruction lapses.
 // The plan-dependent sentence is composed here, from the weekly plan present on
@@ -3859,6 +3895,11 @@ function buildWateringBanner(instruction, weekPlan = null) {
     expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
     ruleSource: instruction.ruleSource,
     ...(mowHold ? { mowHold } : {}),
+    // GATE_LAWN_WATERING_FORECAST: the sentence frozen with a water-in at
+    // completion (lawn-watering-forecast.js). LIVE VIEW ONLY: it is deleted
+    // from every non-live render by stripLiveOnlyScheduleFields, and it is
+    // never part of `lines`. Gate off = no key.
+    ...bannerForecastExtras(instruction),
   };
 }
 
@@ -7330,6 +7371,7 @@ module.exports = {
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
   stripLiveOnlyReportProductCopy,
+  attachLawnWateringCloseOut,
   loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
