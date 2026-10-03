@@ -41,6 +41,7 @@ function servicePhotoDraftRecord(photo, serviceId, technicianId, stage, message 
     caption: photo.caption,
     capturedAt: photo.capturedAt,
     expectedVisit: photo.expectedVisit || null,
+    uploadReceipt: photo.uploadReceipt || null,
   };
 }
 
@@ -74,7 +75,14 @@ async function persistCurrentPhotoStage(photo, serviceId, deviceScope, stage, me
   return 'unavailable';
 }
 
-async function postServicePhoto(photo, serviceId, token) {
+async function postServicePhoto(photo, serviceId, token, deviceScope) {
+  // The bytes already have a server receipt. Only the derived artifacts are
+  // owed; re-uploading would incorrectly apply the current visit's identity
+  // guard to work that was committed against the original visit.
+  if (photo.uploadReceipt?.photo?.id) {
+    if (photo.uploadReceipt.reconcileRequired) await reconcileRecoveredPhoto(serviceId, token);
+    return photo.uploadReceipt;
+  }
   const fd = new FormData();
   fd.append('photo', photo.file);
   fd.append('photoType', photo.photoType);
@@ -88,6 +96,14 @@ async function postServicePhoto(photo, serviceId, token) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.ok && data?.photo?.id) {
+    photo.uploadReceipt = {
+      photo: { id: data.photo.id, staged: Boolean(data.photo.staged) },
+      reconcileRequired: Boolean(data.reconcileRequired),
+    };
+    if (deviceScope) await persistCurrentPhotoStage(
+      photo, serviceId, deviceScope, 'uploaded', 'Photo attached; completed-visit updates may still be pending.',
+      { verifyConflict: false },
+    );
     if (data.reconcileRequired) await reconcileRecoveredPhoto(serviceId, token);
     return data;
   }
@@ -99,10 +115,16 @@ async function postServicePhoto(photo, serviceId, token) {
 }
 
 async function reconcileRecoveredPhoto(serviceId, token) {
-  const res = await fetch(`${API}/api/tech/services/${serviceId}/photos/reconcile`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  let res;
+  try {
+    res = await fetch(`${API}/api/tech/services/${serviceId}/photos/reconcile`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    error.uploadStage = 'reconciliation_failed';
+    throw error;
+  }
   if (res.ok) return;
   const data = await res.json().catch(() => ({}));
   const failure = new Error(data.error || `Photo attached, but visit reconciliation failed (HTTP ${res.status})`);
@@ -133,7 +155,7 @@ function photoVisitChanged(expected, live) {
     || expected.revision !== live.revision) return true;
   // Normal check-in progression does not change which visit owns these bytes.
   // Dead or unrecognized states still require the technician to reconcile.
-  return !['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'].includes(live.status);
+  return !['pending', 'confirmed', 'en_route', 'on_site', 'completed'].includes(live.status);
 }
 
 async function confirmPhotoDraft(photo, serviceId, deviceScope) {
@@ -190,6 +212,8 @@ function restoreServicePhoto(record, serviceId, technicianId) {
       caption: typeof record.caption === 'string' ? record.caption : '',
       capturedAt: record.capturedAt,
       expectedVisit: record.expectedVisit || null,
+      stage: record.stage,
+      uploadReceipt: record.uploadReceipt?.photo?.id ? record.uploadReceipt : null,
     };
   } catch {
     return null;
