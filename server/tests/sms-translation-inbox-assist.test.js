@@ -110,7 +110,7 @@ describe('inboxAssistFor', () => {
   });
 
   test('send boundary: the Agent Review send checks re-read the reply\'s facts from the stored snapshot', async () => {
-    const ok = await translationReplySendChecks({ trialId: 7, customerId: 'c1' });
+    const ok = await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: READY.reply_translated });
     expect(ok.reason).toBeNull();
     expect(mockSendChecks).toHaveBeenCalledWith({
       decision: expect.objectContaining({
@@ -123,16 +123,109 @@ describe('inboxAssistFor', () => {
     expect(mockBoundary.eta).toHaveBeenCalledWith(expect.objectContaining({ factsGeneratedAt: '2026-10-03T14:00:00.000Z', promptVersion: 'house_voice_v12_test' }));
     expect(mockBoundary.amounts).toHaveBeenCalledWith(expect.objectContaining({ decision: expect.objectContaining({ billing_fingerprint: 'fp-1' }) }));
     expect(ok.providerPreSendCheck).toBe('composed-check');
+    // an edited body (a different day) cannot be judged against the stored reply: refused before any recheck
+    mockSendChecks.mockClear();
+    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: 'Su visita es el miércoles 7 de oct, 13:00 - 15:00.' })).toEqual({ reason: 'body_edited' });
+    expect(mockSendChecks).not.toHaveBeenCalled();
     mockSendChecks.mockResolvedValue('open-times stale (slot_taken)');
-    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1' })).toEqual({ reason: 'open-times stale (slot_taken)' });
+    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: READY.reply_translated })).toEqual({ reason: 'open-times stale (slot_taken)' });
     // no snapshot, no row, or a failed read: refused
     mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [] } });
-    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1' })).toEqual({ reason: 'not_readable' });
+    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: READY.reply_translated })).toEqual({ reason: 'not_readable' });
     mockTrial.mockResolvedValue(undefined);
-    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1' })).toEqual({ reason: 'not_readable' });
+    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: READY.reply_translated })).toEqual({ reason: 'not_readable' });
     mockTrial.mockResolvedValue(READY);
     mockSendChecks.mockRejectedValue(new Error('boom'));
-    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1' })).toEqual({ reason: 'recheck_failed' });
+    expect(await translationReplySendChecks({ trialId: 7, customerId: 'c1', outgoingBody: READY.reply_translated })).toEqual({ reason: 'recheck_failed' });
+  });
+
+  test('send boundary: sendable only while its card would still offer it, and by one sender', async () => {
+    const claim = (over = {}) => claimTranslationReplyForSend({ trialId: 7, customerId: 'c1', to: '+19415550100', now: NOW, ...over });
+    expect(await claim()).toBe('ok');
+    expect(mockClaim).toHaveBeenCalledTimes(1);
+    // a text that committed between the guard and the stamp is seen by the re-read after it: the stamp is lifted
+    mockClaim.mockClear();
+    mockLiveAnswer.mockResolvedValueOnce(null).mockResolvedValueOnce('newer_inbound');
+    expect(await claim()).toBe('stale');
+    expect(mockClaim).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(mockClaim.mock.calls[1][0])).toContain("checks - 'send_claimed_at'");
+    mockClaim.mockClear();
+    // the guarded UPDATE matched no row: a teammate stamped it a moment ago
+    mockClaim.mockResolvedValue(0);
+    expect(await claim()).toBe('claimed');
+    // a stamp is never lifted: the card stops offering the reply, and a second send is refused without an UPDATE
+    mockClaim.mockClear();
+    mockTrial.mockResolvedValue({ ...READY, checks: { ...READY.checks, send_claimed_at: '2026-10-03T14:10:00.000Z' } });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, replyUsed: true, heldReason: 'The suggested reply was already used once.' });
+    expect(await claim()).toBe('claimed');
+    expect(mockClaim).not.toHaveBeenCalled();
+    mockTrial.mockResolvedValue(READY);
+    mockClaim.mockClear(); mockClaim.mockResolvedValue(1);
+    // the suggest lane's guard under the thread lock: a staff reply still with the provider, or a newer text
+    mockLiveAnswer.mockResolvedValueOnce('reply_in_flight');
+    expect(await claim()).toBe('claimed');
+    mockLiveAnswer.mockResolvedValueOnce('newer_inbound');
+    expect(await claim()).toBe('stale');
+    expect(mockLiveAnswer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ threadLast10: '9415550100', customerId: 'c1', inboundSmsLogId: 's1' }));
+    expect(mockClaim).not.toHaveBeenCalled();
+    expect(await claim({ trialId: 6 })).toBe('stale'); // another text's trial
+    expect(await claim({ to: '+19415550177' })).toBe('stale'); // another number
+    expect(await claim({ customerId: null })).toBe('stale');
+    mockLater.mockResolvedValue([{ message_type: 'manual', status: 'sent', to_phone: '+19415550100' }]);
+    expect(await claim()).toBe('stale'); // already answered
+    mockLater.mockResolvedValue([]);
+    mockTrial.mockResolvedValue({ ...READY, created_at: new Date('2026-10-02T13:00:00Z') });
+    expect(await claim()).toBe('stale'); // expired
+    expect(mockClaim).not.toHaveBeenCalled(); // nothing stale is ever stamped
+    mockTrial.mockResolvedValue(READY);
+    mockClaim.mockRejectedValue(Object.assign(new Error('update ... secreto'), { code: '57014' }));
+    expect(await claim()).toBe('stale');
+  });
+
+  test('no trial row for the latest text (an English writer), or a skipped one: nothing', async () => {
+    mockTrial.mockResolvedValue(undefined);
+    expect(await inboxAssistFor('c1', NOW)).toBeNull();
+    mockTrial.mockResolvedValue({ ...READY, verdict: 'skipped', hold_reason: 'reaction' });
+    expect(await inboxAssistFor('c1', NOW)).toBeNull();
+  });
+
+  test('a held reply: the confirmed English of their text and a plain reason, never the reply', async () => {
+    mockTrial.mockResolvedValue({ ...READY, verdict: 'held', hold_reason: 'meaning_changed_in_translation' });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({
+      inboundEnglish: READY.inbound_english, replyEnglish: null, replyTranslated: null, heldReason: 'The translated reply did not read back the same as the English.',
+    });
+  });
+
+  test('an inbound translation that failed its checks is never shown', async () => {
+    mockTrial.mockResolvedValue({ ...READY, verdict: 'held', hold_reason: 'meaning_changed_in_inbound_translation', reply_translated: null });
+    expect(await inboxAssistFor('c1', NOW)).toBeNull();
+  });
+
+  test('a ready reply more than a day old is not offered (it may quote a visit time); the translation still shows', async () => {
+    mockTrial.mockResolvedValue({ ...READY, created_at: new Date('2026-10-02T13:00:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, heldReason: 'The suggested reply is more than a day old.' });
+  });
+
+  test('a reply quoting an arrival time in minutes is never offered; the translation still shows', async () => {
+    const eta = { ...READY, reply_english: 'Adam is on the way. ETA: 9 minutes.', reply_translated: 'Adam va en camino. ETA: 9 minutos.' };
+    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:59:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({
+      inboundEnglish: READY.inbound_english, replyEnglish: null, replyTranslated: null, replyExpiresAt: null,
+      heldReason: 'The reply quotes a live arrival time, so it needs a person.', customerId: 'c1',
+    });
+    // a bare figure, when the facts it was drafted from carried a live arrival line
+    const bare = { ...READY, reply_english: '20 minutes.', reply_translated: '20 minutos.', created_at: new Date('2026-10-03T14:59:00Z') };
+    mockTrial.mockResolvedValue({ ...bare, facts_block: 'LIVE STATUS: en route\nLIVE ETA: about 20 minutes (GPS, as of 10:59 AM)' });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: 'The reply quotes a live arrival time, so it needs a person.' });
+    // the same words with no live arrival fact behind them are an ordinary reply
+    mockTrial.mockResolvedValue({ ...bare, facts_block: 'VISIT: Tuesday' });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: '20 minutos.', heldReason: null });
+  });
+
+  test('only into the thread the text came in on: another To number gets nothing', async () => {
+    expect(await inboxAssistFor('c1', NOW, '9415550100')).toMatchObject({ replyTranslated: READY.reply_translated, replyExpiresAt: '2026-10-04T14:00:00.000Z' });
+    expect(await inboxAssistFor('c1', NOW, '9415550177')).toBeNull();
+    expect(mockTrial).toHaveBeenCalledTimes(1);
   });
 
   test('no row yet for a recent text: pending, so the composer asks again (15 s at first, then each minute, 15 minutes at most)', async () => {

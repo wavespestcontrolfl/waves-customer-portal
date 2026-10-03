@@ -995,15 +995,20 @@ function sendSnapshotFor({ draft, context, inboundEnglish }) {
  * The Agent Review send checks, run for a translation card's reply before its send takes the thread lock (as
  * verifyAgentDecisionForSend runs them for a reviewed draft): an offered time that is gone, a balance that
  * changed, a technician no longer on the way, a closed loop. Judged on the ENGLISH reply the translation was
- * checked against. Returns { reason } (a short reason, or null when the facts still hold) and, when they
+ * checked against, and only when the outgoing body IS that translation. Returns { reason } (a short reason, or null when the facts still hold) and, when they
  * hold, the providerPreSendCheck that re-reads them at the provider boundary. Fails closed.
  */
-async function translationReplySendChecks({ trialId, customerId }) {
+async function translationReplySendChecks({ trialId, customerId, outgoingBody }) {
   try {
     if (!trialId || !customerId || !inboxAssistEnabled()) return { reason: 'not_readable' };
-    const row = await db(TRIAL_TABLE).where({ id: trialId, customer_id: customerId, verdict: 'ready' }).first('checks', 'reply_english', 'inbound_english');
+    const row = await db(TRIAL_TABLE).where({ id: trialId, customer_id: customerId, verdict: 'ready' }).first('checks', 'reply_english', 'reply_translated', 'inbound_english');
     const send = parseChecks(row?.checks).send;
-    if (!row?.reply_english || !send?.input_snapshot) return { reason: 'not_readable' };
+    if (!row?.reply_english || !row.reply_translated || !send?.input_snapshot) return { reason: 'not_readable' };
+    // Only the checked translation itself is vouched for by its English: an edited body (a different day, a
+    // different amount) cannot be judged against the stored reply, so it is refused. The composer detaches the
+    // trial on any edit, which makes the text the staff member's own.
+    const flat = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+    if (flat(outgoingBody) !== flat(row.reply_translated)) return { reason: 'body_edited' };
     const checks = require('./agent-decision-send-checks');
     const snap = send.input_snapshot;
     const promptVersion = send.prompt_version || null;
@@ -1083,7 +1088,16 @@ async function claimTranslationReplyForSend({ trialId, customerId, to, now = new
     const claimed = await dbi(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
       .whereRaw("checks->>'send_claimed_at' IS NULL")
       .update({ checks: db.raw("jsonb_set(COALESCE(checks, '{}'::jsonb), '{send_claimed_at}', to_jsonb(?::text))", [now.toISOString()]) });
-    return claimed === 1 ? 'ok' : 'claimed';
+    if (claimed !== 1) return 'claimed';
+    // Twilio's inbound inserts do not take the thread lock: a text committed between the guard above and the
+    // stamp is only visible now (the Agent Review path re-reads its anchor after its claim for the same
+    // reason). The stamp is lifted again: the reply was never sent, and it is stale either way.
+    const after = await require('./sms-suggest-mode').threadHasLiveAnswer(dbi, { threadLast10, customerId, inboundCreatedAt: assist.createdAt, inboundSmsLogId: assist.smsLogId });
+    if (after) {
+      await dbi(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId }).update({ checks: db.raw("checks - 'send_claimed_at'") });
+      return after === 'reply_in_flight' ? 'claimed' : 'stale';
+    }
+    return 'ok';
   } catch (err) {
     logger.warn(`[sms-translation] send claim not read: ${err.code || err.name || 'error'}`);
     return 'stale';

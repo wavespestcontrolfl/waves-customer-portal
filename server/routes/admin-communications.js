@@ -673,11 +673,13 @@ router.post('/sms', async (req, res, next) => {
     // The same facts are read once more at the provider boundary (translationProviderPreSendCheck, below).
     let translationProviderPreSendCheck;
     if (translationTrialId) {
-      const sendChecks = await require('../services/sms-translation').translationReplySendChecks({ trialId: translationTrialId, customerId: trustedCustomerId });
+      const sendChecks = await require('../services/sms-translation').translationReplySendChecks({ trialId: translationTrialId, customerId: trustedCustomerId, outgoingBody: body });
       translationProviderPreSendCheck = sendChecks.providerPreSendCheck;
       if (sendChecks.reason) {
         logger.info(`[communications] translated reply refused at send: ${String(sendChecks.reason).slice(0, 80)}`);
-        return res.status(409).json({ error: 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
+        return res.status(409).json({ error: sendChecks.reason === 'body_edited'
+          ? 'This suggested reply was edited, so it can no longer be checked. Clear the message box and write the reply yourself.'
+          : 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
       }
     }
 

@@ -451,6 +451,20 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('an edited suggested reply is refused with its own words', async () => {
+    mockTranslationFacts.mockResolvedValueOnce({ reason: 'body_edited' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el miércoles.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/was edited/);
+      expect(mockTranslationFacts).toHaveBeenLastCalledWith(expect.objectContaining({ trialId: 7, outgoingBody: 'Su visita es el miércoles.' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   test('a suggested reply that passes carries the trial\'s fact checks to the provider boundary', async () => {
     const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
     mockTranslationFacts.mockResolvedValueOnce({ reason: null, providerPreSendCheck });

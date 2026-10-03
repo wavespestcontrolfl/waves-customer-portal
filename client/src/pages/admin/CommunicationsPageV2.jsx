@@ -1710,10 +1710,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return () => clearTimeout(t);
   }, [translationAssist]);
 
-  // An emptied message box is no longer the suggested reply: what staff type next is their own.
+  // Any edit makes the text the staff member's own: only the checked translation itself rides with its trial
+  // (the server refuses an edited body under a trial id). While it rides, the send is immediate.
   useEffect(() => {
-    if (selectedAgentDraft?.translationTrialId && !msgBody.trim()) setSelectedAgentDraft(null);
-  }, [msgBody, selectedAgentDraft, setSelectedAgentDraft]);
+    if (!selectedAgentDraft?.translationTrialId) return;
+    if (msgBody.trim() !== String(selectedAgentDraft.suggestedMessage || "").trim()) setSelectedAgentDraft(null);
+    else if (sendTiming !== "now") setSendTiming("now");
+  }, [msgBody, selectedAgentDraft, setSelectedAgentDraft, sendTiming, setSendTiming]);
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
@@ -3451,7 +3454,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     setMsgBody(translationAssist.replyTranslated);
                     // A translated reply is not the Agent Review draft: it is sent as an ordinary staff message.
                     // The trial it came from rides with the saved draft so the server can refuse it once stale.
-                    setSelectedAgentDraft({ translationTrialId: translationAssist.trialId });
+                    setSelectedAgentDraft({ translationTrialId: translationAssist.trialId, suggestedMessage: translationAssist.replyTranslated });
+                    // it is sent now or not at all (the server refuses to schedule it)
+                    setSendTiming("now");
                   }}
                 >
                   Use Reply
