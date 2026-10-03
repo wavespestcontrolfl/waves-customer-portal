@@ -1,0 +1,112 @@
+{
+  "_comment": "Lawn visit photo shot list (lawn report rebuild P18, GATE_LAWN_SHOT_LIST). The one definition shared by the server (server/services/lawn-photo-shots.js) and the admin client (client/src/lib/lawn-photo-shots.js). Order is the order the technician sees. key is the value stored in lawn_assessment_photos.zone (a free string, no enum). areaWeight is the weight a photo carries in a legacy area-score merge (0 = detail shot, never moves an area score); an unlabeled photo counts as 1. heroRank orders the report's lead photo (higher wins, then photo quality). pairable shots are the same spot every visit and may pair across visits for the before/after slider. max is how many photos one visit may carry for that shot.",
+  "cap": 8,
+  "minimum": 4,
+  "minimumSlots": [["front"], ["back", "side"], ["close_up"], ["blade_crown"]],
+  "shots": [
+    {
+      "key": "front",
+      "label": "Front overview",
+      "reportLabel": "Front yard",
+      "instruction": "The whole front from the same spot as last time (mailbox or driveway apron), chest height, house corner in frame.",
+      "feeds": "Scores coverage, color, weeds; anchors the before/after.",
+      "requiredWhen": "always",
+      "pairable": true,
+      "role": "area",
+      "areaWeight": 1,
+      "heroRank": 3,
+      "max": 1
+    },
+    {
+      "key": "back",
+      "label": "Back overview",
+      "reportLabel": "Back yard",
+      "instruction": "Same rules from the same back door or lanai edge.",
+      "feeds": "Second area sample so one side never speaks for the lawn.",
+      "requiredWhen": "back_or_side",
+      "pairable": true,
+      "role": "area",
+      "areaWeight": 1,
+      "heroRank": 2,
+      "max": 1
+    },
+    {
+      "key": "side",
+      "label": "Side overview",
+      "reportLabel": "Side yard",
+      "instruction": "Down one side strip from the front corner. Use when the back is gated or blocked.",
+      "feeds": "Stands in for the back overview.",
+      "requiredWhen": "optional",
+      "pairable": true,
+      "role": "area",
+      "areaWeight": 1,
+      "heroRank": 2,
+      "max": 1
+    },
+    {
+      "key": "close_up",
+      "label": "Canopy close-up",
+      "reportLabel": "Close-up",
+      "instruction": "Straight down, 12 to 18 inches up, at a typical spot (not the worst), hand or gauge for scale.",
+      "feeds": "True color and weed identity.",
+      "requiredWhen": "always",
+      "pairable": false,
+      "role": "detail",
+      "areaWeight": 0,
+      "heroRank": 0,
+      "max": 1
+    },
+    {
+      "key": "blade_crown",
+      "label": "Blade and crown",
+      "reportLabel": "Blade close-up",
+      "instruction": "Part the grass, 4 to 6 inches away, blade plus the runner and crown.",
+      "feeds": "Leaf spot, chinch, webworm and thatch live here.",
+      "requiredWhen": "always",
+      "pairable": false,
+      "role": "detail",
+      "areaWeight": 0,
+      "heroRank": 0,
+      "max": 1
+    },
+    {
+      "key": "hot_edge",
+      "label": "Hot edge",
+      "reportLabel": "Sunny edge",
+      "instruction": "Turf along the driveway, sidewalk or curb in afternoon sun, 6 to 10 feet of edge.",
+      "feeds": "Chinch and drought start here.",
+      "requiredWhen": "edge_exists",
+      "pairable": false,
+      "role": "area",
+      "areaWeight": 0.5,
+      "heroRank": 1,
+      "max": 1
+    },
+    {
+      "key": "shade",
+      "label": "Shadiest turf",
+      "reportLabel": "Shaded area",
+      "instruction": "The most shaded patch, 10 to 15 feet wide.",
+      "feeds": "Keeps thin shade from reading as disease.",
+      "requiredWhen": "shade_exists",
+      "pairable": false,
+      "role": "area",
+      "areaWeight": 0.5,
+      "heroRank": 1,
+      "max": 1
+    },
+    {
+      "key": "trouble",
+      "label": "Problem area",
+      "reportLabel": "Trouble spot",
+      "instruction": "Whenever something looks wrong: one wide shot with good turf beside the bad, one close-up of the patch edge.",
+      "feeds": "The named finding only. Up to 2 photos.",
+      "requiredWhen": "flagged",
+      "pairable": false,
+      "role": "detail",
+      "areaWeight": 0,
+      "heroRank": 0,
+      "max": 2
+    }
+  ]
+}

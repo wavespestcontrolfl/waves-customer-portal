@@ -2171,7 +2171,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
               <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
-              <figcaption>{formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
+              <figcaption>{photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}
         </div>

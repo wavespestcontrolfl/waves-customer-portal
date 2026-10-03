@@ -2322,6 +2322,17 @@ establishment date) gets a RESULT TIMING rule and generate-report rejects any fo
 its output, and the lawn "What we applied today" paragraph
 (`treatment-narrative.js`, its own prompt version) and its deterministic
 fallback carry none, any forward timing failing the paragraph to that fallback.
+`GATE_LAWN_SHOT_LIST` (dark): on the service-report payload
+(`/api/reports/:token/data` and the PDF, which share `buildReportV1Data`),
+`lawnAssessment.photos` carries up to 8 photos (5 with the gate off), and each
+photo gains an optional string `zoneLabel`: the customer-safe name of the shot
+the technician tagged ("Front overview", "Canopy close-up", "Problem area", and
+so on, from `shared/lawn-photo-shots.json`). It is `null` for an untagged photo.
+The web report captions a photo with `zoneLabel` when present. The lawn PDF
+cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
+PDFs in both directions. Nothing else in the payload changes, and with the gate
+off the payload and the signature are byte-identical to before.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`

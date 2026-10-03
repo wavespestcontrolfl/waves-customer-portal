@@ -159,6 +159,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
+import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, assignShotZone, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10141,6 +10142,12 @@ function LawnAssessmentCompletionBlock({
   technicianNotes = "",
 }) {
   const [photos, setPhotos] = useState([]);
+  // GATE_LAWN_SHOT_LIST (lawn report rebuild P18): the server says so in the
+  // existing-assessment lookup below. Off (the default, and on any lookup
+  // failure) the step keeps its three optional slots and 3-photo cap.
+  const [shotList, setShotList] = useState(false);
+  const pendingShotRef = useRef(null);
+  const photoCap = shotList ? LAWN_SHOT_CAP : 3;
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
@@ -10157,6 +10164,8 @@ function LawnAssessmentCompletionBlock({
   useEffect(() => {
     let cancelled = false;
     setPhotos([]);
+    setShotList(false);
+    pendingShotRef.current = null;
     setResult(null);
     setVisitReview(null);
     setTechScores(null);
@@ -10173,6 +10182,7 @@ function LawnAssessmentCompletionBlock({
     setLoading(true);
     adminFetch(`/admin/lawn-assessment/service/${service.id}`)
       .then((data) => {
+        if (!cancelled && data?.shotListEnabled === true) setShotList(true);
         if (cancelled || !data?.assessment) return;
         const assessment = data.assessment;
         const scores = parseAssessmentScores(assessment);
@@ -10215,14 +10225,18 @@ function LawnAssessmentCompletionBlock({
 
   async function addPhotos(event) {
     const files = Array.from(event.target.files || []);
-    const remaining = Math.max(0, 3 - photos.length);
+    const remaining = Math.max(0, photoCap - photos.length);
+    // A shot's own "Add" button tags the first photo it brings in; only set
+    // while the shot list is on, so this is null (every photo untagged) off.
+    const pendingZone = pendingShotRef.current;
+    pendingShotRef.current = null;
     if (!files.length || remaining === 0) return;
     setError("");
     try {
       const nextPhotos = await Promise.all(
         files.slice(0, remaining).map(readLawnAssessmentPhoto),
       );
-      setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
+      setPhotos((prev) => [...prev, ...nextPhotos.map((photo, k) => ({ ...photo, zone: k === 0 ? pendingZone : null }))].slice(0, photoCap));
       setResult(null);
       setTechScores(null);
       setTypedKeys(new Set());
@@ -10240,6 +10254,12 @@ function LawnAssessmentCompletionBlock({
   // one. Picking the same slot again clears it (every slot, including none,
   // is a valid choice).
   function setPhotoZone(index, zone) {
+    // Shot list on: every shot allows one photo (a problem area, two), so
+    // picking a shot another photo holds moves it, as Front always has.
+    if (shotList) {
+      setPhotos((prev) => assignShotZone(prev, index, zone));
+      return;
+    }
     setPhotos((prev) => {
       const current = prev[index]?.zone || null;
       const next = current === zone ? null : zone;
@@ -10401,8 +10421,8 @@ function LawnAssessmentCompletionBlock({
           <>
             <button
               type="button"
-              onClick={() => fileRef.current?.click()}
-              disabled={disabled || photos.length >= 3 || analyzing}
+              onClick={() => { pendingShotRef.current = null; fileRef.current?.click(); }}
+              disabled={disabled || photos.length >= photoCap || analyzing}
               style={{
                 height: 38,
                 padding: "0 14px",
@@ -10412,13 +10432,13 @@ function LawnAssessmentCompletionBlock({
                 color: D.heading,
                 fontSize: 13,
                 fontWeight: 500,
-                cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
+                cursor: disabled || photos.length >= photoCap || analyzing ? "not-allowed" : "pointer",
+                opacity: disabled || photos.length >= photoCap || analyzing ? 0.55 : 1,
               }}
             >
               Add turf photos
             </button>
-            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
+            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/{photoCap}</span>
           </>
         )}
             {showGaugeReading && (
@@ -10451,6 +10471,32 @@ function LawnAssessmentCompletionBlock({
           </div>
           {!hasResult && (
             <>
+          {/* GATE_LAWN_SHOT_LIST: the named shots, one line of how-to each. A
+              shot's Add button brings the photo in already tagged with it. */}
+          {shotList && (
+            <ul data-testid="lawn-shot-list" aria-label="Lawn photo shots" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+              {LAWN_SHOTS.map((shot) => (
+                <li key={shot.key} data-testid={`lawn-shot-${shot.key}`} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", border: `1px solid ${D.border}`, borderRadius: 8, background: D.white }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
+                      {shot.label}
+                      {photos.some((photo) => photo.zone === shot.key) ? " (added)" : ""}
+                    </div>
+                    <div style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>{shot.instruction}</div>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Add photo for ${shot.label}`}
+                    disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key)}
+                    onClick={() => { pendingShotRef.current = shot.key; fileRef.current?.click(); }}
+                    style={{ height: 34, padding: "0 12px", borderRadius: 8, border: `1px solid ${D.border}`, background: D.white, color: D.heading, fontSize: 14, cursor: "pointer" }}
+                  >
+                    Add
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           {photos.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {photos.map((photo, index) => (
@@ -10508,7 +10554,7 @@ function LawnAssessmentCompletionBlock({
                     }}
                   >
                     <option value="">No slot</option>
-                    {LAWN_PHOTO_ZONES.map((zone) => (
+                    {(shotList ? LAWN_SHOTS.map((shot) => ({ value: shot.key, label: shot.label })) : LAWN_PHOTO_ZONES).map((zone) => (
                       <option key={zone.value} value={zone.value}>{zone.label}</option>
                     ))}
                   </select>
@@ -10520,7 +10566,12 @@ function LawnAssessmentCompletionBlock({
               "since your last visit" score line needs 2+ usable photos on both
               visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
               can never show it. Analyze stays enabled at one photo. */}
-          {photos.length < 2 && (
+          {shotList && shotListHint(photos) && (
+            <div data-testid="lawn-shot-list-hint" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+              {shotListHint(photos)}
+            </div>
+          )}
+          {!shotList && photos.length < 2 && (
             <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
               2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
