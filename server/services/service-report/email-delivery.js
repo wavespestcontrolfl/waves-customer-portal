@@ -5,6 +5,7 @@ const sendgrid = require('../sendgrid-mail');
 const { wrapEmail, formatDate, plainText } = require('../email-template');
 const EmailTemplateLibrary = require('../email-template-library');
 const { buildReportV1Data } = require('./report-data');
+const { reportGreetingFirstToken } = require('../../utils/greeting-first-name');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const {
   enqueuePdfRenderRetry,
@@ -119,7 +120,10 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     : (data?.pressureIndex != null ? String(data.pressureIndex) : '');
 
   return {
-    first_name: firstName(recipient.name || data?.customerName),
+    // A recipient's own name greets by its first token; the customer's own
+    // composed name greets by customerFirstName (a blank-first-name customer
+    // is "there", not their surname).
+    first_name: recipient.name ? firstName(recipient.name) : (reportGreetingFirstToken(data) || 'there'),
     report_url: reportUrl,
     service_label: serviceLabel,
     service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
@@ -334,10 +338,22 @@ async function sendLegacyServiceReportEmail({
   }
 }
 
+// A recipient's own name (a service contact, a billing contact) greets by its
+// first token, so the customer's customerFirstName must not outrank it: the
+// key is dropped (not set undefined, which still counts as present).
+function legacyRecipientData(data, recipient, pdfUrl) {
+  const next = { ...data, pdfUrl };
+  if (recipient.name) {
+    next.customerName = recipient.name;
+    delete next.customerFirstName;
+  }
+  return next;
+}
+
 function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspectionCreditNote = '' } = {}) {
   const serviceLine = serviceDisplayName(data);
   const serviceDate = formatDate(data?.serviceDate);
-  const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
+  const first = reportGreetingFirstToken(data) || 'there';
   const tech = data?.technicianName || 'your Waves technician';
   const propertyAddress = propertyAddressLine(data);
   const location = propertyAddress ? ` at ${escapeHtml(propertyAddress)}` : '';
@@ -825,7 +841,7 @@ async function sendServiceReportV1Email(recordId, {
 
   const legacyOutcomes = await Promise.allSettled(legacyRecipients.map((recipient) => {
     const email = buildServiceReportV1Email({
-      data: { ...data, customerName: recipient.name || data.customerName, pdfUrl: fullPdfUrl },
+      data: legacyRecipientData(data, recipient, fullPdfUrl),
       reportUrl: fullReportUrl,
       pdfAttached: !!pdf,
       inspectionCreditNote,
@@ -914,6 +930,7 @@ async function sendServiceReportV1Email(recordId, {
 
 module.exports = {
   buildServiceReportV1Email,
+  legacyRecipientData,
   serviceReportTemplatePayload,
   sendServiceReportV1Email,
   REENTRY_SEND_LOCK_CLASS,

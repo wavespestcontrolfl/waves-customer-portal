@@ -154,6 +154,73 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText(/setup fee waived\. Save your card at checkout; the 12-month total is charged when you confirm\./)).toBeInTheDocument();
   });
 
+  // GATE_PAF_PREPAY: the in-lane prepay is charged after the first visit.
+  it('prepayAfterFirstVisit: capture and saved-method notes say the year is charged after the first visit', () => {
+    const { rerender } = render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        prepayInLane
+        prepayAfterFirstVisit
+        prepayCardCapture
+      />,
+    );
+    expect(screen.getByText('Save your card at checkout; the 12-month total is charged after your first visit.')).toBeInTheDocument();
+    expect(screen.queryByText(/charged when you confirm/)).not.toBeInTheDocument();
+
+    rerender(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        prepayInLane
+        prepayAfterFirstVisit
+      />,
+    );
+    expect(screen.getByText('Your saved payment method on file is charged the 12-month total after your first visit.')).toBeInTheDocument();
+  });
+
+  it('prepayAfterFirstVisit: the breakdown box says one payment covers the year, charged after the first visit', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={{ amount: 99, waivedWithPrepay: true }}
+        annualPrepayEligible
+        prepayInLane
+        prepayAfterFirstVisit
+        prepayCardCapture
+        selectedFrequency={{ annual: 600, monthly: 50 }}
+      />,
+    );
+    expect(screen.getByText('One payment covers the year — charged after your first visit.')).toBeInTheDocument();
+    expect(screen.queryByText(/charged when you approve/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/charged when you confirm/)).not.toBeInTheDocument();
+  });
+
+  it('flag off keeps the charge-at-approve and charge-at-confirm copy byte-identical', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        prepayInLane
+        prepayCardCapture
+        selectedFrequency={{ annual: 600, monthly: 50 }}
+      />,
+    );
+    expect(screen.getByText('One payment covers the year — charged when you approve.')).toBeInTheDocument();
+    expect(screen.queryByText(/after your first visit/)).not.toBeInTheDocument();
+  });
+
   it('shows setup plus first visit invoice total for pay per application', () => {
     const onSelect = vi.fn();
 
