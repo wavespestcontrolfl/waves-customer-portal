@@ -2855,7 +2855,7 @@ present only when the gate is on, never persisted as a column and never in
 customer copy; the extra calls' tokens are added to the run's token columns. No
 migration. Off, or unset: byte-identical to today. Cost shape: a confident read
 draws no extra call; an unsure-or-serious read draws one Sol re-read; only a
-name dispute also draws one Fable call. Full detail: `docs/gates-and-env.md`'s "Lawn visit
+name dispute also draws one Fable call. Full detail: `CLAUDE.md`'s "Lawn visit
 assessment name referee" paragraph and `server/services/lawn-visit-referee.js`.
 
 ## 2026-09-29 — Cockroach "Work completed today" chips become an auto-filled field derived from the recorded products
@@ -3133,3 +3133,16 @@ from the record as the fill left it, so the report and the record agree; the
 form stays locked through both steps. A failed read fills nothing and the
 report is written anyway. The two Generate buttons (computer and phone) now
 share one handler. Off, Generate is exactly as before.
+
+## 2026-10-03 — The gate and env var catalogue moves from `CLAUDE.md` to `docs/gates-and-env.md`
+
+The "Environment Variables (Railway)" paragraphs (one per `GATE_*` flag or
+env var family) moved out of `CLAUDE.md` into `docs/gates-and-env.md`, so
+they are read on demand instead of loading into every session. `CLAUDE.md`
+keeps a pointer and a 24 KB budget enforced by `npm run check:domain-rules`.
+Earlier entries in this log that say "Full detail: `CLAUDE.md`'s ...
+paragraph" (for example the 2026-09-29 lawn visit assessment name referee
+entry) are left as written: read them as pointing at the paragraph of the
+same name in `docs/gates-and-env.md`. The catalogue covers documented
+variables only; a variable with no entry may still exist in
+`server/config/feature-gates.js`.
