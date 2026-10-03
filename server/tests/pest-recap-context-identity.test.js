@@ -10,16 +10,28 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const { buildRecapContext } = require('../services/pest-recap');
 
-function contextDb(visit) {
+function contextDb(visit, { linkedProject = null, projectReadFails = false, projectLinkColumns = [] } = {}) {
   return jest.fn((table) => {
-    if (!['scheduled_services', 'job_status_history', 'products_catalog', 'service_records', 'scheduled_service_addons'].includes(table)) {
+    if (!['scheduled_services', 'job_status_history', 'products_catalog', 'service_records', 'scheduled_service_addons', 'projects'].includes(table)) {
       throw new Error(`Unexpected recap context table: ${table}`);
     }
+    const firstRow = { scheduled_services: visit, projects: linkedProject }[table] || null;
     const q = {
-      where: jest.fn().mockReturnThis(),
+      // The projects read names its links in a grouped where: record each
+      // column it matches the visit on.
+      where: jest.fn((arg, value) => {
+        if (table === 'projects' && typeof arg === 'function') {
+          const group = { where: (col, v) => { projectLinkColumns.push([col, v]); return group; } };
+          group.orWhere = group.where;
+          arg(group);
+        } else if (table === 'projects') projectLinkColumns.push([arg, value]);
+        return q;
+      }),
       leftJoin: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue(table === 'scheduled_services' ? visit : null),
+      first: jest.fn(() => (table === 'projects' && projectReadFails
+        ? Promise.reject(new Error('project read failed'))
+        : Promise.resolve(firstRow))),
       select: jest.fn(() => (table === 'scheduled_services' ? q : Promise.resolve([]))),
     };
     return q;
@@ -84,6 +96,14 @@ test('a visit stamp with an inline unit does not inherit the primary unit', asyn
 test('the context says whether the visit is a free callback', async () => {
   expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_callback: true }))).service.isCallback).toBe(true);
   expect((await buildRecapContext(visit.id, contextDb(visit))).service.isCallback).toBe(false);
+});
+
+// The sheet's report flow is the only reader of the lane and the typed form,
+// so both need GATE_FAST_COMPLETE_REPORT; the cases below run with it on.
+const savedReportGate = process.env.GATE_FAST_COMPLETE_REPORT;
+beforeEach(() => { process.env.GATE_FAST_COMPLETE_REPORT = 'true'; });
+afterEach(() => {
+  if (savedReportGate === undefined) delete process.env.GATE_FAST_COMPLETE_REPORT; else process.env.GATE_FAST_COMPLETE_REPORT = savedReportGate;
 });
 
 describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => {
@@ -219,6 +239,64 @@ describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)',
     const result = await buildRecapContext(roach.id, contextDb(roach));
     expect(result).not.toHaveProperty('typedType');
     expect(result).not.toHaveProperty('traceOnReport');
+  });
+
+  // Codex replay of #5633: the schedule row a phone cached can predate the
+  // report-flow gate going off, or the office linking a project to the visit;
+  // this live answer is what the sheet's "is this still my visit" check reads.
+  describe('the live answer stops a sheet routed from a stale schedule row', () => {
+    const bedBug = { ...visit, service_type: 'Bed Bug Treatment' };
+    const BED_BUG = { category: 'specialty', serviceKey: 'bed_bug_treatment' };
+    const savedLane = process.env.GATE_LANE_VOICE_FILL;
+    beforeEach(() => {
+      process.env.GATE_TYPED_VOICE_FILL = 'true';
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+    });
+    afterEach(() => {
+      if (savedLane === undefined) delete process.env.GATE_LANE_VOICE_FILL; else process.env.GATE_LANE_VOICE_FILL = savedLane;
+    });
+
+    test.each([undefined, '', 'false', '1', 'TRUE'])('report-flow gate %p: no typed form and no lane', async (value) => {
+      if (value === undefined) delete process.env.GATE_FAST_COMPLETE_REPORT; else process.env.GATE_FAST_COMPLETE_REPORT = value;
+      resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+      const typed = await buildRecapContext(roach.id, contextDb(roach));
+      expect(typed).not.toHaveProperty('typedType');
+      expect(typed).not.toHaveProperty('traceOnReport');
+      resolveCompletionProfileForScheduledService.mockResolvedValue(BED_BUG);
+      expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
+    });
+
+    test('a project linked to the visit since the schedule loaded: no typed form and no lane', async () => {
+      const linked = { linkedProject: { id: 'project-example' } };
+      resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+      expect(await buildRecapContext(roach.id, contextDb(roach, linked))).not.toHaveProperty('typedType');
+      resolveCompletionProfileForScheduledService.mockResolvedValue(BED_BUG);
+      expect((await buildRecapContext(bedBug.id, contextDb(bedBug, linked))).lane).toBeNull();
+    });
+
+    test('the linkage read covers a project linked directly and one linked only through its service record', async () => {
+      const projectLinkColumns = [];
+      resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+      await buildRecapContext(roach.id, contextDb(roach, { projectLinkColumns }));
+      expect(projectLinkColumns).toEqual([
+        ['projects.scheduled_service_id', roach.id],
+        ['service_records.scheduled_service_id', roach.id],
+      ]);
+    });
+
+    test('a project linkage that cannot be read counts as linked', async () => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+      expect(await buildRecapContext(roach.id, contextDb(roach, { projectReadFails: true }))).not.toHaveProperty('typedType');
+      resolveCompletionProfileForScheduledService.mockResolvedValue(BED_BUG);
+      expect((await buildRecapContext(bedBug.id, contextDb(bedBug, { projectReadFails: true }))).lane).toBeNull();
+    });
+
+    test('a visit the sheet reads no record for asks nothing of the projects table', async () => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'pest_control', serviceKey: 'pest_general_quarterly' });
+      const db = contextDb(visit);
+      await buildRecapContext(visit.id, db);
+      expect(db).not.toHaveBeenCalledWith('projects');
+    });
   });
 
   test('the sheet books a suggested follow-up only while the gate is on', async () => {

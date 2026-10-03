@@ -23,7 +23,8 @@ const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
-const { routeSpellingVariants } = require('./route-spellings');
+const { routeSpellingVariants, terminalSuffixVariant } = require('./route-spellings');
+const { USPS_STREET_SUFFIXES, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -651,15 +652,15 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
     _provider: 'charlotte_pao',
     parcelId: search.parcelId,
     situsAddress: search.situsAddress,
-    postalCity: search.city,
-    zipCode: search.zipCode,
+    postalCity: parsed._situsCity,
+    zipCode: parsed._situsZip,
     ownership: ownership?.attributes || null,
     detailUrl: charlotteRecordUrl(search.parcelId),
   };
   record.addressLine1 = search.situsAddress || '';
-  record.city = search.city || '';
+  record.city = parsed._situsCity || '';
   record.state = 'FL';
-  record.zipCode = search.zipCode || '';
+  record.zipCode = parsed._situsZip || '';
   record.county = 'Charlotte';
   record._provider = 'charlotte_pao';
   record._aiProviders = ['charlotte_pao'];
@@ -1133,6 +1134,16 @@ function buildCadastralRecord(parcel, address) {
 // house-number match (an interpolated point can land on a neighbor, and a
 // wrong parcel at county weight is far worse than the address search).
 // Centroid/approximate results stay excluded.
+// The county retrieval budget, and the most a point query can get out of it
+// at the start of a lookup — shared with the replay harness so it waits
+// exactly as long as the live call would.
+function countyPropertyTimeoutMs() {
+  return positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+}
+function livePointQueryBudgetMs() {
+  return Math.min(parcelGisTimeoutMs(), countyPropertyTimeoutMs());
+}
+
 function parcelGisPrecision(geoContext) {
   if (!geoContext
       || geoContext.partialMatch
@@ -2222,6 +2233,100 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   return sawDisagreement;
 }
 
+// The guards applied to a point-in-parcel GIS hit before the parcel is allowed
+// to key the by-parcel county record. Pulled out of lookupPropertyFromAITrio
+// unchanged so the address-match replay harness
+// (scripts/property-lookup-replay.js) runs the SAME decisions the live lookup
+// does — a harness that copied them would stop measuring the code once a later
+// PR edits a guard. Pure apart from log lines and the optional diag.unitFolio
+// out-param; no network. Returns the surviving parcel (possibly a unit parcel
+// resolved out of an aggregate), the park marker when one survives, and
+// dropReason (null when the parcel was kept or there was none to judge).
+function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null }) {
+  let parcel = inputParcel;
+  let parkParcelSignal = null;
+  let dropReason = null;
+  if (parcel && isMobileHomeParkParcel(parcel)) {
+    // Land-lease mobile-home park master parcel: the polygon genuinely
+    // contains the rooftop, but every parcel-level dimension (and the
+    // commercial-band DOR 28 code) describes the PARK, not the home.
+    // Checked BEFORE the situs guards — a blank park situs fails the
+    // mismatch guard open, and a home at the park's own situs line would
+    // pass it outright; both must still drop the parcel. Only the marker
+    // survives, so the panel explains the missing dimensions instead of
+    // "not found on the roll". An interpolated point is a guess along the
+    // street — it proves the neighborhood, not the parcel (same rule as
+    // the interpolated positive-situs guard), so it drops the parcel
+    // WITHOUT keeping the marker: a false HIGH park flag on a non-park
+    // neighbor is worse than a plain miss.
+    if (gisPrecision !== 'interpolated') {
+      parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
+    }
+    logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts', {
+      markerKept: Boolean(parkParcelSignal),
+    });
+    parcel = null;
+    dropReason = 'mobile_home_park';
+  } else if (parcel && parcel.aggregated === true) {
+    const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
+    const unitMatch = verdict === 'drop' && condoUnitFolioEnabled()
+      ? aggregateUnitDesignatorMatch(parcel, searchAddress, address)
+      : null;
+    if (unitMatch) {
+      // A typed Apt/Unit in a stacked condo building: the unit's OWN roll
+      // row, when exactly one matches, replaces both the association sums
+      // and the address-search guess (unit-scope ruling #8). Anything
+      // short of a unique attested match degrades to the address search as
+      // before — never the building's figures for one unit — and the
+      // outcome rides diag so the route can flag an ambiguous match.
+      if (diag) diag.unitFolio = { status: unitMatch.status, candidates: unitMatch.candidates };
+      logger.info('[county-property] association aggregate unit designator match', {
+        status: unitMatch.status,
+        candidates: unitMatch.candidates ?? null,
+        associationUnits: parcel.residentialUnits ?? null,
+      });
+      parcel = unitMatch.status === 'resolved' ? unitParcelFromAggregateRow(parcel, unitMatch.row) : null;
+      if (!parcel) dropReason = `aggregate_unit_${unitMatch.status}`;
+    } else if (verdict === 'drop') {
+      logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
+      parcel = null;
+      dropReason = 'aggregate_situs_drop';
+    } else if (verdict === 'unit') {
+      // The typed number is ONE home in a stacked association (own street
+      // number, shared polygon): resolve its own unit row — by-parcel PAO
+      // detail, a residential cadastral record, no association land — and
+      // keep the association totals as context. A missing row (defensive)
+      // degrades to the address search rather than pricing the HOA.
+      const unitParcel = resolveAggregateUnitParcel(parcel, searchAddress, address);
+      logger.info('[county-property] association aggregate resolved to the typed house number\'s own unit parcel', {
+        resolved: Boolean(unitParcel),
+        associationUnits: parcel.residentialUnits ?? null,
+      });
+      parcel = unitParcel;
+      if (!parcel) dropReason = 'aggregate_unit_row_missing';
+    }
+  } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
+    // The rooftop point landed inside a parcel whose situs is a different
+    // building (multi-building complex master parcel). Drop the GIS match
+    // entirely — by-parcel detail, the cadastral record, and parcel meta
+    // would all describe the wrong building — and let the typed-address
+    // search below decide. No address values in the log (PII rule).
+    logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
+    parcel = null;
+    dropReason = 'situs_house_number_mismatch';
+  } else if (parcel && gisPrecision === 'interpolated'
+      && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
+    // An interpolated point is a guess along the street — keep the parcel
+    // only when its situs POSITIVELY confirms the typed house number. A
+    // blank/range situs (vacant developer lot, master parcel) proves
+    // nothing about which lot the guess landed on.
+    logger.warn('[county-property] interpolated-geocode GIS parcel lacks a confirming situs house number — degrading to address search');
+    parcel = null;
+    dropReason = 'interpolated_unconfirmed';
+  }
+  return { parcel, parkParcelSignal, dropReason };
+}
+
 // Optional `diag` out-param: when supplied, the trio records which AI legs
 // LOOK timed out — each leg consumes its own timeout internally and
 // resolves null, so a null that took (about) the leg's full configured
@@ -2233,7 +2338,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
   const searchAddress = canonicalLookupAddress(address, geoContext);
-  const countyTimeoutMs = positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const countyTimeoutMs = countyPropertyTimeoutMs();
   const t0 = Date.now();
   // Interactive estimating gives each county retrieval its own attempt.
   // A slow GIS request must not consume the address-search fallback window.
@@ -2280,78 +2385,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
           .catch(() => null));
       }
     }
-    if (parcel && isMobileHomeParkParcel(parcel)) {
-      // Land-lease mobile-home park master parcel: the polygon genuinely
-      // contains the rooftop, but every parcel-level dimension (and the
-      // commercial-band DOR 28 code) describes the PARK, not the home.
-      // Checked BEFORE the situs guards — a blank park situs fails the
-      // mismatch guard open, and a home at the park's own situs line would
-      // pass it outright; both must still drop the parcel. Only the marker
-      // survives, so the panel explains the missing dimensions instead of
-      // "not found on the roll". An interpolated point is a guess along the
-      // street — it proves the neighborhood, not the parcel (same rule as
-      // the interpolated positive-situs guard), so it drops the parcel
-      // WITHOUT keeping the marker: a false HIGH park flag on a non-park
-      // neighbor is worse than a plain miss.
-      if (gisPrecision !== 'interpolated') {
-        parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
-      }
-      logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts', {
-        markerKept: Boolean(parkParcelSignal),
-      });
-      parcel = null;
-    } else if (parcel && parcel.aggregated === true) {
-      const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
-      const unitMatch = verdict === 'drop' && condoUnitFolioEnabled()
-        ? aggregateUnitDesignatorMatch(parcel, searchAddress, address)
-        : null;
-      if (unitMatch) {
-        // A typed Apt/Unit in a stacked condo building: the unit's OWN roll
-        // row, when exactly one matches, replaces both the association sums
-        // and the address-search guess (unit-scope ruling #8). Anything
-        // short of a unique attested match degrades to the address search as
-        // before — never the building's figures for one unit — and the
-        // outcome rides diag so the route can flag an ambiguous match.
-        if (diag) diag.unitFolio = { status: unitMatch.status, candidates: unitMatch.candidates };
-        logger.info('[county-property] association aggregate unit designator match', {
-          status: unitMatch.status,
-          candidates: unitMatch.candidates ?? null,
-          associationUnits: parcel.residentialUnits ?? null,
-        });
-        parcel = unitMatch.status === 'resolved' ? unitParcelFromAggregateRow(parcel, unitMatch.row) : null;
-      } else if (verdict === 'drop') {
-        logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
-        parcel = null;
-      } else if (verdict === 'unit') {
-        // The typed number is ONE home in a stacked association (own street
-        // number, shared polygon): resolve its own unit row — by-parcel PAO
-        // detail, a residential cadastral record, no association land — and
-        // keep the association totals as context. A missing row (defensive)
-        // degrades to the address search rather than pricing the HOA.
-        const unitParcel = resolveAggregateUnitParcel(parcel, searchAddress, address);
-        logger.info('[county-property] association aggregate resolved to the typed house number\'s own unit parcel', {
-          resolved: Boolean(unitParcel),
-          associationUnits: parcel.residentialUnits ?? null,
-        });
-        parcel = unitParcel;
-      }
-    } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
-      // The rooftop point landed inside a parcel whose situs is a different
-      // building (multi-building complex master parcel). Drop the GIS match
-      // entirely — by-parcel detail, the cadastral record, and parcel meta
-      // would all describe the wrong building — and let the typed-address
-      // search below decide. No address values in the log (PII rule).
-      logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
-      parcel = null;
-    } else if (parcel && gisPrecision === 'interpolated'
-        && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
-      // An interpolated point is a guess along the street — keep the parcel
-      // only when its situs POSITIVELY confirms the typed house number. A
-      // blank/range situs (vacant developer lot, master parcel) proves
-      // nothing about which lot the guess landed on.
-      logger.warn('[county-property] interpolated-geocode GIS parcel lacks a confirming situs house number — degrading to address search');
-      parcel = null;
-    }
+    const guarded = applyGisParcelGuards(parcel, { searchAddress, address, gisPrecision, diag });
+    parcel = guarded.parcel;
+    parkParcelSignal = guarded.parkParcelSignal;
   }
 
   // County record: keyed by parcel ID when GIS matched, else (or on a
@@ -2732,11 +2768,24 @@ function routeSearchCandidates(street) {
   return tail ? [...routes.map((r) => `${r} ${tail}`), ...routes] : routes;
 }
 
+// Every spelling a parcel search should try for one street: the canonical
+// key and its other spellings (routes, "Avenue C", a name-only suffix
+// "W LK" → "W LAKE"), the pre-suffix-table spelling (directions + the
+// historical globals only, "100 EXAMPLE LAKE E"), then the street EXACTLY
+// as typed (cleaned, never canonicalized). The typed form guarantees a normalization change can
+// never make a previously searchable spelling unreachable — Charlotte
+// matches candidates by exact equality (pre-push audit, 10-02).
+function streetSpellingCandidates(address, street) {
+  const typed = stripCountyLocationSuffix(String(address || '').split(',')[0]
+    .toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim());
+  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), terminalSuffixVariant(street), normalizeCountyStreetBase(address), typed].filter(Boolean);
+}
+
 function manateeAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street, ...routeSearchCandidates(street)];
+  const candidates = streetSpellingCandidates(address, street);
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 
@@ -2751,7 +2800,7 @@ function countyAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
 
-  const candidates = [street, ...routeSearchCandidates(street)];
+  const candidates = streetSpellingCandidates(address, street);
   const withoutSuffix = removeStreetSuffix(street);
   if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
 
@@ -2835,33 +2884,66 @@ function normalizeCountyCityName(value) {
     .trim();
 }
 
-// New long-form suffixes canonicalize ONLY at the terminal suffix position
-// (optionally before a post-direction and/or a unit tail): these words are
-// common INSIDE street names ("Glen Oaks Dr", "Cove Point Rd"), and a global
-// replacement would corrupt the outbound county query key before any roll
-// row could match (codex P2). Terminal canonicalization is query-safe
-// because every candidate builder also emits a suffix-STRIPPED candidate,
-// so a roll that spells the suffix out is still found. The historical
-// globals below (AVENUE, STREET, …) keep their long-standing behavior.
-const TERMINAL_ONLY_SUFFIX_ALIASES = {
-  BEND: 'BND',
-  COVE: 'CV',
-  CROSSING: 'XING',
-  GLEN: 'GLN',
-  HIGHWAY: 'HWY',
-  // Google abbreviates Loop as "Lp" (live miss: "SKIPPING STONE LP" vs the
-  // Manatee roll's "SKIPPING STONE LOOP" read as street-not-found) — the
-  // roll spells it out, so LOOP is the canonical form here.
-  LP: 'LOOP',
-  PLAZA: 'PLZ',
-  POINT: 'PT',
-  POINTE: 'PT',
-  SQUARE: 'SQ',
-  TRACE: 'TRCE',
-};
+// Street-suffix canonicalization is driven by the USPS Publication 28
+// Appendix C1 table (usps-street-suffixes.js): every primary name and every
+// commonly used variant maps to the USPS standard abbreviation. The twelve
+// historical long forms (AVENUE, STREET, … in normalizeCountyStreetLine)
+// stay GLOBAL replacements, unchanged. Every other table word canonicalizes
+// ONLY at the terminal suffix position (optionally before a post-direction
+// and/or a unit tail): words like GLEN, PARK, LAKE, CREEK, VIEW, RIDGE,
+// HARBOR, ISLAND, MEADOWS, SPRINGS and VILLAGE are common INSIDE street names
+// ("Glen Oaks Dr", "Creek View Way"), and a global replacement would corrupt
+// the outbound county query key before any roll row could match (codex P2).
+// Terminal canonicalization is query-safe because every candidate builder
+// also emits a suffix-STRIPPED candidate, so a roll that spells the suffix
+// out is still found.
+//
+// The key is only ever compared with itself (typed side and roll side run
+// through the same normalizer), so it need not equal the roll spelling. It is
+// the USPS standard abbreviation, except where noted below. Live reads
+// 10-02 of the Manatee (SITUS_STREET_SUF, full roll), Sarasota (loct, full
+// roll), Charlotte and Hillsborough layers: the rolls write the USPS standard
+// for every common suffix (Manatee: ST AVE DR CT CIR TER PL WAY LN RD TRL
+// LOOP BLVD CV RUN GLN PKWY XING PLZ, WAY/RUN/PASS/PATH/WALK/LOOP are their
+// own standard), so those keys already match the roll. The words below are
+// spelled OUT on the rolls and essentially never abbreviated, so the key keeps
+// the spelled word (the first outbound candidate then matches the roll text):
+//   CREEK  (CRK:  Charlotte 16 + Hillsborough 16 spelled, 3 abbreviated)
+//   ISLAND (IS:   Charlotte 255 + Hillsborough 7 spelled, 13 abbreviated)
+//   KEY    (KY:   Hillsborough 84 spelled, 0 abbreviated)
+//   VISTA  (VIS:  Charlotte 21 + Hillsborough 22 spelled, 0 abbreviated)
+//   HOLLOW (HOLW: Sarasota 38 + Hillsborough 2 spelled, 4 abbreviated)
+// MEADOW(S): the USPS table lists MDW as the standard for MEADOW AND as a
+// variant of MEADOWS (standard MDWS); Sarasota writes MDW (321 rows), so the
+// whole family keys as MDW and "Meadows"/"Mdws"/"Mdw" read as one street type.
+// TRACE/BEND/CROSSING/COVE keep the USPS standard (TRCE/BND/XING/CV, as
+// before): Manatee writes the standard, Sarasota spells them out — the key
+// is the same on both sides either way.
+// TRAILER's standard (TRLR) is also a secondary-unit designator that
+// stripUnitDesignators peels off the end of a street line, so rewriting a
+// terminal "Trailer" to TRLR would erase the word. It is left exactly as typed.
+const STREET_SUFFIX_NEVER_CANONICALIZED = new Set(['TRLR']);
+// Not in the USPS table: Google abbreviates Loop as "Lp" (live miss: "SKIPPING
+// STONE LP" vs the roll's "… LOOP") and writes Pointe for Point.
+const STREET_SUFFIX_SUPPLEMENTAL_ALIASES = { LP: 'LOOP', POINTE: 'PT' };
+// Long forms normalizeCountyStreetLine already replaces GLOBALLY.
+const GLOBAL_LONG_SUFFIXES = new Set([
+  'AVENUE', 'BOULEVARD', 'CIRCLE', 'COURT', 'DRIVE', 'LANE', 'PARKWAY', 'PLACE', 'ROAD', 'STREET', 'TERRACE', 'TRAIL',
+]);
+function canonicalStreetSuffix(standard) {
+  return STREET_SUFFIX_CANON_OVERRIDES[standard] || standard;
+}
+const TERMINAL_ONLY_SUFFIX_ALIASES = { ...STREET_SUFFIX_SUPPLEMENTAL_ALIASES };
+const CANONICAL_STREET_SUFFIX_SET = new Set(Object.values(STREET_SUFFIX_SUPPLEMENTAL_ALIASES));
+for (const [variant, standard] of Object.entries(USPS_STREET_SUFFIXES)) {
+  if (STREET_SUFFIX_NEVER_CANONICALIZED.has(standard)) continue;
+  const canonical = canonicalStreetSuffix(standard);
+  CANONICAL_STREET_SUFFIX_SET.add(canonical);
+  if (variant !== canonical && !GLOBAL_LONG_SUFFIXES.has(variant)) TERMINAL_ONLY_SUFFIX_ALIASES[variant] = canonical;
+}
 const TERMINAL_ONLY_SUFFIX_RE = new RegExp(
-  `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).join('|')})`
-  + '(?=(?:\\s+[NSEW])?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
+  `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).sort((x, y) => y.length - x.length || (x < y ? -1 : 1)).join('|')})`
+  + '(?=(?:\\s+(?:[NS][EW]|[NSEW]))?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
 );
 
 // Numbered-route spellings → one canonical county-search key. The typed
@@ -2912,7 +2994,12 @@ function canonicalizeCountyRouteStreet(street) {
   return `${houseNumber} ${preDirection}${type} ${routeNumber}${rest}`;
 }
 
-function normalizeCountyStreetLine(address) {
+// Directions and the long-standing global suffix rewrites, WITHOUT the
+// terminal suffix-table step — the spelling this normalizer produced before
+// the USPS table ("100 EXAMPLE LAKE E"). Parcel search sends it alongside
+// the canonical key so a roll matched by exact equality (Charlotte) never
+// loses a spelling it used to receive.
+function normalizeCountyStreetBase(address) {
   const firstLine = String(address || '').split(',')[0] || '';
   const cleaned = firstLine
     .toUpperCase()
@@ -2940,6 +3027,12 @@ function normalizeCountyStreetLine(address) {
     .replace(/\bSTREET\b/g, 'ST')
     .replace(/\bTERRACE\b/g, 'TER')
     .replace(/\bTRAIL\b/g, 'TRL')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeCountyStreetLine(address) {
+  return normalizeCountyStreetBase(address)
     .replace(TERMINAL_ONLY_SUFFIX_RE, (token) => TERMINAL_ONLY_SUFFIX_ALIASES[token])
     .replace(/\s+/g, ' ')
     .trim();
@@ -2987,22 +3080,44 @@ function extractTrailingCountyCity(normalizedText) {
 // extractPostSuffixDirection / AUDIT_SUFFIX_ALT so they can never drift apart
 // again — the original inline copies omitted LOOP entirely, and every
 // Loop-suffixed street (all of Canoe Creek) read as not-on-the-roll.
-const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
-// "…ends with a street suffix" — canonical abbreviations plus the
-// spelled-out forms, because extractTrailingCountyCity runs BEFORE the
-// suffix replacements in normalizeCountyStreetLine.
+// Derived from the USPS table (plus the supplemental aliases), longest first
+// so no alternation can stop on a shorter prefix of another suffix.
+const COUNTY_STREET_SUFFIXES = [...CANONICAL_STREET_SUFFIX_SET]
+  .sort((x, y) => y.length - x.length || (x < y ? -1 : 1))
+  .join('|');
+// "…ends with a street suffix", for the directional-city ambiguity only
+// ("45th St West Bradenton": is WEST the street's or the city's?). This stays
+// on the HISTORICAL suffix set on purpose: with every USPS word here, a name
+// word that is also a suffix ("Harbor Island West Bradenton") would hand the
+// city's WEST to the street and the real "100 HARBOR ISLAND" would never be
+// searched (codex #5661 r3). Runs BEFORE the suffix replacements, so the
+// spelled-out forms are listed.
 const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
-  `\\b(?:${COUNTY_STREET_SUFFIXES}|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$`,
+  '\\b(?:AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING'
+  + '|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$',
 );
-const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
-const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
-const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
-const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');
+// The two "digit-led token after a suffix is a unit" heuristics stay on the
+// historical suffix set on purpose: a number after one of the newer USPS words
+// ("… LAKE 5", "… PARK 3") is as likely part of a street name as a unit, and
+// no live miss needs it.
+const UNIT_HEURISTIC_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
+const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${UNIT_HEURISTIC_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
+// One direction vocabulary for every suffix helper: the terminal canonicalizer
+// accepts diagonals ("EXAMPLE LK NW"), so stripping/extraction must too.
+const POST_DIRECTION_ALT = '(?:NE|NW|SE|SW|[NSEW])';
+const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+${POST_DIRECTION_ALT})?$`, 'i');
+const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+${POST_DIRECTION_ALT})?$`, 'i');
+const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+(${POST_DIRECTION_ALT})\\b`, 'i');
 
+// A line that is only a number and/or a direction once the suffix is gone
+// ("100 N LK" — a street NAMED Lake) keeps its suffix: stripping it would leave
+// a query as wide as "N". The wider USPS suffix set makes that shape reachable.
+const BARE_DIRECTION_ONLY_RE = /^(?:\d+[A-Z]?\s*)?(?:[NSEW]{1,2})?$/;
 function removeStreetSuffix(street) {
-  return String(street || '')
+  const stripped = String(street || '')
     .replace(REMOVE_SUFFIX_RE, '')
     .trim();
+  return BARE_DIRECTION_ONLY_RE.test(stripped) ? String(street || '').trim() : stripped;
 }
 
 function extractStreetSuffix(street) {
@@ -3039,7 +3154,27 @@ function escapeAuditRegex(value) {
 // removeStreetSuffix; designators are the USPS secondary-unit set we see in
 // typed/spoken addresses.
 const AUDIT_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]+\s*$/i;
-function stripUnitDesignators(street) {
+// A bare unit token with NO designator word: the Sarasota roll writes condo
+// units as "<number> <STREET> DR 10A" and a Manatee row can end "CT E 2".
+// Only a digit-led token that FOLLOWS a street suffix (optionally one
+// post-direction) is a unit — "5TH ST" has its number BEFORE the suffix, and
+// a numbered route ("US 41", "SR 70 E") has no suffix in front of its number.
+// Suffixes that routinely precede a ROUTE number ("OLD TAMPA HWY 41",
+// "SOMETHING RD 70") are left out so the route number is never peeled.
+const BARE_UNIT_SUFFIXES = UNIT_HEURISTIC_SUFFIXES.split('|')
+  .filter((suffix) => !['HWY', 'RD', 'TRL', 'PKWY'].includes(suffix))
+  .join('|');
+// A street NAME word must precede the suffix: "100 AVENUE 2" (a street
+// named Avenue 2) keys "100 AVE 2" — peeling the 2 would make it match
+// "100 AVENUE 1". Neither the house number nor a lone direction ("100 N
+// AVE 2") counts as the name word; an ordinal ("5TH ST 10A") does.
+const AUDIT_BARE_UNIT_RE = new RegExp(
+  `(\\b(?!(?:N|S|E|W|NE|NW|SE|SW)\\s)(?:[A-Z][A-Z0-9'-]*|\\d+(?:ST|ND|RD|TH))\\s+(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
+);
+// `bareUnit` is opt-in: the condo-unit folio matchers (typedDwellingUnit,
+// aggregateUnitDesignatorMatch) read a bare trailing number off the line
+// stripUnitDesignators returns, so their default must keep it.
+function stripUnitDesignators(street, { bareUnit = false } = {}) {
   let s = String(street || '').trim();
   // Peel repeatedly — "STE 200 BLDG C" carries two designators.
   for (let i = 0; i < 3; i += 1) {
@@ -3051,6 +3186,7 @@ function stripUnitDesignators(street) {
   // bare-# pre-strip ate the value out of "Apt #4") is not a street token
   // either.
   s = s.replace(/\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)$/i, '').trim();
+  if (bareUnit) s = s.replace(AUDIT_BARE_UNIT_RE, '$1').trim();
   return s;
 }
 
@@ -3140,12 +3276,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // the audit validate the wrong number. The house number is therefore
     // always taken from the ORIGINALLY TYPED address when one is supplied.
     if (options.typedAddress) {
-      const typedStreet = normalizeCountyStreetLine(String(options.typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' '));
-      const typedM = /^(\d+)\s+/.exec(typedStreet);
+      // Read from the RAW typed text: a hyphenated lead number ("14-384 …",
+      // a park-lot style Google reads as 14384) is ambiguous once
+      // normalization turns the hyphen into a space, so it never overrides —
+      // the canonical number stands. A plain leading number still wins.
+      const typedM = /^\s*(\d+)\b(?!\s*-\s*\d)/.exec(String(options.typedAddress));
       if (typedM) houseNumber = parseInt(typedM[1], 10);
     }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
-    const streetLabel = stripUnitDesignators(m[2].trim());
+    const streetLabel = stripUnitDesignators(m[2].trim(), { bareUnit: true });
     if (streetLabel.length < 3) return null;
     // Query WITHOUT the suffix for recall (counties abbreviate differently),
     // then extract numbers with the full street tokens for precision.
@@ -3183,7 +3322,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // different streets. A roll row that omits the direction still matches
     // (formatting variance), a DIFFERENT direction never does.
     const typedDirection = extractPostSuffixDirection(streetLabel);
-    const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : '[NSEW]';
+    const relaxedDirectionAlt = typedDirection ? escapeAuditRegex(typedDirection) : POST_DIRECTION_ALT;
     // Route rows put the direction straight after the number with no suffix
     // between ("9155 SR 70 E" typed as "9155 FL-70": formatting variance,
     // not a different street), may carry a pre-direction ("N US 41") or a
@@ -3218,7 +3357,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
           // Roll rows can carry their own secondary designator ('123 MAIN ST
           // APT 4') — strip it like the typed side, or the end-pinned
           // patterns reject a street that IS on the roll.
-          const norm = stripUnitDesignators(normalizeCountyStreetLine(piece));
+          const norm = stripUnitDesignators(normalizeCountyStreetLine(piece), { bareUnit: true });
           if (!norm) continue;
           for (const hit of norm.matchAll(pattern)) {
             const n = parseInt(hit[1], 10);
@@ -4107,8 +4246,12 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
   const ownershipAttrs = ownership?.attributes || {};
   const situsAddress = search.situsAddress || extractCharlottePairedValue(detailHtml, 'Property Address');
   const cityZip = extractCharlottePairedValue(detailHtml, 'Property City & Zip');
-  const city = search.city || extractCharlotteCity(cityZip) || cleanHtmlText(ownershipAttrs.city);
-  const zipCode = search.zipCode || extractAddressZip(cityZip) || cleanHtmlText(ownershipAttrs.zipcode);
+  // search.city/zipCode now come only from the address-search row (situs);
+  // the GIS parcel no longer publishes the ownership layer's city/zipcode,
+  // which is the owner's MAILING address (live 10-02) — so it is never a
+  // fallback here either. The record page's "Property City & Zip" is next.
+  const city = search.city || extractCharlotteCity(cityZip) || null;
+  const zipCode = search.zipCode || extractAddressZip(cityZip) || null;
   const currentUse = extractCharlottePairedValue(detailHtml, 'Current Use') || ownershipAttrs.description || ownershipAttrs.landuse;
   const source = charlotteRecordUrl(search.parcelId);
   const propertyType = normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`);
@@ -4133,6 +4276,11 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     confidence: 'high',
     county: 'Charlotte',
     formattedAddress: [situsAddress, city, 'FL', zipCode].filter(Boolean).join(', ') || address,
+    // The verified situs locality (address-search row, else the record page's
+    // "Property City & Zip") for the shaped record — the GIS parcel path has
+    // no city/ZIP of its own to pass in.
+    _situsCity: city,
+    _situsZip: zipCode,
     ...charlottePoolFeatures(detailHtml),
     ...(sqftDetailed.pricingAdjustment
       ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
@@ -5569,6 +5717,8 @@ module.exports = {
   // areas) must treat an at-cap lot as unusable for geometry math.
   COUNTY_LOT_SQFT_MAX: LOT_SQFT_MAX,
   auditAddressHouseNumber,
+  // Exported for the read-only replay harness (scripts/property-lookup-replay.js).
+  normalizeCountyStreetLine,
   hasCountyEvidence,
   hasCountyPricingCore,
   hasUnconfirmedCountyEvidence,
@@ -5627,9 +5777,12 @@ module.exports = {
     parcelGisPrecision,
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
+    applyGisParcelGuards,
+    livePointQueryBudgetMs,
     addressHasSubpremise,
     FL_FLOOR_RE,
     normalizeCountyStreetLine,
+    stripUnitDesignators,
     resolveAggregateUnitParcel,
     aggregateUnitDesignatorMatch,
     typedDwellingUnit,

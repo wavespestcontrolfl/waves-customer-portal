@@ -680,6 +680,8 @@ const INFO_FLAG_RULES = Object.freeze([
   ['list_from_cadence_mode', (l) => l.listRateSource === 'cadence_mode'],
   ['list_cadence_mismatch', (l) => !!l.listCadenceMismatch],
   ['anniversary_predates_portal', (l) => !!l.anniversaryConflict],
+  // imported account, only program, no loaded history: dated by membership
+  ['anniversary_from_membership', (l) => l.anniversarySource === 'member_since_import'],
   ['stamped_zero_free', (l) => !!l.stampedZeroFree],
   ['carried_forward', (l) => !!l.carriedFrom],
   // a legacy NULL billing_mode resolved through the canonical lane rule
@@ -802,10 +804,18 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
 // seen later was added since, whatever the admin booked it without, and
 // starts at its first visit.
 const IMPORT_PRESENCE_DAYS = 90;
+// An account whose membership predates its portal record by this much came
+// in by import (the April 2026 load created 657 accounts with member_since
+// back to 2024-05); an account opened in the portal has member_since on or
+// about its created_at.
+const IMPORTED_ACCOUNT_LEAD_DAYS = 30;
 function presenceWindowFor(visitsPerYear) {
   return visitsPerYear > 0 ? Math.round(365 / visitsPerYear) + 30 : IMPORT_PRESENCE_DAYS;
 }
-function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS }) {
+function isImportedAccount(member, accountCreatedDay) {
+  return !!(member && accountCreatedDay) && (ymdToUtcMs(accountCreatedDay) - ymdToUtcMs(member)) / DAY_MS >= IMPORTED_ACCOUNT_LEAD_DAYS;
+}
+function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false, accountHasActivity = false }) {
   const firstVisit = dateColumn(firstCompletedVisit);
   const accepted = etDay(acceptedAt);
   const member = dateColumn(memberSince);
@@ -821,7 +831,16 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, acco
   // No accepted estimate and no completed visit yet: the line's age is
   // unknown — never the account's membership (an admin-booked program can
   // be days old) — and the row is held (no_anniversary) until its first
-  // application dates it.
+  // application dates it. One exception (owner ruling 2026-10-02, Fix B):
+  // an IMPORTED account (membership ≥ 30 days older than its portal
+  // record) whose ONLY active program this is came in with that program —
+  // its history simply was not loaded — so member_since dates the line.
+  // A second program on the account (counted on the underlying plan lines
+  // and service keys, not the consolidated family — tree/shrub + palm is
+  // two programs in one entry), or any portal activity on the account
+  // (loadAccountActivity: an accepted estimate, a completed visit of any
+  // kind, a recurring add-on program), takes the rules above.
+  else if (member && !accountFirst && onlyActiveFamily && !accountHasActivity && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -1260,6 +1279,32 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
 // included follow-up. One rule for the book and the history loaders.
 const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.recurring_parent_id IS NOT NULL))
   AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
+// The rows that DATE a line (its anniversary) — an allow-list, not an
+// exclusion list (Codex rounds 1–3 on #5662 each found another edge of
+// the latter): a purchased-plan row (PLAN_ROW_SQL), OR a standalone
+// booking of a recurring program that was saved without the recurring
+// flag (prod read 2026-10-02: 14 completed "Quarterly Pest Control
+// Service" / "Bi-Monthly Tree & Shrub" rows carry is_recurring = false
+// with no parent — 7 imported pre-April history, 7 admin-booked since —
+// so the October batch held 12 of its 25 no_anniversary lines although
+// the work was done). A standalone row counts only when nothing marks it
+// a one-time service AND something marks it recurring: not a parented
+// booster, callback or included follow-up; its catalog service is billed
+// `recurring`, or — no catalog row at all (imported history) — its name
+// carries a cadence (Quarterly / Bi-Monthly / Semiannual / Monthly /
+// Annual / Every N — spelled out: a `?` in a knex raw string is a binding);
+// and its name is not an inspection / assessment / WDO (a same-family one-time — a WDO
+// inspection sits in the termite family — must not date a termite
+// program or set the account's import baseline). Revenue and $/hr keep
+// PLAN_ROW_SQL (loadCompletedVisitRows).
+const DATING_ROW_SQL = `(${PLAN_ROW_SQL} OR (
+    s.is_recurring IS FALSE AND s.recurring_parent_id IS NULL
+    AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false
+    AND (sv.billing_type = 'recurring'
+      OR (sv.id IS NULL AND COALESCE(s.service_type, '') ~* '(quarterly|bi-monthly|bimonthly|semi-annual|semiannual|monthly|annual|every [0-9]|recurring)'))
+    AND COALESCE(s.service_type, '') NOT ILIKE '%inspection%'
+    AND COALESCE(s.service_type, '') NOT ILIKE '%assessment%'
+    AND COALESCE(s.service_type, '') NOT ILIKE '%wdo%'))`;
 // Live upcoming rows = the same statuses the plan-count reconciler counts
 // (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a
 // 'rescheduled' placeholder is not an application on the books.
@@ -1327,10 +1372,12 @@ async function loadCustomers(dbh, customerIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-// Completed non-callback recurring visit dates per (customer, line), oldest
-// first (first_visit = the oldest; completed_dates = all of them, so a line
+// Completed non-callback visit dates per (customer, line), oldest first
+// (first_visit = the oldest; completed_dates = all of them, so a line
 // restarted on a new estimate after a cancellation can take the first visit
-// of the CURRENT series, not of the family's whole history).
+// of the CURRENT series, not of the family's whole history). DATING_ROW_SQL,
+// not PLAN_ROW_SQL: an application booked without the recurring flag still
+// dates the line.
 async function loadFirstCompletedVisits(dbh, customerIds) {
   if (!customerIds.length) return new Map();
   const { rows } = await dbh.raw(`
@@ -1340,7 +1387,8 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND ${PLAN_ROW_SQL}
+      AND ${DATING_ROW_SQL}
+      AND ${LINE_SQL} <> 'other'
     GROUP BY 1, 2
   `, [customerIds]);
   const map = new Map();
@@ -1392,6 +1440,21 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 // Historical rows survive their retirement inside the lookback: composite
 // in the completed-visit evidence, withheld in the current-rate decomposition.
 const RETIRED_COMBINED_CATALOG_KEYS = Object.freeze(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']);
+// A catalog key that is TWO programs in one row, derived rather than
+// listed: the retired combined identities, any key naming two distinct
+// families (pest_rodent_quarterly — combined_service_cutover 20260612, its
+// retirement left scheduled rows in place), or a "combo". The import
+// exception's only-program test rejects these.
+const KEY_FAMILY_TOKENS = Object.freeze([
+  ['pest', /pest/], ['rodent', /rodent/], ['termite', /termite|wdo/], ['mosquito', /mosquito/],
+  ['lawn', /lawn|turf/], ['tree_shrub', /tree|shrub/], ['palm', /palm/],
+]);
+function isCompositeCatalogKey(key) {
+  const k = String(key || '').toLowerCase();
+  if (!k) return false;
+  if (RETIRED_COMBINED_CATALOG_KEYS.includes(k) || /combo|combined/.test(k)) return true;
+  return KEY_FAMILY_TOKENS.filter(([, re]) => re.test(k)).length >= 2;
+}
 const COMBINED_CATALOG_SQL = `COALESCE(s.service_key_snapshot, sv.service_key) IN (${RETIRED_COMBINED_CATALOG_KEYS.map((k) => `'${k}'`).join(', ')})`;
 
 // A partial refund's refund_amount carries the prorated card surcharge
@@ -1589,6 +1652,92 @@ async function loadEstimates(dbh, estimateIds) {
     .where({ status: 'accepted' })
     .select('id', 'customer_id', 'accepted_at', 'waveguard_tier', 'estimate_data');
   return new Map(rows.map((r) => [r.id, r]));
+}
+
+// Portal activity per account that says it did not simply arrive by import
+// with one running program — the one gate the import exception in
+// resolveAnniversary reads (Codex #5668 r1–r7 found a new signal each round
+// when these were judged piecemeal). Account-wide signals:
+//   • an accepted estimate, by status OR timestamp (a legacy row can be
+//     status accepted with accepted_at NULL), linked or not;
+//   • a completed scheduled_services row of ANY kind (an inspection, a
+//     specialty visit — the per-line dating map filters these; the account
+//     gate must not) or a completed service_records row (imported / legacy
+//     history often lives ONLY there: estimate-conversion-guard.js);
+//   • a live upcoming row carrying a recurring add-on program
+//     (ADDON_LINE_IS_PLAN_SQL, minus the keys admin-schedule.js
+//     ONE_TIME_ADDON_SERVICE_KEYS treats as one-time whatever their
+//     pattern column says — waveguard_membership is the signup fee, not
+//     a program): a second program the plan-line count cannot see.
+// Per-PROGRAM signal: a non-live RECURRING-PLAN row (DATING_ROW_SQL — a
+// cancelled one-time job in the family is not a program; cancelled — a
+// program swept before its first completion keeps status cancelled,
+// cancellation-processor.js — skipped, or simply past) of a program OTHER
+// than the line's own, judged on normalized identities (palm ≠ tree/shrub;
+// a composite key is each family it names; an add-on's frozen category
+// snapshot outranks the mutable catalog row). The same
+// family's cancelled rows are that one program being rescheduled (prod
+// read 2026-10-03: every one of the 10 no-history import accounts carries
+// cancelled 2026 pest series and nothing else), not a second program.
+const ONE_TIME_ADDON_SERVICE_KEYS = Object.freeze(['waveguard_membership']); // mirror of admin-schedule.js
+async function loadAccountActivity(dbh, customerIds, { today }) {
+  if (!customerIds.length) return new Map();
+  const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+  const oneTimeAddonKeys = ONE_TIME_ADDON_SERVICE_KEYS.map((k) => `'${k}'`).join(', ');
+  const { rows } = await dbh.raw(`
+    SELECT c.id AS customer_id,
+      (EXISTS (SELECT 1 FROM estimates e WHERE e.customer_id = c.id AND (e.accepted_at IS NOT NULL OR e.status = 'accepted'))
+       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
+       OR EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed')
+       OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
+                  LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
+                  WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL}
+                    AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys}))
+      ) AS account_activity,
+      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
+        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${DATING_ROW_SQL}) AS non_live_lines,
+      (SELECT COALESCE(array_agg(DISTINCT COALESCE(scheduled_service_addons.service_category_snapshot, asv.category, 'other') || '|' || COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '')), '{}')
+        FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
+        LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${ADDON_LINE_IS_PLAN_SQL}
+          AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys})) AS non_live_addons,
+      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
+        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+        WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${DATING_ROW_SQL} AND NOT ${PLAN_ROW_SQL}) AS live_standalone_lines
+    FROM customers c WHERE c.id = ANY(?::uuid[])
+  `, [today, today, today, today, customerIds]);
+  const ids = new Set(customerIds.map(String));
+  const out = new Map();
+  for (const r of rows) {
+    if (!ids.has(String(r.customer_id))) continue;
+    // a recurring add-on on a non-live visit (a cancelled pest visit that carried a palm add-on) is program history too
+    // a LIVE upcoming standalone recurring row (recurring evidence, not a plan row — so not in the
+    // book and not in the history) is a program too
+    const lines = [...(Array.isArray(r.non_live_lines) ? r.non_live_lines : []), ...(Array.isArray(r.non_live_addons) ? r.non_live_addons : []), ...(Array.isArray(r.live_standalone_lines) ? r.live_standalone_lines : [])].map(String);
+    out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLivePrograms: [...new Set(lines.flatMap(programsForNonLiveLine))] });
+  }
+  return out;
+}
+// A non-live row's normalized program identities, from its family and
+// catalog key: palm is its own program inside the tree_shrub family, a
+// composite key is every family it names, anything else is its family.
+function programsForNonLiveLine(encoded) {
+  const [family, key = ''] = String(encoded).split('|');
+  if (!family) return [];
+  if (isCompositeCatalogKey(key)) {
+    const named = KEY_FAMILY_TOKENS.filter(([, re]) => re.test(key.toLowerCase())).map(([name]) => name);
+    return named.length ? named : [family];
+  }
+  if (family === 'tree_shrub') return [isPalmServiceKey(key) ? 'palm' : 'tree_shrub'];
+  return [family];
+}
+// The gate for ONE line: account-wide activity, or a non-live row of
+// another PROGRAM (a cancelled palm series is not a tree/shrub reschedule).
+function accountActiveFor(activity, customerId, lineProgram) {
+  const a = activity && activity.get ? activity.get(String(customerId)) : null;
+  if (!a) return false;
+  return a.accountActivity || a.nonLivePrograms.some((p) => p !== lineProgram);
 }
 
 async function loadLiveTerms(dbh, customerIds, { today }) {
@@ -1972,6 +2121,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
+  const activeAccounts = await loadAccountActivity(dbh, customerIds, { today });
   const visitsByLine = new Map();
   for (const row of completedRows) {
     const key = `${row.customer_id}|${row.line}`;
@@ -1981,7 +2131,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   // Conversation allowances per line, from the whole book's completed
   // visits — stored on the batch row so every snapshot is reproducible.
   const allowances = computeLineAllowances(completedRows);
-  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances };
+  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, activeAccounts };
 }
 
 // Stage 2 — one book entry per plan line: current rate per lane, duration /
@@ -2146,19 +2296,37 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
   // next anniversary (or a catch-up build), as the screen says. Consecutive
   // windows share their boundary day, so the occurrence the owner skipped is
   // not listed again by the next window either.
-  const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+  const latestFlags = latest ? (parseJson(latest.flags) || []) : [];
+  const ownerSkipped = latestFlags.includes('admin_skipped');
   if (!entry.anniversary.date) return ownerSkipped ? null : { reviewDate: null, carriedFrom: null };
   const inWindow = anniversaryInWindow(entry.anniversary.date, from, to);
   if (inWindow) return ownerSkipped && dateColumn(latest.review_date) === inWindow ? null : { reviewDate: inWindow, carriedFrom: null };
   if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) return null;
+  // An earlier batch listed the line undated (no_anniversary, review_date
+  // NULL). Now that it has a date, that carry has nothing to anchor: the
+  // line is reviewed at its anniversary's next occurrence, never at the old
+  // batch's computed_at (the apply would trust that as the review date).
+  if (latestFlags.includes('no_anniversary') && !dateColumn(latest.review_date)) return null;
   const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
   if (!anchor || anchor < carryFloor || anchor > to) return null;
   return { reviewDate: anchor, carriedFrom: latest.batch_key };
 }
 
-function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, activeAccounts = new Map() }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
+  // active PROGRAMS per account, counted as normalized program identities:
+  // one plan line (account_lines), whose linePrograms() is exactly one (a
+  // keyless tree_shrub line is of unknown composition = two; tree/shrub +
+  // palm = two), with no composite catalog identity (two programs in one
+  // row); several keys naming the same program are still one program
+  const onlyProgramFor = (entry) => {
+    if (Number(entry.planLine && entry.planLine.account_lines) !== 1) return false;
+    const keys = (entry.serviceKeys || []).map((k) => String(k || '').toLowerCase());
+    if (keys.some(isCompositeCatalogKey)) return false;
+    // several catalog keys for ONE program (a frozen legacy key beside the current one) still count as one
+    return linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys }).length === 1;
+  };
   const selected = [];
   for (const entry of book) {
     entry.anniversary = resolveAnniversary({
@@ -2168,6 +2336,9 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       memberSince: dateColumn(entry.customer.member_since) || etDay(entry.customer.created_at),
       accountFirstVisit: accountFirst.get(entry.customer.id) || null,
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
+      accountCreatedAt: entry.customer.created_at,
+      onlyActiveFamily: onlyProgramFor(entry),
+      accountHasActivity: !!entry.acceptedAt || accountActiveFor(activeAccounts, entry.customer.id, linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys })[0] || entry.familyKey),
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -2353,7 +2524,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, activeAccounts: inputs.activeAccounts || new Map() });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
@@ -3057,7 +3228,7 @@ module.exports = {
   // anniversary / coverage helpers, shared with the apply lane
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
-  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL },
+  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL, DATING_ROW_SQL },
   lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
@@ -3102,7 +3273,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, LIVE_STATUS_SQL,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, accountActiveFor, programsForNonLiveLine, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,

@@ -98,6 +98,7 @@ const BELL_CATEGORY_LABELS = {
   email_rescue: "Email rescued from spam",
   email_rescue_review: "Spam rescue needs review",
   llm_cost: "AI spend spikes",
+  review_low_rating: "New Google reviews of 3 stars or fewer",
 };
 
 const bellCategoryLabel = (cat) =>

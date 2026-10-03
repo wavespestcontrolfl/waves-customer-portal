@@ -44,6 +44,9 @@ const {
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { isSmsReaction } = require('./sms-intent');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 const { parsePackSize } = require('./product-costing');
 const { getAreaRainfall } = require('./lawn-water-area');
@@ -67,6 +70,33 @@ function jobCardEnabled() {
 // time, exact 'true'.
 function paragraphLlmEnabled() {
   return process.env.GATE_JOB_CARD_LLM === 'true';
+}
+
+// What the customer told us about THIS visit, on the card (owner "ok go"
+// 2026-10-03): the booked reason today; texts and pre-visit photos join it.
+// Display only — never the paragraph or its grounding. Read at call time,
+// exact 'true'; off = the card's payload is unchanged.
+function customerContextEnabled() {
+  return process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT === 'true';
+}
+
+// How the booked reason was taken down. A call is an AI summary, never the
+// customer's exact words, so the card never quotes it.
+const CUSTOMER_REQUEST_SOURCES = new Set(['picker', 'text', 'call', 'office']);
+function customerRequestNote(svc) {
+  let pests = svc.customer_request_pests;
+  if (typeof pests === 'string') pests = parseJson(pests);
+  const pestWords = (Array.isArray(pests) ? pests : [])
+    .map((p) => clean(String(p || '').replace(/[_-]+/g, ' '), 40))
+    .filter(Boolean)
+    .slice(0, 8);
+  const text = clean(svc.customer_request, 1000);
+  if (!text && !pestWords.length) return null;
+  return {
+    text: text || null,
+    source: CUSTOMER_REQUEST_SOURCES.has(svc.customer_request_source) ? svc.customer_request_source : null,
+    pests: pestWords,
+  };
 }
 
 // ── Facts ───────────────────────────────────────────────────────────────────
@@ -291,6 +321,89 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
+// The texts window (owner ruling 2026-10-03: "last 14 days"): the 14 ET
+// days up to and including the visit's day, never past now. Deliberately
+// independent of last-visit and arrival records — "since the last visit"
+// had a corner for every lifecycle state (Codex #5685 r2–r8).
+const TEXTS_WINDOW_DAYS = 14;
+function textsWindow(scheduledDate, now = new Date()) {
+  const day = etCalendarDayOf(scheduledDate) || etDateString(now);
+  const dayStart = parseETDateTime(`${day}T00:00`);
+  const dayEnd = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), 1))}T00:00`);
+  const since = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), -(TEXTS_WINDOW_DAYS - 1)))}T00:00`);
+  return { since: since < dayStart ? since : dayStart, until: dayEnd < now ? dayEnd : now };
+}
+
+// The customer's own recent texts inside textsWindow. Inbound only; a
+// tapback quotes a Waves text and is never their words; an unresolved
+// review-ask reservation is not a delivered message; recruiting rows are
+// owner-only. null = unreadable (the card says so), never an empty history.
+const TEXTS_MAX = 3;
+const TEXTS_PAGE = 25;
+async function loadTextsSince(dbh, customerId, scheduledDate, now = new Date()) {
+  const { since, until } = textsWindow(scheduledDate, now);
+  try {
+    // Typed reactions are dropped in SQL; a tapback that only its body
+    // gives away is dropped here, so pages are read until three real texts
+    // are kept or the window itself runs out — no run of reactions hides
+    // the text before it. Pages step by position over a total order
+    // (created_at, then the unique id), so rows sharing a timestamp at a
+    // page edge are never skipped; a text landing mid-read can only repeat
+    // a row, which the id check drops.
+    const kept = [];
+    const seen = new Set();
+    for (let offset = 0; ; offset += TEXTS_PAGE) {
+      // The customer timeline's own exclusions: recruiting rows (an applicant
+      // who is also a customer; owner-only) and unresolved send reservations.
+      const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: customerId })))
+        .where('direction', 'inbound')
+        .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
+        .where('created_at', '>=', since)
+        .where('created_at', '<', until)
+        .select('id', 'created_at', 'message_body', 'message_type')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(TEXTS_PAGE)
+        .offset(offset);
+      for (const r of rows) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        if (r.message_type === 'sms_reaction' || isSmsReaction(r.message_body)) continue;
+        const text = clean(r.message_body, 300);
+        if (text) kept.push({ date: etDateString(new Date(r.created_at)), text });
+        if (kept.length >= TEXTS_MAX) return kept;
+      }
+      if (rows.length < TEXTS_PAGE) return kept;
+    }
+  } catch (err) {
+    logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+// Photos the customer sent before the visit (GATE_VISIT_PREP_PHOTOS's own
+// hardened reader — the Visit Brief's "Customer flagged"): topic, where,
+// their note and how many photos. The thumbnails come from
+// GET /admin/schedule/:id/visit-prep-photos, which owns the signing and
+// the reassignment recheck. Gate off or unreadable = no key.
+async function loadPrepPhotos(dbh, svc) {
+  if (!require('../config/feature-gates').visitPrepPhotosLive()) return undefined;
+  try {
+    const flagged = await require('./visit-prep').customerFlaggedFacts(svc, dbh);
+    if (!flagged?.length) return null;
+    return flagged.map((f) => ({
+      sentAt: f.sentAt,
+      topic: f.topic,
+      locationOnProperty: f.locationOnProperty,
+      note: clean(f.note, 500) || null,
+      photoIds: f.photoIds,
+    }));
+  } catch (err) {
+    logger.warn(`[job-card] prep photos unavailable for ${svc.id}: ${err.code || err.name || 'error'}`);
+    return undefined;
+  }
+}
+
 async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant = null) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
@@ -400,7 +513,7 @@ function unavailable(message, cause) {
   return err;
 }
 
-async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
+async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext = true } = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
     .leftJoin('services as s', 'ss.service_id', 's.id')
@@ -421,6 +534,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       // irrigation.
       dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
+      'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests',
     )
     .first();
   if (!svc) return null;
@@ -434,9 +548,15 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadOpenIssues(dbh, svc.customer_id),
     loadAddons(dbh, svc.id),
   ]);
-  const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
+  const visitStart = svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null;
+  // Display-only context is for the full card: the dispatch board's
+  // readiness poll (every visit, every minute) never reads it.
+  const customerContext = displayContext && customerContextEnabled();
+  const [calls, rain7d, texts, prepPhotos] = await Promise.all([
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
+    customerContext ? loadTextsSince(dbh, svc.customer_id, svc.scheduled_date) : Promise.resolve(undefined),
+    customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
   const alternateAddress = Boolean(svc.address_diverges);
@@ -468,12 +588,22 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     // Display copies of the notes, complete and code-scrubbed: the facts
     // below are bounded for the model grounding and may lose a restriction
     // stated later in the text.
-    notes: scrubKnownCodes({
-      instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
-      visitNotes: clean(svc.notes, 2000) || null,
-      chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
-      petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
-    }, knownCodes),
+    notes: {
+      ...scrubKnownCodes({
+        instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
+        visitNotes: clean(svc.notes, 2000) || null,
+        chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+        petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
+        // Only with the gate on, so the payload is byte-identical off.
+        ...(customerContext ? { customerRequest: customerRequestNote(svc) } : {}),
+      }, knownCodes),
+      // Texts and photos carry dates and photo ids; only their words are
+      // scrubbed, so a code that happens to be digits never mangles an id.
+      ...(customerContext ? {
+        customerTexts: texts && texts.map((t) => ({ ...t, text: scrubKnownCodes(t.text, knownCodes) })),
+        ...(prepPhotos !== undefined ? { prepPhotos: prepPhotos && prepPhotos.map((p) => ({ ...p, note: scrubKnownCodes(p.note, knownCodes) })) } : {}),
+      } : {}),
+    },
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property
@@ -1568,7 +1698,7 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
 }
 
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false } = {}) {
-  const facts = await loadJobCardFacts(serviceId, dbh, deps);
+  const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
@@ -1916,6 +2046,7 @@ function fieldGuideLineProduct(name, products) {
 module.exports = {
   jobCardEnabled,
   paragraphLlmEnabled,
+  customerContextEnabled,
   buildJobCard,
   mixForProduct,
   loadJobCardFacts,
@@ -1930,5 +2061,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
+  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

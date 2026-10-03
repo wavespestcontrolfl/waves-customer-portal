@@ -108,6 +108,26 @@ describe('CustomersPageV2 workflow state', () => {
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/customers/intelligence'))).toBe(false);
   });
 
+  // The call bridge is an owner-only route: a technician's customer list offers
+  // no "Call via Waves" (row button or workspace menu item); an admin keeps both.
+  it.each([
+    ['/admin/customers'],
+    ['/admin/customers?customer360=workspace'],
+  ])('hides Call via Waves from a technician and keeps it for an admin at %s', async (entry) => {
+    const withPhone = { ...list, customers: [{ ...list.customers[0], phone: '+15555550104' }] };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(withPhone) : response({})));
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    const tech = render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.queryByRole('button', { name: 'Call via Waves' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Call via Waves')).not.toBeInTheDocument();
+    tech.unmount();
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getAllByRole('button', { name: 'Call via Waves' }).length).toBeGreaterThan(0);
+  });
+
   it('preserves the admin Opportunities navigation', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
     render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);

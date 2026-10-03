@@ -79,10 +79,26 @@ async function estimateGreetingFirstName(database, estimate, opts = {}) {
   return (await estimateGreetingFirstToken(database, estimate, opts)) || FALLBACK;
 }
 
+// Service-report payloads (report-data.js buildReportV1Data) carry the
+// customer's own first name as `customerFirstName` (null when blank) next to
+// the composed `customerName`. When the key is present it is authoritative:
+// blank means no first name, so the greeting falls back ('there') instead of
+// reading the surname off the composed name. A payload without the key (older
+// frozen payloads) keeps the first token of customerName, or, when the caller
+// has the customer row in hand, the same blank-first-name rule as estimates.
+function reportGreetingFirstToken(data, customer) {
+  if (data && Object.prototype.hasOwnProperty.call(data, 'customerFirstName')) {
+    return nameTokens(data.customerFirstName)[0] || '';
+  }
+  const row = customer && typeof customer === 'object' && 'first_name' in customer ? customer : null;
+  return greetingFirstToken({ customerName: data?.customerName, customer: row });
+}
+
 module.exports = {
   FALLBACK,
   greetingFirstToken,
   greetingFirstName,
+  reportGreetingFirstToken,
   loadGreetingCustomer,
   estimateGreetingFirstToken,
   estimateGreetingFirstName,

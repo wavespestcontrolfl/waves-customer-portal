@@ -98,6 +98,9 @@ import {
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
+import {
+  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillMicBar, VoiceFillReview, useVoiceFillSheet,
+} from './FastCompleteVoiceFill';
 import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -289,7 +292,7 @@ function rowRate(row, sprayMethod) {
 // The first requirement the application record still needs, in screen order
 // (reason '' when none), and the product whose stock holds Complete when
 // that is what is missing.
-function missingRequirement(form, rows, ratingAllowed, dictationPending) {
+function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}) {
   const active = rows.filter((row) => row.active);
   // The server refuses the whole visit when a tracked stock would go below
   // zero; a stock already at zero is named here instead.
@@ -307,6 +310,11 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending) {
     [!form.areas.size, 'Select where you treated.'],
     [needsLinearFt && !(Number(form.linearFt) > 0), 'Enter the linear feet you sprayed.'],
     [ratingAllowed && !form.activity, 'Select activity seen.'],
+    // Voice fill: something it could not settle is still open.
+    [openChecks > 0, 'Check what I couldn\'t fill.'],
+    // Voice fill: what it set waits on the tech's ✓, and the office note fits.
+    [voiceHolds.confirms > 0, 'Confirm what I filled.'],
+    [voiceHolds.officeNoteTooLong, 'Shorten the office note.'],
   ].find(([missing]) => missing) || [];
   return { reason, stockRow };
 }
@@ -332,7 +340,7 @@ const NO_CUSTOMER_RECAP_FLAGS = {
   includePayLink: false,
 };
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled, officeNote = '' }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -359,6 +367,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     areasServiced: [...form.areas],
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
+    // Voice fill's office note: staff-only (the visit's internal notes),
+    // sent only when there is one.
+    ...(officeNote.trim() ? { officeNote: officeNote.trim() } : {}),
     techTips: techTipsOf(form, tipsAvailable),
     // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
     // link. Gate on: the fixed re-service text; the server composes it.
@@ -498,7 +509,7 @@ function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
-export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -537,6 +548,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // mic may be recording, a change saving, a removal to answer): Full form
   // waits for it the same way (codex local r3 on #5624).
   const [photoBusy, setPhotoBusy] = useState(false);
+  // Voice fill recording, transcribing or filling (the form's own hold, lifted
+  // so Full form and Close wait on it too).
+  const [voiceBusy, setVoiceBusy] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -545,10 +559,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // is unknown or refused (it may have saved), so reopening routes from the
   // live schedule rather than the same old row.
   const close = useCallback(() => {
-    if (submitting) return;
+    // Voice still recording, transcribing or filling: closing (×, backdrop or
+    // Escape all come through here) would drop those words and the sheet's edits.
+    if (submitting || voiceBusy) return;
     if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, voiceBusy, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -567,13 +583,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -590,7 +606,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   if (reportFlow) {
     return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
   }
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
 }
 
 // The products on the sheet: the house mix it opened with, plus what the tech
@@ -622,19 +638,41 @@ function useProductRows(ctx, serviceType, lane = null) {
   const clearFollowingRates = useCallback(() => {
     setRows((prev) => prev.map((row) => (followsVisitMethod(row) ? { ...row, rateInput: null } : row)));
   }, []);
+  // A voice fill: rows it adds (without opening their editors) and the patches
+  // it makes to rows already there; a product already on the sheet is not added twice.
+  const applyFill = useCallback((added, patches) => {
+    setRows((prev) => {
+      const known = new Set(prev.map((row) => row.productId));
+      const kept = prev.map((row) => (patches[row.productId] ? { ...row, ...patches[row.productId] } : row));
+      return [...kept, ...added.filter((row) => !known.has(row.productId))];
+    });
+  }, []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyStock };
+  return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyFill, applyStock };
 }
 
-function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile }) {
+// The pest sheet's own row rules, handed to the voice-fill plan
+// (lib/fast-complete-voice-plan.js) so it reads rows and choices the way the
+// sheet does. `makeRow` is added per sheet (it needs the visit's service type).
+const VOICE_SHEET_OPS = {
+  rowMethod,
+  followsVisitMethod,
+  sprayMethods: SPRAY_METHODS,
+  defaultMethod: DEFAULT_METHOD,
+  pests: [...PEST_CHIPS, ...PEST_CHIPS_MORE],
+  areas: AREA_CHIPS,
+  activityValues: ACTIVITY_LEVELS.map((level) => level.value),
+};
+
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
-    pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, linearFt: '', activity: '', note: '',
+    pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
     tipId: '', customTip: '',
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -649,6 +687,35 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // The tech's own How tap: voice fill never replaces it, even the default way.
+  const pickMethod = useCallback((next) => {
+    chooseMethod(next);
+    setField('methodPicked', true);
+  }, [chooseMethod, setField]);
+  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL, delivered as the `voiceFillEnabled`
+  // prop): off, nothing below renders and the sheet is as it always was.
+  const voiceOps = useMemo(() => ({
+    ...VOICE_SHEET_OPS,
+    makeRow: (product, extras) => productRow(product, { serviceType: service?.serviceType, added: true, ...extras }),
+  }), [service?.serviceType]);
+  const voice = useVoiceFillSheet({
+    enabled: voiceFillEnabled,
+    request,
+    serviceId: service?.id,
+    sheet: { ops: voiceOps, ctx, products, form, setForm, chooseMethod, appendNote },
+  });
+  // Words being recorded, transcribed or filled in would miss the save. The
+  // voice mic keeps its own flag: the note's mic finishing first must not clear it.
+  const [voiceMicPending, setVoiceMicPending] = useState(false);
+  const busy = dictationPending || voiceMicPending || voice.filling;
+  const voiceBusy = voiceMicPending || voice.filling;
+  useEffect(() => {
+    onVoiceBusy?.(voiceBusy);
+  }, [voiceBusy, onVoiceBusy]);
+  useEffect(() => () => onVoiceBusy?.(false), [onVoiceBusy]);
+  // While the voice mic is live every other control waits: the browser's speech
+  // session drops the words still in flight on any other tap or keystroke.
+  const formLocked = locked || voiceMicPending;
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -658,13 +725,13 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     products: ctx.products,
     commonProducts: pickerCommonProducts,
     rows,
-    locked: locked || dictationPending,
+    locked: locked || busy,
     isMobile,
     onFullForm,
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, dictationPending);
+  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong });
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
   const [checkingStock, setCheckingStock] = useState(false);
@@ -683,6 +750,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     submission.submit(
       () => completionBody(form, rows, {
         visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+        officeNote: voice.enabled ? voice.officeNote : '',
       }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
@@ -691,40 +759,53 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
-        <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+        {/* One mic at a time: the note's mic recording (the upload path is not stopped
+            by another tap) holds this one. */}
+        <VoiceFillMicBar voice={voice} serviceId={service?.id} locked={locked || dictationPending} onPendingChange={setVoiceMicPending} />
+        {/* Disabled as one block while the voice mic is live, so no control inside
+            (now or added later) can end the speech session early. */}
+        <fieldset className="tech-visit-form" disabled={formLocked}>
+          <VoiceFillReview voice={voice} locked={formLocked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={formLocked} />
+          <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
-          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || dictationPending} />
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={formLocked || busy} />
           <ProductsSection
             products={products}
+            heardLines={<ProductHeardLines voice={voice} rows={rows} />}
+            // With voice fill on, a way the tech picks for a product is stored as
+            // picked (never "follows How"), so a dictated How cannot move it. 'how':
+            // an unpicked spray still follows the How row here (not the note).
+            stickyPicks={voiceFillEnabled === true ? 'how' : false}
             method={form.method}
             editAmounts={editAmounts}
-            locked={locked}
+            locked={formLocked}
             onToggleEdit={() => setEditAmounts((on) => !on)}
             other={picker.button}
             popover={picker.popover}
           />
-          <PestsSection form={form} setField={setField} locked={locked} />
+          <PestsSection form={form} setField={setField} locked={formLocked} />
           <ChoiceSection title="Where" columns={3}>
             {AREA_CHIPS.map((label) => (
-              <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
+              <Chip disabled={formLocked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
           </ChoiceSection>
-          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={chooseMethod} locked={locked} />
+          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={formLocked} />
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (
-                <Chip disabled={locked} key={level.value} label={ctx.rating.scaleLabels?.[level.rating] || level.label} pressed={form.activity === level.value} onClick={() => setField('activity', level.value)} />
+                <Chip disabled={formLocked} key={level.value} label={ctx.rating.scaleLabels?.[level.rating] || level.label} pressed={form.activity === level.value} onClick={() => setField('activity', level.value)} />
               ))}
             </ChoiceSection>
           )}
+          <VisitHeardLine voice={voice} />
           {tipsAvailable && (
             <TipSection
               library={tips}
               tipId={form.tipId}
               customTip={form.customTip}
-              locked={locked}
+              locked={formLocked}
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />
@@ -741,7 +822,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         coverProps={picker.coverProps}
       >
         {stockRow && !locked && (
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} disabled={voiceMicPending} onClick={checkStock}>Check stock</Button>
         )}
       </CompleteFooter>
       {picker.sheet}
@@ -1014,6 +1095,11 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
   // map, so the record must list a place inside (the pest sheet asks the
   // note for Inside; codex local r4 on #5629).
   const interiorUnbacked = draft && shownTrace && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
+  // Every shown trace (an outline, a perimeter, and "Interior spray too",
+  // which still carries the perimeter) draws the outside of the house and
+  // sets the outdoor re-entry wait, so the record must list a place outside;
+  // a broadcast spray picked beside an inside-only record is not enough.
+  const exteriorUnbacked = draft && shownTrace && !laneAreas.some((area) => AREA_SCOPES.exterior.includes(area));
   return [
     ...ready.report,
     // The record's places are the visit's treated side on the report: with
@@ -1031,6 +1117,7 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
       ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
       : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
     [interiorUnbacked, 'Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.', null, 'remove_trace'],
+    [exteriorUnbacked, 'Your trace would show the outside of the house on the customer’s report, but no place on the record is outside. Add the place outside (Change beside Where), or remove the trace.', null, 'remove_trace'],
   ];
 }
 
@@ -1847,7 +1934,7 @@ function CustomerTextResult({ outcome }) {
 // stickyPicks (the report flow): a way the tech picks for a product stays that
 // way. The visit's way there is the note's read, which can change when the
 // report is written, so a pick never quietly follows it.
-function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false }) {
+function ProductsSection({ products, heardLines = null, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -1898,6 +1985,7 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
           />
         ))}
       </div>
+      {heardLines}
       {editing && (
         <AddedProductEditor
           key={editing.productId}
@@ -2002,6 +2090,8 @@ const methodLabel = (value) => {
 // is read for its record, not its sprays).
 function followHint(row, sticky) {
   if (!sticky) return 'Same as the visit\'s How';
+  // voice fill's sticky picks: the row still follows How until a way is picked
+  if (sticky === 'how') return 'Same as the visit\'s How until you pick one';
   return row.lane ? 'Spot treatment until you pick another way' : 'Goes the way your note says until you pick one';
 }
 
@@ -2013,6 +2103,8 @@ function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
   const ownMethod = row.catalogMethod && !ways.some((choice) => choice.value === row.catalogMethod);
   const choices = ownMethod ? [...ways, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ways;
   const pick = (value) => onChange({
+    // the tech's own pick, even when it is the row's standard way (voice fill never replaces it)
+    methodPicked: true,
     methodInput: !sticky && value === standard ? null : value,
     // A rate typed for one method doesn't carry to another.
     ...(value !== current ? { rateInput: null } : {}),
@@ -2031,7 +2123,9 @@ function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
 }
 
 function PestsSection({ form, setField, locked }) {
-  const [showMore, setShowMore] = useState(false);
+  const [moreTapped, setShowMore] = useState(false);
+  // A pest from the second row (a voice fill can pick one) keeps it open.
+  const showMore = moreTapped || PEST_CHIPS_MORE.some((label) => form.pests.has(label));
   const toggle = (label) => setField('pests', toggleInSet(form.pests, label));
   return (
     <>
@@ -2121,13 +2215,14 @@ function AmountRow({ row, rate, onChange }) {
           min="0"
           step="any"
           value={row.totalAmount ?? ''}
-          onChange={(e) => onChange({ totalAmount: e.target.value })}
+          // amountPicked: the tech's own entry, even when it equals the seeded amount
+          onChange={(e) => onChange({ totalAmount: e.target.value, amountPicked: true })}
         />
         <select
           className="ui-control tech-visit-control"
           aria-label={`Unit for ${row.name}`}
           value={row.amountUnit}
-          onChange={(e) => onChange({ amountUnit: e.target.value })}
+          onChange={(e) => onChange({ amountUnit: e.target.value, amountPicked: true })}
         >
           {UNIT_CHOICES[row.dimension].map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
         </select>

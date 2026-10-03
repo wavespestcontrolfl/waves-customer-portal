@@ -169,7 +169,12 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // rules that act on it ('3_cflv': 34 chars, 39 with all four category tags).
 // PR #5331 (payment status contract) is the fresh identity above '3_cflv': numeric token "5" + 'cflvp' (COMPANY + LABEL + VISIT
 // STATUS & OPEN LOOPS ride along, cumulative, + PAYMENT FACTS) — see the cohort note above.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}5_cflvp`;
+// SERVICE KNOWLEDGE (owner 2026-10-03): seven more owner-approved COMPANY FACTS lines.
+// The section's text is part of the sealed contract (sms-company-facts: any edit
+// needs a new identity — older items no longer match the exact render), so the
+// numeric token moves to "6": same markers as '5_cflvp', still 35 chars / 40 with
+// all four tags.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}6_cflvp`;
 const SHADOW_STATUS = 'shadow';
 
 /**

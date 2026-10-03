@@ -1796,8 +1796,14 @@ false`); once released it reads as the existing `pending`/`claimed` sweep postur
 the in-transaction account credit already covered settles exactly as before (no deferral).
 The accept notification (customer account feed) says nothing is charged today and the
 annual prepay is charged to the card on file after the first visit. No message is sent
-because of these fields. Client copy and the attestation ship in PR-E; until then a
-deferred accept re-quotes, so the gate must not be flipped before it.
+because of these fields. (5) PR-E: GET `/api/estimates/:token/data` carries
+`recurringCardPolicy.prepayAfterFirstVisit: true` (present only when true) exactly when an
+in-lane prepay accept would defer (`prepayInLane` plus the gate conjunction above). The React
+estimate page uses it to render the after-visit wording on the plan option, the review step and
+the capture checkbox (`after_visit_prepay` text), renders the quote's `consentVariant` at the
+confirm step, sends `prepayChargeConsentVariant` back, and shows the `after_first_visit` success
+copy. In-lane prepay is React-only (the legacy page redirects), so the legacy renderer is
+unchanged.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -2294,7 +2300,14 @@ key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen o
 under this gate, so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+and its cache signature carries a `:copyv6=1` stamp while the gate is live. The same gate keeps model-written lawn copy from stating result timing
+(P15), so "What to expect" is its only source: the dedicated lawn treatment
+technician report writer (not the physical-lawn remaining-service module, whose
+visits carry no "What to expect" and whose prompt already forbids an
+establishment date) gets a RESULT TIMING rule and generate-report rejects any forward timeframe in
+its output, and the lawn "What we applied today" paragraph
+(`treatment-narrative.js`, its own prompt version) and its deterministic
+fallback carry none, any forward timing failing the paragraph to that fallback.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
@@ -4066,6 +4079,20 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A NO-SLOT `/accept` of MORE THAN ONE recurring service (B06/B17) keeps each
+series' parent visit unpriced (the combined first-application invoice covers
+its first visit) but prices every seeded follow-up at that service's own
+quoted per-visit amount — the same per-service figures the customer saw and
+the first-application invoice summed (`firstApplicationRowAmounts`), matched
+to the services one-to-one. Never the customer's existing per-application fee,
+never an annual-over-visits reconstruction. When the amounts cannot be matched
+exactly (a tier-monthly accept, a fallback visit total, an unmatched service),
+nothing is priced by guess and the accept raises ONE billing bell for the
+office (`per-application-fee-unresolved:<estimateId>`, stamped Billing /
+needs-you / estimate subject) — through the converter's deferred
+`perApplicationFeeNotification` field, so it fires post-commit on every accept
+path and a rolled-back accept never pages. A reserved-slot accept is unchanged
+(its own `reservedAcceptPerVisitSplit`).
 Overlapping annual coverage on public `/accept` returns 409
 `{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
 explanation and no acceptance committed. Clients preserve the appointment
@@ -5977,3 +6004,5 @@ baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the
 AGENTS.md P0 rule "Public route surface", not in this document. This
 document holds the per-route entries only.
+
+Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.

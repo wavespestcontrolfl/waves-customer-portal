@@ -1357,16 +1357,39 @@ function initScheduledJobs() {
   // two ACA report sessions at once.
   // =========================================================================
   cron.schedule('5 4 * * 1', async () => {
-    try {
-      const res = await runExclusive('permit-sync', () =>
-        require('./property-lookup/manatee-permit-sync').syncPermits());
-      if (res && !res.skipped) {
-        const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
-        logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
+    // ONE lease for the whole sequence (codex #5673 P1): with separate
+    // leases a deploy overlap could run the detail step on one replica while
+    // another still runs the report sync (stale candidates, concurrent ACA
+    // scraping) and then skip it there. Each step keeps its own try so a
+    // failure in one never skips the other.
+    await runExclusive('permit-sync', async () => {
+      const failures = [];
+      try {
+        const res = await require('./property-lookup/manatee-permit-sync').syncPermits();
+        if (res && !res.skipped) {
+          const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
+          logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
+        }
+      } catch (err) {
+        logger.error(`Permit sync failed: ${err.message}`);
+        failures.push(`report sync: ${err.message}`);
       }
-    } catch (err) {
-      logger.error(`Permit sync failed: ${err.message}`);
-    }
+      // Permit detail collection (building facts off each new-home permit's
+      // ACA record page → construction_permit_records). Runs AFTER the
+      // report sync so this week's new permits are candidates. Inert unless
+      // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
+      // syncPermitDetails). Slow by design (sequential, >=2 s between
+      // requests, per-run cap + time budget); never runs from a lookup.
+      try {
+        await require('./property-lookup/manatee-permit-detail').syncPermitDetails();
+      } catch (err) {
+        logger.error(`Permit detail sync failed: ${err.message}`);
+        failures.push(`detail sync: ${err.message}`);
+      }
+      // Both steps ran; a failure in either still reaches the lease so job
+      // health records it (a swallowed error would read as success).
+      if (failures.length) throw new Error(failures.join(' | '));
+    }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3386,6 +3409,39 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:10AM ET — Call incident adjudicator (correction loop for calls,
+  // Part B wave 1). After the 03:40 self-audit: each new field disagreement
+  // becomes an ai_incidents row, confirmed only when a second model on the
+  // other provider from the auditor's reaches the auditor's answer blind. Shadow data; dark behind
+  // GATE_CALL_INCIDENTS (needs GATE_CALL_SELF_AUDIT); CALL_INCIDENT_BATCH=0
+  // stops it. The gate is read inside the job.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateCallFindings } = require('./call-incidents');
+      await runExclusive('call-incidents-adjudicate', () => adjudicateCallFindings());
+    } catch (err) {
+      logger.error(`Call incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:50AM ET — Correction-loop fix proposals for calls, same
+  // rules as SMS, on the latest extraction prompt version. No model call.
+  // Gate read inside the job (GATE_CALL_INCIDENTS).
+  // =========================================================================
+  cron.schedule('50 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeCallFixes } = require('./call-incidents');
+      await runExclusive('call-fix-proposals', () => proposeCallFixes());
+    } catch (err) {
+      logger.error(`Call fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
