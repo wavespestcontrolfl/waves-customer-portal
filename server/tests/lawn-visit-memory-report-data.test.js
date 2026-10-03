@@ -515,7 +515,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     const progress = data.reportV2.progress;
     expect(progress).toMatchObject({ v: 1, eligible: true, daysSincePrior: 60, confidence: { level: 'moderate', comparable: true } });
     expect(progress.overall.direction).toBe('flat'); // the two visits carry the same scores
-    const weed = progress.items.find((i) => i.rowId === 'herbicide_broadleaf');
+    const weed = progress.items.find((i) => i.rowId === 'herbicide_celsius');
     // 60 days after the herbicide with no gain in weed suppression: the window has closed.
     expect(weed).toMatchObject({ kind: 'applied', metric: 'weed_suppression', state: 'behind', approved: true });
     // The prior's "weeds" check was never rechecked by a technician: unclear, not_recorded.
@@ -528,7 +528,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
     const { reportV2 } = await render(recs); // fixtures() has no lawn_assessment_photos rows
     expect(reportV2.progress.confidence.level).toBe('insufficient');
-    expect(reportV2.progress.items.find((i) => i.rowId === 'herbicide_broadleaf').state).toBe('unclear');
+    expect(reportV2.progress.items.find((i) => i.rowId === 'herbicide_celsius').state).toBe('unclear');
     expect(reportV2.progress.overall.direction).toBe('unknown');
   });
 
@@ -625,7 +625,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
     const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
     expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: false });
-    expect(data.reportV2.progress.items.find((i) => i.rowId === 'herbicide_broadleaf').state).toBe('unclear');
+    expect(data.reportV2.progress.items.find((i) => i.rowId === 'herbicide_celsius').state).toBe('unclear');
     expect(data.reportV2.progress.overall.direction).toBe('unknown');
   });
 
