@@ -17,7 +17,8 @@ const MAX_SERVICE_PHOTO_BYTES = 15 * 1024 * 1024;
 const MAX_COMPLETION_PHOTO_DATA_URL_BYTES = 2 * 1024 * 1024;
 const VALID_PHOTO_TYPES = new Set(['before', 'after', 'issue', 'progress']);
 const SERVICE_PHOTO_VISIT_COLUMNS = [
-  'id', 'customer_id', 'property_id', 'technician_id', 'scheduled_date', 'status',
+  'id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_type',
+  'scheduled_date', 'status',
 ];
 
 const s3 = new S3Client({
@@ -82,12 +83,16 @@ function servicePhotoVisitSnapshot(visit) {
     String(visit.customer_id ?? ''),
     String(visit.property_id ?? ''),
     String(visit.technician_id ?? ''),
+    String(visit.service_id ?? ''),
+    String(visit.service_type ?? ''),
     visitDate(visit.scheduled_date),
   ];
   return {
     customerId: visit.customer_id ?? null,
     propertyId: visit.property_id ?? null,
     technicianId: visit.technician_id ?? null,
+    catalogServiceId: visit.service_id ?? null,
+    serviceType: visit.service_type ?? null,
     scheduledDate: visitDate(visit.scheduled_date),
     status: visit.status ?? null,
     // scheduled_services has no revision column. This opaque digest versions
@@ -104,7 +109,10 @@ function parseExpectedServicePhotoVisit(value) {
   if (typeof value === 'string') {
     try { parsed = JSON.parse(value); } catch { parsed = null; }
   }
-  const keys = ['customerId', 'propertyId', 'technicianId', 'scheduledDate', 'status', 'revision'];
+  const keys = [
+    'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
+    'scheduledDate', 'status', 'revision',
+  ];
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
     || keys.some((key) => !(key in parsed))
     || typeof parsed.revision !== 'string') {
@@ -127,6 +135,8 @@ function servicePhotoVisitChanged(expected, visit) {
   if (!sameVisitValue(expected.customerId, live.customerId)
     || !sameVisitValue(expected.propertyId, live.propertyId)
     || !sameVisitValue(expected.technicianId, live.technicianId)
+    || !sameVisitValue(expected.catalogServiceId, live.catalogServiceId)
+    || !sameVisitValue(expected.serviceType, live.serviceType)
     || visitDate(expected.scheduledDate) !== live.scheduledDate
     || expected.revision !== live.revision) return true;
   // Lifecycle can advance while a selected file is waiting or retrying. The
@@ -181,13 +191,27 @@ async function deleteUploadedObject(key) {
   }
 }
 
-async function cleanupUploadedServicePhotoObjects(photos = []) {
+async function cleanupUploadedServicePhotoObjects(photos = [], { verifyAbsentWith = null } = {}) {
   const seen = new Set();
   let deleted = 0;
   for (const photo of photos || []) {
     const key = photo?.s3_key || photo?.storage_key;
     if (!key || seen.has(key)) continue;
     seen.add(key);
+    if (verifyAbsentWith) {
+      try {
+        const [committedPhoto, committedStagedPhoto] = await Promise.all([
+          verifyAbsentWith('service_photos').where({ s3_key: key }).first('id'),
+          verifyAbsentWith('scheduled_service_photo_staging').where({ s3_key: key }).first('id'),
+        ]);
+        if (committedPhoto || committedStagedPhoto) continue;
+      } catch (err) {
+        // Retaining an unreferenced object is recoverable; deleting one whose
+        // commit outcome could not be read is not.
+        logger.warn(`[service-photos] commit cleanup verification failed key=${key}: ${err.message}`);
+        continue;
+      }
+    }
     await deleteUploadedObject(key);
     deleted += 1;
   }
@@ -556,7 +580,11 @@ async function uploadServicePhotoForVisit({
     // success still precedes this outer transaction's commit. If that commit
     // rolls back, remove only objects created by this attempt; deduped rows
     // are deliberately absent from this list.
-    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects);
+    // A driver can report a failed COMMIT after Postgres accepted it. Verify
+    // from a fresh connection before deleting bytes, or that ambiguous result
+    // can leave a committed photo row pointing at an object we just removed.
+    const cleanupKnex = knex?.isTransaction ? db : knex;
+    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects, { verifyAbsentWith: cleanupKnex });
     throw err;
   });
 }

@@ -96,6 +96,8 @@ describe('tech photo visit snapshot route contract', () => {
       customer_id: 'customer-1',
       property_id: 'property-1',
       technician_id: 'tech-1',
+      service_id: 'catalog-pest',
+      service_type: 'Pest Control',
       scheduled_date: '2026-10-02',
       status: 'on_site',
     }];
@@ -114,6 +116,8 @@ describe('tech photo visit snapshot route contract', () => {
         customerId: 'customer-1',
         propertyId: 'property-1',
         technicianId: 'tech-1',
+        catalogServiceId: 'catalog-pest',
+        serviceType: 'Pest Control',
         scheduledDate: '2026-10-02',
         status: 'on_site',
       });

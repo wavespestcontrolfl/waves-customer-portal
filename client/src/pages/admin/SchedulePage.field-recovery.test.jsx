@@ -190,6 +190,7 @@ describe('completion photos in an unsubmitted draft', () => {
     await seed();
     const servicePhotoVisit = {
       customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
+      catalogServiceId: 'catalog-pest', serviceType: service.serviceType,
       scheduledDate: service.scheduledDate, status: 'on_site', revision: 'completion-visit-revision',
     };
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', servicePhotoVisit, completionPhotoUpload: { failed: 1 } });
@@ -244,6 +245,58 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(completionResumeOwed(service.id)).toBe(false);
     third.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
+  it('lets the technician discard retained photos when the frozen visit identity has changed', async () => {
+    await seed();
+    const servicePhotoVisit = {
+      customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
+      catalogServiceId: 'catalog-pest', serviceType: service.serviceType,
+      scheduledDate: service.scheduledDate, status: 'on_site', revision: 'completion-visit-revision',
+    };
+    const completion = vi.fn().mockResolvedValue({
+      serviceRecordId: 'record-1', servicePhotoVisit, completionPhotoUpload: { failed: 1 },
+    });
+    await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+
+    const originalFetch = fetch.getMockImplementation();
+    const uploads = [];
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) {
+        uploads.push(options);
+        const response = {
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: async () => ({ error: 'Visit changed', code: 'visit_identity_changed' }),
+          text: async () => 'Visit changed',
+        };
+        response.clone = () => response;
+        return response;
+      }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return originalFetch(url, options);
+    });
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry photo uploads' })));
+    await screen.findByText(/visit changed after these photos were selected/i);
+    expect(completionResumeOwed(service.id)).toBe(true);
+    expect(uploads).toHaveLength(1);
+    expect(reconciles).toHaveLength(0);
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Discard retained photos' })));
+    expect(completionResumeOwed(service.id)).toBe(false);
+    await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(uploads).toHaveLength(1);
+    expect(reconciles).toHaveLength(0);
   });
 
   it('keeps the autosaved photo revision when closeout reports failed uploads, so a lost IndexedDB write still reopens recovery (Codex r-63b2098 P1)', async () => {

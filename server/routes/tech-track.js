@@ -1055,7 +1055,10 @@ router.get('/:id/photos', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'property_id', 'technician_id', 'status', 'scheduled_date');
+      .first(
+        'id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_type',
+        'status', 'scheduled_date',
+      );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });

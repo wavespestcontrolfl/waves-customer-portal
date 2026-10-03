@@ -13635,6 +13635,7 @@ export function CompletionPanel({
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
   const [photoRetrying, setPhotoRetrying] = useState(false);
   const [photoRetryError, setPhotoRetryError] = useState("");
+  const [photoRetryConflict, setPhotoRetryConflict] = useState(false);
   const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
@@ -17763,9 +17764,12 @@ export function CompletionPanel({
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
+    setPhotoRetryConflict(false);
     const failedPhotos = [];
+    let visitChanged = false;
     try {
-      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
+      const photos = draft.servicePhotos || [];
+      for (const [index, photo] of photos.entries()) {
         try {
           const form = buildPhotoRetryFormBody(
             photo,
@@ -17778,8 +17782,13 @@ export function CompletionPanel({
             method: "POST", body: form,
             headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
           });
-        } catch {
+        } catch (error) {
           failedPhotos.push(photo);
+          if (error?.code === "visit_identity_changed") {
+            visitChanged = true;
+            failedPhotos.push(...photos.slice(index + 1));
+            break;
+          }
         }
       }
       if (!failedPhotos.length) {
@@ -17815,13 +17824,30 @@ export function CompletionPanel({
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
           setCompletionResult(result);
-          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+          setPhotoRetryConflict(visitChanged);
+          setPhotoRetryError(visitChanged
+            ? "This visit changed after these photos were selected, so they can’t be attached safely. Your copies remain on this device until you discard them."
+            : "Some photos still could not upload. Your copies are retained on this device; retry when connected.");
         }
       }
     } finally {
       photoRetryLockRef.current = false;
       if (!completionPanelClosedRef.current) setPhotoRetrying(false);
     }
+  }
+
+  function discardRetainedCompletionPhotos() {
+    clearSavedDraft();
+    clearCompletionResumeOwed(service.id);
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
+    setPhotoRetryConflict(false);
+    setPhotoRetryError("");
+    setCompletionResult((current) => current ? {
+      ...current,
+      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false },
+    } : current);
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -19492,10 +19518,17 @@ export function CompletionPanel({
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
-        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
-      </button>
+      {photoRetryConflict ? (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Discard retained photos
+        </button>
+      ) : (
+        <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+        </button>
+      )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
         Later
       </button>
