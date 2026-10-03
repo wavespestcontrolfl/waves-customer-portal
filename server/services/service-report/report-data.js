@@ -5995,6 +5995,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             completedAt: completionTime,
             latitude: service.customer_latitude ?? service.latitude ?? service.lat,
             longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+            // The product list is the verdict's input: when the products or their
+            // catalog facts could not be read cleanly, a stored verdict still
+            // replays but nothing new is judged or written (first writer wins,
+            // so a partial list would be permanent).
+            degraded: !!(productsLoadFailed || products.catalogEnrichmentFailed),
             knex,
             fetchForecast: require('./application-conditions').fetchPropertyForecast,
             fetchQuarterHours: require('./application-conditions').fetchPropertyRainQuarterHours,

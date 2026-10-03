@@ -176,7 +176,7 @@ function validRetreatCheck(item) {
  * @returns {Promise<{line: string}|null>}
  */
 async function resolveRainfastWatch({
-  structuredNotes, serviceRecordId, assessmentId, products, completedAt, latitude, longitude, now, knex, fetchForecast, fetchQuarterHours,
+  structuredNotes, serviceRecordId, assessmentId, products, completedAt, latitude, longitude, now, knex, fetchForecast, fetchQuarterHours, degraded = false,
 } = {}) {
   try {
     if (!serviceRecordId || !assessmentId || !knex) return null;
@@ -185,6 +185,9 @@ async function resolveRainfastWatch({
     if (!entry) return null;
     if (entry.retreatCheck != null) return validRetreatCheck(entry.retreatCheck) ? { line: RAINFAST_WATCH_LINE } : null;
 
+    // Input products not read cleanly: a stored verdict replayed above, but no
+    // NEW judgment and no write (a later healthy view tries again).
+    if (degraded) return null;
     const item = await judgeRainfastBreach({
       products, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
     });

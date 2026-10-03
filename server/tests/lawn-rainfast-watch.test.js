@@ -350,6 +350,23 @@ describe('resolveRainfastWatch: judge once, record once, replay after', () => {
     expect(log.updates).toBe(0);
   });
 
+  test('degraded product inputs: a stored verdict still replays, but nothing new is judged or written', async () => {
+    const fresh = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY } } };
+    const { knex, log } = memoryKnex(fresh);
+    const fetchForecast = breachFetch();
+    await expect(run(fresh, knex, { fetchForecast, degraded: true })).resolves.toBeNull();
+    expect(fetchForecast).not.toHaveBeenCalled();
+    expect(log.updates).toBe(0);
+    expect(storedVisitMemoryFor(fresh.structured_notes, 'la-1').retreatCheck).toBeUndefined();
+    // a later healthy view judges and records
+    await expect(run(fresh, knex, { fetchForecast, degraded: false })).resolves.toEqual({ line: RAINFAST_WATCH_LINE });
+    expect(log.updates).toBe(1);
+    // and once stored, a degraded view still replays it with no weather call
+    const again = breachFetch();
+    await expect(run(fresh, knex, { fetchForecast: again, degraded: true })).resolves.toEqual({ line: RAINFAST_WATCH_LINE });
+    expect(again).not.toHaveBeenCalled();
+  });
+
   test('a stored item of an unknown shape is ignored, never repaired and never re-judged', async () => {
     const record = { structured_notes: { lawnVisitMemory: { 'la-1': { ...ENTRY, retreatCheck: { v: 2, kind: 'other' } } } } };
     const { knex } = memoryKnex(record);

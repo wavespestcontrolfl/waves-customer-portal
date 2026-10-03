@@ -993,6 +993,68 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     expect(JSON.stringify(recs['svc-cur'].structured_notes)).toBe(before);
   });
 
+  test.each([
+    ['the visit\'s products could not be read', { service_products: FAIL }],
+    ['the catalog lookup failed', { products_catalog: FAIL }],
+  ])('%s: no new judgment and no write; a healthy view later tries again, and a stored verdict still replays', async (_label, broken) => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const recs = records();
+    await serve(recs, withProduct()); // freezes the entry from a healthy read
+    fetchSpy.mockClear();
+    const degraded = await serve(recs, { ...withProduct(), ...broken });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(degraded.data.reportV2.lead.watching).toBeUndefined();
+    expect(stored(recs).retreatCheck).toBeUndefined();
+    // healthy again: judged and recorded
+    const healthy = await serve(recs, withProduct());
+    expect(healthy.data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+    expect(stored(recs).retreatCheck).toBeTruthy();
+    // degraded once more: the stored verdict still replays, with no weather call
+    fetchSpy.mockClear();
+    const replay = await serve(recs, { ...withProduct(), ...broken });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(replay.data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+  });
+
+  test('frozen facts for one product plus a failed lookup for another: no partial verdict is judged or stored', async () => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const ID2 = '66666666-7777-4888-8999-000000000000';
+    const frozen = { [ID]: { productType: 'pesticide', name: 'Test Herbicide B', category: 'herbicide', epaRegNumber: '2217-1031', rainfastMinutes: 180 } };
+    const svc = (recs) => ({
+      ...service(recs['svc-cur'].structured_notes),
+      service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, frozenAt: '2026-09-30T18:41:00Z', productFacts: frozen } }),
+    });
+    const patch = {
+      service_products: [
+        { id: 'sp-1', service_record_id: 'svc-cur', product_id: ID, product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' },
+        { id: 'sp-2', service_record_id: 'svc-cur', product_id: ID2, product_name: 'Test Iron', product_category: 'fertilizer', created_at: '2026-09-30T18:05:00Z' },
+      ],
+      products_catalog: FAIL, // the lookup for the second product fails
+    };
+    const run = async (recs, over = patch) => {
+      const { knex } = withRecords({ ...fixtures(), ...over }, recs);
+      const data = await buildReportV1Data(svc(recs), 'token-p31', knex, { mode: 'live', lawnRainfastWatch: true });
+      applyLawnReportReconciliation(data, null);
+      return data;
+    };
+    const healthyPatch = { ...patch, products_catalog: [{ id: ID2, name: 'Test Iron', category: 'fertilizer', approved_for_service_report: true, rainfast_minutes: 60 }] };
+    const recs = records();
+    await run(recs, healthyPatch); // freezes the entry from a healthy read (a degraded read never creates it)
+    fetchSpy.mockClear();
+    const degraded = await run(recs);
+    expect(fetchSpy).not.toHaveBeenCalled(); // the frozen product alone would have been judged
+    expect(degraded.reportV2.lead.watching).toBeUndefined();
+    expect(stored(recs).retreatCheck).toBeUndefined();
+    // a healthy view reads both products and judges them together
+    const quarterSpy = jest.spyOn(conditions, 'fetchPropertyRainQuarterHours').mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.3 });
+    const healthy = await run(recs, healthyPatch);
+    quarterSpy.mockRestore();
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(healthy.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+  });
+
   test('a visit whose only prior record is a retreat-check: no public sinceLast, no since-last copy, nothing else moves', async () => {
     live('GATE_LAWN_SINCE_LAST');
     setHistory([PRIOR, CUR]);

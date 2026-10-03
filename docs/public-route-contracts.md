@@ -2431,7 +2431,7 @@ wins, compare-and-set on that entry, never creates an entry, no row lock) and
 the sentence follows. Later views replay the stored item with no weather call.
 A missing hour, a failed or slow read, missing coordinates or a missing
 completion time writes nothing and says nothing; the next live view tries
-again; one interval that cannot be read holds back the whole verdict. The next
+again; one interval that cannot be read holds back the whole verdict, and so does a failed read of the visit's products or their catalog facts (a stored verdict still replays, nothing new is judged or written until a healthy view). The next
 visit's frozen `sinceLast` carries the item as engine input only, even when the
 visit had no applied list or watched topics (a support-product-only visit): that
 internal block is not served, the progress engine and the since-last copy treat
