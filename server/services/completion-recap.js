@@ -398,7 +398,9 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 //     second when a maker's name comes first, "Talak" in "Atticus Talak")
 //     only where the text writes it capitalized in the middle of a sentence. A
 //     lowercase or sentence-opening use ("Suspend watering for 24 hours",
-//     "keep your distance") is ordinary wording and passes.
+//     "keep your distance") is ordinary wording and passes; and
+//   - two capitalized words side by side anywhere in it ("Green Flo"), as
+//     the catalog writes them.
 // In an all-capitals line every word is capitalized, so a brand word inside
 // it is caught and an ordinary use there ("PLEASE SUSPEND WATERING") is too.
 // A product the prompt itself names is the caller's to add to the visit's
@@ -456,7 +458,7 @@ function buildCatalogBrandScreen(rows, genericTokens) {
   for (const { name, label, alias } of named) {
     const tokens = tokensOf(label);
     if (!tokens.length) continue;
-    const entry = { name, brands: [], phrases: [], collapsed: [], exact: null, stem: null };
+    const entry = { name, brands: [], phrases: [], collapsed: [], pairs: [], exact: null, stem: null };
     if (whollyPlain(tokens)) {
       // The label as the catalog cases it ("Advance Termite Bait Station"),
       // or its capitalized first word mid-sentence followed by another
@@ -478,9 +480,19 @@ function buildCatalogBrandScreen(rows, genericTokens) {
     for (const token of tokens.slice(0, 2)) {
       if (token.length >= 4 && !isPlain(token)) entry.brands.push(token);
     }
+    // Two capitalized words side by side anywhere in the name ("Green Flo"
+    // in "LESCO Green Flo 6-0-0 10% Ca") are a name as the catalog writes
+    // them, unless both are plain. Lowercase copy ("rat snap traps") passes.
+    const casedWords = String(label).match(/[A-Za-z0-9]+/g) || [];
+    for (let i = 0; i + 1 < casedWords.length; i += 1) {
+      const pair = [casedWords[i], casedWords[i + 1]];
+      if (!pair.every((word) => /^[A-Z][A-Za-z]+$/.test(word))) continue;
+      if (whollyPlain(pair.map((word) => word.toLowerCase()))) continue;
+      entry.pairs.push(asWritten(pair.join(' ')));
+    }
     if (alias) {
       entry.exact = asWritten(label);
-      if (entry.exact || entry.brands.length) entries.push(entry);
+      if (entry.exact || entry.brands.length || entry.pairs.length) entries.push(entry);
       continue;
     }
     if (tokens.length >= 2) {
@@ -539,6 +551,7 @@ function buildCatalogBrandScreen(rows, genericTokens) {
     || entry.collapsed.some((word) => read.wordSet.has(word))
     || entry.brands.some((brand) => read.midSentenceCapitalized.has(brand))
     || (entry.exact !== null && entry.exact.test(read.raw))
+    || entry.pairs.some((pair) => pair.test(read.raw))
     || (entry.stem !== null && entry.stem.followers.some((tok) => read.midSentencePairs.has(`${entry.stem.lead} ${tok}`)
       || read.midSentencePairs.has(`${entry.stem.lead} ${tok}s`)));
   return (text) => {
