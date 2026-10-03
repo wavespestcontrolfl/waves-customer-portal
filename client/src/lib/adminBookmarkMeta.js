@@ -33,8 +33,28 @@ export const ADMIN_BOOKMARK_META = {
   themeColor: "#18181B",
 };
 
+// The technician field workspace inside the admin shell keeps the FIELD PWA
+// identity (its own manifest, name and colors): an "Install Field Tools"
+// from /admin/today must install the field app, not the admin app.
+export const FIELD_BOOKMARK_META = {
+  manifest: "/manifest.tech.json",
+  appTitle: "Field Tools",
+  description: "Waves field technician tools — route, estimates, and protocols.",
+  documentTitle: "Waves Tech",
+  themeColor: "#0f1923",
+};
+
+const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];
+
+// Case-insensitive, as React Router matches /ADMIN/TODAY too (pre-push P1).
+export function isFieldPath(pathname) {
+  const path = String(pathname || "").toLowerCase();
+  return path === "/admin/today" || path.startsWith("/admin/today/");
+}
+
 export function isAdminPath(pathname) {
-  return pathname === "/admin" || pathname.startsWith("/admin/");
+  const path = String(pathname || "").toLowerCase();
+  return path === "/admin" || path.startsWith("/admin/");
 }
 
 function getMeta(name) {
@@ -52,7 +72,7 @@ function setMeta(name, content) {
 
 /**
  * Capture the document's current bookmark identity so it can be restored
- * on SPA leave. Returns null on a document already carrying admin identity
+ * on SPA leave. Returns null on a document already carrying admin or field identity
  * (a cold /admin load in production is server-rendered with html.admin-app
  * before React mounts) — there is no pre-admin state to go back to, so
  * restore falls back to the customer defaults instead of "restoring" admin
@@ -62,6 +82,12 @@ export function snapshotBookmarkMeta() {
   if (typeof document === "undefined") return null;
   if (document.documentElement.classList.contains("admin-app")) return null;
   const manifest = document.querySelector('link[rel="manifest"]');
+  // A legacy /tech URL is server-rendered with the field identity and then
+  // redirected into /admin/today: that transient identity is not a pre-admin
+  // state, so leaving admin restores the customer defaults (Codex #5573 r6).
+  // Both field manifests count: the client's own and the one server/index.js
+  // renders for a /tech section load (Codex #5573 r7).
+  if (FIELD_MANIFESTS.includes(manifest?.getAttribute("href"))) return null;
   return {
     manifest:
       manifest?.getAttribute("href") ?? CUSTOMER_BOOKMARK_META.manifest,
@@ -89,6 +115,10 @@ function applyBookmark(meta, { adminApp }) {
 
 export function applyAdminBookmarkMeta() {
   applyBookmark(ADMIN_BOOKMARK_META, { adminApp: true });
+}
+
+export function applyFieldBookmarkMeta() {
+  applyBookmark(FIELD_BOOKMARK_META, { adminApp: true });
 }
 
 export function restoreBookmarkMeta(snapshot) {
