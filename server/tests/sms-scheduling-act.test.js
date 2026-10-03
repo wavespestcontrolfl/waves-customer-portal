@@ -31,6 +31,7 @@ function fakeDb({ claim = true, marked = true } = {}) {
       update: (values) => { writes.push(values); q.updated = values; return q; },
       returning: async () => (claim ? [{ id: 'dec-1' }] : []),
       then: (resolve) => resolve(1),
+      catch: () => Promise.resolve(1),
     };
     return q;
   });
