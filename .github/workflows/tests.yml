@@ -389,7 +389,7 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
+        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
 
   client:
     runs-on: ubuntu-latest
