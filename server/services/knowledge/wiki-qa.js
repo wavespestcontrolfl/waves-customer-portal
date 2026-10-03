@@ -232,7 +232,9 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
       // lists agree on it (vector + full text). Most entries share phrases
       // like "General Pest Control", so a lone full-text match is noise.
       let slugs = named ? [named] : [];
-      if (isEnabled('hybridKnowledge') && !context?.bounded) {
+      // Hybrid enrichment has its own unscoped embedding/read work. A
+      // caller's signal or deadline must not enter that unbounded path.
+      if (isEnabled('hybridKnowledge') && !context?.signal && !context?.remainingMs) {
         const { hybridKnowledgeSearch } = require('../knowledge-index/hybrid-search');
         const hits = await hybridKnowledgeSearch(question, { limit: 8, sources: staff ? ['species', 'species_tech'] : ['species'] });
         slugs.push(...(hits?.results || []).filter((r) => r.lists >= 2).map((r) => r.sourceId));
