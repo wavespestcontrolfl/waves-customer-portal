@@ -248,12 +248,20 @@ function evaluateDecision({ offer, slot = null, decision, inboundBody, customer,
   return { outcome: offer.kind === 'move_visit' ? 'would_move' : 'would_book', refusals, would_have: would };
 }
 
-/** Every open, unexpired offer a phone holds at `now`, newest first. */
-async function findOpenOffers(dbh, phone, now) {
+/**
+ * The offers that stood when the text ARRIVED (`at` = the inbound row's
+ * created_at), newest first: sent before it, not yet expired, and either still
+ * open or superseded only after it (closed_at is the superseding text's send
+ * time). A replacement offer sent while this text waited for its decision is
+ * not the one the customer answered.
+ */
+async function findOffersAsOf(dbh, phone, at) {
   return dbh('sms_offers')
-    .where({ phone_last10: phone, status: 'open' })
-    .where('expires_at', '>', now)
-    .where('sent_at', '<=', now)
+    .where({ phone_last10: phone })
+    .where('sent_at', '<=', at)
+    .where('expires_at', '>', at)
+    .where((q) => q.where('status', 'open')
+      .orWhere((sup) => sup.where('status', 'superseded').where('closed_at', '>', at)))
     .orderBy('sent_at', 'desc');
 }
 
@@ -298,14 +306,13 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
   const phone = phoneLast10(fromPhone);
   if (!phone || !inboundSmsLogId || !String(inboundBody || '').trim()) return { recorded: false, reason: 'missing_input' };
   try {
-    const rows = await findOpenOffers(dbh, phone, now);
-    if (!rows?.length) return { recorded: false, reason: 'no_open_offer' };
-    const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
-    const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId })
-      .whereIn('sms_offer_id', offers.map((o) => o.id)).first('id');
-    if (already) return { recorded: false, reason: 'already_decided', id: already.id };
     const inbound = await dbh('sms_log').where({ id: inboundSmsLogId }).first('id', 'created_at');
     if (!inbound) return { recorded: false, reason: 'inbound_missing' };
+    const rows = await findOffersAsOf(dbh, phone, inbound.created_at);
+    if (!rows?.length) return { recorded: false, reason: 'no_open_offer' };
+    const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
+    const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id');
+    if (already) return { recorded: false, reason: 'already_decided', id: already.id };
     const who = customer || (offers[0].customer_id
       ? await dbh('customers').where({ id: offers[0].customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS)
       : null);

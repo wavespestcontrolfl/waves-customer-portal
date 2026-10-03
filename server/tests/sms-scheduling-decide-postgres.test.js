@@ -87,6 +87,27 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(await trx('sms_offer_decisions').where({ id: result.id }).first('customer_id')).toEqual({ customer_id: customerId });
   }));
 
+  test('a replacement offer sent after the text arrived is not the one it answered', () => inTrx(async (trx) => {
+    const { customerId, offerId, inboundId } = await seed(trx);
+    // Staff send a new offer at 14:59:30, after the 14:59 reply: the old one is superseded as of then.
+    const [later] = await trx('agent_decisions').insert({ workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer 2' }).returning('id');
+    const closedAt = new Date('2040-03-01T14:59:30Z');
+    await trx('sms_offers').where({ id: offerId }).update({ status: 'superseded', closed_at: closedAt });
+    await trx('sms_offers').insert({
+      agent_decision_id: later.id || later, phone_last10: PHONE.slice(-10), customer_id: customerId, kind: 'book_new', service_key: 'pest_control',
+      slots: JSON.stringify([{ date_label: 'Friday, March 9', window_label: '1:00 PM - 3:00 PM', date: '2040-03-09', start: '13:00', end: '15:00' }]),
+      sent_at: closedAt, expires_at: new Date('2040-03-03T14:59:30Z'), status: 'open',
+    });
+    const customer = await trx('customers').where({ id: customerId }).first();
+    const llm = { dispatch: jest.fn(async () => ({ ok: true, json: { action: 'accept_slot', slot_number: 1, customer_quote: 'Tuesday works', confidence: 'high' } })) };
+    const result = await decide.runShadowDecision({ customer, inboundBody: 'Tuesday works', inboundSmsLogId: inboundId, fromPhone: PHONE, now: NOW, dbh: trx, llm, slotRecheck: async () => ({ ok: true }) });
+    expect(result).toMatchObject({ recorded: true });
+    // Only the offer standing at 14:59 was shown, and the decision is filed against it.
+    expect(llm.dispatch.mock.calls[0][1].text).toContain('Tuesday, March 6');
+    expect(llm.dispatch.mock.calls[0][1].text).not.toContain('Friday, March 9');
+    expect(await trx('sms_offer_decisions').where({ id: result.id }).first('sms_offer_id')).toEqual({ sms_offer_id: offerId });
+  }));
+
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {
     const { customerId, inboundId } = await seed(trx);
     const customer = await trx('customers').where({ id: customerId }).first();

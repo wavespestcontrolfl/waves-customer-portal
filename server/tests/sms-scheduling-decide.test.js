@@ -170,7 +170,7 @@ describe('runShadowDecision', () => {
 
   test('gate on: a phone with no open offer costs one read and no model call', async () => {
     process.env[GATE] = 'true';
-    const builder = { where: () => builder, orderBy: () => Promise.resolve([]) };
+    const builder = { where: () => builder, first: async () => ({ id: 'in-1', created_at: NOW }), orderBy: () => Promise.resolve([]) };
     const dbh = jest.fn(() => builder);
     const llm = { dispatch: jest.fn() };
     await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', now: NOW, dbh, llm }))
