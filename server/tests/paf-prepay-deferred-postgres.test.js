@@ -488,7 +488,10 @@ postgres('annual prepay charged after the first visit', () => {
       const facts = async (id) => require('../services/paf-prepay-release')
         .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
       await perform(f.parentId, f.customerId);
+      // The child's closeout is still running when it reserves.
       await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running' });
       const [a, b] = [await facts(f.childId), await facts(f.parentId)];
       expect([a, b].filter(Boolean)).toHaveLength(1);
     });
@@ -578,6 +581,28 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('a pre-credit total raised above the approval keeps the regular text, even with credit masking it (GitHub Codex #5640 r5)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_invoice_total_cents: 48000 } });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('invoices').where({ id: f.invoiceId }).update({ total: 520, subtotal: 520, credit_applied: 60 });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toBeNull();
+    });
+
+    it('a reservation whose visit no longer qualifies passes to the next held visit (GitHub Codex #5640 r5)', async () => {
+      const f = await deferredAccept();
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      // The announced visit is reopened (no longer completed, stamp kept).
+      await trx('scheduled_services').where({ id: f.parentId }).update({ status: 'confirmed' });
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
+      expect((await jobOf(f)).first_charge_text_visit_id).toBe(f.childId);
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
@@ -628,6 +653,9 @@ postgres('annual prepay charged after the first visit', () => {
         .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
       const f = await deferredAccept();
       await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
+      // The announcing closeout is still running.
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.parentId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running' });
       expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
       expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
       expect(await facts(f.childId)).toBeNull();

@@ -534,6 +534,19 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
+// A first-charge reservation still stands while its visit is still stamped by
+// the year and is either performed or still closing out (a fresh unfinished
+// completion attempt: the text goes out during that closeout).
+async function reservationStands(visitId, termId) {
+  if (await visitStillPerformed(visitId, termId)) return true;
+  const visit = await db('scheduled_services').where({ id: visitId }).first('paf_held_term_id');
+  if (String(visit?.paf_held_term_id || '') !== String(termId)) return false;
+  const staleCutoff = new Date(Date.now() - require('./completion-attempts').STALE_SIDE_EFFECTS_MS);
+  const inFlight = await db('service_completion_attempts').where({ service_id: visitId })
+    .whereIn('status', UNFINISHED_COMPLETION_STATUSES).where('updated_at', '>=', staleCutoff).first('id');
+  return !!inFlight;
+}
+
 // The deferred job a visit belongs to (its own or its series parent's
 // estimate), while that job still waits for the first visit.
 async function awaitingDeferredJobForVisit(svc, conn) {
@@ -618,6 +631,10 @@ async function announcedAmount(job, svc, conn) {
   // the authorized base would exceed the ceiling the sweep enforces (it falls
   // to the pay link): no charge-now text for either (GitHub Codex #5640 r3).
   if (currentDueCents <= 0 || (Number.isInteger(job.authorized_base_cents) && currentDueCents > job.authorized_base_cents)) return null;
+  // …and the pre-credit bill within the approved total, the cap the charge
+  // enforces before any credit (GitHub Codex #5640 r5).
+  if (Number.isInteger(job.authorized_invoice_total_cents)
+    && Math.round(Number(invoice.total) * 100) > job.authorized_invoice_total_cents) return null;
   let creditLowers = Number(invoice.credit_applied) > 0
     || (Number.isInteger(job.authorized_base_cents) && currentDueCents !== job.authorized_base_cents);
   if (await credit.autoApplyWouldApply(invoice, conn)) {
@@ -654,8 +671,15 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     const method = await autoChargeMethod(job, svc.customer_id, conn);
     const amount = method ? await announcedAmount(job, svc, conn) : null;
     if (!amount) return null;
+    // A reservation whose visit no longer qualifies (reopened, cancelled,
+    // re-closed not performed, its stamp cleared) passes to this visit
+    // (GitHub Codex #5640 r5); a standing one blocks.
+    const holder = job.first_charge_text_visit_id ? String(job.first_charge_text_visit_id) : null;
+    const replaceable = holder && holder !== String(svc.id) && !(await reservationStands(holder, term.id));
+    if (holder && holder !== String(svc.id) && !replaceable) return null;
+    const expected = replaceable ? holder : String(svc.id);
     const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
-      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);
+      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [expected, expected]), conn);
     if (!reserved) return null;
     const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
     return { amount, methodLine: bank ? 'saved bank account' : 'card on file' };
