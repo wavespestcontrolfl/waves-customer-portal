@@ -351,6 +351,9 @@ const EVIDENCE_BACKFILL_KEYS = {
   // enforced by the reader (commercialSuiteSizeStampIsFresh), and the
   // newest sourced resolution is always the one to keep.
   _commercialSuiteSize: 'TRUE',
+  // Same: the newest Places answer replaces a missing or aged-out one
+  // (freshness is the reader's: businessIdentityIsFresh, 30 days).
+  _businessIdentity: 'TRUE',
 };
 
 async function attachEvidenceToCachedLookup(address, key, value) {
@@ -388,6 +391,12 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
 
 async function attachCommercialSuiteSizeToCachedLookup(address, stamp) {
   return attachEvidenceToCachedLookup(address, '_commercialSuiteSize', stamp);
+}
+
+// The Places business-identity stamp (GATE_LOOKUP_BUSINESS_IDENTITY), kept on
+// the cached record like the suite-size stamp so a cache hit reuses it.
+async function attachBusinessIdentityToCachedLookup(address, identity) {
+  return attachEvidenceToCachedLookup(address, '_businessIdentity', identity);
 }
 
 // ── Attempt lifecycle (owner ruling 2026-08-11) ─────────────────
@@ -699,6 +708,7 @@ module.exports = {
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
   attachCommercialSuiteSizeToCachedLookup,
+  attachBusinessIdentityToCachedLookup,
   saveLookup,
   markLookupAttempt,
   claimLiveRefresh,
