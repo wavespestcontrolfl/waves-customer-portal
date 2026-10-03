@@ -567,11 +567,12 @@ postgres('annual prepay charged after the first visit', () => {
       expect(facts).toBeNull();
     });
 
-    it('the payer is checked against the visit being completed (GitHub Codex #5640 r3)', async () => {
+    it('the payer is checked at account scope, as the sweep resolves a deferred year (GitHub Codex #5640 r6)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
       const payer = require('../services/payer');
-      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === f.childId ? 7 : null }));
+      // An account payer; the held visit itself is self-pay.
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
       try {
         const facts = await require('../services/paf-prepay-release')
           .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.childId }).first(), trx);
@@ -601,6 +602,35 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
       expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
       expect((await jobOf(f)).first_charge_text_visit_id).toBe(f.childId);
+    });
+
+    it('the customer-level Auto Pay switch off keeps the regular text (GitHub Codex #5640 r6)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('customers').where({ id: f.customerId }).update({ autopay_enabled: false });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toBeNull();
+    });
+
+    it('a card surcharge in the acknowledged total is announced as a ceiling (GitHub Codex #5640 r6)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_total_cents: 49440, authorized_base_cents: 48000 } });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toMatchObject({ amount: 'up to $494.40' });
+    });
+
+    it('a holder whose text was definitively rejected passes the reservation on (GitHub Codex #5640 r6)', async () => {
+      const f = await deferredAccept();
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await perform(f.parentId, f.customerId);
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      await trx('service_records').where({ scheduled_service_id: f.parentId })
+        .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', completionSmsStatus: 'failed' }) });
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
     });
 
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {

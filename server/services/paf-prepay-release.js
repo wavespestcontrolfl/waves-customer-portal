@@ -538,6 +538,11 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
 // the year and is either performed or still closing out (a fresh unfinished
 // completion attempt: the text goes out during that closeout).
 async function reservationStands(visitId, termId) {
+  // A holder whose completion text was definitively rejected announced
+  // nothing: its reservation passes on (GitHub Codex #5640 r6).
+  const record = await db('service_records').where({ scheduled_service_id: visitId })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('structured_notes');
+  if (String(parseData(record?.structured_notes)?.completionSmsStatus || '') === 'failed') return false;
   if (await visitStillPerformed(visitId, termId)) return true;
   const visit = await db('scheduled_services').where({ id: visitId }).first('paf_held_term_id');
   if (String(visit?.paf_held_term_id || '') !== String(termId)) return false;
@@ -591,6 +596,9 @@ async function autoChargeMethod(job, customerId, conn) {
       ? (await conn('payment_methods').where({ customer_id: customerId, stripe_payment_method_id: job.stripe_payment_method_id }).first('id'))?.id
       : null);
   if (!boundId) return null;
+  // The customer-level Auto Pay switch the charge's guard reads
+  // (customerOnAutopay), not only the method walk (GitHub Codex #5640 r6).
+  if (!(await Eligibility.customerOnAutopay(customer, { db: conn, failClosed: true }))) return null;
   const method = await Eligibility.getChargeableAutopayMethod(customer, conn, { rethrow: true });
   if (!method || String(method.id) !== String(boundId)) return null;
   // The authorization the sweep requires before charging (GitHub Codex #5640
@@ -617,9 +625,9 @@ async function announcedAmount(job, svc, conn) {
   // one the sweep's own payer check would resolve.
   if (invoice.payer_id) return null;
   const livePayer = await require('./payer').resolveForInvoice({
-    // The visit producing this text is the one the release scopes the payer
-    // to (GitHub Codex #5640 r3).
-    database: conn, customerId: invoice.customer_id, scheduledServiceId: svc.id, throwOnError: true,
+    // Account scope, as the sweep resolves a deferred year's payer (it is the
+    // account's bill; GitHub Codex #5640 r6).
+    database: conn, customerId: invoice.customer_id, scheduledServiceId: null, throwOnError: true,
   });
   if (livePayer?.payerId) return null;
   const credit = require('./customer-credit');
@@ -635,8 +643,11 @@ async function announcedAmount(job, svc, conn) {
   // enforces before any credit (GitHub Codex #5640 r5).
   if (Number.isInteger(job.authorized_invoice_total_cents)
     && Math.round(Number(invoice.total) * 100) > job.authorized_invoice_total_cents) return null;
+  // A card surcharge in the acknowledged total is a ceiling too: the charge
+  // prices the method itself and can come out lower (GitHub Codex #5640 r6).
   let creditLowers = Number(invoice.credit_applied) > 0
-    || (Number.isInteger(job.authorized_base_cents) && currentDueCents !== job.authorized_base_cents);
+    || (Number.isInteger(job.authorized_base_cents) && currentDueCents !== job.authorized_base_cents)
+    || (Number.isInteger(job.authorized_base_cents) && job.authorized_total_cents !== job.authorized_base_cents);
   if (await credit.autoApplyWouldApply(invoice, conn)) {
     const balance = await credit.getBalance(invoice.customer_id, conn);
     if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
