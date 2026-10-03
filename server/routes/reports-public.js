@@ -2224,7 +2224,7 @@ router.get('/:token', async (req, res, next) => {
       const tzSignature = await treatmentZonePdfSignature(service, db);
       const smSignature = await stationMapPdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
-      const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
+      const tnSignature = await treatmentNarrativePdfSignature(service.id, db, { serviceLine: service.service_line || detectServiceLine(service.service_type) });
       const apSignature = await applicatorIdentityPdfSignature(service.id, db);
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always

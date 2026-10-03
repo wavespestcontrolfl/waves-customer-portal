@@ -37,6 +37,19 @@
  * Nothing here writes.
  */
 
+// This explicitly selected mode reads only an operator-supplied local evidence
+// file. It must run before loading DB, gates or integrations.
+const evidenceArg = process.argv.find((arg) => arg.startsWith('--build-evidence='));
+if (evidenceArg) {
+  try {
+    const { buildEvidence, formatBuildEvidence } = require('./report-evidence');
+    const report = buildEvidence(JSON.parse(require('node:fs').readFileSync(evidenceArg.slice('--build-evidence='.length), 'utf8')));
+    const output = process.argv.includes('--json') ? JSON.stringify(report, null, 2) : formatBuildEvidence(report);
+    process.stdout.write(`${output}\n`);
+    process.exitCode = 0;
+  } catch (err) { console.error(`agents-report: ${err.message}`); process.exitCode = 2; }
+} else {
+
 if (!process.env.DATABASE_PUBLIC_URL) {
   console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/agents-report.js');
   process.exit(2);
@@ -225,3 +238,4 @@ async function main() {
 main()
   .then(() => db.destroy())
   .catch((err) => { console.error(`agents-report failed: ${err.message}`); return db.destroy().finally(() => process.exit(1)); });
+}

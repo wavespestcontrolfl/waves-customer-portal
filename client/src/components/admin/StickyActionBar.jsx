@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "../ui/cn";
 import { callViaBridge } from "./CallBridgeLink";
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 
 /**
  * Persistent bottom action bar for mobile admin detail views.
@@ -123,6 +124,8 @@ export function customerEstimateHref(customer) {
 }
 
 export function CustomerActionBar({ customer, standalone }) {
+  // The call bridge is owner-only: a technician login gets no Call action.
+  const canCall = useCanAccessCalls();
   const phone = customer?.phone;
   const customerId = customer?.id || customer?.customerId;
 
@@ -151,13 +154,13 @@ export function CustomerActionBar({ customer, standalone }) {
             : undefined,
           disabled: !phone,
         },
-        {
+        ...(canCall ? [{
           key: "call",
           icon: Phone,
           label: "Call",
           onClick: phone ? () => callViaBridge(phone, fullName, undefined, customerId) : undefined,
           disabled: !phone,
-        },
+        }] : []),
         {
           key: "estimate",
           icon: FilePlus2,

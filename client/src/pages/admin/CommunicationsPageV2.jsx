@@ -113,6 +113,7 @@ import {
   Select,
   cn,
 } from "../../components/ui";
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useSmsDraft from "../../hooks/useSmsDraft";
@@ -246,22 +247,25 @@ function findKnownWavesNumber(value) {
 }
 
 const TABS = [
+  // Automations and Triage are owner-only (technician allow-list, 2026-10-02):
+  // their notification-events / triage routes are admin-only server-side.
   {
     key: "events",
     label: "Automations",
     Icon: Zap,
+    adminOnly: true,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "email", label: "Email", Icon: Mail, adminOnly: true },
   // Calls are owner-only (2026-10-02): a technician login gets no customer
   // calls — no call list, audio or transcript. The server refuses the reads.
   { key: "calls", label: "Calls", Icon: PhoneCall, adminOnly: true },
-  { key: "triage", label: "Triage", Icon: Inbox },
+  { key: "triage", label: "Triage", Icon: Inbox, adminOnly: true },
   // Open promises across calls (call_commitments) — staff-wide.
   { key: "owed", label: "Promises", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
-  // not day-to-day comms work. Events/SMS/Triage/Promises stay staff-wide.
+  // not day-to-day comms work. SMS and Promises stay staff-wide.
   {
     key: "templates",
     label: "Templates",
@@ -514,6 +518,8 @@ function latestInboundContext(messages) {
 }
 
 function SmsLogItemV2({ msg: m, onReply }) {
+  // "Call back" rides the owner-only call bridge: a technician gets no button.
+  const canCall = useCanAccessCalls();
   const [expanded, setExpanded] = useState(false);
   const isLong = m.body && m.body.length > 80;
   const hasMedia = Array.isArray(m.media) && m.media.length > 0;
@@ -582,7 +588,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
       </div>
       {expanded && (
         <div className="mt-2 ml-7 flex flex-wrap gap-2">
-          {contactPhone && (
+          {contactPhone && canCall && (
             <Button
               size="sm"
               variant="secondary"
@@ -633,6 +639,8 @@ function ConversationViewV2({
   onOpenProfile,
   onMarkSpam,
 }) {
+  // "Call back" rides the owner-only call bridge: a technician gets no button.
+  const canCall = useCanAccessCalls();
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
@@ -685,15 +693,17 @@ function ConversationViewV2({
               Mark spam
             </Button>
           ) : null}
-          <Button
-            size="sm"
-            variant="secondary"
-            className="flex-1 md:flex-none"
-            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, thread.linkedCustomerId || thread.customerId)}
-          >
-            <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
-            Call back
-          </Button>{" "}
+          {canCall && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, thread.linkedCustomerId || thread.customerId)}
+            >
+              <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Call back
+            </Button>
+          )}{" "}
           <Button
             size="sm"
             variant="primary"

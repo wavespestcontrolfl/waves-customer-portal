@@ -2168,10 +2168,16 @@ describe('voice relay eval — the harness', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const { todayEtaText } = require('../services/voice-agent/relay-visit');
     const live = await todayEtaText('never-read', { tier: 'redacted' });
+    // A recognised contact (own number on a secondary slot) is also told to
+    // save a follow-up; a looked-up third party is not.
+    const recognised = await todayEtaText('never-read', { tier: 'redacted', recognisedContact: true });
     const scenarios = replay.loadFixture(FIXTURE_PATH).scenarios;
-    expect(scenarios.find((s) => s.id === 'eta-recognised-redacted').fixtures.toolResponses.get_today_eta).toBe(live);
+    expect(scenarios.find((s) => s.id === 'eta-recognised-redacted').fixtures.toolResponses.get_today_eta).toBe(recognised);
+    expect(scenarios.find((s) => s.id === 'eta-recognised-redacted').caller.context.block).not.toMatch(/First name/);
     expect(scenarios.find((s) => s.id === 'eta-third-party').fixtures.toolResponses.get_today_eta[0]).toEqual({ when: { customer_ref: 'C1' }, text: live });
     expect(live).not.toMatch(/capture|follow up/i);
+    expect(recognised.startsWith(live)).toBe(true);
+    expect(recognised).toMatch(/capture_lead/);
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 

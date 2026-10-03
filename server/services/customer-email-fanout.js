@@ -27,6 +27,9 @@
  *     (invoice/balance recipients); only rewritten when it still equals the
  *     OLD email, so a deliberately different billing contact is never
  *     touched.
+ *   - email_messages provider-block retries — a scheduled retry re-sends the
+ *     stored copy to its recipient snapshot, so one still addressed to the
+ *     OLD email is stopped (not retargeted) by the provider-retry rail.
  *   - triage_items (email_unverified / email_invalid) — the read-back card
  *     asks "which spelling is right?"; an operator saving a DIFFERENT email
  *     on the customer record is the authoritative answer, so the card
@@ -83,7 +86,7 @@ function emailKey(value) {
  *            edit", "Intelligence Bar update_customer")
  * @param {object} conn — knex connection or transaction
  * @returns counts { leads, estimates, newsletter, automations, templateRuns,
- *   promoters, billingPrefs, contracts, bookingIntents, reviewCards } — all
+ *   promoters, billingPrefs, contracts, bookingIntents, emailRetries, reviewCards } — all
  *   zero when the email did not actually change or was removed. When a
  *   PENDING (double-opt-in) subscriber row was moved to the corrected
  *   address, the result also carries `pendingConfirmation` ({ id, email,
@@ -207,7 +210,7 @@ async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now
 async function propagateCustomerEmailChange({
   before, after, source = 'customer edit', reviewReasonCodes = EMAIL_REVIEW_REASON_CODES,
 }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
   let heldNewsletterResume = null;
   const customerId = (after && after.id) || (before && before.id);
@@ -483,6 +486,13 @@ async function propagateCustomerEmailChange({
       .whereRaw('LOWER(email) = ?', [oldEmail])
       .whereNull('converted_at')
       .update({ email: newEmail, updated_at: now });
+
+    // Provider-block retries (email_messages) re-send the STORED copy to its
+    // recipient snapshot, so a scheduled retry would keep mailing the old
+    // address after this correction. The rail stops them (never retargets:
+    // the owning senders re-issue to the corrected address themselves).
+    counts.emailRetries += await require('./transactional-email-provider-retry')
+      .stopRetriesForReplacedEmail(conn, { customerId, oldEmail, now });
 
     // newsletter_subscribers.email is UNIQUE. Check-first instead of
     // update-and-catch: a caught unique violation would poison the caller's
@@ -1035,7 +1045,7 @@ async function propagateCustomerEmailChange({
 
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).
-    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
+    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s), ${counts.emailRetries} email retry(ies) stopped; resolved ${counts.reviewCards} email review card(s)`);
   }
   // One DOI, never two (Codex #3084 r5): if the customer publicly
   // subscribed while the call's newsletter was held, the moved pending row's

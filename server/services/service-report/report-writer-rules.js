@@ -341,6 +341,64 @@ const DURATION_PHRASE_RE = new RegExp(
   + `|\\b(?:(?:over|in|during|for|within)\\s+)?the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
+// Lawn model copy under GATE_LAWN_REPORT_COPY_V6 (P15) states NO result
+// timing: the report's "What to expect" carries it in owner-approved words.
+// CLOSED WORLD on calendar language, not a list of forward phrasings (those
+// never converge): every time-unit word ("days", "a week", "this week",
+// "months", "weekend", and a frequency such as "every week": telling the
+// schedule of the work from the pace of a result needs meaning a pattern
+// does not have) fails unless it is plainly past ("... before the visit",
+// "... ago", "the last two weeks");
+// every weekday name and month-day date fails (the narrative never dates a
+// visit either, owner 2026-09-28); plus the writer-rules forward screen and
+// the number-free words the lawn prompts name. "today", "peak season" and
+// "next visit" pass.
+const LAWN_TIME_UNIT_RE = /\b(?:hours?|days?|weeks?|weekends?|fortnights?|months?|years?)\b/gi;
+const PAST_AFTER_RE = /^\s+(?:before|ago|earlier|prior|leading\s+up\s+to)\b/i;
+// "the last two weeks" is history; the verb "last" ("will last weeks") is not,
+// so "last" counts only after a determiner.
+const PAST_BEFORE_RE = /(?:\b(?:the|these|those)\s+(?:last|past|previous|prior|preceding)|\b(?:past|previous|preceding))\s+(?:\S+\s+){0,3}$/i;
+const LAWN_WEEKDAY_RE = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b/i;
+const LAWN_MONTH_DAY_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/i;
+const LAWN_NUMERIC_DATE_RE = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/;
+// A result tied to the next visit ("should fade by your next visit"); a plan
+// at it ("we will recheck at your next visit") passes.
+const LAWN_BY_NEXT_VISIT_RE = /\b(?:by|until|before)\s+(?:your|the|our)\s+next\s+(?:visit|treatment|application|service|appointment)\b/i;
+const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later|tomorrow|tonight|overnight|immediately|instantly)\b|\bright\s+away\b|\b(?:by|until|before|in|this|next|come)\s+(?:the\s+)?(?:spring|summer|fall|autumn|winter)\b/i;
+// A sentence that is history, not a promise: past or perfect tense and no
+// future or expectation word ("The lawn has been browning for three days",
+// "Three weeks of dry weather stressed the lawn before our visit"). A
+// sentence with a future word still fails on any duration.
+const LAWN_PAST_SENTENCE_RE = /\b(?:has|have|had)\s+been\b|\b(?:was|were|did|ago)\b|\bbefore\s+(?:our|the|this|today'?s)\s+(?:visit|service|treatment)\b/i;
+const LAWN_FUTURE_WORD_RE = /\b(?:will|should|may|might|can|could|would|expect\w*|going\s+to|begin\w*|start\w*|continue\w*|keep\w*|until|soon)\b|'ll\b/i;
+// Watering, irrigation, mowing and rainfall CLAUSES are out of scope: the
+// lawn prompt has the writer preserve the approved watering plan's own timing
+// and name the supplied rainfall window, and rejecting those would fail
+// correct drafts (a backstop errs toward accepting). Only the clause is
+// exempt: "With regular watering, the weeds should fade within two weeks"
+// still fails on its second clause. History is judged per clause too.
+const LAWN_CARE_PLAN_CLAUSE_RE = /water|irrigat|sprinkl|\bmow|\brain/i;
+const LAWN_CLAUSE_SPLIT_RE = /(?<=[.!?])\s+|\n+|[,;:]\s*|\s(?:and|but|so|then)\s/;
+// `carePlanExempt` (default true) is for the technician draft, which repeats
+// the approved watering plan and is read by a person before it saves. The
+// unreviewed "What we applied today" paragraph passes false: it has no
+// watering schedule to repeat, so every clause is screened.
+function lawnResultTimingViolation(text, { carePlanExempt = true } = {}) {
+  for (const clause of String(text || '').split(LAWN_CLAUSE_SPLIT_RE)) {
+    if (!clause || (carePlanExempt && LAWN_CARE_PLAN_CLAUSE_RE.test(clause))) continue;
+    if (TIMEFRAME_RE.test(clause) || LAWN_NAMED_TIMING_RE.test(clause) || LAWN_BY_NEXT_VISIT_RE.test(clause)
+      || LAWN_WEEKDAY_RE.test(clause) || LAWN_MONTH_DAY_RE.test(clause) || LAWN_NUMERIC_DATE_RE.test(clause)) return true;
+    const history = LAWN_PAST_SENTENCE_RE.test(clause) && !LAWN_FUTURE_WORD_RE.test(clause);
+    for (const m of clause.matchAll(LAWN_TIME_UNIT_RE)) {
+      const after = clause.slice(m.index + m[0].length, m.index + m[0].length + 24);
+      const before = clause.slice(Math.max(0, m.index - 30), m.index);
+      if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before) || history) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
 function groundedTimeframePhrases(lines) {
   return [...new Set((Array.isArray(lines) ? lines : [])
     .flatMap((line) => String(line || '').match(DURATION_PHRASE_RE) || [])
@@ -620,6 +678,7 @@ module.exports = {
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
   groundedTimeframePhrases,
+  lawnResultTimingViolation,
   draftDatePhrases,
   writerRulesRejection,
 };
