@@ -347,6 +347,11 @@ describe('what holds a typed visit\'s send', () => {
     await openSheet(request);
     await generate();
     await waitFor(() => expect(sendButton().disabled).toBe(false));
+    // The completion tells the server the trace is one this report never
+    // shows: its stamp is still checked, but it sets no outdoor wait.
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).toMatchObject({ traceSeen: '2026-10-02T14:00:00Z', traceShown: false });
   });
 });
 

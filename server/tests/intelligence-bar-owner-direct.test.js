@@ -178,7 +178,7 @@ describe('which writes skip the card', () => {
   });
 
   test('update_customer skips the card only for name, phone, address, source and note fields', () => {
-    const run = updates => OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates });
+    const run = updates => OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates }, { notes_replaced: { before: null } });
     expect(run({ first_name: 'Jay' })).toBe(true);
     expect(run({ phone: '9415550100', notes: 'gate code moved' })).toBe(true);
     expect(run({ lead_source: 'Referral' })).toBe(true);
@@ -377,5 +377,69 @@ describe('reads for the owner login', () => {
   test('a bad record id on a read still refuses', async () => {
     expect(await Context.prepareReadInput({ customer_id: 'nope' }, direct(), { toolName: 'get_customer_detail', schema: { properties: { customer_id: {} } } }))
       .toMatchObject({ code: 'invalid_target' });
+  });
+});
+
+describe('owner-direct limits (owner ruling 2026-10-02)', () => {
+  const call = (name, input = {}) => ({ type: 'tool_use', name, input });
+  const lead = id => call('update_lead_status', { lead_id: id, new_status: 'lost' });
+
+  test('two same-tool direct edits are allowed; a third in the request hits the cap', () => {
+    const committed = new Map();
+    OwnerDirect.recordDirectCommit(committed, 'update_lead_status');
+    OwnerDirect.recordDirectCommit(committed, 'update_lead_status');
+    expect(OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([lead(LEAD)])).has('update_lead_status')).toBe(true);
+    const one = new Map([['update_lead_status', 1]]);
+    expect(OwnerDirect.cappedTools(one, OwnerDirect.messageDirectPlan([lead(LEAD)])).has('update_lead_status')).toBe(false);
+    // Two in one message from zero: neither is capped (their own commits never count against each other).
+    expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan([lead(LEAD), lead(LEAD_TWIN)])).size).toBe(0);
+  });
+
+  test('three eligible calls in one message all hit the cap; carded-anyway, invalid and other-tool calls are not counted', () => {
+    const plan = OwnerDirect.messageDirectPlan([lead(LEAD), lead(LEAD_TWIN), lead(MISSING),
+      call('update_customer', { customer_id: A, updates: { email: 'x@example.com' } }),
+      call('update_lead_status', { lead_id: LEAD, lead_name: 'Fixture' }), call('send_sms', { customer_id: A })]);
+    expect(plan.get('update_lead_status')).toBe(3);
+    expect(plan.has('update_customer')).toBe(false);
+    expect(plan.has('send_sms')).toBe(false);
+    expect(OwnerDirect.cappedTools(new Map(), plan).has('update_lead_status')).toBe(true);
+    const validOnly = OwnerDirect.messageDirectPlan([lead(LEAD), lead(LEAD_TWIN), lead('bad')], t => t.input.lead_id !== 'bad');
+    expect(OwnerDirect.cappedTools(new Map(), validOnly).has('update_lead_status')).toBe(false);
+    expect(OwnerDirect.DIRECT_CAP).toBe(3);
+    expect(OwnerDirect.BULK_LIMIT_RESULT.code).toBe('owner_direct_bulk_limit');
+  });
+
+  const seedDb = (rows, { fail = false } = {}) => () => {
+    const q = { where: () => q, whereNotNull: () => q, whereIn: () => q, whereRaw: () => q,
+      select: async () => { if (fail) throw new Error('db down'); return rows; } };
+    return q;
+  };
+
+  test('a resumed task keeps its count; a failed seed read counts as the cap reached; no task starts at zero', async () => {
+    const done = { tool_name: 'update_lead_status', result: { success: true } };
+    const seeded = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([done, done]));
+    // A known failure changed nothing and is not counted; an unknown outcome is.
+    const mixed = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([done, { tool_name: 'update_lead_status', result: { success: false, error: 'stale' } },
+      { tool_name: 'update_lead_status', result: JSON.stringify({ blocked: true }) }, { tool_name: 'update_customer', result: null }]));
+    expect(mixed.get('update_lead_status')).toBe(1);
+    expect(mixed.get('update_customer')).toBe(1);
+    expect(OwnerDirect.cappedTools(seeded, OwnerDirect.messageDirectPlan([lead(LEAD)])).has('update_lead_status')).toBe(true);
+    const failed = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([], { fail: true }));
+    expect(OwnerDirect.cappedTools(failed, OwnerDirect.messageDirectPlan([call('update_customer', { customer_id: A, updates: { phone: '+19415550100' } })])).has('update_customer')).toBe(true);
+    expect((await OwnerDirect.seedDirectCounts(null)).size).toBe(0);
+  });
+
+  test('a notes edit is direct only when the proposal read empty notes', () => {
+    const input = { customer_id: A, updates: { notes: 'Dog in back yard' } };
+    expect(OwnerDirect.executesWithoutCard('update_customer', input, { notes_replaced: { before: null } })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', input, { notes_replaced: { before: 'Gate 1234, call ahead' } })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', input, {})).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', input)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates: { phone: '+19415550100' } })).toBe(true);
+  });
+
+  test('the owner prompt states both limits', () => {
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).toMatch(/notes REPLACE the existing notes/);
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).toMatch(/Three or more edits with the same tool in one request are refused as a set/);
   });
 });
