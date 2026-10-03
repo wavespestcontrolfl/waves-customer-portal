@@ -53,22 +53,44 @@ function dedupeKeyFor(phrase) {
   return `techsuggest:v1:${slug}`;
 }
 
-// Why a phrase cannot be a topic, or null.
-function phraseProblem(phrase) {
+// A phrase that places a topic at someone's home or with someone ("ants at
+// the wood home", "termites at smith's house", "roaches for mr jones"): a
+// topic names a pest or a problem, never whose place it is. Words that make a
+// building, not a person, stand ("the pool house", "the guest house").
+const PLACE_WORDS = 'home|house|residence|place|property|yard|apartment|condo|unit|family';
+const STRUCTURE_WORDS = new Set(['pool', 'guest', 'dog', 'tree', 'green', 'club', 'boat', 'bird', 'farm', 'beach', 'lake', 'ware', 'bath', 'out', 'hot', 'light', 'school', 'mobile', 'manufactured', 'model', 'town', 'open', 'new', 'old', 'my', 'our', 'your', 'their', 'his', 'her']);
+const PLACE_CONTEXT_RE = new RegExp(`\\b(?:at|for|near|by|from|behind|outside|inside|around)\\s+(?:the\\s+|a\\s+)?((?:[a-z]+\\s+){0,2}?[a-z]+)(?:['’]s)?\\s+(?:${PLACE_WORDS})\\b`, 'i');
+const POSSESSIVE_RE = new RegExp(`\\b[a-z]+['’]s\\s+(?:${PLACE_WORDS})\\b`, 'i');
+const TITLE_RE = /\b(?:mr|mrs|ms|miss|dr)\b\.?\s+[a-z]+/i;
+function personContext(text) {
+  const place = PLACE_CONTEXT_RE.exec(text);
+  if (place && !place[1].split(/\s+/).every((word) => STRUCTURE_WORDS.has(word.toLowerCase()))) return true;
+  return POSSESSIVE_RE.test(text) || TITLE_RE.test(text);
+}
+
+// Why a phrase cannot be a topic, or null. `typed` is the phrase as the
+// person typed it.
+function phraseProblem(phrase, typed = phrase) {
   const { searchTerms } = require('./report-blog-post');
   if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !searchTerms(phrase).length) return 'not_a_topic';
   const { isTransactionalQuery } = require('../content/scoring-config');
   if (isTransactionalQuery(phrase)) return 'not_a_topic';
   const { geoBlockReason } = require('../content/topic-targeting-gate');
   if (geoBlockReason(phrase, { allowStatewide: true })) return 'not_a_topic';
-  // Personal data the redactor finds (a phone, an email, an address), or a
-  // phrase it is unsure of (confidence below high; pre-push P1 on
-  // 1aaeaa36ab). A name is the site-words rule's to refuse (see
-  // suggestReportBlogPost): the redactor finds names by their capitals, so it
-  // misses a lowercase one and reads a capitalized topic as one.
+  // Personal data, read in the words as typed as well as normalized (the
+  // redactor finds a name by its capitals: "ants at Summer Wood home"), and
+  // any read it is unsure of. A capitalized topic ("Standing Water") can read
+  // as a name and is refused with it: a suggestion publishes with no approval
+  // step, so a false name costs far less than a real one (pre-push P1s on
+  // 1aaeaa36ab and d1f230dfa2).
   const { redact } = require('../content/pii-redactor');
-  const { findings = [], confidence } = redact(phrase);
-  if (findings.length || confidence !== 'high') return 'not_a_topic';
+  for (const text of new Set([String(typed), phrase])) {
+    const { findings = [], confidence } = redact(text);
+    if (findings.length || confidence !== 'high') return 'not_a_topic';
+  }
+  // A name in lowercase, or one made of ordinary words, still reads as a
+  // person by its place ("at the wood home", "smith's house", "mr jones").
+  if (personContext(phrase)) return 'not_a_topic';
   return null;
 }
 
@@ -110,13 +132,12 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // Object]" or a comma list (GitHub Codex P2 on 45144528b8).
   if (typeof raw !== 'string') return { error: 'not_a_topic' };
   const phrase = normalizePhrase(raw);
-  const problem = phraseProblem(phrase);
+  const problem = phraseProblem(phrase, raw);
   if (problem) return { error: problem };
   const { searchReportBlogPosts, wordsOnTheSite } = require('./report-blog-post');
-  // Every word must be one the site's live posts already use, so a name (in
-  // any case: "ants for John", "ants at john smith home") or a stray word
-  // never becomes a published topic, and a capitalized topic ("Standing
-  // Water") is not mistaken for a name (GitHub Codex P1 on 45144528b8).
+  // Every word must be one the site's live posts already use, so a name the
+  // checks above miss ("ants for john") or a stray word never becomes a
+  // published topic (GitHub Codex P1 on 45144528b8).
   const { known } = await wordsOnTheSite(knex, phrase);
   if (!known.length || !known.every(Boolean)) return { error: 'not_a_topic' };
   if ((await searchReportBlogPosts(knex, phrase)).some((post) => post.exact)) return { status: 'covered' };

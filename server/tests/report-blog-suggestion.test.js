@@ -152,8 +152,8 @@ describe('suggestionRow', () => {
 });
 
 describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
-  test('a name is refused in any case: no live post uses its words, and nothing is written (GitHub Codex P1 on 45144528b8)', async () => {
-    for (const phrase of ['ants for John', 'ants at john smith home', 'ants at John Smith home']) {
+  test('a name is refused in any case, by its capitals, its place or its words, and nothing is written (GitHub Codex P1 on 45144528b8; pre-push P1 on d1f230dfa2)', async () => {
+    for (const phrase of ['ants for John', 'ants at john smith home', 'ants at John Smith home', 'ants at Summer Wood home', 'ants at summer wood home']) {
       const knex = queueKnex();
       expect(await suggestReportBlogPost(knex, { phrase, actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
       expect(queueWrites(knex)).toEqual([]);
@@ -164,8 +164,23 @@ describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
     expect(phraseProblem(normalizePhrase('ants 12345678'))).toBe('not_a_topic');
   });
 
-  test('a capitalized topic whose words are site words is taken, not mistaken for a name', async () => {
-    expect(await suggestReportBlogPost(queueKnex(), { phrase: 'Standing Water', actorId: 'tech-1' })).toEqual({ status: 'queued' });
+  test('a capitalized topic can read as a name and is refused with it; written as a sentence it is taken', async () => {
+    expect(await suggestReportBlogPost(queueKnex(), { phrase: 'Standing Water', actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
+    expect(await suggestReportBlogPost(queueKnex(), { phrase: 'Standing water', actorId: 'tech-1' })).toEqual({ status: 'queued' });
+  });
+
+  test.each([
+    ['ants at the smith house', 'not_a_topic'],
+    ["termites at smith's house", 'not_a_topic'],
+    ['roaches for mr jones', 'not_a_topic'],
+    ['ants at summer wood home', 'not_a_topic'],
+    ['ants at the pool house', null],
+    ['mosquitoes around the guest house', null],
+    ['ants at home', null],
+    ['termites in my home', null],
+    ['ants near the wood pile', null],
+  ])('a person read by their place: "%s" is %s (pre-push P1 on d1f230dfa2)', (phrase, problem) => {
+    expect(phraseProblem(normalizePhrase(phrase))).toBe(problem);
   });
 
   test('only text is a phrase: an object or a list is refused before anything is read (GitHub Codex P2 on 45144528b8)', async () => {

@@ -310,13 +310,17 @@ async function searchReportBlogPosts(knex, query) {
     const pattern = jsPattern(term);
     return [entry.texts.title, entry.texts.keyword, entry.texts.summary].some((text) => pattern.test(String(text || '')));
   });
+  for (const entry of entries) entry.exact = holdsAll(entry);
+  // A post holding every word of the whole search ranks first, so the eight
+  // shown, and the coverage a suggestion checks, never drop it for newer
+  // posts holding only the first words (pre-push P1 on d1f230dfa2).
   return entries
-    .sort((a, b) => Number(every(b)) - Number(every(a)) || specific(b) - specific(a) || b.placed - a.placed || b.when - a.when)
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || Number(every(b)) - Number(every(a)) || specific(b) - specific(a) || b.placed - a.placed || b.when - a.when)
     .slice(0, MAX_RESULTS)
     // `exact`: the post holds every word. With none exact, the forms say no
     // post covers the search, show these as the closest, and offer to
     // suggest one (owner mockup approval 2026-10-03).
-    .map((entry) => ({ ...entry.post, exact: holdsAll(entry) }));
+    .map((entry) => ({ ...entry.post, exact: entry.exact }));
 }
 
 // The most words a suggestion's site-words read checks (one aggregate each).

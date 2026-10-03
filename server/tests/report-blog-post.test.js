@@ -349,6 +349,15 @@ describe('searchReportBlogPosts', () => {
     expect(Object.fromEntries(posts.map((post) => [post.id, post.exact]))).toEqual({ [four.id]: false, [six.id]: true });
   });
 
+  test('a post holding every word ranks first, ahead of newer ones holding only the first words (pre-push P1 on d1f230dfa2)', async () => {
+    const partial = Array.from({ length: 9 }, (_, i) => registryRow(`aaaaaaaa-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, `Small Black Ants in the Kitchen ${i}`, { published_at: `2026-09-${String(10 + i).padStart(2, '0')}T00:00:00Z` }));
+    const exact = registryRow('aaaaaaaa-0000-4000-8000-000000000199', 'Small Black Ants in the Kitchen After Heavy Rain', { published_at: '2025-01-01T00:00:00Z' });
+    const posts = await searchReportBlogPosts(recordingKnex({ content_registry: [...partial, exact] }), 'small black ants kitchen heavy rain');
+    expect(posts).toHaveLength(8);
+    expect(posts[0]).toMatchObject({ id: exact.id, exact: true });
+    expect(posts.slice(1).every((post) => post.exact === false)).toBe(true);
+  });
+
   test('which words of a phrase the live posts use: every word, in one read (GitHub Codex P1 on 45144528b8)', async () => {
     const knex = recordingKnex({ content_registry: [{ t0: true, t1: false }] });
     expect((await wordsOnTheSite(knex, 'ants for john')).known).toEqual([true, false]);
