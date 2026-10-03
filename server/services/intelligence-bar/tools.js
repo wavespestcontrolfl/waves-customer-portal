@@ -313,6 +313,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
+        customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
@@ -2824,24 +2825,49 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   return `This visit needs a price: "${serviceType}" has no catalog price, and nothing in this customer's billing would invoice it. Ask the user for the visit price and propose the booking again with price${orFee}. Nothing was booked.`;
 }
 
+// Why the customer booked a re-service (scheduled_services.customer_request,
+// migration 20260927100000): the operator's words for it, saved exactly as the
+// Schedule screen's "Customer's words" box saves typed words — trimmed, capped,
+// source 'office' (never a quote; the operator relayed it). Same gate and same
+// two catalog rows as that box (reservice-office-request.js). Returns
+// { text } to stamp, null when no reason was given, or { error } when a reason
+// was given for a visit that cannot carry one — refused rather than dropped,
+// so words the card showed are never silently lost.
+function ibBookingCustomerRequest(rawRequest, catalogRow) {
+  const reserviceOfficeRequest = require('../reservice-office-request');
+  const text = reserviceOfficeRequest.cleanRequestText(rawRequest);
+  if (!text) return null;
+  const { isEnabled } = require('../../config/feature-gates');
+  if (!isEnabled('reserviceOfficeRequest')
+    || !reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
+    return { error: 'customer_request is saved only on a Pest Control Re-Service or Lawn Care Re-Service visit — nothing was booked. Propose the booking again with the reason in notes instead, or without it.' };
+  }
+  return { text };
+}
+
 // Proposal-time twin for the confirm-card route: the same price and billing
 // verdict the executor asks at commit, so the card shows the price the
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest) {
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
   if (booking.error) return { error: booking.error };
   const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
   if (refusal) return { error: refusal };
+  const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
+  if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
   return {
     price: booking.price,
     source: booking.source,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    // The reason exactly as the insert will save it (trimmed, capped), so
+    // the card shows the saved words; null when none was given.
+    customerRequest: request?.text || null,
     listPrice: discount ? Number(booking.pricing.primaryBase) : null,
     discountName: discount?.discountName || null,
     discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
@@ -2934,6 +2960,11 @@ async function createAppointment(input, actionContext = {}) {
   // transaction below, since this read is unlocked.
   const billingRefusal = ibBookingBillingRefusal(customer, service_type, booking.price);
   if (billingRefusal) return { error: billingRefusal };
+  // Why the customer booked (re-service rows only). The catalog row is the
+  // one the price check above just pinned against the card, and the locked
+  // re-read below refuses if it changed, so this verdict holds at the insert.
+  const customerRequest = ibBookingCustomerRequest(input.customer_request, booking.catalogRow);
+  if (customerRequest?.error) return { error: customerRequest.error };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -3054,6 +3085,10 @@ async function createAppointment(input, actionContext = {}) {
       window_start: win.start,
       window_end: windowEnd,
       notes: notes || null,
+      ...(customerRequest ? {
+        customer_request: customerRequest.text,
+        customer_request_source: 'office',
+      } : {}),
       // The catalog link and the price exactly as the Schedule POST stamps
       // them: service_id + key/category snapshots, and for a priced visit
       // estimated_price, the primary line's gross, and the create-invoice

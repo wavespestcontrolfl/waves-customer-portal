@@ -614,6 +614,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -746,6 +757,10 @@ module.exports = {
 //                                  default: gpt-4o-transcribe-diarize
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
 //                                  default: gemini-2.5-flash
+//   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
+//                                  (services/fast-complete-voice-fill.js; goes through
+//                                  call-recording-processor's transcribeWithOpenAI)
+//                                  default: gpt-transcribe (32-clip test 2026-10-03)
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary

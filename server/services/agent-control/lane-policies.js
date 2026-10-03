@@ -146,6 +146,8 @@ const LANE_RUNTIME = {
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  // Speech to text for Fast Complete voice fill: one provider, no stored output (the words live only inside the request).
+  voice_fill_transcription: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   parse_when: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
 
   // ── Voice AI agent ──
@@ -174,6 +176,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // GATE_TS_WATCH_LIST (dark): the T&S sheet's watch-signal read, keys only, shown to the technician and
+  // never to a customer; Gemini -> OpenAI in-request with a hard 20 s bound, a miss shows the sheet no read.
+  ts_watch_signals: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // Owner ruling 2026-09-29: the gated Fable name tie-break (GATE_LAWN_ASSESSMENT_REFEREE, dark). One extra ledger row
   // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
   lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },

@@ -2,6 +2,7 @@ const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOr
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
+const { canonicalStoredPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const router = express.Router();
 const db = require('../models/db');
 const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
@@ -3667,7 +3668,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
       notes: cleanOptionalText(notes),
       companyName: cleanOptionalText(companyName),
-      propertyType: cleanOptionalText(propertyType),
+      propertyType: canonicalStoredPropertyType(cleanOptionalText(propertyType)),
       profileLabel: cleanOptionalText(profileLabel),
       contactRole: normalizeContactRole(contactRole),
     };
@@ -4014,6 +4015,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
         else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
         else if (v === 'address_line2') { updates[v] = normalizeUnitLine(cleanText(req.body[k])) || null; }
+        else if (v === 'property_type') { updates[v] = canonicalStoredPropertyType(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
     }
@@ -4311,6 +4313,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // An edited property type also lands on the primary property row,
+          // in this transaction, so property-scoped readers agree with the
+          // account. Only an ACTUAL change (the editor posts the whole form).
+          if (updates.property_type !== undefined
+            && String(updates.property_type ?? '') !== String(lockedBefore.property_type ?? '')) {
+            await require('../services/customer-properties')
+              .syncPrimaryPropertyType(req.params.id, updates.property_type, trx);
+          }
           // A Bill-To edit that can make a withdrawn combined-visit invoice
           // self-pay again (payer cleared) requeues it through the shared
           // reconciliation, inside this same transaction.

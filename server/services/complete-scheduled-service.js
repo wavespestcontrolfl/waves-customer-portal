@@ -111,6 +111,7 @@ const {
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
+const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -3961,6 +3962,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const treeShrubTechFindingsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
       ? freezeTechFindings(completionInput.body?.treeShrubReview)
       : null;
+    // T&S watch items (GATE_TS_WATCH_LIST): the technician's Seen / Not seen
+    // choices on the visit month's watch list, normalized and frozen the same
+    // way. Tech-facing storage only (no customer copy reads it); gate off or
+    // nothing valid = null = nothing written.
+    const treeShrubWatchItemsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezeWatchItems(completionInput.body?.treeShrubReview, {
+        month: visitWatchMonth(backfillPlan.active ? backfillPlan.serviceDate : svc.scheduled_date),
+      })
+      : null;
     // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
     // is checked against the one link rule (report-blog-post.js) and its
     // title and live URL frozen, so the report shows the post the customer
@@ -6286,6 +6296,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treeShrubCloseoutWarnings,
             } : {}),
             ...(treeShrubTechFindingsFreeze || {}),
+            ...(treeShrubWatchItemsFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,

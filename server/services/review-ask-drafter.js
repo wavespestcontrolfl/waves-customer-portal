@@ -1217,7 +1217,7 @@ function factCheckPolicy(writerProvider) {
   return Object.freeze({ name: policy.name, primary: policy.fallback, fallback: policy.primary });
 }
 
-async function factCheckTechVoice(body, { record, firstName, techName, deadline, writerProvider, serviceDate = null }) {
+async function factCheckTechVoice(body, { record, firstName, techName, deadline, writerProvider, serviceDate = null, out = null }) {
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return "out_of_time";
   const sentences = techVoiceSentences(body);
@@ -1247,6 +1247,13 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
   // A malformed answer is the checker's failure, so its ledger row says so;
   // a well-formed "unsupported" verdict is the checker doing its job.
   if (reject === "fact_check_bad_answer") leg.reject(reject);
+  // The record lines behind each sentence, for the review page (review_ask_drafts).
+  if (out && !reject) {
+    out.sentences = sentences.map((sentence, i) => ({
+      sentence, quotes: Array.isArray(judged[i]?.quotes) ? judged[i].quotes.filter((q) => typeof q === "string") : [],
+      ask_only: judged[i]?.ask_only === true, greeting_only: judged[i]?.greeting_only === true,
+    }));
+  }
   return reject;
 }
 
@@ -1343,14 +1350,15 @@ async function techVoiceAttempt({ system, facts, channel, check, record, priorTo
     return { reject: refused ? String(refused.reason) : "provider_unavailable" };
   }
   const { draft } = accepted;
-  const reject = await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider, serviceDate: check.serviceDate });
+  const cited = {};
+  const reject = await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider, serviceDate: check.serviceDate, out: cited });
   // A draft the fact check refused is a failed writer call on the ledger; an
   // unavailable checker or an exhausted budget says nothing about the draft.
   if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) rejectCall(accepted.legResult, reject);
   if (reject) return { reject };
-  if (!priorTouches.length) return { body: draft.body };
+  if (!priorTouches.length) return { body: draft.body, sentences: cited.sentences };
   const checked = await repeatCheckTechVoice(draft.body, priorTouches, deadline);
-  return checked.reject ? { reject: checked.reject } : { body: draft.body, repeat: checked.repeat };
+  return checked.reject ? { reject: checked.reject } : { body: draft.body, repeat: checked.repeat, sentences: cited.sentences };
 }
 
 // A drafted touch held as a repeat of an earlier one (owner ruling
@@ -1364,9 +1372,9 @@ class HeldTouch extends Error {
   }
 }
 
-async function draftTechVoice({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
-  if (!isEnabled("reviewAskTechVoice")) return null;
-  if (!customer || !customer.id) return null;
+// What the writer made of one touch: { outcome: 'drafted', body, sentences }
+// | { outcome: 'held', body, repeat, sentences } | { outcome: 'fallback', reason }.
+async function techVoiceOutcome({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
   try {
     const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate });
     // The company check reads the FULL name ("Sunset Vacation Rentals"), never
@@ -1399,29 +1407,39 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
     const deadline = Date.now() + TECH_VOICE_BUDGET_MS;
     let note = "";
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const { body, reject, repeat } = await techVoiceAttempt(prompt, note, deadline);
+      const { body, reject, repeat, sentences } = await techVoiceAttempt(prompt, note, deadline);
       // A later touch that repeats an earlier one is held, not redrafted.
       if (repeat) {
         logger.info(`[review-drafter] tech voice held as a repeat (customerId=${customer.id} step=${sequenceStep ?? 0} earlierStep=${repeat.earlierStep})`);
-        throw new HeldTouch({ step: sequenceStep, heldBody: body, ...repeat });
+        return { outcome: "held", body, repeat, sentences };
       }
       if (body) {
         logger.info(`[review-drafter] tech voice accepted (customerId=${customer.id} step=${sequenceStep ?? 0} kind=${stepKind} attempt=${attempt} chars=${body.length})`);
-        return body;
+        return { outcome: "drafted", body, sentences };
       }
       if (["provider_unavailable", "fact_check_unavailable", "repeat_check_unavailable", "repeat_check_bad_answer", "out_of_time"].includes(reject)) {
         logger.warn(`[review-drafter] tech voice: ${reject.replace(/_/g, " ")} (customerId=${customer.id}) — template fallback`);
-        return null;
+        return { outcome: "fallback", reason: reject };
       }
       logger.info(`[review-drafter] tech voice rejected (customerId=${customer.id} step=${sequenceStep ?? 0} attempt=${attempt} reason=${reject})`);
       note = `YOUR PREVIOUS DRAFT WAS REJECTED (${reject.replace(/_/g, " ")}). Write a new one that follows every rule.`;
+      if (attempt === 2) return { outcome: "fallback", reason: reject };
     }
-    return null;
+    return { outcome: "fallback", reason: "no_draft" };
   } catch (err) {
-    if (err instanceof HeldTouch) throw err;
     logger.error(`[review-drafter] tech voice failed (customerId=${customer?.id} errType=${err?.name || "Error"}): ${err.message}`);
-    return null;
+    return { outcome: "fallback", reason: "draft_error" };
   }
+}
+
+async function draftTechVoice(args) {
+  if (!isEnabled("reviewAskTechVoice")) return null;
+  if (!args?.customer?.id) return null;
+  const result = await techVoiceOutcome(args);
+  // Every outcome is recorded for the review page (best effort, never blocks).
+  await require("./review-ask-drafts").recordDraft(args, result);
+  if (result.outcome === "held") throw new HeldTouch({ step: args.sequenceStep, heldBody: result.body, ...result.repeat });
+  return result.outcome === "drafted" ? result.body : null;
 }
 
 const ReviewAskDrafter = {

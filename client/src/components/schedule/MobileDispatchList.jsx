@@ -163,6 +163,31 @@ function headerLabel(dateStr) {
   });
 }
 
+// "~14 min from last stop · ~9 min to next" — straight-line estimates the
+// day route computes (GET /admin/schedule). Absent fields (week view, older
+// payload) render nothing; a missing leg is left out, never shown as 0.
+function DriveLegs({ service }) {
+  const chips = [];
+  if (service.firstStop) chips.push({ key: 'in', text: 'First stop', muted: true });
+  else if (Number.isFinite(service.driveFromPrevMin)) chips.push({ key: 'in', text: `~${service.driveFromPrevMin} min from last stop` });
+  if (service.lastStop) chips.push({ key: 'out', text: 'Last stop', muted: true });
+  else if (Number.isFinite(service.driveToNextMin)) chips.push({ key: 'out', text: `~${service.driveToNextMin} min to next` });
+  if (!chips.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className={'u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 ' + (c.muted ? 'text-ink-tertiary' : 'text-ink-secondary')}
+          style={{ fontSize: 14, padding: '2px 8px' }}
+        >
+          {c.text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
@@ -287,6 +312,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </button>
+        <DriveLegs service={service} />
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
