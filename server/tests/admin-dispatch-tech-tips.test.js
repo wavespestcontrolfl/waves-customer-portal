@@ -57,6 +57,15 @@ beforeEach(() => {
   mockResolveProfile.mockImplementation((...args) => jest.requireActual('../services/service-completion-profiles').resolveCompletionProfileForScheduledService(...args));
 });
 
+// GATE_LAWN_MEASURED_COLD (P36): the nightly-low fetch is the only outside call;
+// it answers null (nothing read) for a visit with no usable coordinates, as the
+// real fetcher does.
+const mockFetchNightlyMinsF = jest.fn();
+jest.mock('../services/service-report/application-conditions', () => ({
+  ...jest.requireActual('../services/service-report/application-conditions'),
+  fetchNightlyMinsF: (...args) => mockFetchNightlyMinsF(...args),
+}));
+
 const fs = require('fs');
 const path = require('path');
 const router = require('../routes/admin-dispatch');
@@ -994,5 +1003,57 @@ describe('default-product reads keep the current technician assignment boundary'
     expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(1);
     expect(result.statusCode).toBe(404);
     expect(result.body).toEqual({ error: 'Service not found' });
+  });
+});
+
+describe('GATE_LAWN_MEASURED_COLD on the tip picker (P36)', () => {
+  const lawn = { ...SERVICE, service_type: 'Lawn Care Treatment', scheduled_date: '2026-10-20' };
+  const nights = (mins) => mins.map((minF, i) => ({ date: `n${i}`, minF }));
+  const lawnIds = (res) => res.body.groups.find((group) => group.id === 'lawn').tips.map((tip) => tip.id);
+  const FIRST = 'lawn_cooler_nights';
+  beforeEach(() => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'lawn_care' });
+    mockFetchNightlyMinsF.mockReset();
+    mockFetchNightlyMinsF.mockImplementation(async ({ latitude, longitude }) => (latitude == null || longitude == null ? null : nights([50, 52, 60, 61, 62, 63, 64])));
+  });
+  afterEach(() => { delete process.env.GATE_LAWN_MEASURED_COLD; });
+
+  test('gate off: no weather call and the October order is what it was', async () => {
+    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls: [] });
+    const off = await invoke({ serviceId: 'svc-1' });
+    expect(mockFetchNightlyMinsF).not.toHaveBeenCalled();
+    expect(lawnIds(off).indexOf(FIRST)).toBeLessThan(10);
+  });
+
+  test('the lookup uses the APPOINTMENT\'s own coordinates (the same stamped-address guard as the report), never the customer table', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    const calls = [];
+    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(mockFetchNightlyMinsF).toHaveBeenCalledTimes(1);
+    expect(mockFetchNightlyMinsF.mock.calls[0][0]).toMatchObject({ latitude: 27.3, longitude: -82.5 });
+    expect(calls).not.toContain('customers');
+    // cold: the lift stays
+    expect(lawnIds(res).indexOf(FIRST)).toBeLessThan(10);
+    expect(source).toMatch(/COALESCE\(scheduled_services\.lat, CASE WHEN NOT \$\{stampedDivergesSql\('scheduled_services', 'customers'\)\} THEN customers\.latitude END\) as latitude/);
+    expect(source).toMatch(/COALESCE\(scheduled_services\.lng, CASE WHEN NOT \$\{stampedDivergesSql\('scheduled_services', 'customers'\)\} THEN customers\.longitude END\) as longitude/);
+  });
+
+  test('a visit at another property with no coordinates of its own is unknown: no lift, the tip stays', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: null, longitude: null }, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(mockFetchNightlyMinsF.mock.calls[0][0]).toMatchObject({ latitude: null, longitude: null });
+    const ids = lawnIds(res);
+    expect(ids).toContain(FIRST);
+    expect(ids.indexOf(FIRST)).toBeGreaterThanOrEqual(10);
+  });
+
+  test('warm nights at the visit\'s property: no lift', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    mockFetchNightlyMinsF.mockResolvedValue(nights([70, 71, 72, 73, 74, 75, 76]));
+    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls: [] });
+    expect(lawnIds(await invoke({ serviceId: 'svc-1' })).indexOf(FIRST)).toBeGreaterThanOrEqual(10);
   });
 });

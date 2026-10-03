@@ -666,10 +666,49 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
       const onSig = await (async () => { const { knex } = withRecords(fixtures(DAY, '2026-07-14'), records()); history.installedForVisit.mockResolvedValue(CUR(DAY, '2026-07-14')); return (await resolveCanonicalLawnRender(svc, knex, { propertyHistoryEnabled: false })).signature; })();
       expect(onSig).not.toBe(off);
     });
+    test('a visit date corrected between cooler-calendar days (same assessment) re-keys the PDF; the same day keeps its key', async () => {
+      on();
+      const stampOn = async (visit) => {
+        const { knex } = withRecords(fixtures(visit, '2026-11-14'), records());
+        history.installedForVisit.mockResolvedValue(CUR(visit, '2026-11-14'));
+        return (await resolveCanonicalLawnRender(service({}, visit), knex, { propertyHistoryEnabled: false })).signature;
+      };
+      const a = await stampOn('2026-11-10');
+      expect(await stampOn('2026-11-10')).toBe(a);
+      expect(await stampOn('2026-11-12')).not.toBe(a);
+      // the gate off ignores the day entirely (byte-identical key)
+      delete process.env.GATE_LAWN_MEASURED_COLD;
+      expect(await stampOn('2026-11-12')).toBe(await stampOn('2026-11-10'));
+    });
+    test('a date correction: the old day\'s entry stays, the new day gets its own, the report follows the new day, and correcting back replays the old one', async () => {
+      on();
+      const recs = records({}, '2026-11-14');
+      const run = (visit) => render(recs, { opts: { lawnMeasuredCold: true }, day: visit, assessDay: '2026-11-14', svc: service(recs['svc-cur'].structured_notes, visit) });
+      conditions.fetchNightlyMinsF.mockResolvedValueOnce(COLD);
+      const first = await run('2026-11-10');
+      expect(colorCard(first.data).customerExplanation).toBe(DIP);
+      const entryA = JSON.stringify(recs['svc-cur'].structured_notes.lawnMeasuredCold['2026-11-10']);
+
+      // the correction asks a new question (the nights before Nov 12) and the answer is warm
+      conditions.fetchNightlyMinsF.mockResolvedValueOnce(WARM);
+      const corrected = await run('2026-11-12');
+      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(2);
+      expect(conditions.fetchNightlyMinsF.mock.calls[1][0].dates[6]).toBe('2026-11-11');
+      expect(colorCard(corrected.data).seasonal).toBeUndefined();
+      const map = recs['svc-cur'].structured_notes.lawnMeasuredCold;
+      expect(Object.keys(map).sort()).toEqual(['2026-11-10', '2026-11-12']);
+      expect(map['2026-11-12'].met).toBe(false);
+      expect(JSON.stringify(map['2026-11-10'])).toBe(entryA);
+
+      // corrected back: the old entry replays, no new weather call
+      const back = await run('2026-11-10');
+      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(2);
+      expect(colorCard(back.data).customerExplanation).toBe(DIP);
+    });
     test('the tech-tips route ranks by the visit\'s scheduled day', () => {
       const src = read('routes/admin-dispatch.js');
       expect(src).toMatch(/const visitDay = dateOnlyString\(svc\.scheduled_date\) \|\| null;/);
-      expect(src).toMatch(/readMeasuredCold\(\{ latitude: cust\.latitude, longitude: cust\.longitude, visitDay \}\)/);
+      expect(src).toMatch(/readMeasuredCold\(\{ latitude: where\.latitude, longitude: where\.longitude, visitDay \}\)/);
       expect(src).toMatch(/measuredColdLiftApplies\(visitDay\)/);
     });
   });

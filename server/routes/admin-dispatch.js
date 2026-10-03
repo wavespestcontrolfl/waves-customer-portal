@@ -755,10 +755,20 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       measuredCold = null;
       try {
         const { readMeasuredCold } = require('../services/service-report/lawn-measured-cold');
-        const cust = svc.customer_id
-          ? await db('customers').where({ id: svc.customer_id }).first('latitude', 'longitude')
-          : null;
-        const read = cust ? await readMeasuredCold({ latitude: cust.latitude, longitude: cust.longitude, visitDay }) : null;
+        // The APPOINTMENT's own coordinates, with the same address-divergence
+        // guard the report builder uses (pdf-queue / reports-public): the
+        // appointment's stamped lat/lng first, the customer's home only when the
+        // stamped service address does not diverge from it. A visit at another
+        // property with no coordinates of its own is unknown (null = no lift),
+        // never the home's weather.
+        const where = await db('scheduled_services')
+          .leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
+          .where({ 'scheduled_services.id': svc.id })
+          .first(
+            db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as latitude`),
+            db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as longitude`),
+          );
+        const read = where ? await readMeasuredCold({ latitude: where.latitude, longitude: where.longitude, visitDay }) : null;
         measuredCold = read ? read.met : null;
       } catch { measuredCold = null; }
     }

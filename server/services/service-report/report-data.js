@@ -2864,14 +2864,16 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // (Mar-Apr, Oct-Feb by the report's own visit day) carry the stamp; summer
   // visits and gate-off keep their existing key. The verdict itself is frozen
   // before any render may be stored (an unsettled read is never cached), so
-  // the constant stamp is enough.
+  // the visit day is enough to identify it.
   // The day is the VISIT's (resolveMeasuredColdVisitDay), the same value the
   // report resolves; an unknown day still stamps, because the report then
-  // withholds the dip sentence.
+  // withholds the dip sentence. The DAY rides the stamp: the verdict is a fact
+  // about the 7 nights before it, so a visit date corrected between cooler-calendar
+  // days can flip the verdict under the same assessment and must re-key the PDF.
   let coldStamp = '';
   if (typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()) {
     const { day: coldDay } = await resolveMeasuredColdVisitDay(service, knex);
-    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) coldStamp = '|cold=1';
+    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) coldStamp = `|cold=${coldDay || 'none'}`;
   }
   const stamp = crypto.createHash('sha1')
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}${coldStamp}`)
