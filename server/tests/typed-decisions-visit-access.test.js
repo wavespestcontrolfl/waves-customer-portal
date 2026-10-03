@@ -162,6 +162,9 @@ describe('visit access shadow: rules that need no database', () => {
     await text('Liked "Your visit is confirmed"', '2026-10-02T15:00:00Z', { message_type: 'sms_reaction' });
     await text('Before the last pest visit', '2026-07-01T15:00:00Z');
     await text('After the visit started', '2026-10-06T14:00:00Z');
+    // 9 PM Eastern the evening BEFORE the last pest visit (07-06): outside the window.
+    await text('Evening before the last pest visit', '2026-07-06T01:00:00Z');
+    await text('Morning of the last pest visit', '2026-07-06T13:00:00Z');
     const visitId = await visit({ notes: 'Customer asked for the lanai too' });
 
     const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
@@ -171,7 +174,8 @@ describe('visit access shadow: rules that need no database', () => {
       last_tech_notes: 'Gate was locked, could not reach the back yard.',
     });
     expect(built.state.recent_texts).toContain('the baby naps at noon');
-    expect(built.state.recent_texts).not.toMatch(/Liked|Before the last pest visit|After the visit started/);
+    expect(built.state.recent_texts).not.toMatch(/Liked|Before the last pest visit|After the visit started|Evening before/);
+    expect(built.state.recent_texts).toContain('Morning of the last pest visit');
     expect(built.state.notes_text).toContain('Visit note: Customer asked for the lanai too');
     expect(JSON.stringify(built.state)).not.toMatch(/7731|5512|9042/);
     expect(built.baselines).toEqual({ dog_on_property: { rules: true }, needs_code_key_or_person: { rules: true } });

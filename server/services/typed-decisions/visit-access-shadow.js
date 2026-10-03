@@ -126,7 +126,8 @@ async function buildVisitAccessState(svc, dbh) {
   const lastLine = history.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine) || null;
 
   const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
-  const lastLineDay = lastLine ? new Date(`${dayString(lastLine.service_date)}T00:00:00Z`) : null;
+  // Eastern midnight of that visit's day, never UTC midnight.
+  const lastLineDay = lastLine ? require('../../utils/datetime-et').parseETDateTime(`${dayString(lastLine.service_date)}T00:00`) : null;
   const floor = lastLineDay && lastLineDay > capFloor ? lastLineDay : capFloor;
   const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
     .where('direction', 'inbound')
