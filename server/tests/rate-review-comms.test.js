@@ -1597,6 +1597,48 @@ describe('customer surfaces', () => {
       expect(meta().pending_letter).toBeTruthy();
     });
 
+    test('email timeout → its bounce lands during the text leg → text accepted → text later fails ⇒ a re-sendable draft (both channels definitively failed), not send_uncertain', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // timed out: ambiguous to the caller
+      smsLeg.mockImplementation(async () => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await comms.handleEmailDeliveryEvent(mockDb, message({ idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true, email_sent: false });
+      expect(meta().uncertain_channels).toBeUndefined(); // the bounce proved the email failed
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'undelivered' });
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+      expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1); // offered for re-send
+    });
+
+    test('control: the email genuinely unknown (no callback) and the text later fails ⇒ send_uncertain', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(meta().uncertain_channels).toEqual({ email: true });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0].status).toBe('send_uncertain');
+    });
+
+    test('a bounce for the unknown email that arrives AFTER the stamp, then the text failing, is also a re-sendable draft (channel_failures re-evaluated on the live row)', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: true, messageId: 'em-1' });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      // the email's id is known only if the library returned one; match through the stored id
+      Object.assign(mockDb.store.price_change_notices[0], { metadata: JSON.stringify({ ...meta(), channel_failures: { email: { event: 'bounce', channel: 'email' } } }) });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0].status).toBe('draft');
+    });
+
     test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
       mockDb.reset(book());
       emailLeg.mockResolvedValue({ sent: false, attempted: true });

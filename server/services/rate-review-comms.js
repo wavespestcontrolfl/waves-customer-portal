@@ -1146,10 +1146,12 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
       // A channel whose outcome is unknown (a timeout, a provider error that may have
-      // delivered) is remembered: it is neither confirmed nor failed.
+      // delivered) is remembered: it is neither confirmed nor failed. A channel whose failure
+      // a callback has already proven (early evidence on the live row, read under this fence)
+      // is no longer unknown, so it is left out.
       const uncertainChannels = {
-        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold ? { email: true } : {}),
-        ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold ? { sms: true } : {}),
+        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && !early.email ? { email: true } : {}),
+        ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold && !early.sms ? { sms: true } : {}),
       };
       const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels } : {}) };
       if (!emailOk && !smsOk) {
@@ -1553,7 +1555,12 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   }
   const rateWritten = (!!live.applied_at && !prepay) || renewalRecorded;
   // A channel of unknown outcome is still out there: not a clean failure.
-  const parked = !rateWritten && Object.keys(meta.uncertain_channels || {}).length > 0;
+  // Re-evaluated on the live row: a channel with failure evidence (channel_failures, or the one
+  // failing now) is no longer unknown. No unknown channel left and none delivered → a clean,
+  // retryable draft with the revocation recorded.
+  const failedChannels = new Set([...Object.keys(meta.channel_failures || {}), channel]);
+  const stillUnknown = Object.keys(meta.uncertain_channels || {}).filter((ch) => !failedChannels.has(ch));
+  const parked = !rateWritten && stillUnknown.length > 0;
   if (parked) {
     patch.status = UNCERTAIN;
     patch.sent_at = null;
