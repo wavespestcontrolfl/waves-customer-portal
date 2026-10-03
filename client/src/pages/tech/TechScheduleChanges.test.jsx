@@ -262,6 +262,27 @@ describe('TechScheduleChanges', () => {
     expect(screen.queryByTestId('schedule-change-soon')).not.toBeInTheDocument();
   });
 
+  it('a read that STARTS while a dismiss is pending never puts the card back either', async () => {
+    let releasePost;
+    let releaseGet;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn((url, init = {}) => {
+      const body = { changes: [SOON], later_total: 0, as_of: AS_OF };
+      if (init.method) return new Promise((r) => { releasePost = () => r({ ok: true, json: async () => ({ success: true }) }); });
+      reads += 1;
+      if (reads === 1) return Promise.resolve({ ok: true, json: async () => body });
+      return new Promise((r) => { releaseGet = () => r({ ok: true, json: async () => body }); });
+    }));
+    await renderChanges();
+    fireEvent.click(await screen.findByRole('button', { name: 'Got it' }));
+    // the poll starts AFTER the click, while the dismiss is still pending
+    await act(async () => { window.dispatchEvent(new Event('focus')); await Promise.resolve(); });
+    await act(async () => { releasePost(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByTestId('schedule-change-soon')).not.toBeInTheDocument();
+    await act(async () => { releaseGet(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByTestId('schedule-change-soon')).not.toBeInTheDocument();
+  });
+
   it('renders nothing when there are no schedule changes', async () => {
     stubApi([]);
     await renderChanges();

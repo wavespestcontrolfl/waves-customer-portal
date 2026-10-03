@@ -228,6 +228,8 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     setError(null);
     try {
       await api(`/${change.id}/dismiss`, { method: 'POST' });
+      // …nor a read that started while the dismiss was pending (Codex #5786).
+      latest.current += 1;
       setChanges((prev) => prev.filter((c) => c.id !== change.id));
     } catch {
       setError('Could not clear that card. Try again.');
@@ -243,6 +245,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
     try {
       // The server clears every folded change up to the read on screen.
       await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf }) });
+      latest.current += 1;
       setChanges((prev) => prev.filter((c) => c.soon));
       setFeed((prev) => ({ ...prev, laterTotal: 0 }));
       setReviewing(false);
