@@ -83,7 +83,7 @@ describe('the two-model rule for a call finding', () => {
       id, call_log_id: callId, audit_source: 'self_audit', category: 'field_drift', field: 'appointment_agreed',
       old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'),
       // The self-audit stores the model that actually answered.
-      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5' }), ...over,
+      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }), ...over,
     });
     return id;
   };
@@ -163,18 +163,21 @@ describe('the two-model rule for a call finding', () => {
 
     // The deep call fell back to OpenAI: the reader is asked to avoid OpenAI,
     // and a reader that answers from OpenAI anyway never confirms.
-    const openaiAudit = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'gpt-6-luna' }) });
+    const openaiAudit = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'gpt-6-luna', verdict: { appointment_agreed: true } }) });
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(agreeing).toHaveBeenLastCalledWith(expect.objectContaining({ finding_id: openaiAudit }), 'openai');
     expect(await database('ai_incidents').where({ evidence_id: openaiAudit }).first()).toMatchObject({ disposition: 'lead', adjudication: expect.objectContaining({ rule: 'same_provider' }) });
 
     agreeing.mockClear();
-    const unknown = await finding(await call(), { detail: JSON.stringify({}) });
+    const unknown = await finding(await call(), { detail: JSON.stringify({ verdict: { appointment_agreed: true } }) });
+    // The auditor never answered the field: its stored "false" is a coercion.
+    const unanswered = await finding(await call(), { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {} }) });
     const long = await finding(await call({ transcription: `${TRANSCRIPT}\n${'Agent: more.\n'.repeat(500)}` }));
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(agreeing).not.toHaveBeenCalled();
     expect((await database('ai_incidents').where({ evidence_id: unknown }).first()).adjudication.rule).toBe('auditor_provider_unknown');
     expect((await database('ai_incidents').where({ evidence_id: long }).first()).adjudication.rule).toBe('transcript_truncated');
+    expect((await database('ai_incidents').where({ evidence_id: unanswered }).first()).adjudication.rule).toBe('auditor_value_missing');
   });
 
   test('old findings, other audit sources and unknown fields are not read', async () => {

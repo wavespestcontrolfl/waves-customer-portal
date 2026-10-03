@@ -14,8 +14,9 @@
  *     auditor's answer for that field, AND both readers' supporting excerpts
  *     are words the transcript really contains.
  *   lead — anything else (the second reader sides with production, an
- *     excerpt is not in the transcript, the auditor's provider is unknown,
- *     or the call is longer than the readers are shown).
+ *     excerpt is not in the transcript, the auditor gave no boolean for the
+ *     field, its provider is unknown, or the call is longer than the
+ *     readers are shown).
  *
  * A second reader that cannot be reached stores nothing (retried next run).
  * The typed-decision answers (TypeSafe Jev, Cloudflare Clef) for the same
@@ -144,6 +145,22 @@ async function typedSignals(dbi, callId, field) {
   }
 }
 
+/**
+ * Findings that stay leads with no second reading (no call made):
+ *   auditor_value_missing — the auditor never answered this field as a
+ *     boolean (the self-audit stores Boolean(verdict[field]), so a missing
+ *     answer reads as "false");
+ *   auditor_provider_unknown — a second reader could share its provider;
+ *   transcript_truncated — the call is longer than both readers are shown,
+ *     so the disagreement may sit in the part neither read.
+ */
+function leadWithoutReading({ row, detail, auditorProvider, auditorValue }) {
+  if (detail?.verdict?.[row.field] !== auditorValue) return 'auditor_value_missing';
+  if (!auditorProvider) return 'auditor_provider_unknown';
+  if (String(row.transcription || '').length > TRANSCRIPT_CHARS) return 'transcript_truncated';
+  return null;
+}
+
 const isUniqueViolation = (err) => err && err.code === '23505';
 const safeJson = (t) => {
   try { return JSON.parse(t) || {}; } catch { return {}; }
@@ -187,12 +204,7 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
       if (prodValue === auditorValue) continue;
       const detail = typeof row.detail === 'string' ? safeJson(row.detail) : (row.detail || {});
       const auditorProvider = providerForModel(detail.auditor_model);
-      // Two cases are leads without a second reading (no call made): the
-      // auditor's provider is unknown, so a second reader could share it; or
-      // the call is longer than what both readers are shown, so a
-      // disagreement may sit in the part neither read.
-      const skipRule = !auditorProvider ? 'auditor_provider_unknown'
-        : String(row.transcription || '').length > TRANSCRIPT_CHARS ? 'transcript_truncated' : null;
+      const skipRule = leadWithoutReading({ row, detail, auditorProvider, auditorValue });
       let reading = { ok: true, provider: null, model: null, answer: null };
       if (!skipRule) {
         reading = await reader(row, auditorProvider);
@@ -286,6 +298,7 @@ async function proposeCallFixes({ dbi = db, now = new Date() } = {}) {
 module.exports = {
   AREA,
   providerForModel,
+  leadWithoutReading,
   FIELDS,
   FAILURE_MODES,
   failureModeFor,
