@@ -448,3 +448,14 @@ it('the money preview is told when the whole stop moves together, so it plans on
   await waitFor(() => expect(previews().at(-1)).not.toHaveProperty('comboMove'), { timeout: 3000 });
 });
 
+// ---- Codex round 6 on #5838 (owner 2026-10-03: refuse the two risky mixes, then merge) ----
+it('together + a technician change on a recurring combo: the scope picker is hidden and the request says this visit only', async () => {
+  const dialog = openModal({ ...combo, technicianId: 'tech-1', isRecurring: true, recurringPattern: 'quarterly', recurringParentId: 'series-1' }, TECHS);
+  fireEvent.change(techSelectOf(dialog), { target: { value: 'tech-2' } });
+  expect(screen.getByTestId('combo-move-scope')).toHaveTextContent('Only this visit moves and changes technician. Later visits in the plan stay where they are, with their technician.');
+  expect(screen.queryByText('Apply staff change to')).not.toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0)).toMatchObject({ comboMove: 'together', technicianId: 'tech-2', assignmentScope: 'this_only' });
+});
+

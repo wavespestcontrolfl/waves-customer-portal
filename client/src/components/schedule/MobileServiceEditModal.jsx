@@ -24,7 +24,7 @@ function adminFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   }).then(async (r) => {
-    if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+    if (!r.ok) throw Object.assign(new Error(await r.text().catch(() => `${r.status}`)), { status: r.status });
     return r.json().catch(() => ({}));
   });
 }
@@ -154,6 +154,13 @@ export default function MobileServiceEditModal({
       // refused until someone chooses (nothing separates unchosen): ask here.
       if (!comboMove && /"code"\s*:\s*"VISIT_EDIT_SCHEDULE_UNSUPPORTED"/.test(String(e?.message || ''))) {
         setSharedStopAsk(true);
+        setSaving(false);
+        return;
+      }
+      // A whole-stop or separate save that got no answer at all may still
+      // have gone through (split, reassignment, customer text).
+      if (comboMove && e?.status == null) {
+        setError('The save did not confirm, so it may or may not have gone through. Close this and check the schedule before you save again.');
         setSaving(false);
         return;
       }

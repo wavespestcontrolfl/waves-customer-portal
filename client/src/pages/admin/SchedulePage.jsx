@@ -3525,6 +3525,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (comboTogether && comboLengthChanged) {
         throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
       }
+      if (comboTogether && form.scheduledDate !== comboOpened.date && isRecurring && !serviceIsRecurringTemplate) {
+        throw new Error("Make this visit recurring in its own save, then move the stop: the plan is built from the visit's date.");
+      }
       if (comboTogether && comboRegroupingEdit) {
         throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
       }
@@ -3635,9 +3638,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : (storedDiscountCleared ? null : undefined),
           estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
+          // The whole-stop move reassigns this stop only (the choice box
+          // says so and the scope picker is hidden for it).
           assignmentScope:
             form.technicianId !== (service.technicianId || "")
-              ? assignmentScope
+              ? (comboTogether ? "this_only" : assignmentScope)
               : undefined,
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
@@ -4670,7 +4675,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </option>
                 ))}
               </select>
-              {serviceHasSeries &&
+              {serviceHasSeries && !comboTogether &&
                 technicianId !== (service.technicianId || "") && (
                   <div style={{ marginTop: 10 }}>
                     <label style={labelStyle}>Apply staff change to</label>
@@ -6000,7 +6005,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </label>
                   {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
                     <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
-                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are.
+                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are{comboTechChanged ? ", with their technician" : ""}.
                     </div>
                   ) : null}
                 </div>

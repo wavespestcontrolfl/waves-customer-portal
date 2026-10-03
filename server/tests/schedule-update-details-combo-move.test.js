@@ -92,7 +92,7 @@ describe('when the planner stays out of the way', () => {
 
 describe("comboMove 'together'", () => {
   test('plans the same staff move against the live stop, strips the move from the edit, and runs it on commit', async () => {
-    const req = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', technicianId: 'tech-2', assignmentScope: 'following', notifyCustomer: true, notes: 'gate code', comboMove: 'together' });
+    const req = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', technicianId: 'tech-2', assignmentScope: 'this_only', notifyCustomer: true, notes: 'gate code', comboMove: 'together' });
     const plan = await planComboEditMove(req);
     expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith({
       serviceId: 'svc-a',
@@ -180,6 +180,10 @@ describe("comboMove 'together'", () => {
     await stays({ scheduledDate: TARGET, windowStart: '09:00', windowEnd: '11:00', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_LENGTH_CHANGE' });
     await stays({ scheduledDate: TARGET, propertyId: 'p2', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ADDRESS_CHANGE' });
     await stays({ windowStart: '', windowEnd: '', comboMove: 'together' }, { statusCode: 422, code: 'INVALID_APPOINTMENT_WINDOW' });
+    // Owner ruling 2026-10-03: two mixes are refused, not half-done.
+    await stays({ scheduledDate: TARGET, technicianId: 'tech-2', assignmentScope: 'following', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ASSIGNMENT_SCOPE' });
+    await stays({ technicianId: 'tech-2', assignmentScope: 'series', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ASSIGNMENT_SCOPE' });
+    await stays({ scheduledDate: TARGET, isRecurring: true, spawnRecurringChildren: true, recurringPattern: 'quarterly', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_MAKE_RECURRING' });
     expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
     mockDispatch.planVisitMoveForStaff.mockResolvedValue({ status: 409, body: { error: 'This stop changed since it was opened.', code: 'VISIT_MEMBERSHIP_CHANGED' } });
     await stays({ scheduledDate: TARGET, comboMove: 'together' }, { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', message: 'This stop changed since it was opened. Nothing was changed.' });

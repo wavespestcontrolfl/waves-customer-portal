@@ -93,4 +93,16 @@ describe('MobileServiceEditModal save payload', () => {
       "The other changes were saved, but the stop's technician was not changed: Technician is inactive.",
     ]);
   });
+
+  it('a whole-stop save that gets no answer is reported as unconfirmed, not as failed', async () => {
+    const answers = [
+      async () => new Response(JSON.stringify({ error: 'grouped', code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' }), { status: 409 }),
+      async () => { throw new TypeError('Failed to fetch'); },
+    ];
+    fetch.mockImplementation(() => answers.shift()());
+    render(<MobileServiceEditModal desktopVisible service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the whole stop' }));
+    expect(await screen.findByText('The save did not confirm, so it may or may not have gone through. Close this and check the schedule before you save again.')).toBeInTheDocument();
+  });
 });

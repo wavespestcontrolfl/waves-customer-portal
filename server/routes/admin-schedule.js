@@ -11149,6 +11149,17 @@ async function planComboTogetherMove(req, row, changes, shown) {
   if (body.propertyId !== undefined) {
     refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
   }
+  // Two mixes the whole-stop move cannot honor (owner ruling 2026-10-03:
+  // refuse them before anything is saved). The move reassigns THIS stop
+  // only, so a staff change for following visits would be dropped silently;
+  // and a visit made recurring in the same save would build its plan from
+  // the date the stop is leaving.
+  if (changes.technician && normalizeAssignmentScope(body.assignmentScope) !== 'this_only') {
+    refuse(422, 'Moving the whole stop changes the technician for this visit only. Set "Apply staff change to" to this appointment only, or change later visits in their own save.', 'COMBO_ASSIGNMENT_SCOPE');
+  }
+  if (changes.date && body.isRecurring === true && body.spawnRecurringChildren === true) {
+    refuse(422, 'Make this visit recurring in its own save, then move the stop: the plan is built from the visit\'s date.', 'COMBO_MAKE_RECURRING');
+  }
   // The stored date is a Date from Postgres: normalized before validation.
   const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
   if (!newDate) refuse(400, 'That date is not a current or future date.');
