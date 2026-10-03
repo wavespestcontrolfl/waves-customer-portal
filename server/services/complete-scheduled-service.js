@@ -567,6 +567,16 @@ function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[text] || text || null;
 }
 
+// The office note a completion may carry: a trimmed string capped at 800
+// characters, else nothing. Not gated here: only the voice-fill sheet sends the
+// field, the route is staff-authenticated and the note is staff-only, and a note
+// the tech can see on a sheet loaded before the gate went off must not vanish.
+const OFFICE_NOTE_MAX_CHARS = 800;
+function officeNoteForCompletion(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, OFFICE_NOTE_MAX_CHARS);
+}
+
 function isWaveGuardLawnCompletion(svc) {
   // Real WaveGuard member tiers only — a flat-commercial lawn job ('Commercial'
   // tier) is excluded from WaveGuard protocol-readiness prep, so it must not
@@ -2616,6 +2626,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       idempotencyKey: bodyIdempotencyKey,
       pricingReview = null,
       technicianNotes,
+      // Voice fill's office note (GATE_FAST_COMPLETE_VOICE_FILL): staff-only,
+      // appended to scheduled_services.internal_notes below; never the report.
+      officeNote,
       customerConcernText,
       customerRecap,
       visitOutcome = 'completed',
@@ -7748,6 +7761,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // below owns the status flip and bumps updated_at on the same row.
         if (Object.keys(scheduledServiceUpdate).length) {
           await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
+        }
+        // The tech's office note (voice fill, dark gate): appended to the
+        // visit's staff-only internal_notes (dispatcher/tech context; never on
+        // the customer job-status payload, the report or a text), dated so a
+        // later note never reads as this visit's. Never part of
+        // technicianNotes, so the report writer and the code guard on
+        // customer-visible text never see it.
+        const officeNoteText = officeNoteForCompletion(officeNote);
+        if (officeNoteText) {
+          await trx('scheduled_services').where({ id: svc.id }).update({
+            internal_notes: trx.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`[Office note ${etDateString(completionEndedAt ? new Date(completionEndedAt) : new Date())}] ${officeNoteText}`]),
+          });
         }
 
         // 5. Status flip via the canonical sole-writer.
@@ -14800,3 +14825,4 @@ module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportA
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
 module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
+module.exports.officeNoteForCompletion = officeNoteForCompletion;
