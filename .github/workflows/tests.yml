@@ -592,15 +592,26 @@ jobs:
         # builds both apps: another directory, a root file, an empty or
         # unreadable diff, a push to main. First step after checkout, so the
         # answer exists even when a later gate fails.
+        #
+        # server/ is such a directory except for the files the bundle pulls in
+        # through shared/ or client source (today one JSON,
+        # server/services/estimate-one-time-copy.json). They are read from the
+        # code, never listed here: a change to one builds, and if the bundle
+        # ever reaches server CODE (whose own imports this step cannot
+        # follow), every server change builds.
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           mobile=true
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             if files=$(git diff --name-only "origin/${BASE_REF}...HEAD") && [ -n "$files" ]; then
-              if ! printf '%s\n' "$files" | grep -qvE '^(server|docs|\.claude|ops|video|wiki)/'; then
-                mobile=false
-              fi
+              inputs=$(git grep -hoE '\.\./server/[A-Za-z0-9_./-]+' -- shared client/vite.config.js client/src ':(exclude,glob)client/src/**/*.test.*' | sed -E 's#^(\.\./)+##' | sort -u || true)
+              safe='^(server|docs|\.claude|ops|video|wiki)/'
+              if printf '%s\n' "$inputs" | grep -qvE '\.json$|^$'; then safe='^(docs|\.claude|ops|video|wiki)/'; fi
+              outside=$(printf '%s\n' "$files" | grep -vE "$safe" || true)
+              hit=""
+              if [ -n "$inputs" ]; then hit=$(printf '%s\n' "$files" | grep -xF -f <(printf '%s\n' "$inputs") || true); fi
+              if [ -z "$outside" ] && [ -z "$hit" ]; then mobile=false; fi
             fi
           fi
           echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
