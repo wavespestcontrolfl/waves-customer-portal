@@ -1085,11 +1085,12 @@ function foreignWordSet() {
   return foreignWordSetCache;
 }
 // The tokens that can speak for the text's language: lower-cased, accents removed, with names and addresses left out.
-function languageTokens(text, { keepNames = false } = {}) {
+function languageTokens(text, { keepNames = false, dropNames = false } = {}) {
   // Title Case or ALL CAPS text is not a run of names: when nearly every word after the first is capitalized, every word counts
   // ("Hi this is Marisol Quintanilla" stays a name; "Can The Dogs Go Out Now" does not).
   const rest = (stripMarks(text).match(/[A-Za-z]{2,}/g) || []).slice(1);
-  const keepCapitalized = keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length);
+  // (dropNames: a mid-sentence capitalized word is always a name - the language-history vote, where "Thanks Nadia" is English)
+  const keepCapitalized = !dropNames && (keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length));
   // contractions are one word ("i'm" -> "im", "don\u2019t" -> "dont"), as the lexicon spells them
   const raws = text.replace(/(\p{L})['\u2019](\p{L})/gu, '$1$2').split(/\s+/).filter(Boolean);
   // An address is a house number followed, within four words, by a street word ("4821 Weatherby Oaks Cir"): only those words are
@@ -1102,7 +1103,10 @@ function languageTokens(text, { keepNames = false } = {}) {
       if (STREET_WORDS.has(word)) {
         for (let k = i + 1; k <= j; k++) skip.add(k);
         // a street word that ends a sentence ("St." then "Kiedy psy?") ends the address: what follows is read as words (#5537 r1)
-        if (/[.!?]["\u201d\u2019')]*$/.test(raws[j])) break;
+        // ... unless the tail of the address follows an abbreviated suffix: a unit ("St. Apt 4") or a state code and zip ("Dr. FL 34250")
+        const tailFollows = j + 1 < raws.length && (/^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[j + 1])
+          || (/^[A-Z]{2},?$/.test(raws[j + 1]) && j + 2 < raws.length && /^\d{5}(?:-\d{4})?[,.]?$/.test(raws[j + 2])));
+        if (/[.!?]["\u201d\u2019')]*$/.test(raws[j]) && !(/\.$/.test(raws[j]) && tailFollows)) break;
         // the address tail: a unit ("apt 102"), then a state code and zip directly after the street ("Dr FL 34000")
         let k = j + 1;
         if (k < raws.length && /^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[k])) { skip.add(k); k += 1; if (k < raws.length && /^#?\d+\w?[,.]?$/.test(raws[k])) { skip.add(k); k += 1; } }
@@ -1130,6 +1134,25 @@ function languageTokens(text, { keepNames = false } = {}) {
   });
   return tokens;
 }
+// One earlier customer text's vote on the language they usually write (the any-language trial): 'english',
+// 'foreign', or null when no language is left once links, emails, an address with its unit / state / zip, and
+// mid-sentence names are set aside (languageTokens). A short text (up to 4 words) with a word the lexicon does
+// not know is foreign ("Perfecto", "Ok. Vale"), as the trial's own prefilter reads it.
+function languageVote(text) {
+  const plain = canonText(String(text || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '));
+  // letters outside the Latin script ("Спасибо", "谢谢", "شكرا") are another language, whatever the tokenizer reads
+  if (/(?!\p{Script=Latin})\p{L}/u.test(plain)) return 'foreign';
+  const tokens = languageTokens(plain, { dropNames: true });
+  if (!tokens.length) return null;
+  // judged on the same name-free words throughout: every word known English is English ("Thanks Nadia Petrova"),
+  // unless the text carries positive evidence of another language
+  if (looksNonEnglish(plain) || hasUnsupportedLanguage(plain)) return 'foreign';
+  const known = tokens.filter(englishKnown).length;
+  if (known === tokens.length) return 'english';
+  if (tokens.length <= 4) return 'foreign';
+  return known / tokens.length >= ENGLISH_SHARE ? 'english' : 'foreign';
+}
+
 function isUnverifiedLanguageInbound(inbound) {
   if (inboundOverCap(Array.isArray(inbound) ? inbound[0] : inbound)) return true;
   const original = canonText(Array.isArray(inbound) ? inbound[0] : inbound).replace(/https?:\/\/[^\s"'\u201d\u2019]+|www\.[^\s"'\u201d\u2019]+|[^\s"'\u201c\u2018]+@[^\s"'\u201d\u2019]+/g, ' ');
@@ -1813,6 +1836,7 @@ module.exports = {
   isEnglishInbound,
   hasUnknownShortWord,
   untranslatedWords,
+  languageVote,
   nonEnglishTimingWords,
   labelFactsForInbound,
   parseReentryText,

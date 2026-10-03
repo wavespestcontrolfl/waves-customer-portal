@@ -898,7 +898,12 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
   // Every DB-sourced free-text field below is customer-influenced and is landing
   // in the SYSTEM role — systemBlockSafe drops directive lines AND smuggled
   // price/guarantee/policy claims (an empty result is simply omitted).
-  const first = systemBlockSafe(customer.first_name, 40);
+  // ⭐ THE ACCOUNT HOLDER'S NAME NEVER REACHES A RECOGNISED-ONLY SESSION. The
+  // caller there is a spouse, tenant or prior occupant, not the person the
+  // name belongs to: a model that never sees it cannot greet them by it or
+  // say it back ("is this Elena's account?"). A name the caller states is
+  // confirmed through lookup_customer, same as any other detail.
+  const first = redacted ? '' : systemBlockSafe(customer.first_name, 40);
   if (first) lines.push(`First name: ${first}`);
   const sinceYear = customer.member_since ? new Date(customer.member_since).getUTCFullYear() : null;
   if (Number.isFinite(sinceYear)) lines.push(`Customer since: ${sinceYear}`);
@@ -1113,13 +1118,18 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
       // The gist of the caller's LAST call is call content, so it rides the
       // same attestation line as get_call_history — not fetched at all without
       // it, rather than fetched and dropped.
-      attested ? loadPriorCallSummary(from).catch(() => null) : Promise.resolve(null),
+      // ⭐ …AND FULL TIER ONLY. A recognised-only caller (secondary slot) gets
+      // neither the prior-call gist nor the recent texts: both are free text
+      // that can carry the account holder's NAME ("Hi Elena, …"), which no
+      // scrubber removes, and the block above withholds for exactly that
+      // caller. Not fetched at all, rather than fetched and redacted.
+      attested && customer.tier === 'full' ? loadPriorCallSummary(from).catch(() => null) : Promise.resolve(null),
       // Phase C: the last few SMS with this number, next to the KNOWN CALLER
       // block (same gate, same ANI-matched-only condition). Optional context —
       // buildRecentTextsBlock fails toward null and never blocks the session.
       // Message BODIES are the most spoof-attractive read on the account, so
       // this block is attested-only too (same line as get_message_history).
-      attested
+      attested && customer.tier === 'full'
         ? (async () => {
           const { buildRecentTextsBlock } = require('./relay-history');
           return buildRecentTextsBlock(from, { customerId: customer.id, tier: customer.tier });

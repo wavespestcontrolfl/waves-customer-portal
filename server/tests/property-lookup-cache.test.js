@@ -18,6 +18,7 @@ const {
   attachFloodZoneToCachedLookup,
   getCachedLookup,
   getVerifiedOverrides,
+  markLookupAttempt,
   saveLookup,
   saveVerifiedOverride,
 } = require('../services/property-lookup/lookup-cache');
@@ -377,6 +378,17 @@ describe('saveLookup', () => {
     expect(JSON.parse(payload.property_record).county).toBe('Charlotte');
   });
 
+  it('stores the attempt id as payload_attempt_id; a save without one clears it', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', result, 'attempt-a');
+    await saveLookup('100 Main St', result);
+    expect(writes[0][1].payload_attempt_id).toBe('attempt-a');
+    expect(writes[0][1].last_attempt_id).toBeUndefined();
+    // The payload is replaced with unknown provenance: the old id must not vouch for it.
+    expect(writes[1][1]).toHaveProperty('payload_attempt_id', null);
+  });
+
   it('anchors data_saved_at to the lookup start, not the save time', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
@@ -582,6 +594,52 @@ describe('attachFloodZoneToCachedLookup (#1698 backfill)', () => {
     await expect(
       attachFloodZoneToCachedLookup('x', { floodZone: 'X', sfha: false }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('markLookupAttempt attempt id', () => {
+  it.each(['pending', 'cache_hit', 'no_parcel', 'error'])('stamps last_attempt_id on %s without touching the payload id', async (status) => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await markLookupAttempt('100 Main St', status, null, 'attempt-a');
+    const [kind, insert, merge] = writes[0];
+    expect(kind).toBe('upsert');
+    expect(insert.last_attempt_id).toBe('attempt-a');
+    expect(merge.last_attempt_id).toBe('attempt-a');
+    expect(insert).not.toHaveProperty('payload_attempt_id');
+    expect(merge).not.toHaveProperty('payload_attempt_id');
+  });
+
+  it('an unnamed attempt writes NULL rather than leaving the previous id behind', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await markLookupAttempt('100 Main St', 'no_parcel');
+    expect(writes[0][2]).toHaveProperty('last_attempt_id', null);
+  });
+});
+
+describe('non-attempt writers leave attempt provenance alone', () => {
+  it('sweep, evidence backfill and override saves never write either id', async () => {
+    const { sweepStalePendingAttempts, attachPoolPermitsToCachedLookup } = require('../services/property-lookup/lookup-cache');
+    const writes = [];
+    mockDbHandler = () => ({
+      where() { return this; },
+      whereNotNull() { return this; },
+      whereRaw() { return this; },
+      first: async () => ({ verified_overrides: {} }),
+      update: async (payload) => { writes.push(payload); return 1; },
+      insert(payload) {
+        return { onConflict: () => ({ merge: async (merge) => { writes.push(payload, merge); } }) };
+      },
+    });
+    await sweepStalePendingAttempts();
+    await attachPoolPermitsToCachedLookup('100 Main St', { hasPool: true });
+    await saveVerifiedOverride('100 Main St', { stories: 2 }, 'Tech');
+    expect(writes).toHaveLength(4);
+    for (const w of writes) {
+      expect(w).not.toHaveProperty('payload_attempt_id');
+      expect(w).not.toHaveProperty('last_attempt_id');
+    }
   });
 });
 

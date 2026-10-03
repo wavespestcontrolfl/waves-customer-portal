@@ -15,7 +15,7 @@ jest.mock('../services/technician-capabilities', () => ({
 }));
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
-  createSchedulingTravel: () => ({ preload: async () => {}, diagnostics: () => ({}) }),
+  createSchedulingTravel: jest.fn(() => ({ preload: async () => {}, diagnostics: () => ({}) })),
 }));
 jest.mock('../services/scheduling/arrival-route', () => ({
   arrivalWindowRoutingEnabled: () => true,
@@ -93,4 +93,17 @@ test('the capacity finder splits its refusal counts by date', async () => {
     for (const [reason, count] of Object.entries(reasons)) summed[reason] = (summed[reason] || 0) + count;
   }
   expect(summed).toEqual(result.rejections);
+});
+
+test('an advisory caller spends none of the shared Google drive-time allowance', async () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { createSchedulingTravel } = require('../services/route-optimizer');
+  evaluateArrivalPlacement.mockImplementation(() => fit);
+  createSchedulingTravel.mockClear();
+  await findAvailableSlots({ ...BASE, providerTravel: false });
+  expect(createSchedulingTravel).toHaveBeenCalledWith({ maxRequests: 0 });
+  // Every other caller (customer booking, the ranged button) keeps the allowance.
+  createSchedulingTravel.mockClear();
+  await findAvailableSlots(BASE);
+  expect(createSchedulingTravel).toHaveBeenCalledWith(undefined);
 });

@@ -19,6 +19,11 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/call-route-decisions', () => ({
   preferredRouteDecisionForFeedback: jest.fn(),
 }));
+const mockResolveScope = jest.fn();
+jest.mock('../services/account-properties', () => ({
+  ...jest.requireActual('../services/account-properties'),
+  resolveSessionScope: (...a) => mockResolveScope(...a),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
@@ -306,6 +311,76 @@ describe('POST /ai/chat canReport flag', () => {
       channelIdentifier: 'shared-session',
       customerId: 'cust-1',
       customerPhone: '+19415550100',
+      // GATE_PORTAL_CHAT_RESERVICE off: no scope read, the re-service button withheld.
+      secondaryProperty: true,
+    });
+    expect(mockResolveScope).not.toHaveBeenCalled();
+  });
+
+  describe('GATE_PORTAL_CHAT_RESERVICE on: the session property scope decides the re-service button', () => {
+    let pageSwitches;
+    beforeEach(() => {
+      process.env.GATE_PORTAL_CHAT_RESERVICE = 'true';
+      pageSwitches = jest.spyOn(require('../services/ai-assistant/tools'), 'reservicePageSwitchesOn').mockReturnValue(true);
+    });
+    afterEach(() => { delete process.env.GATE_PORTAL_CHAT_RESERVICE; delete process.env.PORTAL_CHAT_SELF_SERVE; pageSwitches.mockRestore(); });
+
+    test('a re-service page switch off: no scope read (the tool would refuse anyway)', async () => {
+      pageSwitches.mockReturnValue(false);
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(mockResolveScope).not.toHaveBeenCalled();
+    });
+
+    test('the chat\'s master switch off: no scope read (the resolver can write)', async () => {
+      process.env.PORTAL_CHAT_SELF_SERVE = 'off';
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty: true }));
+    });
+
+    test.each([
+      ['an unscoped session (single home)', async () => ({ enabled: false }), false],
+      ['the primary saved property', async () => ({ enabled: true, scoped: true, property: { id: 'p1', is_primary: true } }), false],
+      ['a secondary saved property', async () => ({ enabled: true, scoped: true, property: { id: 'p2', is_primary: false } }), true],
+      ['a failed scope read', async () => { throw new Error('db down'); }, true],
+    ])('%s', async (_label, scope, secondaryProperty) => {
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      mockResolveScope.mockImplementation(scope);
+      WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(mockResolveScope).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+      expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty }));
     });
   });
 

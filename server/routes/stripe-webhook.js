@@ -3985,7 +3985,31 @@ async function handleChargeRefunded(charge) {
       // charge-only payment has no PI, so a PI-only lookup would skip the restore
       // and strand the customer's applied credit.
       const invId = await resolveRefundedInvoiceId(trx, { pmt, charge, chargeId });
+      // Ownership check before terminalizing (B03, the single-invoice twin of
+      // the combined path's codex r36 P1): resolveRefundedInvoiceId reads
+      // payments.metadata.invoice_id FIRST, which a dispute-created reopen
+      // never clears — so after a replacement payment paid the reopened
+      // invoice, refunding the ORIGINAL charge would flip that replacement-paid
+      // invoice to refunded and return credit the replacement still consumes.
+      // The invoice row decides: it is terminalized only when it still points
+      // at the refunded PI (pay-page / saved-card) or the refunded charge (a
+      // charge-only reconciled payment has no PI). A pre-settlement refund
+      // (no pmt) resolved the invoice BY that PI/charge, so it always passes.
+      // Not owned → only the ledger row (stamped above) carries the refund.
+      // Locked FOR UPDATE — the same row lock returnAppliedCreditOnRefund takes
+      // next — so a replacement settling in between cannot change the answer.
+      let invoiceOwned = false;
       if (invId) {
+        const refInvoice = await trx('invoices').where({ id: invId }).forUpdate().first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
+        invoiceOwned = require('../services/invoice-helpers').refundedPaymentOwnsInvoice(refInvoice, {
+          paymentIntentId: pmt?.stripe_payment_intent_id || charge.payment_intent,
+          chargeId,
+        });
+        if (!invoiceOwned) {
+          logger.warn(`[stripe-webhook] full refund of charge ${chargeId}: invoice ${invId} is no longer owned by it (invoice PI ${refInvoice?.stripe_payment_intent_id || 'none'}, charge ${refInvoice?.stripe_charge_id || 'none'}) — left untouched, ledger row stamped only`);
+        }
+      }
+      if (invId && invoiceOwned) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
         // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded

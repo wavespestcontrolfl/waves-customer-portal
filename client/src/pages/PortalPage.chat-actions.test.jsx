@@ -55,6 +55,9 @@ describe('assistant reply buttons', () => {
         { type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' },
         { type: 'link', label: 'Elsewhere', href: 'https://example.com/reschedule/tok' },
         { type: 'link', label: 'Admin', href: '/admin/customers' },
+        { type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' },
+        { type: 'link', label: 'Off-site re-service', href: 'https://example.com/reservice/tok' },
+        { type: 'link', label: 'Traversal', href: '/reservice/../admin' },
         { type: 'tab', label: 'Open Billing', tab: 'billing' },
         { type: 'tab', label: 'Open Admin', tab: 'admin' },
       ],
@@ -63,10 +66,23 @@ describe('assistant reply buttons', () => {
     expect(screen.getByRole('link', { name: 'Reschedule Pest Control, Oct 9' })).toHaveAttribute('href', '/reschedule/tok_one');
     expect(screen.queryByText('Elsewhere')).toBeNull();
     expect(screen.queryByText('Admin')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Book your free pest control re-service' })).toHaveAttribute('href', '/reservice/tok_rs');
+    expect(screen.queryByText('Off-site re-service')).toBeNull();
+    expect(screen.queryByText('Traversal')).toBeNull();
     expect(screen.queryByText('Open Admin')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Billing' }));
     expect(onNavigate).toHaveBeenCalledWith('billing');
+  });
+
+  it('renders every button the server can build at once: six tabs, three reschedule links, the re-service link and two booked re-service moves', async () => {
+    const tabs = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'].map((tab) => ({ type: 'tab', label: `Open ${tab}`, tab }));
+    const links = ['a', 'b', 'c', 'd', 'e'].map((t) => ({ type: 'link', label: `Reschedule ${t}`, href: `/reschedule/tok_${t}` }));
+    await ask({ reply: 'Here you go.', actions: [...tabs, ...links, { type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }] });
+
+    expect(screen.getByRole('link', { name: 'Book your free re-service' })).toHaveAttribute('href', '/reservice/tok_rs');
+    expect(screen.getAllByRole('link')).toHaveLength(6);
+    expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(6);
   });
 
   it('a reply with no actions renders no buttons', async () => {

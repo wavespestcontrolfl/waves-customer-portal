@@ -375,8 +375,8 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   if (zone !== inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city })) {
     return { ok: true, eligible: false, reason: 'zone_mismatch', service };
   }
-  const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS });
-  // The shared loader turns a failed read into []. An empty catalog here would
+  const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS }).catch(() => []);
+  // A failed read leaves no usable catalog. An empty catalog here would
   // let the sheet record a real application as "Inspection only" with none of
   // the product checks, so it sends the visit to the full form instead.
   if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
