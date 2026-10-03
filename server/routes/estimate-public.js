@@ -11938,6 +11938,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the phone-grouping key (same primitive as proposal-win / quick-add).
           // Lazy require: admin-customers is a route module (load-cycle risk).
           const { ensureCustomerAccount } = require('./admin-customers');
+          // B18 quarantine: a contradicted phone is another customer's number, so the new
+          // profile (and its account) is stored WITHOUT one — '' is how every phone-less
+          // customer is stored (customers.phone is NOT NULL: lead converts and estimate
+          // wins write ''). Portal login (activeCustomerByPhone) and every SMS sender
+          // resolve from customers.phone, so none can reach the disputed number until the
+          // office adds the accepter's real one. estimates.customer_phone keeps what staff typed.
+          const acceptProfilePhone = phoneContradicted ? '' : estimate.customer_phone;
           const account = await ensureCustomerAccount(trx, {
             // A multi-word first name the page collected stays whole.
             firstName: contactFillFirstName || nameParts[0] || 'New',
@@ -11945,7 +11952,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // estimates.customer_name snapshot is capped at 100 chars and
             // could clip it; customers.last_name holds the full 50.
             lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
-            phone: estimate.customer_phone,
+            phone: acceptProfilePhone,
             email: newProfileEmail,
             // B18: a contradicted lone phone hit is somebody else's line —
             // mint a separate account instead of phone-matching onto theirs.
@@ -11966,8 +11973,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
             first_name: contactFillFirstName || nameParts[0] || 'New',
             last_name: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
-            phone: estimate.customer_phone,
+            phone: acceptProfilePhone,
             email: newProfileEmail,
+            // The disputed number stays visible to the office on the profile it was kept off.
+            ...(phoneContradicted ? { internal_notes: `Phone on the estimate (${estimate.customer_phone}) belongs to another customer, so it was not saved on this profile and this customer is not texted. Add their real number, or merge the two profiles if they are the same person. Estimate ${estimate.id}.` } : {}),
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
             // Canonicalized unit segment (codex #3244 r7): without it the
             // primary-property backfill and every addressKey compare see a
@@ -14292,10 +14301,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
           area: 'Customers',
           action: fitAction('Customers', estimate.customer_name || 'the new customer', [
-            (n) => `fix ${n}'s phone number`,
-            (n) => `fix ${n}'s phone`,
+            (n) => `add ${n}'s phone number`,
+            (n) => `add ${n}'s phone`,
           ]),
-          why: 'The phone on their estimate is another customer\u2019s, so they cannot sign in to the portal yet.',
+          why: 'Their estimate\u2019s phone is another customer\u2019s, so they were saved without one and are not texted.',
           severity: 'needs-you',
           link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
           subject: { type: 'customer', id: String(customerId) },
@@ -14305,10 +14314,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           bell: true,
           dedupeKey: `accept-phone-contradicted:${estimate.id}`,
           dedupeVersion: 'v1',
-          detail: `This estimate's phone number belongs to another customer (${rejectedName}, customer id ${txResult.phoneContradictionRejectedId}). `
+          detail: `The phone number on this estimate belongs to another customer (${rejectedName}, customer id ${txResult.phoneContradictionRejectedId}). `
             + 'The person who accepted was set up as a separate customer and was asked for their own card. '
-            + 'They cannot sign in to the portal by phone until their phone number is corrected: fix the phone on the new customer, '
-            + 'or merge the two if they are the same person.',
+            + 'They were created without a phone number, so they are not texted and cannot sign in to the portal by phone: '
+            + 'add their real number on the new customer, or merge the two if they are the same person. '
+            + 'The number staff typed is kept on the estimate and in the new customer\'s internal notes.',
           metadata: { estimateId: estimate.id, customerId: String(customerId), rejectedCustomerId: String(txResult.phoneContradictionRejectedId) },
         });
       } catch (e) {
@@ -15246,7 +15256,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // none but the linked customer row does — or, for a secondary-property
     // row without one, the account primary (same person; #1995) — that
     // number. Fail-open to "no phone", never a guess.
-    let acceptSmsPhone = String(estimate.customer_phone || '').trim();
+    // B18: a contradicted accept never texts the disputed number (the profile was stored without it).
+    let acceptSmsPhone = txResult.phoneContradictionRejectedId ? '' : String(estimate.customer_phone || '').trim();
     if (!acceptSmsPhone && customerId) {
       try {
         const { withAccountPrimaryContact } = require('../services/customer-contact');

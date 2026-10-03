@@ -737,4 +737,4 @@ router.delete('/account', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._private = { annualPrepayForCustomer };
+module.exports._private = { annualPrepayForCustomer, activeCustomerByPhone };

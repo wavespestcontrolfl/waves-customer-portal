@@ -4183,6 +4183,15 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(created.account_id).not.toBe('acct-bob');
     expect(created.is_primary_profile).toBe(true);
     expect(created.profile_label).toBe('Primary');
+    // Quarantine: stored WITHOUT the disputed number (login + SMS resolve from this
+    // field), the number kept visible in internal notes, and the estimate keeps what staff typed.
+    expect(created.phone).toBe('');
+    expect(created.internal_notes).toContain('(941) 555-0123');
+    expect(created.internal_notes).toContain('belongs to another customer');
+    expect(db.__state.tables.customer_accounts.find((a) => a.id === created.account_id).phone ?? null).toBeNull();
+    expect(storedEstimate().customer_phone).toBe('(941) 555-0123');
+    // The accepter's own email is still the profile email.
+    expect(created.email).toBe('pat@example.com');
     // A second account row was minted; the rejected customer still sits alone on his.
     expect(db.__state.tables.customer_accounts).toHaveLength(2);
     expect(db.__state.tables.customers.find((c) => c.id === 'cust-bob')).toMatchObject({ account_id: 'acct-bob', email: 'bob@example.com' });
@@ -4192,8 +4201,8 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(alerts).toHaveLength(1);
     const [category, headline, why, opts] = alerts[0];
     expect(category).toBe('customer');
-    expect(headline).toBe("Customers \u2014 fix Pat Tester's phone number");
-    expect(why).toBe('The phone on their estimate is another customer\u2019s, so they cannot sign in to the portal yet.');
+    expect(headline).toBe("Customers \u2014 add Pat Tester's phone number");
+    expect(why).toBe('Their estimate\u2019s phone is another customer\u2019s, so they were saved without one and are not texted.');
     expect(opts.dedupeKey).toBe('accept-phone-contradicted:est-b18-1');
     expect(opts.bell).toBe(true);
     expect(opts.link).toBe(`/admin/customers?customerId=${newId}`);
@@ -4202,7 +4211,54 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
       estimateId: 'est-b18-1', customerId: newId, rejectedCustomerId: 'cust-bob',
     });
     expect(opts.detail).toContain('Bob Example');
+    expect(opts.detail).toContain('created without a phone number');
     expect(opts.detail).toContain('merge the two if they are the same person');
+  });
+
+  const smsToNumber = (digits) => require('../services/messaging/send-customer-message').sendCustomerMessage.mock.calls
+    .filter(([args]) => String(args?.to || '').replace(/\D/g, '').endsWith(digits));
+
+  function oneTimeEstimate(id) {
+    return recurringPestEstimate({
+      id,
+      token: `tok-${id}-x0123456789`,
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 300,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { services: [] },
+          oneTime: { items: [{ name: 'Lawn Aeration & Overseed', service: 'lawn_care', price: 300 }], membershipFee: 0 },
+        },
+      }),
+    });
+  }
+
+  test('one-time accept: the booking-link text goes to the estimate phone normally, and to NOBODY when the phone is contradicted', async () => {
+    // The accept's SMS body comes from the editable template store (a fake db here): give it a body.
+    const templateSpy = jest.spyOn(require('../routes/admin-sms-templates'), 'getTemplate').mockResolvedValue('Book your visit: https://example.com/book');
+    try {
+    // Control: no customer on that phone, so the text goes to the typed number.
+    resetStore(oneTimeEstimate('est-b18-ot-0'));
+    conversionOk();
+    const control = await putAccept('tok-est-b18-ot-0-x0123456789', { serviceMode: 'one_time' });
+    expect(control.status).toBe(200);
+    expect(smsToNumber('9415550123').length).toBeGreaterThan(0);
+
+    jest.clearAllMocks();
+    resetStore(oneTimeEstimate('est-b18-ot-1'));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    const res = await putAccept('tok-est-b18-ot-1-x0123456789', { serviceMode: 'one_time' });
+    expect(res.status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(1);
+    expect(smsToNumber('9415550123')).toHaveLength(0);
+    const created = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(created.phone).toBe('');
+    // The accepter's email leg is untouched by the quarantine.
+    expect(created.email).toBe('pat@example.com');
+    } finally { templateSpy.mockRestore(); }
   });
 
   test('a rolled-back contradicted accept raises no alert and leaves no profile or account behind', async () => {
