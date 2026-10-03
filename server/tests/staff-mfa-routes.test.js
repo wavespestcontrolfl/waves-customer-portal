@@ -328,10 +328,13 @@ describe('self-service routes', () => {
     expect(res.statusCode).toBe(400);
     expect(staffMfa.disable).not.toHaveBeenCalled();
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
-    staffMfa.disable.mockResolvedValue({ ok: true });
+    staffMfa.disable.mockResolvedValue({ ok: true, technician: staffRow({ auth_token_version: 4 }) });
     res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
-    expect(res.body).toEqual({ ok: true });
+    expect(res.body.ok).toBe(true);
     expect(staffMfa.disable).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3 });
+    // Earlier sessions are signed out (version moved); this one continues.
+    expect(jwt.verify(res.body.token, SECRET).tokenVersion).toBe(4);
+    expect(require('../sockets').disconnectStaffSockets).toHaveBeenCalledWith('tech-1', 'mfa_disabled');
 
     // A factor replacement or password change that landed first wins.
     staffMfa.disable.mockResolvedValue({ ok: false, reason: 'revoked' });

@@ -31,11 +31,17 @@ function tokenUnexpired(token, now = Date.now()) {
   }
 }
 
+// Pass format version. 2 = written by a build that checks the two-step
+// sign-in policy (GATE_ADMIN_MFA) on the profile it verified; a pass from an
+// older build (no version) never unlocks Today — the next online check
+// writes a new one.
+export const STAFF_OFFLINE_PASS_VERSION = 2;
+
 export function saveStaffOfflinePass(token, profile) {
   const binding = tokenBinding(token);
   try {
     if (!binding || profile?.mustChangePassword || profile?.twoStep?.enrollmentRequired) throw new Error('not eligible');
-    localStorage.setItem(STAFF_OFFLINE_PASS_KEY, JSON.stringify({ binding, profile }));
+    localStorage.setItem(STAFF_OFFLINE_PASS_KEY, JSON.stringify({ v: STAFF_OFFLINE_PASS_VERSION, binding, profile }));
   } catch {
     try { localStorage.removeItem(STAFF_OFFLINE_PASS_KEY); } catch { /* storage unavailable */ }
   }
@@ -48,6 +54,7 @@ export function loadStaffOfflinePass(token, now = Date.now()) {
     const binding = tokenBinding(token);
     const pass = JSON.parse(localStorage.getItem(STAFF_OFFLINE_PASS_KEY) || 'null');
     const profile = pass?.profile;
+    if (pass?.v !== STAFF_OFFLINE_PASS_VERSION) return null;
     if (!binding || pass?.binding !== binding || !tokenUnexpired(token, now)) return null;
     if (!profile?.id || !['admin', 'technician'].includes(profile.role) || profile.mustChangePassword) return null;
     if (profile.twoStep?.enrollmentRequired) return null;

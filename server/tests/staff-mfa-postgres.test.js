@@ -164,7 +164,13 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
     expect(await staffMfa.verifySecondFactor(techId, fresh[0], { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'recovery' });
 
-    expect(await staffMfa.disable(techId, { expectedTokenVersion: 2 })).toEqual({ ok: true });
+    await mockDatabase('push_subscriptions').insert({ admin_user_id: techId, subscription_data: '{}', active: true, staff_token_version: 2 });
+    const disabled = await staffMfa.disable(techId, { expectedTokenVersion: 2 });
+    expect(disabled.ok).toBe(true);
+    // A password-only token the gate was refusing must not come back: the
+    // version moves and devices are deactivated, like enrolling.
+    expect(disabled.technician.auth_token_version).toBe(3);
+    expect(await mockDatabase('push_subscriptions').where({ admin_user_id: techId, active: true })).toHaveLength(0);
     expect(await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first()).toBeUndefined();
     expect(await mockDatabase('staff_mfa_recovery_codes').where({ technician_id: techId })).toHaveLength(0);
     expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();

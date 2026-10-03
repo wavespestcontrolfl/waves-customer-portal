@@ -435,16 +435,23 @@ async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = 
 
 // Lock order everywhere: account row, then factor row, then recovery codes
 // (verification takes factor row then codes), so turning it off never
-// deadlocks against a recovery-code sign-in.
-// Returns { ok: true } or { ok: false, reason: 'revoked' }.
+// deadlocks against a recovery-code sign-in. Like enrolling, turning it off
+// moves the credential version and deactivates push registrations: a
+// password-only token or device the gate was refusing (minted while the gate
+// was briefly off) must not come back to life once the factor is gone.
+// Returns { ok: true, technician } or { ok: false, reason: 'revoked' }.
 async function disable(technicianId, { expectedTokenVersion } = {}) {
   return db.transaction(async (trx) => {
     if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion, { writesAccount: true })) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
     await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();
-    await trx('technicians').where({ id: technicianId }).update({ mfa_enabled_at: null, updated_at: trx.fn.now() });
-    return { ok: true };
+    const [technician] = await trx('technicians')
+      .where({ id: technicianId, auth_token_version: expectedTokenVersion })
+      .update({ mfa_enabled_at: null, auth_token_version: expectedTokenVersion + 1, updated_at: trx.fn.now() })
+      .returning('*');
+    await require('./push-notifications').deactivateStaffUser(technicianId, trx);
+    return { ok: true, technician };
   });
 }
 

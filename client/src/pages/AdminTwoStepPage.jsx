@@ -287,11 +287,13 @@ export default function AdminTwoStepPage() {
     setView(next);
   };
 
-  const call = async (path, { method = 'GET', body } = {}) => {
+  // `authToken`: a request made right after this page replaced its own
+  // session passes the new token (state updates land on the next render).
+  const call = async (path, { method = 'GET', body, authToken = token } = {}) => {
     const response = await fetch(`${API_BASE}/admin/auth/mfa${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${authToken}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -303,7 +305,7 @@ export default function AdminTwoStepPage() {
     // picks the newer token up instead.
     if (response.status === 401) {
       const stored = localStorage.getItem('waves_admin_token');
-      if (stored && stored !== token) {
+      if (stored && stored !== authToken) {
         setToken(stored);
         throw new Error('You signed in again in another tab. Try that once more.');
       }
@@ -319,9 +321,9 @@ export default function AdminTwoStepPage() {
     return data;
   };
 
-  const loadStatus = async () => {
+  const loadStatus = async (authToken = token) => {
     try {
-      setStatus(await call(''));
+      setStatus(await call('', { authToken }));
       setLoadError('');
     } catch (err) {
       setLoadError(err.status === 404 ? 'Two-step sign-in is not turned on for Waves yet.' : err.message);
@@ -402,10 +404,19 @@ export default function AdminTwoStepPage() {
       return;
     }
     await submit('off', async () => {
-      await call('/disable', { method: 'POST', body: { currentPassword: form.offPassword, code: form.offCode.trim() } });
+      const data = await call('/disable', { method: 'POST', body: { currentPassword: form.offPassword, code: form.offCode.trim() } });
+      // The server signed out every earlier session; this one continues on
+      // the fresh token unless another tab changed the session meanwhile.
+      let current = token;
+      if (data.token && localStorage.getItem('waves_admin_token') === token) {
+        localStorage.setItem('waves_admin_token', data.token);
+        localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
+        setToken(data.token);
+        current = data.token;
+      }
       show('overview');
       setNotice('Two-step sign-in is off.');
-      await loadStatus();
+      await loadStatus(current);
     })(event);
   };
 

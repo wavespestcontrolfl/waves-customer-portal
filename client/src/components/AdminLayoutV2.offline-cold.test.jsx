@@ -42,6 +42,7 @@ it("opens the saved route when the staff check and the flag read both hang", asy
   vi.useFakeTimers({ shouldAdvanceTime: true });
   localStorage.setItem("waves_admin_token", staffJwt());
   localStorage.setItem("waves_tech_offline_pass", JSON.stringify({
+    v: 2,
     binding: "fixture-signature",
     profile: { id: "tech-1", name: "River Tech", role: "technician" },
   }));

@@ -124,6 +124,22 @@ describe('AdminTwoStepPage', () => {
     expect(screen.queryByText('Sign in page')).not.toBeInTheDocument();
   });
 
+  it('turning it off continues this session on the fresh token', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 9 }))
+      .mockResolvedValueOnce(reply(200, { ok: true, token: 'after-off-jwt', user: { id: 'a', role: 'admin' } }))
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.change(screen.getByLabelText('Code from your authenticator', { selector: '#two-step-off-code' }), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off two-step sign-in' }));
+    expect(await screen.findByText('Set up two-step sign-in')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('after-off-jwt');
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer after-off-jwt');
+  });
+
   it('a revoked session goes back to sign in', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(401, { error: 'Two-step sign-in required. Sign in again.', code: 'MFA_REQUIRED' })));
     renderPage();

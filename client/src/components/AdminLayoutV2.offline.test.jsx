@@ -62,7 +62,7 @@ function staffJwt(exp = Math.floor(Date.now() / 1000) + 3600, sig = "fixture-sig
 const LIVE_TOKEN = staffJwt();
 const TECH = { id: "tech-1", name: "River Tech", role: "technician" };
 function seedOfflinePass(token, profile = TECH) {
-  localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ binding: token.split(".")[2], profile }));
+  localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ v: 2, binding: token.split(".")[2], profile }));
 }
 const offline = () => vi.fn(async () => { throw new TypeError("Failed to fetch"); });
 
@@ -262,6 +262,15 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     // The pre-rotation offline pass and saved route are gone (Codex #5573 r22).
     expect(localStorage.getItem("waves_tech_offline_pass")).toBeNull();
     expect(localStorage.getItem("waves_tech_route_snapshot")).toBeNull();
+  });
+
+  it("a pass written before the two-step policy existed (no version) never opens Today offline", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    localStorage.setItem("waves_tech_offline_pass", JSON.stringify({ binding: LIVE_TOKEN.split(".")[2], profile: TECH }));
+    vi.stubGlobal("fetch", offline());
+    renderAt();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to verify staff access");
+    expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
   it("an admin who still owes two-step setup goes to the setup page, and the offline pass goes (GATE_ADMIN_MFA_ENFORCE)", async () => {
@@ -482,7 +491,7 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     renderAt(path);
     expect(await screen.findByText(content)).toBeInTheDocument();
     const pass = JSON.parse(localStorage.getItem("waves_tech_offline_pass"));
-    expect(pass).toMatchObject({ binding: "fixture-signature", profile: { id: profile.id } });
+    expect(pass).toMatchObject({ v: 2, binding: "fixture-signature", profile: { id: profile.id } });
     expect(JSON.parse(localStorage.getItem("waves_admin_user"))).toMatchObject({ id: profile.id });
   });
 

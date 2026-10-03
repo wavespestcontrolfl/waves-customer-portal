@@ -404,7 +404,11 @@ async function mfaDisable(req, res, next) {
     if (!result.ok) return mfaFailureResponse(res, result, 400);
     const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!disabled.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
-    return res.json({ ok: true });
+    // Every earlier session and device is signed out; this one continues.
+    disconnectRevokedStaffSessions(tech.id, 'mfa_disabled');
+    const { token, refreshToken } = mintStaffTokens(disabled.technician);
+    setAdminMarkerCookie(res, tech.id);
+    return res.json({ ok: true, token, refreshToken, user: staffUser(disabled.technician) });
   } catch (err) { return next(err); }
 }
 
