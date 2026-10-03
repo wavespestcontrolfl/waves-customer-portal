@@ -242,6 +242,24 @@ function fakeClock(start = 1_700_000_000_000) {
   return clock;
 }
 
+describe('search form validation', () => {
+  test('a 200 page that is not the search form is an error (never not_found) and five in a row stop as an outage', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const ids = Array.from({ length: 7 }, (_, i) => `BLD9801-096${i}`);
+    stubDb(ids.map((id) => cand(id)));
+    const calls = fakeAca({}, { clock });
+    const realFetch = global.fetch;
+    global.fetch = jest.fn(async (url, opts = {}) => (/CapHome\.aspx/.test(url) && opts.method === 'GET'
+      ? response('<html>Scheduled maintenance</html>')
+      : realFetch(url, opts)));
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ errors: 5, notFound: 0, stopped: 'outage' });
+    expect(global.fetch.mock.calls.some(([, o]) => o.method === 'POST')).toBe(false);
+    expect(calls).toBeDefined();
+  });
+});
+
 describe('redirect hops', () => {
   test('a one-hit search redirect is followed through the throttle (≥2 s before the redirected GET), cookies kept', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';

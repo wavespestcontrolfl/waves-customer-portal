@@ -1357,29 +1357,33 @@ function initScheduledJobs() {
   // two ACA report sessions at once.
   // =========================================================================
   cron.schedule('5 4 * * 1', async () => {
-    try {
-      const res = await runExclusive('permit-sync', () =>
-        require('./property-lookup/manatee-permit-sync').syncPermits());
-      if (res && !res.skipped) {
-        const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
-        logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
+    // ONE lease for the whole sequence (codex #5673 P1): with separate
+    // leases a deploy overlap could run the detail step on one replica while
+    // another still runs the report sync (stale candidates, concurrent ACA
+    // scraping) and then skip it there. Each step keeps its own try so a
+    // failure in one never skips the other.
+    await runExclusive('permit-sync', async () => {
+      try {
+        const res = await require('./property-lookup/manatee-permit-sync').syncPermits();
+        if (res && !res.skipped) {
+          const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
+          logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
+        }
+      } catch (err) {
+        logger.error(`Permit sync failed: ${err.message}`);
       }
-    } catch (err) {
-      logger.error(`Permit sync failed: ${err.message}`);
-    }
-    // Permit detail collection (building facts off each new-home permit's
-    // ACA record page → construction_permit_records). Runs AFTER the report
-    // sync so this week's new permits are candidates, in its own try so a
-    // failed report sync never skips it (and vice versa). Inert unless
-    // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
-    // syncPermitDetails). Slow by design (sequential, >=2 s between
-    // requests, per-run cap + time budget); never runs from a lookup.
-    try {
-      await runExclusive('permit-detail-sync', () =>
-        require('./property-lookup/manatee-permit-detail').syncPermitDetails());
-    } catch (err) {
-      logger.error(`Permit detail sync failed: ${err.message}`);
-    }
+      // Permit detail collection (building facts off each new-home permit's
+      // ACA record page → construction_permit_records). Runs AFTER the
+      // report sync so this week's new permits are candidates. Inert unless
+      // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
+      // syncPermitDetails). Slow by design (sequential, >=2 s between
+      // requests, per-run cap + time budget); never runs from a lookup.
+      try {
+        await require('./property-lookup/manatee-permit-detail').syncPermitDetails();
+      } catch (err) {
+        logger.error(`Permit detail sync failed: ${err.message}`);
+      }
+    }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

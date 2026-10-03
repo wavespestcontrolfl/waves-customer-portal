@@ -226,8 +226,17 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
   const cookies = [];
   const referer = CAP_HOME_URL;
   const { text: home } = await politeFetch(polite, CAP_HOME_URL, { cookies, timeoutMs: timeout, referer, step: 'permit search form' });
+  // A 200 that is not the search form (maintenance / login page, or a
+  // rebuilt form) must not be posted and read as "no such permit": that
+  // would stamp a whole batch not_found for 14 days. Missing the view state
+  // or the permit-number input is a transport-level failure (error, counted
+  // toward the outage stop).
+  const hidden = hiddenInputs(home);
+  if (!hidden.__VIEWSTATE || !String(home || '').includes(`name="${SEARCH_FIELD}"`)) {
+    throw new TransientAcaError('permit search form missing its view state or permit-number field');
+  }
   const form = new URLSearchParams({
-    ...hiddenInputs(home),
+    ...hidden,
     [SEARCH_FIELD]: permitNo,
     __EVENTTARGET: SEARCH_TARGET,
     __EVENTARGUMENT: '',
