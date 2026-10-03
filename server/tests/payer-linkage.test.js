@@ -71,7 +71,7 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
   test('the portal payment history (GET /api/billing) uses the shared service (no second copy of the predicate)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/portal-payment-history'), 'utf8');
     expect(src).toMatch(/require\('\.\/payer-linkage'\)/);
-    expect(src).toMatch(/await loadPayerLinkage\(customerId\)/);
+    expect(src).toMatch(/await loadPayerLinkage\(customerId(?:, database)?\)/);
     expect(src).not.toMatch(/const isPayerLinked = /);
     expect(require('fs').readFileSync(require.resolve('../routes/billing-v2'), 'utf8')).not.toMatch(/const isPayerLinked = /);
   });
