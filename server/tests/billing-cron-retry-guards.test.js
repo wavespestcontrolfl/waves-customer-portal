@@ -24,6 +24,8 @@ let mockCollectedRow = null;
 let mockOrphanRow = null;
 let mockPaymentUpdates = [];
 let mockHoldSkipLogged = null;
+let mockPaymentUpdateCount = 1;
+let mockPaymentUpdateError = null;
 
 jest.mock('../models/db', () => {
   function builder(table) {
@@ -36,7 +38,8 @@ jest.mock('../models/db', () => {
     b.insert = () => Promise.resolve([]);
     b.update = (payload) => {
       if (table === 'payments') mockPaymentUpdates.push(payload);
-      return Promise.resolve(1);
+      if (table === 'payments' && mockPaymentUpdateError) return Promise.reject(mockPaymentUpdateError);
+      return Promise.resolve(table === 'payments' ? mockPaymentUpdateCount : 1);
     };
     b.first = () => {
       if (table === 'customers') return Promise.resolve(mockCustomer);
@@ -130,6 +133,8 @@ beforeEach(() => {
   mockOrphanRow = null;
   mockPaymentUpdates = [];
   mockHoldSkipLogged = null;
+  mockPaymentUpdateCount = 1;
+  mockPaymentUpdateError = null;
   jest.clearAllMocks();
   StripeService.charge.mockReset();
   StripeService.chargeOneTime.mockReset();
@@ -649,6 +654,7 @@ describe('retry settlement reporting', () => {
 // micro-deposit step), so the office is told once, keyed on the retry's PaymentIntent.
 describe('B16: retry ladder parked on card authentication (3DS)', () => {
   const NotificationService = require('../services/notification-service');
+  beforeEach(() => { NotificationService.notifyAdmin.mockReset(); NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1' }); });
   const scaErr = () => Object.assign(new Error('Customer authentication required'), {
     code: 'STRIPE_REQUIRES_ACTION',
     stripePaymentIntentId: 'pi_retry_sca',
@@ -696,6 +702,45 @@ describe('B16: retry ladder parked on card authentication (3DS)', () => {
 
     expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey))
       .toEqual(['autopay-sca-parked:cust-1:pi_retry_sca', 'autopay-sca-parked:cust-1:pi_retry_sca']);
+  });
+
+  // notifyAdmin catches its own insert failures and resolves NULL instead of rejecting, so a
+  // null is a failed alert: nothing may claim the office was told, and a durable
+  // customer_health_alerts row is the fallback.
+  test('a null notification (the real failure shape) is a failed alert: health-alert fallback, still parked', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAllCharges(scaErr());
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    const db = require('../models/db');
+    const logger = require('../services/logger');
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      await BillingCron.processPaymentRetries();
+      expect(db).toHaveBeenCalledWith('customer_health_alerts');
+      expect(errorSpy.mock.calls.some((c) => /office alert NOT filed/.test(String(c[0])))).toBe(true);
+      expect(warnSpy.mock.calls.some((c) => /office alerted/.test(String(c[0])))).toBe(false);
+      expect(warnSpy.mock.calls.some((c) => /office bell NOT filed/.test(String(c[0])))).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+    expect(mockPaymentUpdates.find((u) => /3DS/.test(u.failure_reason || ''))).toMatchObject({ next_retry_at: null });
+  });
+
+  // The alert tells the office to collect by hand, so it needs the park CONFIRMED: a row still
+  // armed with a due next_retry_at can be charged again by the next sweep (double charge).
+  test.each([
+    ['the park update rejects', () => { mockPaymentUpdateError = new Error('db unavailable'); }],
+    ['the park update touches no row', () => { mockPaymentUpdateCount = 0; }],
+  ])('%s: NO manual-collection alert, no sca_required event, loop continues', async (_label, arrange) => {
+    mockFailedPayments = [monthlyFailedPayment(), monthlyFailedPayment({ id: 'pay-failed-2', customer_id: 'cust-1' })];
+    rejectAllCharges(scaErr());
+    arrange();
+    const result = await BillingCron.processPaymentRetries();
+    expect(result.retried).toBe(2); // the first row's failed park did not abort the sweep
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'sca_required', expect.anything());
   });
 
   test('a decline on the retry is not an SCA park: no SCA office alert', async () => {

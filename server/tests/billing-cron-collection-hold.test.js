@@ -238,7 +238,7 @@ describe('a hold deferral that cannot persist is never reported complete (billin
 // parked with NO retry and the office is told once, by one stable key per PaymentIntent.
 describe('B16: monthly autopay parked on card authentication (3DS)', () => {
   const NotificationService = require('../services/notification-service');
-  beforeEach(() => { logAutopay.mockResolvedValue(undefined); });
+  beforeEach(() => { logAutopay.mockResolvedValue(undefined); NotificationService.notifyAdmin.mockReset(); NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1' }); });
   afterEach(() => { StripeService.chargeMonthly.mockReset(); logAutopay.mockReset(); });
   const scaErr = (overrides = {}) => Object.assign(new Error('Customer authentication required'), {
     code: 'STRIPE_REQUIRES_ACTION',
@@ -293,6 +293,31 @@ describe('B16: monthly autopay parked on card authentication (3DS)', () => {
     }));
     await BillingCron.processMonthlyBilling();
     expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('autopay-sca-parked:cust-held:pi_sca_2');
+  }, 15000);
+
+  // notifyAdmin catches its own insert failures and resolves NULL instead of rejecting, so a null
+  // is a failed alert: nothing may claim the office was told, and a durable
+  // customer_health_alerts row is the fallback.
+  test('a null notification (the real failure shape) is a failed alert: health-alert fallback, still parked', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaErr());
+    const logger = require('../services/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const result = await BillingCron.processMonthlyBilling();
+      expect(result.failed).toBe(1);
+      expect(errorSpy.mock.calls.some((c) => /office alert NOT filed/.test(String(c[0])))).toBe(true);
+      expect(warnSpy.mock.calls.some((c) => /office alerted/.test(String(c[0])))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+    expect(mockHealthAlertInserts).toEqual([expect.objectContaining({
+      customer_id: 'cust-held', alert_type: 'payment_failure', severity: 'high',
+      title: expect.stringContaining('$89.00'),
+    })]);
+    expect(mockPaymentsInserts).toHaveLength(0); // still no retry
   }, 15000);
 
   test('a bell failure never aborts the loop: the month is still parked and counted', async () => {

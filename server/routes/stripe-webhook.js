@@ -542,6 +542,24 @@ async function recordAppointmentCardNoShowFeePayment(paymentIntent) {
   }
 }
 
+// B16: billing-cron raises one office alert per autopay charge parked on card
+// authentication, keyed on customer + PaymentIntent. When that PI settles (its ledger
+// row is paid) the condition the alert was about has cleared, so close it. The
+// emitter's own lifecycle (docs/admin-notifications.md); never throws, since a bell
+// close must not fail the webhook.
+async function closeScaParkedAlertForIntent(paymentIntent) {
+  try {
+    if (!paymentIntent?.id) return;
+    const row = await db('payments')
+      .where({ stripe_payment_intent_id: paymentIntent.id, status: 'paid' })
+      .first('id', 'customer_id', 'stripe_payment_intent_id');
+    if (!row?.customer_id) return;
+    await require('../services/autopay-sca-parked').closeScaParkedAlerts([row], 'charge_collected');
+  } catch (err) {
+    logger.warn(`[stripe-webhook] could not close the parked-autopay alert for PI ${paymentIntent?.id}: ${err.message}`);
+  }
+}
+
 // Resolve the customer whose own money just settled and clear their billing
 // pause if one is waiting on exactly that (billing-pause.js owns the rules).
 // Skips the non-arrears purposes: a statement is the PAYER's money, an
@@ -940,6 +958,9 @@ router.post(
           // 'autopay_final_failure' pauses, compare-and-swaps so a newer
           // pause is never wiped, and requires the settlement moment.
           await maybeAutoClearBillingPauseForIntent(event.data.object, event.created);
+          // B16: the original PaymentIntent of an autopay charge parked on card
+          // authentication settled — close the office alert that asked us to collect it.
+          await closeScaParkedAlertForIntent(event.data.object);
           break;
 
         case 'payment_intent.processing':
@@ -8652,3 +8673,4 @@ module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._sendBillingSms = sendBillingSms;
 module.exports._handlePaymentIntentRequiresAction = handlePaymentIntentRequiresAction;
+module.exports._closeScaParkedAlertForIntent = closeScaParkedAlertForIntent;

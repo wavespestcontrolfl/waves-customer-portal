@@ -67,6 +67,8 @@ const mockHandleAutopayFailure = jest.fn(async () => {});
 jest.mock('../services/invoice-followups', () => ({
   handleAutopayFailure: (...a) => mockHandleAutopayFailure(...a),
 }));
+const mockCloseAdminAlertKeys = jest.fn(async () => 1);
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...a) => mockCloseAdminAlertKeys(...a) }));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: jest.fn(async () => null),
 }));
@@ -130,6 +132,7 @@ jest.mock('../models/db', () => {
 const {
   _handleAchFailure: handleAchFailure,
   _handlePaymentIntentRequiresAction: handlePaymentIntentRequiresAction,
+  _closeScaParkedAlertForIntent: closeScaParkedAlertForIntent,
   _handleSetupIntentFailed: handleSetupIntentFailed,
   _sendBillingSms: sendBillingSms,
 } = require('../routes/stripe-webhook');
@@ -222,6 +225,30 @@ describe('sendBillingSms — held-notice queueing (REPLAY_HOLD_CODES)', () => {
     expect(row.to_phone).toBe('+19415550101');
     const meta = JSON.parse(row.metadata);
     expect(meta.requires_registered_dispatch).toBeUndefined();
+  });
+});
+
+// B16: the original PaymentIntent of an autopay charge parked on card authentication settles
+// -> the office alert (key: customer + PI) closes. Never throws into the webhook.
+describe('closeScaParkedAlertForIntent', () => {
+  test('a settled PI with a paid ledger row closes its customer + PI alert key', async () => {
+    mockState.paymentRow = { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' };
+    await closeScaParkedAlertForIntent({ id: 'pi_sca_1' });
+    expect(mockCloseAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(mockCloseAdminAlertKeys.mock.calls[0][1]).toEqual(expect.arrayContaining(['autopay-sca-parked:cust-1:pi_sca_1']));
+    expect(mockCloseAdminAlertKeys.mock.calls[0][2]).toBe('charge_collected');
+  });
+
+  test('no paid ledger row for the PI: nothing is closed', async () => {
+    mockState.paymentRow = null;
+    await closeScaParkedAlertForIntent({ id: 'pi_other' });
+    expect(mockCloseAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
+  test('a close failure never throws into the webhook', async () => {
+    mockState.paymentRow = { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' };
+    mockCloseAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
+    await expect(closeScaParkedAlertForIntent({ id: 'pi_sca_1' })).resolves.toBeUndefined();
   });
 });
 

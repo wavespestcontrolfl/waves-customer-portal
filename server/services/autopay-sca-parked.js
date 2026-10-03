@@ -1,0 +1,140 @@
+'use strict';
+
+// B16: an off-session autopay charge that the cardholder's bank answered with a
+// 3D Secure demand is parked with no retry (a retry would hit the same wall), and
+// nothing else tells anyone: the requires_action webhook texts the customer only
+// for an ACH micro-deposit step (and that bank-verification text is switched off),
+// and no page can finish a card authentication. This module owns the office alert's
+// whole lifecycle (docs/admin-notifications.md: the emitter that raises a row owns
+// clearing it):
+//   - alertAutopayScaParked: raise it (billing-cron's two parked branches);
+//   - resolveParkedMonthlyRows: when the month is collected by hand (Customer 360
+//     Charge now), take the parked rows out of the overdue balance and close the alert;
+//   - closeScaParkedAlerts: close it (also used when the original PaymentIntent
+//     later succeeds, from the Stripe webhook).
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
+
+const KEY_PREFIX = 'autopay-sca-parked:';
+// One key per customer + PaymentIntent (the payment row id when no PI was minted), so a
+// replay or a second tick never rings twice and a closer can recompute it from a row.
+const scaParkedAlertKey = (customerId, ref) => `${KEY_PREFIX}${customerId}:${ref}`;
+
+// Raises the office alert. Resolves true only when a notification row exists (new or an
+// already-standing one for the same key). `notifyAdmin` catches its own insert failures
+// and resolves null instead of rejecting, so a null (or a throw) is a failed alert: it is
+// logged at error level and falls back to a customer_health_alerts row (the same staff
+// surface billing-cron's ambiguous-outcome branch uses), and the caller must not claim
+// the office was told. Never throws: a bell failure must not abort the collection loop.
+async function alertAutopayScaParked(customer, err, { amount, source }) {
+  const customerId = String(customer.id);
+  const paymentIntentId = err.stripePaymentIntentId || err.paymentRecord?.stripe_payment_intent_id || null;
+  const attemptId = err.paymentRecord?.id || null;
+  const owed = parseFloat(err.paymentRecord?.amount ?? amount);
+  const dollars = Number.isFinite(owed)
+    ? `$${owed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : '';
+  let alert = null;
+  let name = 'this customer';
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fullName, fitAction } = require('./admin-alert-names');
+    name = fullName(customer) || name;
+    alert = await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: fitAction('Billing', name, [
+        (who) => `collect ${who}'s autopay by hand`,
+        (who) => `collect ${who}'s autopay`,
+      ]),
+      why: `The bank must approve this ${dollars ? `${dollars} ` : ''}card charge; it was not collected and will not retry on its own.`,
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'customer', id: customerId },
+      doneWhen: 'charge_collected',
+      who: 'person',
+    }, {
+      detail: `Autopay for ${name} (${dollars || 'amount unknown'}) was declined for customer authentication (3D Secure): the cardholder's bank has to approve the charge, and an automatic charge cannot do that. It was not collected and no retry is scheduled, so it will not collect on its own. No message was sent to the customer. Reach the customer to approve it with their bank, or collect it another way. Stripe PaymentIntent ${paymentIntentId || 'unknown'}${attemptId ? `, payment record ${attemptId}` : ''}.`,
+      dedupeKey: scaParkedAlertKey(customerId, paymentIntentId || attemptId || etDateString().slice(0, 7)),
+      metadata: {
+        customer_id: customerId,
+        stripe_payment_intent_id: paymentIntentId,
+        payment_id: attemptId,
+        source,
+      },
+    });
+  } catch (alertErr) {
+    logger.error(`[autopay-sca] office alert threw for customer ${customerId}: ${alertErr.message}`);
+  }
+  if (alert) return true;
+
+  logger.error(`[autopay-sca] office alert NOT filed for customer ${customerId} (PI ${paymentIntentId || 'none'}): the autopay charge is parked on card authentication with no retry — falling back to a customer health alert`);
+  try {
+    await db('customer_health_alerts').insert({
+      customer_id: customer.id,
+      alert_type: 'payment_failure',
+      severity: 'high',
+      title: `Autopay needs card authentication — ${dollars || 'amount unknown'} (${name})`,
+      description: 'The cardholder\'s bank has to approve this card charge, so it was NOT collected and no retry is scheduled. Reach the customer to approve it with their bank, or collect it another way. The office bell could not be filed.',
+      trigger_data: JSON.stringify({ payment_id: attemptId, stripe_payment_intent_id: paymentIntentId, source: `autopay_sca_parked_${source}` }),
+    });
+  } catch (fallbackErr) {
+    logger.error(`[autopay-sca] CRITICAL: customer ${customerId} autopay is parked on card authentication and neither the office bell nor the health-alert fallback could be written (${fallbackErr.message}); the sca_required autopay_log row is the only record`);
+  }
+  return false;
+}
+
+// Close the alert(s) for these payment rows ({ id, customer_id, stripe_payment_intent_id }).
+// Best-effort and never throws: clearing a bell must not fail a collection or a webhook.
+async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null } = {}) {
+  try {
+    const keys = [];
+    for (const row of rows || []) {
+      if (!row?.customer_id) continue;
+      if (row.stripe_payment_intent_id) keys.push(scaParkedAlertKey(row.customer_id, row.stripe_payment_intent_id));
+      if (row.id != null) keys.push(scaParkedAlertKey(row.customer_id, row.id));
+    }
+    if (!keys.length) return 0;
+    const { closeAdminAlertKeys } = require('./admin-alert-episodes');
+    return await closeAdminAlertKeys(conn, keys, reason, { resolution: resolution || 'The parked autopay charge was collected' });
+  } catch (err) {
+    logger.warn(`[autopay-sca] could not close the parked-charge alert: ${err.message}`);
+    return 0;
+  }
+}
+
+// The office collected the month by hand (Customer 360 "Charge now"): the customer's
+// still-open failed monthly rows for THAT obligation month (parked on card
+// authentication, or a ladder that ran out) are no longer owed. Same supersede the
+// retry sweep applies to an armed row when "another door" collected the month, and
+// the same month matcher (metadata.billed_month, else the payment_date window plus the
+// 'WaveGuard Monthly' marker). Only unarmed rows (an armed row is the sweep's own to
+// resolve) of the same customer and month; the collecting payment itself and rows
+// already superseded are left alone. Returns the rows it resolved.
+async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, monthEnd }, collectedPaymentId, { conn = db } = {}) {
+  const resolved = await conn('payments')
+    .where({ customer_id: customerId, status: 'failed' })
+    .whereNull('superseded_by_payment_id')
+    .whereNull('next_retry_at')
+    .whereNot({ id: collectedPaymentId })
+    .where(function () {
+      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .orWhere(function () {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .andWhere('payment_date', '>=', monthStart)
+            .andWhere('payment_date', '<=', monthEnd)
+            .andWhere('description', 'like', '%WaveGuard Monthly%');
+        });
+    })
+    .update({
+      superseded_by_payment_id: collectedPaymentId,
+      failure_reason: conn.raw("COALESCE(failure_reason, '') || ?", [` — resolved: ${monthKey} collected by payment ${collectedPaymentId}`]),
+    })
+    .returning(['id', 'customer_id', 'stripe_payment_intent_id']);
+  if (resolved?.length) {
+    await closeScaParkedAlerts(resolved, 'charge_collected', { conn });
+  }
+  return resolved || [];
+}
+
+module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows };
