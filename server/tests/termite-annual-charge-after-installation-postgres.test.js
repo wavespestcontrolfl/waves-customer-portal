@@ -454,7 +454,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await covers(db, visit, { throwOnError: true })).toBe(true);
     });
 
-    test('only the installation itself: a later bait/station job of the same plan bills normally, before and after the anchor', async () => {
+    test('only the installation itself: once it is performed, a later bait/station job of the same plan bills normally', async () => {
       const { atSigning, sweep, db } = load();
       await atSigning();
       const install = await addInstall(db);
@@ -463,19 +463,41 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await ruleCovers(db, install)).toBe(true);
       expect(await ruleCovers(db, later)).toBe(false);
 
-      await sweep(); // anchors the term to the installation and charges the plan
-      expect((await db('annual_prepay_terms').where({ id: ids.termId }).first()).installation_anchor_visit_id).toBe(install.id);
+      await sweep(); // anchors the term and charges the plan
       expect(await ruleCovers(db, install)).toBe(true);
       expect(await ruleCovers(db, later)).toBe(false);
     });
 
-    test('a cancelled earlier booking does not take the installation\'s place', async () => {
+    test('the installation in progress (no closeout record yet) is covered', async () => {
       const { atSigning, db } = load();
       await atSigning();
-      await addInstall(db, { scheduled_date: dayOffset(-1), status: 'cancelled' });
-      const install = await addInstall(db);
+      const booked = await addInstall(db, { status: 'confirmed' });
+      const closing = await addInstall(db, { scheduled_date: dayOffset(1) }, null);
 
+      expect(await ruleCovers(db, booked)).toBe(true);
+      expect(await ruleCovers(db, closing)).toBe(true);
+    });
+
+    test('an unsuccessful first visit, then the real installation: the real one is covered and charged once; the first is not the installation', async () => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const inspected = await addInstall(db, { scheduled_date: dayOffset(-1) }, { visitOutcome: 'inspection_only' });
+
+      // The anchor may record the inspection-only visit for coverage dates;
+      // it must not decide money.
+      await sweep();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(await ruleCovers(db, inspected)).toBe(false);
+
+      const install = await addInstall(db, {}, null); // closing out now
       expect(await ruleCovers(db, install)).toBe(true);
+      await db('service_records').insert({ scheduled_service_id: install.id, status: 'completed', structured_notes: JSON.stringify({}) });
+      expect(await ruleCovers(db, install)).toBe(true);
+
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(await ruleCovers(db, install)).toBe(true);
+      expect(await ruleCovers(db, inspected)).toBe(false);
     });
 
     test('another visit of the same customer is not covered by it', async () => {

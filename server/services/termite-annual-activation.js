@@ -1257,7 +1257,9 @@ function awaitingInstallationRows(conn) {
 // a second bill for the visit. A plan cancelled before installation (term
 // neither payment_pending nor active) covers nothing: that visit bills
 // normally. By the same plan-scoped installation rule as the anchor, and
-// bound to the ONE installation visit (see the body).
+// bound to the ONE performed installation visit (see the body). It does not
+// read installation_anchor_visit_id: the anchor records coverage DATES from
+// the earliest completed visit and is not a money identity.
 async function installationVisitOfDeferredPlan(conn, visitId) {
   // The deferred plan(s) this visit matches by the plan-scoped rule.
   const plans = await whereInstallationVisitForPlan(
@@ -1279,23 +1281,30 @@ async function installationVisitOfDeferredPlan(conn, visitId) {
     },
   ).select(
     'apt.id', 'apt.customer_id', 'apt.source_estimate_id', 'apt.term_start', 'apt.created_at',
-    'apt.installation_anchor_visit_id', 'e.property_id as estimate_property_id',
   );
   for (const term of plans) {
-    // ONE visit only — the installation itself, never a later bait/station
-    // job that merely matches the plan (pre-push audit P0). Once the anchor
-    // has recorded the installation, it is exactly that visit.
-    if (term.installation_anchor_visit_id) {
-      if (String(term.installation_anchor_visit_id) === String(visitId)) return true;
+    // ONE identity for "the installation", shared with the charge release
+    // (earliestPerformedInstallation): the plan's earliest PERFORMED
+    // installation visit. Once one exists it is the only covered visit — a
+    // later bait/station job, or a visit that was closed as inspection only
+    // before it, is not.
+    const performed = await earliestPerformedInstallation(term, conn);
+    if (performed) {
+      if (String(performed.id) === String(visitId)) return true;
       continue;
     }
-    // Not anchored yet (the anchor runs in the next daily sweep, after the
-    // visit completes): the plan's EARLIEST live installation visit.
-    const first = await whereInstallationVisitForPlan(
-      conn('scheduled_services as ss').whereNotIn('ss.status', DEAD_VISIT_STATUSES),
-      installationPlanFor(term, { property_id: term.estimate_property_id }),
-    ).orderBy('ss.scheduled_date', 'asc').orderBy('ss.id', 'asc').first('ss.id');
-    if (first && String(first.id) === String(visitId)) return true;
+    // None performed yet: this visit may be the installation in progress (its
+    // closeout asks before the service record exists). Covered unless its own
+    // newest closeout already says the work was not performed — that visit
+    // is not the installation, and the real one comes later.
+    const closeout = await conn('service_records')
+      .where({ scheduled_service_id: visitId })
+      .orderBy('created_at', 'desc').orderBy('id', 'desc')
+      .first('status', 'structured_notes');
+    const notes = parseJsonish(closeout?.structured_notes) || {};
+    const closedUnperformed = !!closeout && closeout.status === 'completed'
+      && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true');
+    if (!closedUnperformed) return true;
   }
   return false;
 }
