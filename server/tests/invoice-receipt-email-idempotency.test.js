@@ -13,6 +13,8 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  // The library's own verdict on a thrown send (handoff started + no definite rejection = uncertain).
+  thrownSendDeliveryOutcome: jest.fn((err) => (err?.providerHandoffStarted === true ? 'uncertain' : 'not_sent')),
 }));
 jest.mock('../services/pdf/invoice-pdf', () => ({
   buildInvoicePDFBuffer: jest.fn(),
@@ -113,6 +115,13 @@ describe('sendReceiptEmail idempotency', () => {
     expect(args.idempotencyKey).toBe('receipt_email_auto:inv-1');
     expect(args.templateKey).toBe('invoice.receipt');
     expect(args.to).toBe('customer@example.com');
+  });
+
+  test('a thrown template send reports the library\'s delivery outcome: uncertain after the provider handoff, a definite non-send before it', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('provider response lost'), { providerHandoffStarted: true }));
+    expect(await sendReceiptEmail('inv-1')).toEqual({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(new Error('ledger unavailable'));
+    expect(await sendReceiptEmail('inv-1')).toEqual({ ok: false, error: 'ledger unavailable', deliveryOutcome: 'not_sent' });
   });
 
   test('passes null idempotencyKey when caller omits it (manual operator resend)', async () => {

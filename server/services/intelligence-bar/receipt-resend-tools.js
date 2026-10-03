@@ -33,7 +33,7 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { receiptRecipients, receiptRecipientsKey, maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { sendInvoiceReceipt, isUnknownOutcome } = require('../invoice-receipt-resend');
+const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
 const { expectedEmailSkip } = require('../receipt-delivery-queue');
 
@@ -164,11 +164,13 @@ const SMS_REASONS = {
 };
 const EXPECTED_SMS_SKIPS = new Set(['channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', 'payer_billed', 'no-phone']);
 
-function channelOutcome(requested, result, { reasons = {}, isExpectedSkip }) {
+// `certainty` is the shared writer's structured per-leg verdict (sent / not_sent /
+// unknown / not_requested, from the senders' deliveryOutcome) — never the error text.
+function channelOutcome(requested, result, certainty, { reasons = {}, isExpectedSkip }) {
   if (!requested) return { status: 'not_requested' };
-  if (result?.ok) return { status: 'sent' };
+  if (certainty === 'sent' || result?.ok) return { status: 'sent' };
   const raw = String(result?.error || 'not sent').slice(0, 160);
-  if (isUnknownOutcome(raw)) {
+  if (certainty === 'unknown') {
     return { status: 'unknown', detail: 'the provider did not answer — the receipt may or may not have gone out; it is not retried, and a queued automatic receipt is held so it cannot send it again; check before sending again' };
   }
   return { status: 'not_sent', detail: reasons[raw] || raw, expected: isExpectedSkip(raw) };
@@ -184,7 +186,7 @@ async function commit(input, actionContext) {
     return { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
-  const { status, body, closeout } = await sendInvoiceReceipt(version.invoice_id, {
+  const { status, body, closeout, delivery } = await sendInvoiceReceipt(version.invoice_id, {
     memo: version.memo, via: version.via, actorTechnicianId: actionContext?.technicianId || null,
     // An unknown provider outcome parks a claimed automatic job instead of re-queuing it.
     holdUnknownOutcome: true,
@@ -194,8 +196,8 @@ async function commit(input, actionContext) {
   if (status === 409) return { error: `Nothing was sent: ${body.error}`, code: body.code, preview_changed: true };
   if (status !== 200) return { error: `Nothing was sent: ${body.error}`, code: 'resend_blocked' };
 
-  const email = channelOutcome(version.via !== 'sms', body.email, { isExpectedSkip: (raw) => expectedEmailSkip({ error: raw }) });
-  const text = channelOutcome(version.via !== 'email', body.sms, { reasons: SMS_REASONS, isExpectedSkip: (raw) => EXPECTED_SMS_SKIPS.has(raw) });
+  const email = channelOutcome(version.via !== 'sms', body.email, delivery?.email, { isExpectedSkip: (raw) => expectedEmailSkip({ error: raw }) });
+  const text = channelOutcome(version.via !== 'email', body.sms, delivery?.sms, { reasons: SMS_REASONS, isExpectedSkip: (raw) => EXPECTED_SMS_SKIPS.has(raw) });
   const legs = [email, text].filter((leg) => leg.status !== 'not_requested');
   const delivered = legs.some((leg) => leg.status === 'sent');
   // The visit closeout that ran ahead of the legs: reported when the card named one or it ran.

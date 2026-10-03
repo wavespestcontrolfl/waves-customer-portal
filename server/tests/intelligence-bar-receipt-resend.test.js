@@ -23,10 +23,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
   expectedEmailSkip: jest.requireActual('../services/receipt-delivery-queue').expectedEmailSkip,
 }));
-jest.mock('../services/invoice-receipt-resend', () => ({
-  sendInvoiceReceipt: jest.fn(),
-  isUnknownOutcome: jest.requireActual('../services/invoice-receipt-resend').isUnknownOutcome,
-}));
+jest.mock('../services/invoice-receipt-resend', () => ({ sendInvoiceReceipt: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
 jest.mock('../services/customer-credit', () => ({ customerAutoApplyEnabled: jest.fn(async () => true), getBalance: jest.fn(async () => 25) }));
@@ -78,7 +75,7 @@ beforeEach(() => {
   db.mockImplementation(fakeDb({}));
   resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Pat@Example.com' }, customer: CUSTOMER });
   issuedCloseoutTarget.mockResolvedValue(null);
-  sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null });
+  sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null , delivery: { email: 'sent', sms: 'sent' } });
 });
 
 test('registered as an admin-only carded write with a uuid selector and the customer-contact label', () => {
@@ -247,14 +244,14 @@ describe('the writer refusing at the claim', () => {
 
 describe('honest per-channel results', () => {
   test('email sent, text skipped on the customer\'s own choice: still a clean success, with the reason', async () => {
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'channel_email_only' } } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'channel_email_only' } } , delivery: { email: 'sent', sms: 'not_sent' } });
     const out = await confirm({});
     expect(out.success).toBe(true);
     expect(out.text).toEqual({ status: 'not_sent', detail: 'the customer chose email-only receipts', expected: true });
   });
 
   test('email sent, text failed for another reason: partial', async () => {
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'carrier rejected' } } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'carrier rejected' } } , delivery: { email: 'sent', sms: 'not_sent' } });
     const out = await confirm({});
     expect(out.partial).toBe(true);
     expect(out.text).toEqual(expect.objectContaining({ status: 'not_sent', detail: 'carrier rejected' }));
@@ -262,7 +259,7 @@ describe('honest per-channel results', () => {
   });
 
   test('a provider timeout is unknown, never retried', async () => {
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' }, sms: { ok: false, skipped: true } } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' }, sms: { ok: false, skipped: true } } , delivery: { email: 'unknown', sms: 'not_requested' } });
     const out = await confirm({ via: 'email' });
     expect(out.outcome_unknown).toBe(true);
     expect(out.email.status).toBe('unknown');
@@ -271,8 +268,21 @@ describe('honest per-channel results', () => {
     expect(executionOutcome(out)).toBe('outcome_unknown');
   });
 
+  test('unknown comes from the writer\'s structured delivery verdict, not the error text', async () => {
+    // A text failure whose message is the real "receipt SMS blocked: PROVIDER_FAILURE" (no timeout wording) but whose outcome is uncertain.
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, skipped: true }, sms: { ok: false, error: 'receipt SMS blocked: PROVIDER_FAILURE' } }, closeout: null, delivery: { email: 'not_requested', sms: 'unknown' } });
+    const unknown = await confirm({ via: 'sms' });
+    expect(unknown.outcome_unknown).toBe(true);
+    expect(unknown.text.status).toBe('unknown');
+    // And error text that merely mentions a timeout, with a definite verdict, is not unknown.
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'request timed out while building the PDF' }, sms: { ok: false, skipped: true } }, closeout: null, delivery: { email: 'not_sent', sms: 'not_requested' } });
+    const definite = await confirm({ via: 'email' });
+    expect(definite.failed).toBe(true);
+    expect(definite.email.status).toBe('not_sent');
+  });
+
   test('nothing delivered: a failure that names the reasons', async () => {
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, error: 'no-phone' } } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, error: 'no-phone' } } , delivery: { email: 'not_sent', sms: 'not_sent' } });
     const out = await confirm({});
     expect(out.failed).toBe(true);
     expect(out.email.detail).toBe('PDF generation failed');
@@ -330,11 +340,11 @@ describe('the visit closeout the shared writer runs ahead of the legs', () => {
 
   test('the result reports the closeout outcome, including a visit completed while no receipt went out', async () => {
     issuedCloseoutTarget.mockResolvedValue(VISIT);
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: true, visitId: VISIT.visitId } , delivery: { email: 'sent', sms: 'sent' } });
     const ok = await confirm({});
     expect(ok).toEqual(expect.objectContaining({ success: true, visit_closeout: { status: 'completed', visit_id: VISIT.visitId } }));
 
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, error: 'no-phone' } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, error: 'no-phone' } }, closeout: { closed: true, visitId: VISIT.visitId } , delivery: { email: 'not_sent', sms: 'not_sent' } });
     const none = await confirm({});
     expect(none.partial).toBe(true);
     expect(none.failed).toBeUndefined();
@@ -342,7 +352,7 @@ describe('the visit closeout the shared writer runs ahead of the legs', () => {
     expect(none.note).toMatch(/linked visit was completed/);
     expect(executionOutcome(none)).toBe('partially_completed');
 
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: false, reason: 'visit_in_future', visitId: VISIT.visitId } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: { closed: false, reason: 'visit_in_future', visitId: VISIT.visitId } , delivery: { email: 'sent', sms: 'sent' } });
     const refused = await confirm({});
     expect(refused.partial).toBe(true);
     expect(refused.visit_closeout).toEqual({ status: 'not_completed', visit_id: VISIT.visitId, detail: 'visit_in_future' });
@@ -350,7 +360,7 @@ describe('the visit closeout the shared writer runs ahead of the legs', () => {
 
   test('an unknown outcome with a completed visit stays outcome-unknown and still reports the visit', async () => {
     issuedCloseoutTarget.mockResolvedValue(VISIT);
-    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' }, sms: { ok: false, skipped: true } }, closeout: { closed: true, visitId: VISIT.visitId } });
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' }, sms: { ok: false, skipped: true } }, closeout: { closed: true, visitId: VISIT.visitId } , delivery: { email: 'unknown', sms: 'not_requested' } });
     const out = await confirm({ via: 'email' });
     expect(out.outcome_unknown).toBe(true);
     expect(out.visit_closeout.status).toBe('completed');

@@ -943,7 +943,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template receipt send failed for ${invoice.invoice_number}: ${err.message}`);
-        return { ok: false, error: err.message };
+        // deliveryOutcome: uncertain when the request was handed to SendGrid
+        // and nothing conclusive came back (callers must not send again).
+        return { ok: false, error: err.message, deliveryOutcome: EmailTemplateLibrary.thrownSendDeliveryOutcome(err) };
       }
       logger.warn(`[invoice-email] Template unavailable for receipt ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
     }
@@ -974,7 +976,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     return { ok: true };
   } catch (err) {
     logger.error(`[invoice-email] Receipt send failed for ${invoice.invoice_number}: ${err.message}`);
-    return { ok: false, error: err.message };
+    // The SMTP fallback (non-production only) has no handoff marker: once sendMail ran, a failure is uncertain.
+    return { ok: false, error: err.message, deliveryOutcome: 'uncertain' };
   }
 }
 

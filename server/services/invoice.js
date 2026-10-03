@@ -9608,6 +9608,11 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
+      // The messaging layer's own verdict (accepted / not_sent / uncertain),
+      // under the name every caller reads it by (classifyDeliveryCertainty):
+      // a provider timeout is PROVIDER_FAILURE + deliveryOutcome 'uncertain',
+      // which the message text alone cannot tell from a definite failure.
+      err.providerOutcome = { deliveryOutcome: sendResult.deliveryOutcome, blocked: sendResult.blocked === true };
       // Send-window hold: carry the window-open time so the receipt queue
       // schedules its retry there instead of burning generic backoff
       // attempts overnight (an after-8PM payment's receipt must go out at

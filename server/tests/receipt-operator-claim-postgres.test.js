@@ -367,16 +367,16 @@ postgres('operator receipt claim on PostgreSQL', () => {
 
       test('tool (holdUnknownOutcome): an email timeout parks the queued automatic job so the worker cannot email again', async () => {
         const id = await paidInvoiceWithQueuedJob();
-        mockSendReceiptEmail.mockRejectedValue(new Error('timeout of 10000ms exceeded'));
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
         const out = await sendInvoiceReceipt(id, { via: 'email', holdUnknownOutcome: true });
-        expect(out.body).toMatchObject({ ok: false, email: { ok: false, error: 'timeout of 10000ms exceeded' } });
+        expect(out.body).toMatchObject({ ok: false, email: { ok: false, error: 'provider response lost' } });
         expect(await job(id)).toMatchObject({ status: 'failed', last_error: expect.stringMatching(/held for reconciliation/) });
         expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(id);
       });
 
       test('route default: the same timeout hands the job back as it always did', async () => {
         const id = await paidInvoiceWithQueuedJob();
-        mockSendReceiptEmail.mockRejectedValue(new Error('timeout of 10000ms exceeded'));
+        mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
         await sendInvoiceReceipt(id, { via: 'email' });
         expect(await job(id)).toMatchObject({ status: 'queued', locked_by: null });
       });
@@ -391,7 +391,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
       test('tool: a text timeout with the email not delivered also holds the job', async () => {
         const id = await paidInvoiceWithQueuedJob();
         mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
-        mockSendReceiptSms.mockRejectedValue(new Error('ETIMEDOUT'));
+        mockSendReceiptSms.mockRejectedValue(Object.assign(new Error('receipt SMS blocked: PROVIDER_FAILURE'), { providerOutcome: { deliveryOutcome: 'uncertain', blocked: false } }));
         await sendInvoiceReceipt(id, { via: 'both', holdUnknownOutcome: true });
         expect(await job(id)).toMatchObject({ status: 'failed' });
       });

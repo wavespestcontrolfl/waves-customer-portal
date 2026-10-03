@@ -14,15 +14,31 @@
  * provider outcome is unknown and nothing was recorded delivered, the claimed
  * automatic receipt job is parked for reconciliation instead of handed back to
  * the drain, which would send again (see releaseOperatorReceiptClaim).
- * Besides `{status, body}` the result carries `closeout`: what the visit
- * closeout ahead of the legs reported (never part of the route's body).
+ * Besides `{status, body}` the result carries `closeout` (what the visit
+ * closeout ahead of the legs reported) and `delivery` (per-leg certainty, see
+ * smsDelivery / emailDelivery) — never part of the route's body.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 
-// A provider that never answered: the leg may or may not have gone out.
-const UNKNOWN_OUTCOME_RE = /timed?[ -]?out|ETIMEDOUT|ESOCKET|ECONNRESET|socket hang up/i;
-const isUnknownOutcome = (error) => UNKNOWN_OUTCOME_RE.test(String(error || ''));
+// Per leg: 'sent' | 'not_sent' | 'unknown' | 'not_requested' — from the senders'
+// own structured evidence, never from message text.
+//  - Text: the messaging layer's deliveryOutcome (accepted / not_sent /
+//    uncertain, originating in twilio.js and carried by sendCustomerMessage),
+//    which InvoiceService.sendReceipt puts on a thrown error as providerOutcome.
+//    classifyDeliveryCertainty is the shared reader (the IB send_sms tools, the
+//    dunning and briefing senders all use it). A throw without providerOutcome
+//    came from sendReceipt's own pre-dispatch work: nothing was handed to Twilio.
+//  - Email: sendReceiptEmail tags a post-handoff failure deliveryOutcome
+//    'uncertain' (SendGrid handoff started, no definite rejection); every
+//    other failure is a definite non-send.
+function smsDelivery(result, err) {
+  if (result?.sent) return 'sent';
+  if (!err?.providerOutcome) return 'not_sent';
+  const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
+  return classifyDeliveryCertainty(err.providerOutcome) === 'unknown' ? 'unknown' : 'not_sent';
+}
+const emailDelivery = (result) => (result?.ok ? 'sent' : result?.deliveryOutcome === 'uncertain' ? 'unknown' : 'not_sent');
 
 async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent, holdUnknownOutcome = false } = {}) {
   const id = invoiceId;
@@ -65,7 +81,9 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
 
   let emailResult = { ok: false, skipped: true };
   let smsResult = { ok: false, skipped: true };
+  let smsThrown = null;
   let closeout = null;
+  const delivery = { email: 'not_requested', sms: 'not_requested' };
 
   try {
     // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
@@ -80,6 +98,7 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
 
     if (via === 'email' || via === 'both') {
       emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+      delivery.email = emailDelivery(emailResult);
       if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
     }
     if (via === 'sms' || via === 'both') {
@@ -93,7 +112,9 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
+        smsThrown = err;
       }
+      delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
       if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
     }
 
@@ -107,7 +128,7 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     }
   } finally {
     const holdForReconciliation = holdUnknownOutcome && emailResult.ok !== true
-      && [emailResult, smsResult].some((leg) => leg.ok === false && isUnknownOutcome(leg.error));
+      && (delivery.email === 'unknown' || delivery.sms === 'unknown');
     await releaseOperatorReceiptClaim(claim, {
       emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult,
       ...(holdForReconciliation ? { holdForReconciliation } : {}),
@@ -134,7 +155,8 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
       invoice: updated,
     },
     closeout,
+    delivery,
   };
 }
 
-module.exports = { sendInvoiceReceipt, isUnknownOutcome };
+module.exports = { sendInvoiceReceipt };
