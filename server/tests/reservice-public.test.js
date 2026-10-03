@@ -942,6 +942,32 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     expect(database).toHaveBeenCalledWith('scheduled_services as s');
   });
 
+  test.each([
+    ['coverage', 1, { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['coverage', 1, { code: 'ABORT_ERR' }],
+    ['coverage', 1, { code: '57014' }],
+    ['coverage', 1, { name: 'AbortError' }],
+    ['coverage', 1, { name: 'KnexTimeoutError' }],
+    ['callback', 2, { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['callback', 2, { code: 'ABORT_ERR' }],
+    ['callback', 2, { code: '57014' }],
+    ['callback', 2, { name: 'AbortError' }],
+    ['callback', 2, { name: 'KnexTimeoutError' }],
+  ])('the coordinated %s read propagates cancellation %# before another query', async (_stage, failedRead, identity) => {
+    const cancelled = Object.assign(new Error('read cancelled'), identity);
+    let laneReads = 0;
+    const database = jest.fn((table) => {
+      const query = db(table);
+      if (table === 'scheduled_services as s' && ++laneReads === failedRead) {
+        query.then = (resolve, reject) => Promise.reject(cancelled).then(resolve, reject);
+      }
+      return query;
+    });
+
+    await expect(reservicePublicRouter._internals.pageLaneState(token, database)).rejects.toBe(cancelled);
+    expect(laneReads).toBe(failedRead);
+  });
+
   test('the location-review reader forwards the supplied executor', async () => {
     const database = jest.fn();
     const reviewedServiceLocation = jest.spyOn(require('../services/customer-geocode-review'), 'reviewedServiceLocation')
