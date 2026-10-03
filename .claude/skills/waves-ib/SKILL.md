@@ -90,9 +90,12 @@ max_tokens for field speed.
   `services/intelligence-bar/owner-direct.js` in the same turn, with no
   card — still proposed as a pending action and committed through the same
   `commitPendingAction` path as a click (pins, receipt, audit row), never a
-  bare executor call. Every other login, context, and tool keeps the card;
-  a third same-tool edit in one request and a notes edit over existing
-  notes keep it too (owner ruling 2026-10-02).
+  bare executor call. Every other login, context, and tool keeps the card.
+  Two limits (owner ruling 2026-10-02): three or more same-tool edits in
+  one request that would run direct are REFUSED as a set
+  (`owner_direct_bulk_limit`, nothing stored) and the model is pointed at
+  the bulk tool, whose one card the owner confirms; and a notes edit over
+  existing notes keeps its card, which names the notes it deletes.
 - **Admin contexts use `GlobalCommandPalette`.** `AdminLayoutV2` mounts
   the palette; update the palette's route context mapping instead of adding another
   page-level embed. The former admin embeds were retired. The dedicated

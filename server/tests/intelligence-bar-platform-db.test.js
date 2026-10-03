@@ -796,7 +796,15 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // version is the row the card's "before" came from.
       const overwriteRow = await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).first('params');
       const overwriteParams = typeof overwriteRow.params === 'string' ? JSON.parse(overwriteRow.params) : overwriteRow.params;
-      expect(overwriteParams._ib_owner_direct).toBeUndefined(); // a card is never counted as a direct edit
+      expect(overwriteParams._ib_owner_direct).toBe(false); // a card is never counted as a direct edit
+      // The resume seed: the direct commit counts, a confirmed card does not, a pre-marker row does.
+      const OwnerDirect = require('../services/intelligence-bar/owner-direct');
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).get('update_customer')).toBe(1);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("params - '_ib_owner_direct'") });
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).get('update_customer')).toBe(1);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("jsonb_set(params, '{_ib_owner_direct}', 'false')") });
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).has('update_customer')).toBe(false);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("jsonb_set(params, '{_ib_owner_direct}', 'true')") });
       expect(overwriteParams._ib_notes_before).toBe(note);
       const pinned = overwriteParams._ib_customer_version;
       expect(pinned).toBe((await db('customers').where('id', customerA).first(db.raw('updated_at::text AS version'))).version);

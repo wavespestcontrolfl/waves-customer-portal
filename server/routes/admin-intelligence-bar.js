@@ -1686,7 +1686,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (directVerdict?.refuse) return { failed: true, modelResult: directVerdict.refuse };
   // Marks the stored action as an owner-direct commit, so a resumed task
   // counts those and not the cards the owner confirmed (Codex r3).
-  if (directVerdict?.direct) params._ib_owner_direct = true;
+  // Always written on the owner-direct path, true or false: a row with no
+  // marker predates it and is counted conservatively (Codex r4).
+  if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card

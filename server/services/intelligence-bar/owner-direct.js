@@ -182,10 +182,13 @@ async function seedDirectCounts(task, dbh = null) {
   if (!task?.id) return counts;
   try {
     const knex = dbh || require('../../models/db');
-    // Only actions the proposal marked owner-direct: a card the owner
-    // confirmed is consumed the same way and is not a direct edit.
+    // Actions the proposal marked owner-direct; a card the owner confirmed
+    // is consumed the same way and is marked false. A listed tool's row with
+    // no marker predates the marker (a task in flight across the deploy) and
+    // counts too, so the cap cannot restart on resume.
     const rows = await knex('ib_pending_actions').where({ task_id: task.id, status: 'confirmed' }).whereNotNull('consumed_at')
-      .whereRaw("params->>'_ib_owner_direct' = 'true'").groupBy('tool_name').select('tool_name').count('* as n');
+      .whereIn('tool_name', [...OWNER_DIRECT_TOOL_NAMES])
+      .whereRaw("coalesce(params->>'_ib_owner_direct', 'unmarked') <> 'false'").groupBy('tool_name').select('tool_name').count('* as n');
     for (const row of rows) counts.set(row.tool_name, Number(row.n) || 0);
   } catch {
     counts.set(SEED_FAILED, true);
