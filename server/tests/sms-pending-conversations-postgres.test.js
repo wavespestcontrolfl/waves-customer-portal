@@ -238,6 +238,22 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(pendingCount()).resolves.toEqual(none);
   });
 
+  test('an outbound call ends at its recorded customer leg, not at insert time plus the staff-leg duration', async () => {
+    const callStart = tick;
+    // Staff answered 30 s after the row was inserted and talked for 100 s, so
+    // the customer leg ended at +130 s. A text at +115 s was during the call.
+    const customerLeg = (endedAt) => ({ status: 'completed', duration_seconds: 95, ended_at: endedAt });
+    tick = new Date(callStart.getTime() + 115 * 1000);
+    await seed({ body: 'Here is the gate code' });
+    tick = callStart;
+    await seedCall({ direction: 'outbound', source: 'admin-callback', duration: 100, customerLeg: customerLeg('not a time') });
+    await expect(pendingCount()).resolves.toEqual(one);
+    tick = callStart;
+    await seedCall({ direction: 'outbound', source: 'admin-callback', duration: 100,
+      customerLeg: customerLeg(new Date(callStart.getTime() + 130 * 1000).toISOString()) });
+    await expect(pendingCount()).resolves.toEqual(none);
+  });
+
   test.each([
     ['the office', { source: 'admin-click' }],
     ['a callback card, customer leg 60 s or more', { source: 'admin-callback', customerLeg: { status: 'completed', duration_seconds: 107 } }],

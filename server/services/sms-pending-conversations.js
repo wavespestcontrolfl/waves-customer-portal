@@ -49,6 +49,11 @@ async function loadPendingSmsConversations({
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
+  // The pattern has no "?" and no ":word": db.raw reads either as a binding.
+  const callEndedAt = `GREATEST(
+    spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)),
+    CASE WHEN spoken.metadata->'customer_leg'->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+      THEN CAST(spoken.metadata->'customer_leg'->>'ended_at' AS timestamptz) END)`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -213,11 +218,14 @@ async function loadPendingSmsConversations({
       -- the row's own status and duration are the staff leg's and prove
       -- nothing. The call must END after the text arrived: a row is inserted
       -- when dialing starts, so a text sent while the phone rings, or during
-      -- the conversation, is answered by it.
+      -- the conversation, is answered by it. The end is the recorded customer
+      -- leg's when there is one; otherwise insert time plus duration, which on
+      -- an outbound row is early by the staff ring time and so only ever
+      -- leaves a text pending.
       SELECT DISTINCT li.id AS inbound_id
       FROM enriched_inbound li
       JOIN call_log spoken ON ${callPeer} = li.peer
-        AND spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) > li.created_at
+        AND ${callEndedAt} > li.created_at
       WHERE spoken.status = 'completed'
         AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
           OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
