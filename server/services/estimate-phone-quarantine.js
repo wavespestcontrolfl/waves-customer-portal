@@ -131,12 +131,42 @@ async function estimatePhoneQuarantined(estimate, dbh = db) {
   }
 }
 
+// THE delivery-time backstop (called by sendCustomerMessage, the one point every text passes through -
+// immediate sends, scheduled-SMS replays and retries alike, since the replay forwards the queued row's
+// destination and metadata.estimate_id): true when a text about `estimateIds` is headed for the
+// DISPUTED number. DESTINATION-side, so a queued item whose estimate phone was since corrected still
+// cannot reach the disputed number, and one headed to the customer's real number goes through:
+//   - the destination's identity equals a referenced estimate's stamped identity key, or
+//   - it equals that estimate's own phone and the estimate's customer carries the marker (the estimate's
+//     number is not the customer's own).
+// Per-route checks stay where they give the operator a better message; this is the net under them.
+// FAILS CLOSED on a read error.
+async function sendToEstimatePhoneQuarantined({ estimateIds, to }, dbh = db) {
+  const toKey = phoneIdentityKey(to);
+  if (!toKey) return false;
+  const ids = [...new Set((estimateIds || []).filter(Boolean).map(String))];
+  for (const id of ids) {
+    try {
+      const row = await dbh('estimates').where({ id }).first('id', 'customer_id', 'customer_phone', 'estimate_data');
+      if (!row) continue;
+      const stamp = parseEstimateData(row.estimate_data)[ESTIMATE_PHONE_DISPUTE_KEY];
+      if (stamp?.key && stamp.key === toKey) return true;
+      if (phoneIdentityKey(row.customer_phone) === toKey && await estimatePhoneQuarantined(row, dbh)) return true;
+    } catch (err) {
+      logger.warn(`[estimate-phone-quarantine] delivery check failed for estimate ${id} - holding the text: ${err.message}`);
+      return true;
+    }
+  }
+  return false;
+}
+
 module.exports = {
   CONTRADICTED_PHONE_NOTE_MARK,
   ESTIMATE_PHONE_QUARANTINED_MESSAGE,
   customerHasContradictedPhoneMarker,
   customerIsContradictedPhoneQuarantine,
   estimatePhoneQuarantined,
+  sendToEstimatePhoneQuarantined,
   stampEstimatePhoneDispute,
   ESTIMATE_PHONE_DISPUTE_KEY,
 };

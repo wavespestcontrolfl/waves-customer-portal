@@ -482,6 +482,20 @@ async function sendCustomerMessageCore(input) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
   }
 
+  // 1.4 Disputed estimate phone (B18). A contradicted public accept quarantined the number staff typed on an
+  // estimate (it belongs to another customer): no text ABOUT that estimate may reach it, whichever sender
+  // built the text and whether it is immediate or a scheduled replay (the replay forwards the queued row's
+  // destination and estimateId). Destination-side, fail closed, not retryable. Callers that texted an
+  // estimate's phone pass estimateId / estimateIds; internal and applicant sends are out of scope.
+  if (input.channel === 'sms' && ['customer', 'lead'].includes(input.audience)
+    && (input.estimateId || (Array.isArray(input.estimateIds) && input.estimateIds.length))) {
+    const { sendToEstimatePhoneQuarantined } = require('../estimate-phone-quarantine');
+    if (await sendToEstimatePhoneQuarantined({ estimateIds: [input.estimateId, ...(input.estimateIds || [])], to: input.to })) {
+      logger.warn(`[send_customer_message] estimate phone quarantined (entry ${input.entryPoint || 'unknown'}) - text not sent`);
+      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'ESTIMATE_PHONE_QUARANTINED', reason: 'estimate_phone_quarantined', retryable: false };
+    }
+  }
+
   // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
   // a pay / update-card link and is billing follow-up the customer was told is on hold. The
   // billing-cron attempts, the Stripe webhook notices and every other live payment_failure

@@ -9,6 +9,12 @@
  * legacy pipeline untouched.
  */
 
+// B18: the disputed-estimate-phone backstop has its own suite (send-customer-message-estimate-quarantine.test.js);
+// this suite's db is a bare mock with no estimates read.
+jest.mock('../services/estimate-phone-quarantine', () => ({
+  ...jest.requireActual('../services/estimate-phone-quarantine'),
+  sendToEstimatePhoneQuarantined: jest.fn(async () => false),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 // The dispute-hold read is not what this suite exercises (its db is a bare mock): no active hold.

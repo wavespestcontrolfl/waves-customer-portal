@@ -25,7 +25,7 @@ const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
-const { estimatePhoneQuarantined } = require("./estimate-phone-quarantine");
+const { estimatePhoneQuarantined, sendToEstimatePhoneQuarantined } = require("./estimate-phone-quarantine");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
@@ -191,10 +191,15 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
 // authorizing delivery on an unchecked condition could nudge a customer who
 // already declined or paid — the executor reschedules the row and re-checks
 // on the next pass instead.
-async function deferredFollowupStillEligible(estimateId) {
+async function deferredFollowupStillEligible(estimateId, { to = null } = {}) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
+    // B18: a text queued before a contradicted accept must not replay to the disputed number. Judged on
+    // the ACTUAL queued destination (falling back to the estimate's phone for a legacy row without one).
+    if (await sendToEstimatePhoneQuarantined({ estimateIds: [estimateId], to: to || est.customer_phone }, db)) {
+      return { eligible: false, reason: "phone-quarantined" };
+    }
     // replay:true — the reply-pause lookup THROWS on a transient failure
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.

@@ -1587,7 +1587,13 @@ phone identity and the same email; a failed stamp rolls the accept back, and an 
 still has the stamped identity - correcting the estimate's phone lifts it, adding the real number on the
 customer profile does not; the customer's marker note (which the accept's own text suppression reads) also
 quarantines a phone that is not the customer's own number, compared by the same country-aware identity (a
-`+44` number sharing the `+1` number's suffix is a different phone). An unrelated estimate for the phone's
+`+44` number sharing the `+1` number's suffix is a different phone). The one delivery-time backstop is `sendCustomerMessage`: a customer or lead SMS that carries
+`estimateId` / `estimateIds` is refused (`ESTIMATE_PHONE_QUARANTINED`, not retryable, nothing sent) when its
+DESTINATION has the stamped identity - or is the estimate's own phone while the customer's marker says that
+number is not theirs - so immediate sends, the follow-up and engagement senders, and every scheduled replay
+(which forwards the queued destination and `metadata.estimate_id`) are covered; the
+`estimate_follow_up_deferred` and `estimate_extension_deferred` rechecks also suppress a queued item up front
+against its stored destination. An unrelated estimate for the phone's
 rightful owner (another email) is not stamped; a same-person estimate with no email is covered only through
 its group or the customer marker; the preflight phone-identity verdict is formed once and the
 accept transaction's authoritative match must equal it, taken under the same per-phone advisory

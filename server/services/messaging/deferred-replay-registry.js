@@ -345,7 +345,7 @@ const REGISTRY = {
     async recheck(meta) {
       if (!meta.estimate_id) return { eligible: true };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
-      return deferredFollowupStillEligible(meta.estimate_id);
+      return deferredFollowupStillEligible(meta.estimate_id, { to: meta.to_phone });
     },
   },
 
@@ -356,7 +356,7 @@ const REGISTRY = {
       // safetyGate the follow-up engine uses.
       if (!meta.estimate_id) return { eligible: true };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
-      const eligible = await deferredFollowupStillEligible(meta.estimate_id);
+      const eligible = await deferredFollowupStillEligible(meta.estimate_id, { to: meta.to_phone });
       if (eligible?.eligible === false) return eligible;
       // Expiry pin (codex r26): the frozen body names the FIRST grant's
       // "{new_expiry}"/"{days_added}". An admin re-extension before 08:00
