@@ -148,6 +148,10 @@ function book({ customers = [customer(1)], notices = [draft(1)], snapshots = nul
 const notices = () => mockDb.store.price_change_notices;
 const snapshots = () => mockDb.store.rate_review_snapshots;
 
+// A leg that reached its provider handoff (the request was made) and then returns `result`.
+const emailVia = (result) => async (args) => { await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient && args.recipient.email }); return result; };
+const smsVia = (result) => async (args) => { await args.sendOptions.withSmsHandoff(async () => ({ ok: true })); return result; };
+
 beforeEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
   process.env.GATE_CANCEL_FLOW_V2 = 'true'; // the hold resume lifecycle runs
@@ -385,7 +389,7 @@ describe('sendBatch', () => {
 
   test('an uncertain outcome (a provider failure) is held send_uncertain with its words — never auto-retried', async () => {
     mockDb.reset(book());
-    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, uncertain: 1, sent: 0 });
     const n = notices()[0];
@@ -888,7 +892,7 @@ describe('customer surfaces', () => {
     expect(m.early_failures).toBeUndefined();
     // with no callback evidence the same ambiguous error still parks
     mockDb.reset(book());
-    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
   });
 
@@ -1055,7 +1059,7 @@ describe('customer surfaces', () => {
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1 });
     // an ambiguous failure is never retried automatically
     mockDb.reset(book());
-    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, uncertain: 1 });
     expect(notices()[0].status).toBe('send_uncertain');
   });
@@ -1069,7 +1073,7 @@ describe('customer surfaces', () => {
     expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('sms_not_prepared');
     // an ambiguous failure of the sender itself still parks
     mockDb.reset(book({ customers: [customer(1, { email: null })] }));
-    smsLeg.mockResolvedValue({ sent: false, attempted: true });
+    smsLeg.mockImplementation(smsVia({ sent: false, attempted: true }));
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
   });
 
@@ -1086,7 +1090,7 @@ describe('customer surfaces', () => {
     expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('email_rejected');
     // ambiguous failure: parked for the owner, still no unpaired text
     mockDb.reset(b);
-    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
     expect(smsLeg.mock.calls.at(-1)[0].hasEmailLeg).toBe(true);
     // a customer with no email on file has no email leg to pair with
@@ -1208,12 +1212,39 @@ describe('customer surfaces', () => {
   test('send: an exception AFTER a provider call parks the letter as send_uncertain with its words', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();
-    emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+    emailLeg.mockImplementation(emailVia({ sent: true, attempted: true, messageId: 'em-1' }));
     smsLeg.mockRejectedValue(new Error('sms leg exploded')); // email already went out
     const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
     expect(res).toMatchObject({ sent: 0, failed: 1 });
     expect(notices()[0].status).toBe('send_uncertain');
-    expect(JSON.parse(notices()[0].metadata).pending_letter).toBeTruthy();
+    const parked = JSON.parse(notices()[0].metadata);
+    expect(parked.pending_letter).toBeTruthy();
+    // the identity a later bounce needs is kept, and the link the email carries works
+    expect(parked).toMatchObject({ email_message_id: 'em-1', uncertain_channels: { email: true }, uncertain_claim_key: parked.pending_letter.key });
+    expect(comms.publicReview(notices()[0]).lines).toBeTruthy();
+    // that bounce settles it: no channel left unknown, back to a re-sendable draft
+    await comms.handleEmailDeliveryEvent(mockDb, { id: 'em-1', template_key: comms.TEMPLATE_KEY, recipient_type: 'customer', recipient_id: CUSTOMER(1) }, { event: 'bounce', timestamp: 1790000000 });
+    expect(notices()[0].status).toBe('draft');
+  });
+
+  test('send: an exception in a leg\'s preparation, before any provider handoff, is a clean draft and exposes nothing', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    emailLeg.mockRejectedValue(new Error('template ledger exploded')); // thrown before withProviderHandoff ran
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(res).toMatchObject({ sent: 0, failed: 1, uncertain: 0 });
+    expect(notices()[0].status).toBe('draft');
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'pre_dispatch_error' });
+    expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true });
+  });
+
+  test('an email leg that reports "attempted" but never reached its handoff is a retryable draft, not send_uncertain; send_uncertain without a handoff record shows nothing', async () => {
+    mockDb.reset(book());
+    emailLeg.mockResolvedValue({ sent: false, attempted: true }); // an infrastructure error in preparation
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, uncertain: 0 });
+    expect(notices()[0].status).toBe('draft');
+    expect(comms.publicReview({ rate_review_row_id: 'r', status: 'send_uncertain', sent_at: null, metadata: { pending_letter: { key: 'k', letter: { lines: [{ service: 'Pest control', current_cents: 1, new_cents: 2 }] } } } })).toEqual({ unavailable: true });
   });
 
   test('send: the recipient is passed through unchanged, and a billing contact renamed between the freeze and the handoff is refused — no send, the frozen greeting untouched', async () => {
@@ -1556,7 +1587,7 @@ describe('customer surfaces', () => {
       // uncertain: parked, never re-sent, nothing advances
       mockDb.reset(book());
       emailLeg.mockClear();
-      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(notices()[0].status).toBe('send_uncertain');
       expect(meta().send_attempts).toBeUndefined();
@@ -1668,7 +1699,7 @@ describe('customer surfaces', () => {
 
     test('an email of UNKNOWN outcome next to a text that later fails parks the letter as send_uncertain (it may have arrived), never a clean draft', async () => {
       mockDb.reset(book());
-      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // timed out: ambiguous
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true })); // timed out: ambiguous
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true });
@@ -1690,7 +1721,7 @@ describe('customer surfaces', () => {
       const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
       b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
       mockDb.reset(b);
-      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // unknown
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true })); // unknown
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       Object.assign(notices()[0], { applied_at: NOW });
@@ -1704,7 +1735,7 @@ describe('customer surfaces', () => {
 
     test('email timeout → its bounce lands during the text leg → text accepted → text later fails ⇒ a re-sendable draft (both channels definitively failed), not send_uncertain', async () => {
       mockDb.reset(book());
-      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // timed out: ambiguous to the caller
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true })); // timed out: ambiguous to the caller
       smsLeg.mockImplementation(async () => {
         const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
         await comms.handleEmailDeliveryEvent(mockDb, message({ idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
@@ -1723,7 +1754,7 @@ describe('customer surfaces', () => {
 
     test('control: the email genuinely unknown (no callback) and the text later fails ⇒ send_uncertain', async () => {
       mockDb.reset(book());
-      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(meta().uncertain_channels).toEqual({ email: true });
@@ -1734,7 +1765,7 @@ describe('customer surfaces', () => {
 
     test('a bounce for the unknown email that arrives AFTER the stamp, then the text failing, is also a re-sendable draft (channel_failures re-evaluated on the live row)', async () => {
       mockDb.reset(book());
-      emailLeg.mockResolvedValue({ sent: false, attempted: true, messageId: 'em-1' });
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true, messageId: 'em-1' }));
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       // the email's id is known only if the library returned one; match through the stored id
@@ -1747,7 +1778,7 @@ describe('customer surfaces', () => {
     test('a real late bounce of the unknown email (no provider id came back) settles that channel through the claim key; the text failing afterwards is a re-sendable draft', async () => {
       mockDb.reset(book());
       let claimKey = null;
-      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(meta().uncertain_channels).toEqual({ email: true });
@@ -1768,7 +1799,7 @@ describe('customer surfaces', () => {
     test('the other order: the text fails first (parked uncertain), then the unknown email bounces ⇒ the parked letter becomes a re-sendable draft', async () => {
       mockDb.reset(book());
       let claimKey = null;
-      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
       smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
@@ -1787,8 +1818,8 @@ describe('customer surfaces', () => {
     test('both legs of unknown outcome park with both channels remembered; one late bounce keeps the letter parked with its frozen words, the second failure releases it', async () => {
       mockDb.reset(book());
       let claimKey = null;
-      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
-      smsLeg.mockResolvedValue({ sent: false, attempted: true, sid: 'SM1' });
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockImplementation(smsVia({ sent: false, attempted: true, sid: 'SM1' }));
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(notices()[0].status).toBe('send_uncertain');
       expect(meta().uncertain_channels).toEqual({ email: true, sms: true });
@@ -1805,7 +1836,7 @@ describe('customer surfaces', () => {
 
     test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
       mockDb.reset(book());
-      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
       mockDb.store.sms_log = [];
       smsLeg.mockImplementation(async () => {
         await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });

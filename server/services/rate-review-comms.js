@@ -134,12 +134,15 @@ function greetingName(customer, prefs) {
   return String(recipient?.name || customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
 }
 
-async function loadCostBlock(dbh = db) {
+async function loadCostBlock(dbh = db, { share = false } = {}) {
   // rate_review_config.cost_block is the owner's once-a-year paragraph
   // (the admin screen's Cost block field). Read via select('*') so a
   // database without the column reads as "not written" (refuse), never
   // throws.
-  const row = await dbh('rate_review_config').where({ id: 1 }).first().catch(() => null);
+  // share: read under a row share lock (inside a provider handoff's transaction), so the
+  // config writer — which takes the row FOR UPDATE — waits until the request is done.
+  const query = dbh('rate_review_config').where({ id: 1 });
+  const row = await (share ? query.forShare() : query).first().catch(() => null);
   const text = String(row?.cost_block || '').trim();
   return text || null;
 }
@@ -798,9 +801,9 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null
     // The LIVE row's metadata, not the copy read before the provider calls: a callback
     // (a bounce, a failed text) may have written early_failures onto it meanwhile.
     const live = await dbh('price_change_notices').where({ id: l.noticeId }).first('metadata');
-    const { pending_letter: _p, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
+    const { pending_letter: livePending, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
     // The failures belong to the attempt that is ending: kept only while it is parked uncertain.
-    const next = { ...meta, ...(status === UNCERTAIN && early ? { early_failures: early } : {}), ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
+    const next = { ...meta, ...(status === UNCERTAIN && early ? { early_failures: early } : {}), ...extra, ...(keepFrozen ? { pending_letter: livePending || frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
@@ -808,11 +811,15 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null
 }
 
 // Parking a send whose outcome is unknown: the evidence on the LIVE rows decides. A
-// channel that a callback has already proven failed is no longer unknown; with no
-// unknown channel left the letter is a certain non-send — a retryable draft with the
-// failure recorded — instead of a permanent send_uncertain. Returns { retryable }.
+// channel is unknown only if its provider handoff was recorded (pending_letter.handoff:
+// committed before the request, so a leg that failed in preparation never reached a
+// provider), and a channel that a callback has already proven failed is no longer
+// unknown. With no unknown channel left the letter is a certain non-send — a retryable
+// draft, with the failure recorded when there is one — instead of a permanent
+// send_uncertain. Returns { retryable, holdReason }.
 async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, dispatchMeta }) {
   let retryable = true;
+  let holdReason = 'pre_dispatch_error';
   const alerts = [];
   // Under the customer-comms fence and the row lock the delivery callbacks take
   // (recordChannelFailure): a bounce either committed its early_failures before this read,
@@ -822,23 +829,34 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   for (const l of entry.lines) {
     const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first();
     if (!live) continue;
-    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+    const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+    const handoff = (livePending && livePending.handoff) || {};
+    const emailStill = emailUnknown && !!handoff.email && !early.email;
+    const smsStill = smsUnknown && !!handoff.sms && !early.sms;
     // A revocation from an EARLIER attempt is history, not overwritten: it advances the attempt
     // identity, so the next send is never deduplicated against a bounced message.
     const history = priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {};
-    const stillUnknown = (emailUnknown && !early.email) || (smsUnknown && !early.sms);
-    if (stillUnknown) {
+    if (emailStill || smsStill) {
       retryable = false;
       await trx('price_change_notices').where({ id: live.id }).update({
         status: UNCERTAIN, updated_at: new Date(),
         metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}),
           // the channels whose outcome is still unknown, so a late bounce can settle them
-          uncertain_channels: { ...(emailUnknown && !early.email ? { email: true } : {}), ...(smsUnknown && !early.sms ? { sms: true } : {}) },
-          uncertain_claim_key: frozen.key, pending_letter: frozen }),
+          uncertain_channels: { ...(emailStill ? { email: true } : {}), ...(smsStill ? { sms: true } : {}) },
+          uncertain_claim_key: (livePending || frozen).key, pending_letter: livePending || frozen }),
       });
       continue;
     }
     const failure = early.email || early.sms;
+    if (!failure) {
+      // No provider was handed anything and nothing failed: a clean, retryable draft.
+      await trx('price_change_notices').where({ id: live.id }).update({
+        status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: new Date(),
+        metadata: JSON.stringify({ ...meta, ...history, ...dispatchMeta, send_hold: { reason: 'pre_dispatch_error', at: new Date().toISOString() } }),
+      });
+      continue;
+    }
+    holdReason = 'delivery_failed_before_stamp';
     await trx('price_change_notices').where({ id: live.id }).update({
       status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: new Date(),
       metadata: JSON.stringify({ ...meta, ...history, ...dispatchMeta, channel_failures: early, delivery_revoked: failure, send_hold: { reason: 'delivery_failed_before_stamp', at: new Date().toISOString() } }),
@@ -853,7 +871,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   }
   });
   if (alerts.length) await raiseDeliveryAlerts(alerts);
-  return { retryable };
+  return { retryable, holdReason };
 }
 
 async function stillOwned(dbh, noticeIds, customerId) {
@@ -999,6 +1017,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   const payload = letterPayload({ customer, prefs, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
+  progress.entry = entry;
+  progress.frozen = frozen;
+  progress.dispatchMeta = {};
   // Ownership is re-read right before each provider leg: a merge undo
   // that repointed a claimed notice stops the send (the fence itself can't
   // be held across the call — the SMS sender takes it on its own
@@ -1025,7 +1046,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   const recheckEligibility = async (conn) => {
     // The cost block the owner's digest covered must still be the saved one: an edit from
     // any session during the fan-out stops the letters not yet handed to a provider.
-    if ((await loadCostBlock(conn)) !== costBlock) return { ok: false, reason: 'cost_block_changed' };
+    // Inside a handoff (its own transaction) the row is share-locked through the provider
+    // request: a save either committed first and is seen here, or waits for the request.
+    if ((await loadCostBlock(conn, { share: conn !== dbh })) !== costBlock) return { ok: false, reason: 'cost_block_changed' };
     // ...and so must the letter template: the email leg refuses a changed template on its
     // own (expectedContentHash); this stops the text too, so neither provider proceeds.
     if ((await letterTemplateHash()) !== templateHash) return { ok: false, reason: 'template_changed' };
@@ -1040,19 +1063,20 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // immediately before the request — every line of the letter in ONE transaction of its
   // own, committed before the provider is called (all lines carry it, or none does). A
   // claim refused or stalled in preparation never exposes them.
-  let handoffMarked = false;
-  const markHandoff = async () => {
-    if (handoffMarked) return;
+  const handoffMarked = new Set();
+  const markHandoff = async (channel) => {
+    if (handoffMarked.has(channel)) return;
     const at = clock().toISOString();
     await dbh.transaction(async (mark) => {
       for (const id of claimed) {
         const row = await mark('price_change_notices').where({ id, status: 'sending' }).forUpdate().first('metadata');
         const meta = parseJson(row && row.metadata, {});
         if (!meta.pending_letter) continue;
-        await mark('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...meta.pending_letter, handoff_at: at } }) });
+        const pending = meta.pending_letter;
+        await mark('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...pending, handoff_at: pending.handoff_at || at, handoff: { ...(pending.handoff || {}), [channel]: at } } }) });
       }
     });
-    handoffMarked = true;
+    handoffMarked.add(channel);
   };
   // From here a provider may have the message: an exception is no longer a clean non-send.
   progress.crossed = true;
@@ -1088,12 +1112,13 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         // BOTH the address and the greeting must still be the frozen ones.
         if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()
           || greetingName(live, prefs) !== payload.first_name) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
-        await markHandoff();
+        await markHandoff('email');
         await dispatch(trx);
         return { ok: true };
       }),
     },
   });
+  if (email.messageId) progress.dispatchMeta.email_message_id = String(email.messageId);
   const smsPhone = String(customer.phone || '').trim();
   const sms = await PriceChangeNotices.sendNoticeSms({
     customer,
@@ -1127,7 +1152,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
         const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility);
         if (refusal) return refusal;
-        await markHandoff();
+        await markHandoff('sms');
         return dispatch(trx);
       }),
     },
@@ -1168,7 +1193,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         emailUnknown: !!email.attempted && !emailHold && !emailRejected,
         smsUnknown: !!sms.attempted && !smsNotPrepared,
       });
-      return settled.retryable ? { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' } : { outcome: 'uncertain' };
+      return settled.retryable ? { outcome: 'rejected', holdReason: settled.holdReason } : { outcome: 'uncertain' };
     }
     await settleLines(dbh, entry, { status: 'unreachable', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
     return { outcome: 'unreachable' };
@@ -1194,7 +1219,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
-      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+      const { pending_letter: livePending, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+      const handoff = (livePending && livePending.handoff) || {};
       const early = { ...earlyRecorded };
       // Twilio's verdict may already be in sms_log (its callback beat this stamp):
       // that is an early failure of the text too.
@@ -1208,8 +1234,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // a callback has already proven (early evidence on the live row, read under this fence)
       // is no longer unknown, so it is left out.
       const uncertainChannels = {
-        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && !early.email ? { email: true } : {}),
-        ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold && !early.sms ? { sms: true } : {}),
+        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && handoff.email && !early.email ? { email: true } : {}),
+        ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold && handoff.sms && !early.sms ? { sms: true } : {}),
       };
       const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels, uncertain_claim_key: frozen.key } : {}) };
       if (!emailOk && !smsOk) {
@@ -1220,7 +1246,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         const parked = Object.keys(uncertainChannels).length > 0;
         await trx('price_change_notices').where({ id: live.id }).update({
           status: parked ? UNCERTAIN : 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: sentAt,
-          metadata: JSON.stringify({ ...base, channel_failures: early, delivery_revoked: failure, ...(parked ? { pending_letter: frozen } : {}) }),
+          metadata: JSON.stringify({ ...base, channel_failures: early, delivery_revoked: failure, ...(parked ? { pending_letter: livePending || frozen } : {}) }),
         });
         const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
         if (snap && !parked) {
@@ -1246,10 +1272,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // took it (a merge undo): never reported sent and never left 'sending' —
     // held as send_uncertain with the words and the fact recorded, for the owner.
     for (const l of orphaned) {
-      const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
+      const moved = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first('metadata');
+      const { pending_letter: livePending, send_hold: _h, ...meta } = parseJson(moved ? moved.metadata : l.notice.metadata, {});
       await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
         status: UNCERTAIN, updated_at: sentAt,
-        metadata: JSON.stringify({ ...meta, pending_letter: frozen, delivered_repointed: { at: sentAt.toISOString(), letter_customer_id: String(entry.customerId) } }),
+        metadata: JSON.stringify({ ...meta, pending_letter: livePending || frozen, delivered_repointed: { at: sentAt.toISOString(), letter_customer_id: String(entry.customerId) } }),
       });
     }
   });
@@ -1276,7 +1303,10 @@ async function settleAfterException(dbh, progress, err) {
       await settleLines(dbh, progress.entry, { status: 'draft', keepFrozen: false, frozen: null, hold: 'pre_dispatch_error', holdError: String((err && err.message) || err).slice(0, 200) });
       return;
     }
-    await dbh('price_change_notices').whereIn('id', progress.claimed).where({ status: 'sending' }).update({ status: UNCERTAIN, updated_at: new Date() });
+    // Through the fenced settlement: the provider ids known so far and the channels whose
+    // handoff was recorded are persisted, so a later bounce or failed text can settle the
+    // letter; with no handoff recorded nothing reached a provider and it is a draft again.
+    await settleAttempted(dbh, progress.entry, { frozen: progress.frozen, dispatchMeta: progress.dispatchMeta || {}, emailUnknown: true, smsUnknown: true });
   } catch (settleErr) {
     logger.error(`[rate-review-comms] could not settle claimed notices after an error: ${settleErr.message}`);
   }
@@ -1373,12 +1403,12 @@ function publicReview(notice) {
   if (!notice?.rate_review_row_id) return null;
   const meta = parseJson(notice.metadata, {});
   // Delivered: the letter frozen at send. Not stamped but handed to a
-  // provider (send_uncertain, or a claim mid-send that recorded its handoff):
+  // provider (send_uncertain or a claim mid-send, with its handoff recorded):
   // the words frozen before the provider call — only a delivered message
   // carries this token, so the link the customer holds keeps working. A claim
   // still running its pre-dispatch checks has handed nothing over: a 404,
   // like anything else.
-  const handedOff = String(notice.status) === UNCERTAIN || (String(notice.status) === 'sending' && !!meta.pending_letter?.handoff_at);
+  const handedOff = [UNCERTAIN, 'sending'].includes(String(notice.status)) && !!meta.pending_letter?.handoff_at;
   const letter = notice.sent_at ? meta.letter : (handedOff ? meta.pending_letter?.letter : null);
   if (!notice.sent_at && !letter) return { unavailable: true };
   // Delivered without a frozen letter (a notice stamped by another
@@ -1639,8 +1669,9 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   if (parked) {
     patch.status = UNCERTAIN;
     patch.sent_at = null;
-    // An attempt already parked keeps the words it froze.
-    next.pending_letter = meta.pending_letter || { key: meta.letter && meta.letter.key ? meta.letter.key : null, letter: meta.letter || null };
+    // An attempt already parked keeps the words it froze. A delivered notice parked now
+    // was handed to a provider (it was stamped): its words keep their handoff record.
+    next.pending_letter = meta.pending_letter || { key: meta.uncertain_claim_key || null, letter: meta.letter || null, handoff_at: new Date(live.sent_at || Date.now()).toISOString() };
   } else if (!rateWritten) {
     patch.status = 'draft';
     patch.sent_at = null;
