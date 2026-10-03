@@ -355,4 +355,20 @@ describe('SlotPicker (B18: an estimate parked for the office)', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(onContactReview).not.toHaveBeenCalled();
   });
+
+  it('a rejecting page transition never surfaces as an unhandled rejection from the slot read', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(REVIEW_BODY)));
+    const onContactReview = vi.fn(() => Promise.reject(new Error('refetch failed')));
+    const unhandled = [];
+    const onUnhandled = (e) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onContactReview={onContactReview} />);
+      await waitFor(() => expect(onContactReview).toHaveBeenCalledTimes(1));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

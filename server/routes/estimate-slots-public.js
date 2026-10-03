@@ -246,10 +246,41 @@ async function contactReviewState(estimate, opts) {
   const state = await estimatePublicBlockingState(estimate, opts);
   return state?.state === 'contact_review' ? state : null;
 }
-// (Read paths only need the boolean; write paths use contactReviewState + refuseParkedWrite.)
-async function contactReviewHold(estimate, opts) {
-  return !!(await contactReviewState(estimate, opts));
+// What a slot route answers for each state the ONE blocking-state helper reports - never "unblocked" for a state it
+// reports (the helper puts quote_required first, so a quote-required estimate whose phone is also contradicted is
+// answered as quote_required, not parked and not bookable). The bodies are the ones the other surfaces already use for
+// that state: the intent routes' 'Estimate is no longer active' 409 for quote_required (main's slot routes had no
+// quote-required refusal of their own: the helper only reports that state when a review state would otherwise apply,
+// so a quote-required estimate alone is answered exactly as on main), the trenching 409 / browse shape, and the
+// office-review 409 / browse shape. Only contact_review carries `park` (the office alert and hold release).
+const ESTIMATE_INACTIVE_409 = { error: 'Estimate is no longer active' };
+const TRENCHING_BROWSE_BODY = {
+  primary: [], expander: [], availableSlots: [], summary: null,
+  reviewBeforeBooking: true,
+  message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+};
+function blockingStateRefusal(state, { browse = false } = {}) {
+  if (!state) return null;
+  if (state.state === 'quote_required') return { status: 409, body: ESTIMATE_INACTIVE_409 };
+  if (state.state === 'termite_trenching_review') {
+    return browse ? { status: 200, body: TRENCHING_BROWSE_BODY } : { status: 409, body: TRENCHING_REVIEW_409 };
+  }
+  return browse
+    ? { status: 200, body: parkedSlotBrowseBody() }
+    : { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } };
 }
+async function slotBlockingRefusal(estimate, opts, shape) {
+  return blockingStateRefusal(await estimatePublicBlockingState(estimate, opts), shape);
+}
+// The re-check a card-intent route runs AFTER its Stripe mint, before a client secret leaves the server: the
+// ESTIMATE row is re-read (staff can edit its phone, email or address, or deactivate it, during the mint) and judged
+// by the same helper with the candidate cache bypassed. An estimate that is no longer active is withheld too.
+async function postMintRefusal(estimate) {
+  const row = await db('estimates').where({ id: estimate.id }).first();
+  if (!row || !isEstimateAcceptActive(row)) return { status: 409, body: ESTIMATE_INACTIVE_409 };
+  return slotBlockingRefusal(row, { fresh: true });
+}
+
 // The contact_review check on the LOCKED estimate row, inside the reservation transaction (reserve and extend): the
 // phone candidate is read on THAT transaction FOR SHARE NOWAIT, held to its end, so a staff edit of the lone
 // candidate cannot land between this read and the hold insert. NOWAIT, not a blocking lock: the transaction already
@@ -272,12 +303,10 @@ const CUSTOMER_BUSY_REFUSAL = {
 // is kept to the outer commit.
 async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {}) {
   try {
-    const state = trx
-      ? await savepointScope(trx, (scoped) => contactReviewState(row, { database: scoped, lock: true }))
-      : await contactReviewState(row, {});
-    return state
-      ? { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } }
-      : null;
+    return trx
+      ? await savepointScope(trx, async (scoped) => blockingStateRefusal(
+        await estimatePublicBlockingState(row, { database: scoped, lock: true })))
+      : await slotBlockingRefusal(row, {});
   } catch (err) {
     if (err?.code === '55P03') return skipOnBusy ? null : CUSTOMER_BUSY_REFUSAL;
     throw err;
@@ -342,8 +371,7 @@ async function slotBrowseRefusal(estimate) {
       },
     };
   }
-  if (await contactReviewHold(estimate)) return { status: 200, body: parkedSlotBrowseBody() };
-  return null;
+  return slotBlockingRefusal(estimate, {}, { browse: true });
 }
 
 router.get('/:token/available-slots', async (req, res) => {
@@ -534,7 +562,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
       });
     }
-    if (await contactReviewHold(estimate)) return res.json(parkedSlotBrowseBody());
+    {
+      const blocked = await slotBlockingRefusal(estimate, {}, { browse: true });
+      if (blocked) return res.status(blocked.status).json(blocked.body);
+    }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
@@ -634,8 +665,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
     {
-      const parkState = await contactReviewState(estimate);
-      if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+      const blocked = await slotBlockingRefusal(estimate, {});
+      if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
     }
 
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
@@ -820,8 +851,8 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     // estimate, and no secret is returned. The pending hold row was never exposed (nothing can confirm it); main has
     // no "abandoned" state for it and the next mint reuses it, so it is left as is.
     {
-      const parkState = await contactReviewState(estimate, { estData, quoteRequirement, fresh: true });
-      if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+      const blocked = await postMintRefusal(estimate);
+      if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
     }
     // The customer reached the save-a-card step — the only local evidence of
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
@@ -987,14 +1018,14 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // between parks the estimate: the minted intent is retired with the accept's own helper (503 if Stripe cannot
     // confirm) and no secret is returned.
     {
-      const parkState = await contactReviewState(estimate, { estData, quoteRequirement, fresh: true });
-      if (parkState) {
+      const blocked = await postMintRefusal(estimate);
+      if (blocked) {
         try {
           await retireOrDenyDroppedCapture(estimate, intent.setupIntentId);
         } catch (retireErr) {
           return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
         }
-        return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+        return respondNoBookingRefusal(res, estimate, blocked);
       }
     }
     // The customer reached the save-a-card step — the only local evidence of
@@ -1351,4 +1382,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, slotBlockingRefusal, postMintRefusal };

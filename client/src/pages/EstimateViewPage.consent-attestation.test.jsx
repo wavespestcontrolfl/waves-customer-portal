@@ -97,7 +97,7 @@ describe('EstimateViewPage accept consent attestation', () => {
     // The slot reads live in SlotPicker (3 fetches: default window, AI find, picked date), each hands the review shape up.
     expect(count(slotPicker, /\/public\/estimates\/\$\{token\}\/(?:available-slots|find-slots)/g)).toBe(3);
     expect(count(slotPicker, /isContactReview\(body\)/g)).toBe(3);
-    expect(src).toMatch(/onContactReview=\{\(body\) => enterContactReviewRef\.current\(body\)\}/);
+    expect(src).toMatch(/onContactReview=\{\(body\) => enterContactReviewRef\.current\(body\)\.catch\(\(\) => \{\}\)\}/);
   });
 
   it('B18: the replace-payment-method call and the inline pre-mint effect take the park through the transition too (not silently ignored)', () => {
@@ -111,7 +111,7 @@ describe('EstimateViewPage accept consent attestation', () => {
 
   it('B18: a failed hold release in the transition keeps the hold id in the existing pending-recovery ref (after one retry), never drops it', () => {
     expect(src).toMatch(
-      /let released = await releaseHeldReservation\(heldId\);\s*if \(!released\) released = await releaseHeldReservation\(heldId\);\s*if \(!released && heldId\) pendingRecoveryHoldRef\.current = heldId;\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
+      /let released = await releaseHeldReservation\(heldId\);\s*if \(!released\) released = await releaseHeldReservation\(heldId\);\s*if \(!released && heldId\) pendingRecoveryHoldRef\.current = heldId;[\s\S]{0,300}try \{ await loadEstimate\(\{ preserveSelection: true \}\); \} catch/,
     );
     // The ref it uses is the recovery's own: set before recoverFromDeadHold's release and its retry fallback.
     expect(src).toMatch(/pendingRecoveryHoldRef\.current = deadHoldId;/);
@@ -126,8 +126,18 @@ describe('EstimateViewPage accept consent attestation', () => {
 
   it('B18: the one transition drops every captured/minted card, releases the slot hold and refetches /data (the review state)', () => {
     expect(src).toMatch(
-      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,900}await releaseHeldReservation\(heldId\);[\s\S]{0,400}await loadEstimate\(\{ preserveSelection: true \}\);/,
+      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,2000}await releaseHeldReservation\(heldId\);[\s\S]{0,400}await loadEstimate\(\{ preserveSelection: true \}\)/,
     );
+  });
+
+  it('r5 P2: the review state is committed locally from the 409 body BEFORE any network call, and the refetch is best effort (caught)', () => {
+    const transition = src.slice(src.indexOf('enterContactReviewRef.current = async (body) => {'), src.indexOf('// The ONE recovery for a hold that is definitively gone'));
+    const commit = transition.indexOf("reviewReason: 'contact_review'");
+    expect(transition).toMatch(/canAccept: false, reviewBeforeBooking: true, reviewReason: 'contact_review', reviewMessage: sentence/);
+    expect(commit).toBeGreaterThan(0);
+    expect(commit).toBeLessThan(transition.indexOf('await releaseHeldReservation(heldId)'));
+    expect(commit).toBeLessThan(transition.indexOf('loadEstimate('));
+    expect(transition).toMatch(/try \{ await loadEstimate\(\{ preserveSelection: true \}\); \} catch \{[^}]*\}\s*return sentence;/);
   });
 
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {

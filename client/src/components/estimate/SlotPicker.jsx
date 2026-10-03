@@ -98,6 +98,10 @@ export default function SlotPicker({
   // (reviewBeforeBooking + reason 'contact_review'). The page owns the transition to its review state.
   onContactReview = null,
 }) {
+  // The page's transition is async: its rejection must never surface as an unhandled one from a slot read.
+  const reportContactReview = (body) => {
+    try { Promise.resolve(onContactReview?.(body)).catch(() => {}); } catch { /* the page owns the transition */ }
+  };
   const [data, setData] = useState(null);
   // Report the first open slot date up (hero {date} token).
   const [loading, setLoading] = useState(true);
@@ -210,7 +214,7 @@ export default function SlotPicker({
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
       .then((body) => {
         if (cancelled) return;
-        if (isContactReview(body)) { setLoading(false); onContactReview?.(body); return; }
+        if (isContactReview(body)) { setLoading(false); reportContactReview(body); return; }
         setData(body);
         setLoading(false);
       })
@@ -291,7 +295,7 @@ export default function SlotPicker({
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
-    if (isContactReview(body)) { onContactReview?.(body); return { summary: null }; }
+    if (isContactReview(body)) { reportContactReview(body); return { summary: null }; }
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     latestPickedRequestRef.current += 1;
     setPickedDate(null);
@@ -336,7 +340,7 @@ export default function SlotPicker({
       if (!res.ok) throw new Error('slot fetch failed');
       const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
-      if (isContactReview(body)) { onContactReview?.(body); return; }
+      if (isContactReview(body)) { reportContactReview(body); return; }
       setPickedData(body);
     } catch {
       if (latestPickedRequestRef.current !== requestId) return;

@@ -593,7 +593,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
       const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
       const mint = route.indexOf('createRecurringCardSetupIntentForEstimate(estimate)');
-      const recheck = route.indexOf('fresh: true });');
+      const recheck = route.indexOf('await postMintRefusal(estimate);');
       const retire = route.indexOf('await retireOrDenyDroppedCapture(estimate, intent.setupIntentId);');
       const secret = route.indexOf('clientSecret: intent.clientSecret');
       expect(mint).toBeGreaterThan(0);
@@ -601,6 +601,117 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       expect(retire).toBeGreaterThan(recheck);
       expect(secret).toBeGreaterThan(retire);
       expect(route.slice(retire, secret)).toContain('RECURRING_CARD_RETIRE_FAILED');
+      // Both card-intent routes re-read the estimate through the one post-mint helper.
+      expect(src.split('await postMintRefusal(estimate);').length - 1).toBe(2);
+    });
+  });
+
+  describe('quote_required outranks a contradicted phone on every slot route (the wrapper never maps a reported state to "unblocked")', () => {
+    const { refuseParkedWrite, isEstimateAcceptActive } = require('../routes/estimate-public');
+    const QUOTE = { state: 'quote_required' };
+    const INACTIVE = { error: 'Estimate is no longer active' };
+    const HOLD = '11111111-1111-4111-8111-111111111111';
+    beforeEach(() => { refuseParkedWrite.mockClear(); currentEstimate = PARKED_ESTIMATE; estimatePublicBlockingState.mockResolvedValue(QUOTE); });
+    afterEach(() => estimatePublicBlockingState.mockResolvedValue(null));
+
+    test('available-slots, find-slots and reserve (pre-transaction) answer the intent routes\' 409; no slots read, no hold, no office alert', async () => {
+      process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+      const browse = await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(browse.status).toBe(409);
+      expect(await browse.json()).toEqual(INACTIVE);
+      const found = await post('find-slots', { query: 'next week please' });
+      // (askToken gating may answer before the check in this harness: assert only that no search ran.)
+      if (found.status === 409) expect(await found.json()).toEqual(INACTIVE);
+      const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      expect(reserved.status).toBe(409);
+      expect(await reserved.json()).toEqual(INACTIVE);
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+      expect(findEstimateSlots).not.toHaveBeenCalled();
+      expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('the LOCKED reserve and extend predicates refuse it too (no park payload, so no alert or hold release)', async () => {
+      const TRX = { isTransaction: true, raw: async () => ({}) };
+      let reserveRefusal; let extendRefusal;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+        reserveRefusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX);
+        const err = new Error('x'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = reserveRefusal; throw err;
+      });
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+        extendRefusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX);
+        const err = new Error('x'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = extendRefusal; throw err;
+      });
+      expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(409);
+      for (const refusal of [reserveRefusal, extendRefusal]) {
+        expect(refusal).toEqual({ status: 409, body: INACTIVE });
+      }
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('the texting AI\'s gate offers nothing for it; and a state-free (quote-required ALONE) estimate is not refused, exactly as on main', async () => {
+      const { offerableEstimateSlots, slotBlockingRefusal } = require('../routes/estimate-slots-public')._internals;
+      currentEstimate = { ...PARKED_ESTIMATE, customer_id: 'cust-1' };
+      customersById = { 'cust-1': { phone: '(941) 555-0123' } };
+      await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+      estimatePublicBlockingState.mockResolvedValue(null);
+      await expect(slotBlockingRefusal(PARKED_ESTIMATE, {})).resolves.toBeNull();
+      expect(isEstimateAcceptActive).toBeDefined();
+    });
+  });
+
+  describe('the post-mint check re-reads the ESTIMATE row (staff edits during the Stripe mint)', () => {
+    const { refuseParkedWrite, retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+    const EDITED = { ...PARKED_ESTIMATE, customer_phone: '(941) 555-0199', customer_email: 'edited@example.invalid' };
+    beforeEach(() => {
+      refuseParkedWrite.mockClear();
+      retireOrDenyDroppedCapture.mockClear?.();
+      currentEstimate = PARKED_ESTIMATE;
+      resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockClear();
+    });
+    afterEach(() => { estimatePublicBlockingState.mockResolvedValue(null); require('../routes/estimate-public').isEstimateAcceptActive.mockImplementation(() => true); });
+
+    test('card-hold-intent: the second verdict is judged on the RELOADED row (edited identity), fresh, and withholds the secret on a park', async () => {
+      createCardHoldSetupIntentForEstimate.mockImplementationOnce(async () => {
+        currentEstimate = EDITED; // staff edit lands while Stripe mints
+        return { clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 };
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce(PARKED);
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(estimatePublicBlockingState.mock.calls[0][0].customer_phone).toBe('(941) 555-0123');
+      expect(estimatePublicBlockingState.mock.calls[1][0].customer_phone).toBe('(941) 555-0199');
+      expect(estimatePublicBlockingState.mock.calls[1][1]).toEqual(expect.objectContaining({ fresh: true }));
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+    });
+
+    test('an estimate that stopped being active during the mint is withheld too (no secret, no park alert)', async () => {
+      const { isEstimateAcceptActive } = require('../routes/estimate-public');
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockResolvedValue(null);
+      isEstimateAcceptActive.mockImplementationOnce(() => true).mockImplementationOnce(() => false);
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toEqual({ error: 'Estimate is no longer active' });
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+
+    test('a quote-required estimate after the mint is withheld with that state\'s own 409 (not the office-review body)', async () => {
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce({ state: 'quote_required' });
+      const res = await post('card-hold-intent', {});
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Estimate is no longer active' });
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
     });
   });
 

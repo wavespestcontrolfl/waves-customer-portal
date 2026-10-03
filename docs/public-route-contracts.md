@@ -1701,7 +1701,11 @@ answers:
   verdict - and `GET /data`, the accept, both card-intent routes, slot browsing / find-slots / reserve /
   extend (the extend recheck runs again on the locked row), the texting scheduler's slot gate and the
   abandoned-payment-step reminder recheck all call it, so every surface reports the same blocking state
-  (an estimate that is already quote-required or trenching-review gets that refusal and no phone alert).
+  (an estimate that is already quote-required or trenching-review gets that refusal and no phone alert). The slot routes
+  answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
+  is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
+  the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
+  when a review state would otherwise apply, so a quote-required estimate alone behaves as it always did on those routes).
   The accept decides it right after those refusals and BEFORE any contact fill, plan, card, hold, prepay
   quote or write, from the request's one cached preflight verdict, so nothing is created, charged,
   captured, reserved, texted or changed: no customer, no account, no status change, no conversion. The
@@ -1742,8 +1746,9 @@ answers:
   live uncommitted slot hold of the estimate is released server-side, so capacity returns as soon as ANY request
   observes the park. `GET /data` runs the same two side effects for a customer view of a parked estimate (the page
   tells the customer a specialist will follow up); staff previews, PDF render passes, slot reads, the texting
-  scheduler's gate and the reminder recheck do not. Both card-intent routes re-run the park authoritatively (not the
-  cached verdict) AFTER minting and before any client secret is returned: a recurring intent minted for a
+  scheduler's gate and the reminder recheck do not. Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
+  row RE-READ at that point (staff can edit its phone, email or address, or deactivate it, during the mint) with the
+  candidate cache bypassed; an estimate no longer active is withheld the same way: a recurring intent minted for a
   just-parked estimate is retired with the accept's helper (503 `RECURRING_CARD_RETIRE_FAILED` if Stripe cannot
   confirm) and a card-hold intent's secret is withheld (its pending row was never exposed and is reused by the next
   mint); no client secret leaves the server for a parked estimate. On `extend` a briefly held customer row never
@@ -1760,7 +1765,9 @@ the React page (the `/estimate/` mount falls through to the SPA, the `/api/estim
 React URL, GrowthBook never reassigns it), the same way it forces a contact-gap estimate. A stale tab handles the
 409 from the accept, `reserve`, every `recurring-card-intent` caller (modal mint, replace-method, inline pre-mint)
 and the card-hold intent, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
-date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The estimate's own phone is left as staff typed
+date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The review state is committed locally FIRST,
+from the 409 body (the page's `cta` becomes not-acceptable, review-before-booking, reason `contact_review`, with the server's
+sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. The estimate's own phone is left as staff typed
   it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
   a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a
   stale tab captured before the park stays unbound at Stripe (customerless until an accept commits); it
