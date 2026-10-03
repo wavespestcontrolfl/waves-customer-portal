@@ -16,10 +16,10 @@
  *
  * No code leaves: the state says only WHETHER codes are on file
  * (`structured.has_codes`), and every free-text field passes redactForState:
- * a sentence naming any access point or credential is replaced by a marker
+ * a text or note naming any access point or credential is replaced whole by a marker
  * built from closed vocabularies (which access points; whether a problem is
- * reported), and in any other sentence digit-bearing and code-shaped tokens
- * are masked.
+ * reported), a text sent just after one is withheld with it, and in any other
+ * text digit-bearing and code-shaped tokens are masked.
  *
  * property_preferences is the primary home's row, so a visit stamped at
  * another address (stamped-address.js) is left out: its pets, codes and
@@ -52,19 +52,18 @@ const DEFAULT_START = '08:00';
 
 const compact = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
-// Sentence by sentence, after redactAccessCodes:
-//  1. A sentence that names ANY access point or credential noun (ACCESS_NOUNS),
-//     or that completion-comms-context's isAccessSentence reads as being about
-//     getting in, never leaves as written. A credential can be any word in any
-//     notation ("use BLUE at the keypad", "Garage:sesame", "four five four
-//     five"), so no token rule is safe there (pre-push P0, 2026-10-03). The
-//     sentence becomes a marker built from two closed vocabularies only: the
-//     access nouns it mentioned and whether it reports a problem. None of the
-//     writer's own words survive.
-//  2. In every other sentence, a token holding a digit is masked unless it is
-//     a one- or two-digit number, an ordinal, a clock time or a day/month
-//     date (house numbers, phone numbers and years go too), and so is a
-//     capitalised code-shaped token ("BLUE") unless the sentence is shouted.
+// Redaction rules (redactForState below):
+//  1. A text that names ANY access point or credential noun (ACCESS_NOUNS), or
+//     holds a sentence completion-comms-context's isAccessSentence reads as
+//     being about getting in, never leaves as written. A credential can be any
+//     word in any notation ("use BLUE at the keypad", "Garage:sesame", "four
+//     five four five"), so no token rule is safe there. It becomes a marker
+//     built from two closed vocabularies only: the access nouns it mentioned
+//     and whether it reports a problem. None of the writer's words survive.
+//  2. In every other text, a token holding a digit is masked unless it is a
+//     one- or two-digit number, an ordinal, a clock time or a day/month date
+//     (house numbers, phone numbers and years go too), and so is a
+//     capitalised code-shaped token ("BLUE") unless the line is shouted.
 const ACCESS_NOUNS = [
   ['code', /\b(?:codes?|pins?|pass(?:code|word|phrase)s?|combos?|combinations?)\b/i],
   ['key', /\bkeys?\b/i],
@@ -84,31 +83,44 @@ function shouted(sentence) {
   const words = sentence.match(/[A-Za-z]{2,}/g) || [];
   return words.length >= 3 && words.filter((word) => word === word.toUpperCase()).length / words.length >= 0.6;
 }
-function redactSentence(sentence, isAccessSentence) {
-  const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(sentence)).map(([name]) => name);
-  if (nouns.length || isAccessSentence(sentence)) {
-    const parts = [];
-    if (nouns.length) parts.push(`mentions ${nouns.join(', ')}`);
-    if (ACCESS_PROBLEM_RE.test(sentence)) parts.push('reports a problem getting in');
-    return parts.length ? `[access detail withheld: ${parts.join('; ')}]` : '[access detail withheld]';
-  }
-  const loud = shouted(sentence);
-  return sentence.replace(/\S+/g, (word) => {
-    const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
-    const masked = /\d/.test(token) ? !PLAIN_NUMBER_RE.test(token) : (!loud && CAPS_CODE_RE.test(token));
-    return masked ? `${lead}[redacted]${trail}` : word;
-  });
+// Whether a text names an access point or credential anywhere in it.
+function mentionsAccess(text) {
+  const { isAccessSentence } = require('../completion-comms-context');
+  const whole = String(text || '');
+  return ACCESS_NOUNS.some(([, re]) => re.test(whole)) || whole.split(/(?<=[.!?])\s+|\n+/).some((sentence) => isAccessSentence(sentence));
 }
+
+// The unit is the WHOLE text (one note field, one customer text), never a
+// sentence or a line: a credential can sit on the line after its access point
+// ("Garage:\nsesame"), so a text that mentions access anywhere leaves only as
+// the marker (pre-push P0, 2026-10-03).
 function redactForState(text) {
   // redactAccessCodes ends with the sensitive-identifier pass (SSN, card, CVV).
   const { redactAccessCodes } = require('../context-aggregator');
-  const { isAccessSentence } = require('../completion-comms-context');
-  return redactAccessCodes(String(text || ''))
-    .split(/(?<=[.!?])\s+|\n+/)
-    .filter((sentence) => sentence.trim())
-    .map((sentence) => redactSentence(sentence, isAccessSentence))
-    .join(' ');
+  const raw = String(text || '');
+  if (!raw.trim()) return '';
+  if (mentionsAccess(raw)) {
+    const nouns = ACCESS_NOUNS.filter(([, re]) => re.test(raw)).map(([name]) => name);
+    const parts = [];
+    if (nouns.length) parts.push(`mentions ${nouns.join(', ')}`);
+    if (ACCESS_PROBLEM_RE.test(raw)) parts.push('reports a problem getting in');
+    return parts.length ? `[access detail withheld: ${parts.join('; ')}]` : '[access detail withheld]';
+  }
+  return redactAccessCodes(raw).split(/\n+/).map((line) => {
+    const loud = shouted(line);
+    return line.replace(/\S+/g, (word) => {
+      const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
+      const masked = /\d/.test(token) ? !PLAIN_NUMBER_RE.test(token) : (!loud && CAPS_CODE_RE.test(token));
+      return masked ? `${lead}[redacted]${trail}` : word;
+    });
+  }).join(' ');
 }
+
+// A customer can split a credential over two texts ("gate code is" / "four
+// five four five"): a text sent within this long after an access-bearing one
+// is withheld with it.
+const ACCESS_FOLLOW_UP_MS = 15 * 60 * 1000;
+const FOLLOW_UP_MARKER = '[follow-up to an access detail withheld]';
 
 function dayString(value) {
   if (!value) return null;
@@ -189,10 +201,19 @@ async function buildVisitAccessState(svc, dbh) {
     .orderBy('created_at', 'desc')
     .limit(24)
     .select('created_at', 'message_body', 'message_type');
+  // Oldest first, so a text that follows an access-bearing one is seen as such.
+  let accessAt = null;
   const recentTexts = texts
     .filter((row) => row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body))
-    .map((row) => compact(redactForState(row.message_body), TEXT_CHARS))
+    .reverse()
+    .map((row) => {
+      const at = new Date(row.created_at).getTime();
+      if (mentionsAccess(row.message_body)) { accessAt = at; return redactForState(row.message_body); }
+      if (accessAt !== null && at - accessAt <= ACCESS_FOLLOW_UP_MS) { accessAt = at; return FOLLOW_UP_MARKER; }
+      return compact(redactForState(row.message_body), TEXT_CHARS);
+    })
     .filter(Boolean)
+    .reverse()
     .slice(0, MAX_TEXTS);
 
   const hasCodes = Boolean(prefs && (prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code));

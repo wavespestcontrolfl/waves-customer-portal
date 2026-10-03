@@ -62,14 +62,17 @@ describe('visit access shadow: rules that need no database', () => {
     ['a code after a separator with no space', 'Garage:sesame', 'sesame'],
     ['a code after an equals sign', 'Gate=BLUE', 'BLUE'],
     ['a capitalised code with no access word', 'Use BLUE at the box', 'BLUE'],
+    ['a code on the line after its access point', 'Garage:\nsesame', 'sesame'],
+    ['a spoken code on a continuation line', 'Gate code:\nfour five four five', 'four five'],
+    ['a code in a later sentence', 'The side gate sticks. Try sesame twice.', 'sesame'],
   ])('%s never reaches the state', (_name, text, secret) => {
     const out = access.redactForState(text);
     expect(out).not.toContain(secret);
     expect(out).toMatch(/\[redacted\]|\[access detail withheld/);
   });
 
-  test('a withheld access sentence keeps which access points it mentioned, and nothing else', () => {
-    expect(access.redactForState('Side gate code 5512, latch sticks. Our dog is friendly.')).toBe('[access detail withheld: mentions code, gate] Our dog is friendly.');
+  test('a text that mentions access leaves only as a marker of which access points it named', () => {
+    expect(access.redactForState('Side gate code 5512, latch sticks. Our dog is friendly.')).toBe('[access detail withheld: mentions code, gate]');
   });
 
   test('what a technician needs to read survives: a time, a count, a date', () => {
@@ -171,13 +174,16 @@ describe('visit access shadow: rules that need no database', () => {
     await database('property_preferences').insert({
       customer_id: customerId, pet_count: 2, pet_details: 'Two labs, friendly', contact_preference: 'text', property_gate_code: '7731',
       access_notes: 'Side gate code 5512, latch sticks', side_gate_access: 'Left side', away_mode_until: '2026-10-20',
-      chemical_sensitivities: true, chemical_sensitivity_details: 'Asthma, no sprays near the nursery window',
+      chemical_sensitivities: true, chemical_sensitivity_details: 'Asthma, no sprays near the nursery',
     });
     await database('service_records').insert([
       { customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-07-06', technician_notes: 'Gate was locked, could not reach the back yard.' },
       { customer_id: customerId, status: 'completed', service_type: 'Lawn Care', service_date: '2026-09-20', technician_notes: 'Mowed short.' },
     ]);
-    await text('Please text before you come, the baby naps at noon. Garage is 9042#', '2026-10-01T15:00:00Z');
+    await text('Please text before you come, the baby naps at noon.', '2026-10-01T15:00:00Z');
+    await text('The garage one changed', '2026-10-01T16:00:00Z');
+    await text('nine zero four two', '2026-10-01T16:02:00Z');
+    await text('Also we got a second dog', '2026-10-01T18:00:00Z');
     await text('Liked "Your visit is confirmed"', '2026-10-02T15:00:00Z', { message_type: 'sms_reaction' });
     await text('Before the last pest visit', '2026-07-01T15:00:00Z');
     await text('After the visit started', '2026-10-06T14:00:00Z');
@@ -194,12 +200,16 @@ describe('visit access shadow: rules that need no database', () => {
       last_tech_notes: '[access detail withheld: mentions gate; reports a problem getting in]',
     });
     expect(built.state.recent_texts).toContain('the baby naps at noon');
+    expect(built.state.recent_texts).toContain('[access detail withheld: mentions garage]');
+    expect(built.state.recent_texts).toContain('[follow-up to an access detail withheld]');
+    expect(built.state.recent_texts).not.toContain('nine zero four two');
+    expect(built.state.recent_texts).toContain('Also we got a second dog');
     expect(built.state.recent_texts).not.toMatch(/Liked|Before the last pest visit|After the visit started|Evening before/);
     expect(built.state.recent_texts).toContain('Morning of the last pest visit');
     expect(built.state.notes_text).toContain('Visit note: Customer asked for the lanai too');
-    expect(built.state.notes_text).toContain('Chemical sensitivity: Asthma, no sprays near the nursery window');
+    expect(built.state.notes_text).toContain('Chemical sensitivity: Asthma, no sprays near the nursery');
     expect(built.state.notes_text).toContain('[access detail withheld: mentions code, gate]');
-    expect(JSON.stringify(built.state)).not.toMatch(/7731|5512|9042/);
+    expect(JSON.stringify(built.state)).not.toMatch(/7731|5512|9042|latch/);
     expect(built.baselines).toEqual({ dog_on_property: { rules: true }, needs_code_key_or_person: { rules: true } });
     expect(Object.keys(built.state).sort()).toEqual([...pkg.stateShape].sort());
   });
