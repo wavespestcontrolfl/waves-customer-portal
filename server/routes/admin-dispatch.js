@@ -3215,10 +3215,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // a rebook LATER THE SAME DAY, which only the window distinguishes
         // (codex r2). Match only rows recorded for the current slot; NULL
         // slot fields match legacy rows to preserve their old per-row dedup.
-        const missedDateStr = svc.scheduled_date
-          ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+        // the occurrence locked by the transition, never the pre-transaction read (Codex #5669 r3)
+        const missedOcc = noShowOccurrence || svc;
+        const missedDateStr = missedOcc.scheduled_date
+          ? String(missedOcc.scheduled_date instanceof Date ? missedOcc.scheduled_date.toISOString() : missedOcc.scheduled_date).slice(0, 10)
           : null;
-        const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
+        const missedWindowStr = missedOcc.window_start ? `${missedOcc.window_start}-${missedOcc.window_end}` : null;
         const alreadyFlagged = await db('reschedule_log')
           .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
           .where(function occurrenceMatch() {
