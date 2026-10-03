@@ -903,6 +903,10 @@ class WavesAssistant {
       }, {
         bell: true,
         dedupeKey: bellKey({ escalation, conversation, newEmail }),
+        // A hand-off that carries a second request rewrites (and rings) a
+        // bell already standing on this key, so a duplicate confirmation can
+        // add that request but a plain duplicate never removes it.
+        refreshOnDedupe: Boolean(alsoAsked),
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
         detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),

@@ -135,6 +135,7 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(headline).toBe("Customers — Change Pat Sample's email");
   expect(why).toBe('Pat Sample confirmed a new email address in portal chat');
   expect(opts.detail).toBe(`Email on file: pat.old@example.com\nNew email, confirmed by the customer in portal chat: ${NEW}\n\nCustomer's message: Yes, that is right`);
+  expect(opts.refreshOnDedupe).toBe(false);
   expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-email-change:conv-1:pat.new@example.com' }));
   // Saved as an account change, whatever the confirming message says.
   expect(db.__bindings[0]).toContain('account_change');
@@ -241,6 +242,8 @@ test('a second need handed off beside the confirmed change rides on the same bel
   const detail = NotificationService.notifyAdmin.mock.calls[0][3].detail;
   expect(detail).toMatch(new RegExp(`confirmed by the customer in portal chat: ${NEW.replace(/\./g, '\\.')}\nThe customer also asked about adding a service: wants mosquito service quoted\n\nCustomer's message:`));
   expect(db.__bindings[0].some((value) => String(value).includes('The customer also asked about adding a service: wants mosquito service quoted'))).toBe(true);
+  // It rewrites a bell already standing for this change; a plain confirmation does not.
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].refreshOnDedupe).toBe(true);
 });
 
 test('an address longer than the account can hold is handed off, never read back', async () => {
