@@ -1710,7 +1710,8 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
         cancelResult = await InvoiceSvc.voidOpenInvoicesForCancelledService(a.visit);
       });
       expect(voidError).toMatchObject({ code: 'MEMBERSHIP_DUES_COLLECTION_IN_PROGRESS' });
-      expect(cancelResult).toEqual([]);
+      // The result array carries extra properties (e.g. inspectionCreditReversal), so compare length.
+      expect(cancelResult).toHaveLength(0);
       expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).not.toBe('void');
       await InvoiceSvc.voidInvoice(a.invoice.id);
       expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).toBe('void');
