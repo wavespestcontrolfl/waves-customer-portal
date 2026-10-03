@@ -200,10 +200,28 @@ describe('report flow, voice fill on: products from the note', () => {
     fireEvent.click(screen.getByRole('button', { name: /Remove/ }));
     // removing the row answers its confirm
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
+    // the same note, read again: the reader may quote other words for it this time
+    request.fill = read([{ ...GEL_FIVE, heard: 'grams of the Advion gel on the counter edge' }]);
     await generate('Write it again');
     await waitFor(() => expect(request.bodies('/voice-fill/products')).toHaveLength(2));
     expect(request.bodies('/generate-report')[1].productsApplied).not.toContain('Advion');
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
+  });
+
+  test('saying it again another way (an edited note) brings a removed product back', async () => {
+    const request = makeRequest({ fill: read([GEL_FIVE]) });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Advion Ant Bait Gel/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Remove/ }));
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: `${NOTE} Two grams of the Advion gel by the sink.` } });
+    request.fill = read([{ ...GEL_FIVE, amount: 2, heard: 'Two grams of the Advion gel' }]);
+    await generate('Write it again');
+    await waitFor(() => expect(request.bodies('/voice-fill/products')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1].productsApplied).toContain('Advion Ant Bait Gel');
+    expect(within(confirmList()).getByText(/Advion Ant Bait Gel — 2 g/)).toBeTruthy();
   });
 
   test.each([

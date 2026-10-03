@@ -22403,6 +22403,18 @@ router.get('/:id/series-summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/:id/visit-summary
+// The stop this service shares with others, read live: { visit: null } for
+// an ungrouped row, else the same summary the day feed attaches. Edit
+// appointment asks on open, so every screen that opens it (Day, 5-Day, Week,
+// List, the dispatch board) sees a combo the same way and with its full
+// membership, whatever its own feed carries.
+router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
+  try {
+    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {

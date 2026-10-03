@@ -990,6 +990,11 @@ function initScheduledJobs() {
         // shadow decision now (GATE_SMS_SCHEDULING_DECIDE; gate off, no read).
         const replies = await require('./sms-scheduling-decide').sweepUndecidedReplies();
         if (replies.recorded > 0) logger.info(`[sms-offer-ledger-backfill] decided ${replies.recorded} waiting replies`);
+        // A text move whose customer notice never started (the process exited
+        // right after the move committed) is finished here.
+        const effects = await require('./sms-scheduling-act').finishMoveEffects();
+        if (effects.finished > 0) logger.info(`[sms-offer-ledger-backfill] finished ${effects.finished} move notices`);
+        if (effects.error) throw new Error('sms move effects sweep unhealthy');
         if (replies.errors > 0) throw new Error(`sms reply decide sweep unhealthy: errors=${replies.errors} scanned=${replies.scanned}`);
         // A failed scan or write must fail job health, not read as a green tick.
         if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
@@ -4383,6 +4388,27 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Pre-visit brief sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Visit access and safety flags, shadow leg (GATE_VISIT_ACCESS_FLAGS=shadow
+  // on top of GATE_TYPED_DECISIONS): today's and tomorrow's open visits, each
+  // asked once per state, so a repeat pass over an unchanged route is database
+  // reads only. Hourly across the booking day so a same-day add or a new
+  // customer text is picked up; :34 is clear of the :19/:49 brief sweep.
+  cron.schedule('34 5-19 * * *', async () => {
+    try {
+      await runExclusive('visit-access-shadow', async () => {
+        const VisitAccess = require('./typed-decisions/visit-access-shadow');
+        // Retention runs whatever the gate says: stored states are dropped on
+        // schedule even after the shadow is switched off.
+        await VisitAccess.pruneVisitAccessStates();
+        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        const result = await VisitAccess.runVisitAccessSweep();
+        logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
+      });
+    } catch (err) {
+      logger.error(`Visit access shadow failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

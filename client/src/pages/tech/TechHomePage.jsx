@@ -1512,6 +1512,8 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          // One gate for every sheet's voice fill: only an exact true turns it on.
+          voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setLawnReserviceFastService(null);
             if (options?.refresh) fetchSchedule();

@@ -71,13 +71,15 @@ function firstWithin(times, from, to) {
 function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
   const nowMs = new Date(now).getTime();
   const observedMs = new Date(observedAt).getTime();
-  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, other: 0, with_unresolved_slot: 0, matured: 0, followed_by_change_48h: 0 };
+  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, accepted: 0, other: 0, with_unresolved_slot: 0, matured: 0, followed_by_change_48h: 0 };
   // State as of the report's end: a supersede that happened after it (a
   // later offer) must not rewrite a past report.
   const stateOf = (o) => {
     if (o.status === 'superseded' && (!o.closed_at || new Date(o.closed_at).getTime() <= nowMs)) return 'superseded';
     if (o.status === 'superseded') return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
-    if (o.status !== 'open') return 'other';
+    // Accepted by the move executor: as of the report's end, like a supersede.
+    if (o.status === 'accepted' && (!o.closed_at || new Date(o.closed_at).getTime() <= nowMs)) return 'accepted';
+    if (o.status !== 'open' && o.status !== 'accepted') return 'other';
     return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
   };
   for (const o of offers) {
@@ -106,6 +108,10 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
  * admin Edit form logs nothing and counts as unmatched (the report says so).
  */
 // reschedule_log.initiated_by values for moves no person asked for.
+// The move executor's own moves ('sms_offer_ai', sms-scheduling-act.js) are
+// NOT in this list: the customer asked for them, so they are real accepts for
+// recall. Precision never scores one as staff's confirmation, because a
+// decision the executor moved is left out of that comparison.
 const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk']);
 
 // A logged move of `visitId` into date + start, inside [t0, t0 + 48h].
@@ -169,7 +175,7 @@ function summarizeRecall(offers, decisions, movesByVisit = new Map(), observedAt
 
 function summarizeDecisions(decisions, movesByVisit = new Map(), observedAt = new Date()) {
   const observedMs = new Date(observedAt).getTime();
-  const out = { total: decisions.length, move_offers_decided: 0, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0 };
+  const out = { total: decisions.length, move_offers_decided: 0, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0, executed: {} };
   // The exit bar's sample: distinct visit-move offers with a real decision
   // (several texts on one offer, booking offers and errors do not add to it).
   out.move_offers_decided = new Set(decisions
@@ -181,6 +187,13 @@ function summarizeDecisions(decisions, movesByVisit = new Map(), observedAt = ne
     const refusals = typeof d.refusals === 'string' ? JSON.parse(d.refusals) : (d.refusals || []);
     for (const r of refusals) out.refusals[r] = (out.refusals[r] || 0) + 1;
     if (d.outcome !== 'would_move') continue;
+    // A decision the executor took (moved, refused, failed, or still claimed)
+    // is counted on its own: staff had no call to make or confirm, so it is
+    // not scored against what staff did.
+    if (d.execution_status) {
+      out.executed[d.execution_status] = (out.executed[d.execution_status] || 0) + 1;
+      if (d.execution_status === 'moved') continue;
+    }
     // From the reply's arrival: staff can act before the classifier's row lands.
     const t0 = new Date(d.replied_at || d.created_at).getTime();
     if (t0 + FOLLOW_WINDOW_MS > observedMs) continue;
@@ -273,7 +286,7 @@ function decisionRows(dbh) {
   return dbh('sms_offer_decisions as d')
     .leftJoin('sms_log as sl', 'sl.id', 'd.inbound_sms_log_id')
     .leftJoin('sms_offers as o', 'o.id', 'd.sms_offer_id')
-    .select('d.sms_offer_id', 'd.action', 'd.outcome', 'd.refusals', 'd.would_have', 'd.created_at',
+    .select('d.sms_offer_id', 'd.action', 'd.outcome', 'd.refusals', 'd.would_have', 'd.created_at', 'd.execution_status',
       'sl.created_at as replied_at', 'o.kind as offer_kind');
 }
 
@@ -322,7 +335,9 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     .select('customer_id', 'message_body as body', 'created_at');
   const hasDecisions = await dbh.schema.hasTable('sms_offer_decisions');
   const decisions = hasDecisions
-    ? await decisionRows(dbh).where('d.created_at', '>=', from).where('d.created_at', '<', to)
+    // By the reply's arrival, the moment scoring starts from: a reply near a
+    // period's end belongs to that period even when its row landed in the next.
+    ? await decisionRows(dbh).whereRaw('COALESCE(sl.created_at, d.created_at) >= ?', [from]).whereRaw('COALESCE(sl.created_at, d.created_at) < ?', [to])
     : null;
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers

@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/sms-scheduling-act.js',
+    snippet: "const newer = await trx('sms_log')",
+    reason: 'buildMoveGuard newer-message fence: an existence check, under the move\'s locks, for ANY row on this phone-and-line conversation after the accepted reply. Nothing is presented as a message. A reply reservation in flight is Waves answering right now, which is exactly when the automatic move must stand down, so hiding reservations would weaken the fence; a placeholder can only refuse a move (staff handle it), never cause one.',
+  },
+  {
     file: 'services/visit-completion-packets.js',
     snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
     reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
