@@ -716,11 +716,11 @@ it("shows the translation of a text in another language and sends the suggested 
   const owner = "translation-assist-owner";
   saveDraft(owner, { msgBody: "", fromNumber: line });
   window.history.replaceState({}, "", "/?phone=9415550100");
-  const translation = { trialId: 7, language: "Spanish", inboundOriginal: "¿A qué hora vienen el martes?", inboundEnglish: "What time are you coming on Tuesday?", replyEnglish: "Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.", replyTranslated: "Su visita es el martes 6 de oct, 13:00 - 15:00.", heldReason: null };
+  const translation = { trialId: 7, customerId: "customer-a", language: "Spanish", inboundOriginal: "¿A qué hora vienen el martes?", inboundEnglish: "What time are you coming on Tuesday?", replyEnglish: "Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.", replyTranslated: "Su visita es el martes 6 de oct, 13:00 - 15:00.", heldReason: null };
   const originalFetch = fetch.getMockImplementation();
   fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
     ? response({ draft: null, translation }) : originalFetch(url, options));
-  setupWithOwner(owner); await tick();
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" }, customerMessages: [{ channel: "sms", contactPhone: "+19415550100", ourEndpointId: line }] }); await tick();
   expect(screen.getByText("Customer wrote in Spanish")).toBeInTheDocument();
   expect(screen.getByText("What time are you coming on Tuesday?")).toBeInTheDocument();
   expect(screen.getByText("Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.")).toBeInTheDocument();
@@ -735,14 +735,25 @@ it("shows the translation of a text in another language and sends the suggested 
 it("a held translation shows the English and the reason, with no reply to use", async () => {
   const owner = "translation-held-owner";
   window.history.replaceState({}, "", "/?phone=9415550100");
-  const translation = { trialId: 8, language: "Portuguese", inboundOriginal: "Quero cancelar meu plano.", inboundEnglish: "I want to cancel my plan.", replyEnglish: null, replyTranslated: null, heldReason: "The translated reply did not read back the same as the English." };
+  const translation = { trialId: 8, customerId: "customer-a", language: "Portuguese", inboundOriginal: "Quero cancelar meu plano.", inboundEnglish: "I want to cancel my plan.", replyEnglish: null, replyTranslated: null, heldReason: "The translated reply did not read back the same as the English." };
   const originalFetch = fetch.getMockImplementation();
   fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
     ? response({ draft: null, translation }) : originalFetch(url, options));
-  setupWithOwner(owner); await tick();
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
   expect(screen.getByText("I want to cancel my plan.")).toBeInTheDocument();
   expect(screen.getByText(/No suggested reply\. The translated reply did not read back/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+});
+
+it("never shows a translation read for a different customer", async () => {
+  const owner = "translation-other-customer-owner";
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 9, customerId: "someone-else", language: "Spanish", inboundEnglish: "Not this customer's text", replyEnglish: "x", replyTranslated: "y", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
 });
 
 it("discards an Agent Review selection before sending a fresh message", async () => {

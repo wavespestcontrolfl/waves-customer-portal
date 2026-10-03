@@ -1646,6 +1646,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       return;
     }
 
+    // The recipient changed: the previous customer's translation card (and its
+    // Use Reply) must not stay on screen while the new one loads.
+    setTranslationAssist(null);
     let cancelled = false;
     const t = setTimeout(() => {
       const params = new URLSearchParams();
@@ -1657,7 +1660,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           if (!cancelled) {
             setAgentDraft(d?.draft || null);
             setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
-            setTranslationAssist(d?.translation || null);
+            // only for the customer it was read for (a phone-only lookup carries none)
+            setTranslationAssist(d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null);
           }
         })
         .catch(() => {

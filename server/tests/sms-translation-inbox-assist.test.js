@@ -73,6 +73,14 @@ describe('inboxAssistFor', () => {
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, heldReason: 'The suggested reply is more than a day old.' });
   });
 
+  test('a reply quoting an arrival time in minutes is offered for 15 minutes only', async () => {
+    const eta = { ...READY, reply_english: 'Adam is on the way. ETA: 9 minutes.', reply_translated: 'Adam va en camino. ETA: 9 minutos.' };
+    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:50:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: eta.reply_translated, heldReason: null, customerId: 'c1' });
+    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:40:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: 'The arrival time in the suggested reply is out of date.' });
+  });
+
   test('a read failure returns nothing and never logs the message text', async () => {
     mockLast.mockRejectedValue(Object.assign(new Error('select ... Hola secreto'), { code: '57014' }));
     expect(await inboxAssistFor('c1', NOW)).toBeNull();

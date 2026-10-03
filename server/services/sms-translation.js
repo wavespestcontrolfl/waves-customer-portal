@@ -977,9 +977,15 @@ async function inboxAssistFor(customerId, now = new Date()) {
     if (!row || row.verdict === 'skipped') return null;
     const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
     const ageMs = now.getTime() - new Date(row.created_at).getTime();
-    const ready = row.verdict === 'ready' && Boolean(row.reply_translated) && ageMs >= 0 && ageMs <= INBOX_REPLY_MAX_AGE_MS;
+    const fresh = row.verdict === 'ready' && Boolean(row.reply_translated) && ageMs >= 0 && ageMs <= INBOX_REPLY_MAX_AGE_MS;
+    // a reply that states an arrival time in minutes ("about 9 minutes away") is good for the live drafter's
+    // own 15-minute window only: after it, the figure is not offered to staff
+    const quotesEta = fresh && require('./sms-shadow-drafter').findEtaMinutesClaims(row.reply_english || '').length > 0;
+    const etaStale = quotesEta && ageMs > require('./sms-eta-freshness').ETA_FRESHNESS_WINDOW_MS;
+    const ready = fresh && !etaStale;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
+    const staleWords = etaStale ? 'The arrival time in the suggested reply is out of date.' : 'The suggested reply is more than a day old.';
     return {
       trialId: row.id,
       smsLogId: row.sms_log_id,
@@ -988,7 +994,8 @@ async function inboxAssistFor(customerId, now = new Date()) {
       inboundEnglish: inboundConfirmed ? row.inbound_english : null,
       replyEnglish: ready ? row.reply_english : null,
       replyTranslated: ready ? row.reply_translated : null,
-      heldReason: ready ? null : (held || (row.verdict === 'ready' ? 'The suggested reply is more than a day old.' : null)),
+      heldReason: ready ? null : (held || (row.verdict === 'ready' ? staleWords : null)),
+      customerId,
       createdAt: row.created_at,
     };
   } catch (err) {
