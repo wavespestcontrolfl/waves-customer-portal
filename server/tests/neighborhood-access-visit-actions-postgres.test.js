@@ -43,6 +43,7 @@ postgres('neighborhood gate codes from a visit', () => {
   let admin;
   const OLD = { access: process.env.GATE_NEIGHBORHOOD_ACCESS, actions: process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS };
   const TODAY = etDateString(new Date());
+  const UUID = /^[0-9a-f-]{36}$/i;
 
   const call = async (method, path, body) => {
     const res = await fetch(`${baseUrl}${path}`, {
@@ -89,6 +90,10 @@ postgres('neighborhood gate codes from a visit', () => {
     }).returning('*');
     return row;
   };
+  // Report an entry wrong as the screen does: with the code it showed.
+  const wrong = async (visitId, entryId, code) => call('POST', `/visits/${visitId}/entries/${entryId}/wrong`, {
+    code: code !== undefined ? code : ((UUID.test(entryId) && (await trx('neighborhood_access').where({ id: entryId }).first('code'))?.code) || '0000'),
+  });
   const rows = (neighborhoodId) => trx('neighborhood_access').where({ neighborhood_id: neighborhoodId }).orderBy('code');
 
   beforeAll(async () => {
@@ -136,7 +141,7 @@ postgres('neighborhood gate codes from a visit', () => {
     for (const key of ['GATE_NEIGHBORHOOD_TECH_ACTIONS', 'GATE_NEIGHBORHOOD_ACCESS']) {
       process.env[key] = 'false';
       expect(await call('POST', `/visits/${v.id}/entries`, { code: '5555' })).toEqual({ status: 404, body: { enabled: false } });
-      expect(await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).toEqual({ status: 404, body: { enabled: false } });
+      expect(await wrong(v.id, id)).toEqual({ status: 404, body: { enabled: false } });
       process.env[key] = 'true';
     }
     expect((await rows(n)).map((r) => [r.code, r.status])).toEqual([['1234', 'active']]);
@@ -183,7 +188,7 @@ postgres('neighborhood gate codes from a visit', () => {
     const n = await neighborhood('Cedar Point');
     const id = await entry(n, { code: '5555' });
     const v = await visit(n);
-    expect(await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).toEqual({ status: 200, body: { id, status: 'needs_confirm' } });
+    expect(await wrong(v.id, id)).toEqual({ status: 200, body: { id, status: 'needs_confirm' } });
     const [row] = await rows(n);
     expect(row).toMatchObject({ code: '5555', status: 'needs_confirm', flagged_wrong_by: tech.id });
     expect(row.flagged_wrong_at).not.toBeNull();
@@ -191,7 +196,7 @@ postgres('neighborhood gate codes from a visit', () => {
     const feed = await neighborhoodGateEntriesForVisits(trx, [v]);
     const alerts = compilePropertyAlerts({ neighborhoodGate: feed.get(v.id), neighborhoodActions: true });
     expect(alerts).toEqual([{
-      type: 'gate', text: 'Gate: 5555 (neighborhood, confirm on site)', neighborhoodEntryId: id, reportedWrong: true,
+      type: 'gate', text: 'Gate: 5555 (neighborhood, confirm on site)', neighborhoodEntryId: id, neighborhoodEntryCode: '5555', reportedWrong: true,
     }]);
     // The office sees who reported it, and confirming clears the report.
     mockStaff = admin;
@@ -200,9 +205,14 @@ postgres('neighborhood gate codes from a visit', () => {
     expect(listed.markedWrongAt).toEqual(expect.any(String));
     expect((await call('PATCH', `/entries/${id}`, { action: 'confirm' })).status).toBe(200);
     expect((await rows(n))[0]).toMatchObject({ status: 'active', flagged_wrong_at: null, flagged_wrong_by: null });
+    // A code the office edited after the screen loaded was never tested: refused.
+    mockStaff = tech;
+    expect(await wrong(v.id, id, '9090')).toEqual({ status: 409, body: { error: 'That code was changed. Check your route for the new one.', code: 'entry_changed' } });
+    expect((await call('POST', `/visits/${v.id}/entries/${id}/wrong`, {})).status).toBe(400);
+    expect((await rows(n))[0]).toMatchObject({ status: 'active', flagged_wrong_at: null });
     // Retiring a reported code answers the report too.
     mockStaff = tech;
-    expect((await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).status).toBe(200);
+    expect((await wrong(v.id, id)).status).toBe(200);
     mockStaff = admin;
     expect((await call('PATCH', `/entries/${id}`, { action: 'retire' })).status).toBe(200);
     expect((await rows(n))[0]).toMatchObject({ status: 'retired', flagged_wrong_at: null, flagged_wrong_by: null });
@@ -216,12 +226,12 @@ postgres('neighborhood gate codes from a visit', () => {
     const old = await visit(n, { scheduled_date: etDateString(addETDays(new Date(), -30)), status: 'completed' });
     for (const v of [notMine, cancelled, old]) {
       expect(await call('POST', `/visits/${v.id}/entries`, { code: '7777' })).toEqual({ status: 404, body: { error: 'Visit not found' } });
-      expect(await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).toEqual({ status: 404, body: { error: 'Visit not found' } });
+      expect(await wrong(v.id, id)).toEqual({ status: 404, body: { error: 'Visit not found' } });
     }
     expect((await rows(n)).map((r) => [r.code, r.status])).toEqual([['6666', 'active']]);
     // A visit completed this week is still theirs to report from.
     const done = await visit(n, { status: 'completed' });
-    expect((await call('POST', `/visits/${done.id}/entries/${id}/wrong`)).status).toBe(200);
+    expect((await wrong(done.id, id)).status).toBe(200);
     // An admin is not tied to the assignment.
     mockStaff = admin;
     const r = await call('POST', `/visits/${notMine.id}/entries`, { code: '7777' });
@@ -247,7 +257,7 @@ postgres('neighborhood gate codes from a visit', () => {
     const guard = await entry(mine, { access_type: 'guard', code: null, instructions: 'Give the stop name at the gatehouse' });
     const v = await visit(mine);
     for (const id of [foreign, retired, guard, randomUUID(), 'not-an-id']) {
-      expect(await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).toEqual({ status: 404, body: { error: 'Gate code not found' } });
+      expect(await wrong(v.id, id)).toEqual({ status: 404, body: { error: 'Gate code not found' } });
     }
     expect(await trx('neighborhood_access').whereIn('id', [foreign, retired, guard]).whereNotNull('flagged_wrong_at')).toEqual([]);
   });
@@ -262,7 +272,7 @@ postgres('neighborhood gate codes from a visit', () => {
       const r = await call('POST', `/visits/${v.id}/entries`, { code: '3030' });
       expect([r.status, r.body.code]).toEqual([409, 'no_neighborhood']);
     }
-    expect((await call('POST', `/visits/${inOff.id}/entries/${offEntry}/wrong`)).status).toBe(409);
+    expect((await wrong(inOff.id, offEntry)).status).toBe(409);
     expect(await trx('neighborhood_access').where({ code: '3030' })).toEqual([]);
     // Nor does a dead row (the routes refuse it), even beside a live sibling.
     const hood = (await trx('customer_properties').where({ id: on.property_id }).first('neighborhood_id')).neighborhood_id;

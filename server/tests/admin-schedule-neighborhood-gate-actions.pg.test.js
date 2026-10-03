@@ -93,7 +93,7 @@ describeOrSkip('neighborhood gate actions on GET /api/admin/schedule', () => {
     const row = await feedRow();
     expect(row.neighborhoodGateActions).toBe(true);
     expect(gateAlerts(row)).toEqual([
-      { type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: entryId, reportedWrong: false },
+      { type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: entryId, neighborhoodEntryCode: '4242', reportedWrong: false },
     ]);
   });
 

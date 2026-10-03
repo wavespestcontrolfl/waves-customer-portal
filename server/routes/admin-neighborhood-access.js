@@ -18,7 +18,7 @@
  * POST   /visits/:visitId/entries   — from a visit: add a keypad code to that
  *                                     visit's neighborhood ({ code, gateLabel? })
  * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
- *                                     neighborhood code wrong
+ *                                     neighborhood code wrong ({ code }: the code shown)
  *
  * A neighborhood's gate code is shared by every stop in it and is staff-only:
  * every route but the two /visits ones requires full admin, and every
@@ -207,34 +207,44 @@ const NO_NEIGHBORHOOD = {
   body: { error: 'This stop has no neighborhood yet. Ask the office to set one.', code: 'no_neighborhood' },
 };
 
-// The neighborhood of a visit this login may act on. Lock order: the visit
-// row, its property row(s), then the neighborhood row (the lock every writer of a neighborhood's
-// entries takes first). A technician reaches only a visit they can see on
-// their own route (assigned to them, not dead, inside the access window,
-// completed allowed), re-checked under the visit's row lock so a reassignment
-// or cancellation landing meanwhile cannot let a former assignee's write
-// through. Returns { neighborhoodId } or { status, body }.
+// The neighborhood of a visit this login may act on, read under the locks
+// that make it stable. Lock order, the property writers' own
+// (customer-properties.js: customer row, property rows, then visits; the
+// office relink: customer row, property row, neighborhood):
+//   1. the visit's CUSTOMER row, FOR SHARE. Every writer that adds a property,
+//      changes the primary or relinks a neighborhood takes that row FOR
+//      UPDATE first, so none of them can run until this commits and the
+//      stop's neighborhood cannot move underneath the write;
+//   2. the visit row (lockOwnedLiveVisit): a technician reaches only a visit
+//      on their own route (assigned to them, not dead, inside the access
+//      window, completed allowed), re-checked under the lock so a
+//      reassignment or cancellation landing meanwhile cannot let a former
+//      assignee's write through;
+//   3. the neighborhood row (the lock every writer of its entries takes first).
+// Returns { neighborhoodId } or { status, body }.
+const VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_zip',
+];
+
 async function lockVisitNeighborhood(trx, req, visitId) {
   const notFound = { status: 404, body: { error: 'Visit not found' } };
   if (!UUID_RE.test(visitId)) return notFound;
+  // The customer is read off the visit before any lock, then confirmed under
+  // the visit's lock: a visit moved to another customer meanwhile is refused.
+  const peek = await trx('scheduled_services').where({ id: visitId }).first('customer_id');
+  if (!peek || !peek.customer_id) return notFound;
+  await trx('customers').where({ id: peek.customer_id }).forShare().first('id');
   let visit;
   try {
-    visit = await lockOwnedLiveVisit(trx, req, visitId, [
-      'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
-      'scheduled_services.service_address_line1', 'scheduled_services.service_address_zip',
-    ], { allowCompleted: true });
+    visit = await lockOwnedLiveVisit(trx, req, visitId, VISIT_COLUMNS, { allowCompleted: true });
   } catch (err) {
     // Not theirs and not there read the same: a technician learns nothing
     // about another route's visits.
     if (err && (err.status === 403 || err.status === 404)) return notFound;
     throw err;
   }
-  // The stop's property link is read under the property's own row lock (the
-  // office relink takes that row before the neighborhood), so a relink
-  // cannot move the stop while this files a code under the old neighborhood.
-  const linked = trx('customer_properties').orderBy('id').forShare();
-  if (visit.property_id) await linked.where({ id: visit.property_id }).select('id');
-  else if (visit.customer_id) await linked.where({ customer_id: visit.customer_id, active: true }).select('id');
+  if (visit.customer_id !== peek.customer_id) return notFound;
   const neighborhoodId = (await visitNeighborhoodIds(trx, [visit])).get(visit.id);
   if (!neighborhoodId) return NO_NEIGHBORHOOD;
   const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
@@ -311,6 +321,10 @@ router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, asy
 router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techActionsLive, async (req, res) => {
   const { entryId } = req.params;
   if (!UUID_RE.test(entryId)) return res.status(404).json({ error: 'Gate code not found' });
+  // The code the technician was shown: an entry the office edited since is a
+  // different code, never tested at the gate, and is not flagged.
+  const shown = req.body && typeof req.body.code === 'string' ? req.body.code.trim() : '';
+  if (!shown) return res.status(400).json({ error: 'code is required' });
   try {
     const result = await db.transaction(async (trx) => {
       const where = await lockVisitNeighborhood(trx, req, req.params.visitId);
@@ -323,8 +337,11 @@ router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techA
         .whereNot('status', 'retired')
         .whereNotNull('code')
         .forUpdate()
-        .first('id');
+        .first('id', 'code');
       if (!row) return { status: 404, body: { error: 'Gate code not found' } };
+      if (row.code.toLowerCase() !== shown.toLowerCase()) {
+        return { status: 409, body: { error: 'That code was changed. Check your route for the new one.', code: 'entry_changed' } };
+      }
       // Flagged, never retired (owner ruling 2026-10-03): the schedule tags
       // it "confirm on site" and the office decides.
       await trx('neighborhood_access').where({ id: entryId }).update({

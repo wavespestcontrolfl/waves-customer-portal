@@ -24,7 +24,7 @@ const { mowingAlertText } = require('../utils/mowing-schedule');
  *   (neighborhood-access.js neighborhoodGateEntriesForVisits), used only when
  *   the customer has no neighborhood gate code of their own
  * @param {boolean} args.neighborhoodActions   tag each neighborhood CODE alert
- *   with its directory entry (neighborhoodEntryId, reportedWrong) so the field
+ *   with its directory entry (neighborhoodEntryId, neighborhoodEntryCode, reportedWrong) so the field
  *   screen can offer "Wrong code" on it (GATE_NEIGHBORHOOD_TECH_ACTIONS)
  * @returns {Array<{type: string, text: string}>}
  */
@@ -52,6 +52,7 @@ function compilePropertyAlerts({
       const alert = { type: 'gate', text: `${label}: ${value} (${tag})` };
       if (neighborhoodActions && e.id && e.code) {
         alert.neighborhoodEntryId = e.id;
+        alert.neighborhoodEntryCode = e.code;
         alert.reportedWrong = !!e.flagged_wrong_at;
       }
       alerts.push(alert);

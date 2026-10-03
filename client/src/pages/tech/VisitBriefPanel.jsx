@@ -144,6 +144,8 @@ function useGateCodeActions(gate) {
       return true;
     } catch (err) {
       setNote({ error: err?.message || 'Could not save. Try again.' });
+      // The code changed under this screen: show the route's current one.
+      if (err?.code === 'entry_changed') gate.onChanged?.();
       return false;
     } finally {
       setBusy(false);
@@ -155,7 +157,7 @@ function useGateCodeActions(gate) {
     clearNote: () => setNote(null),
     markWrong: (alert) => {
       if (!window.confirm(`Report "${alert.text}" as not working? The office will check it.`)) return;
-      post(`/${alert.neighborhoodEntryId}/wrong`, {}, 'Reported. The office will check that code.');
+      post(`/${alert.neighborhoodEntryId}/wrong`, { code: alert.neighborhoodEntryCode }, 'Reported. The office will check that code.');
     },
     add: (code) => post('', { code }, "Saved to this neighborhood's gate codes."),
   };

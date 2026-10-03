@@ -201,7 +201,7 @@ describe('VisitBriefPanel', () => {
     const gateStop = (alert = {}) => stopOf({
       ...BASE_SERVICE,
       neighborhoodGateActions: true,
-      propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: 'entry-1', reportedWrong: false, ...alert }],
+      propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: 'entry-1', neighborhoodEntryCode: '4242', reportedWrong: false, ...alert }],
     });
     const panel = (stop, props = {}) => render(
       <VisitBriefPanel stop={stop} detail={undefined} onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()} {...props} />,
@@ -218,10 +218,20 @@ describe('VisitBriefPanel', () => {
       expect(confirm).toHaveBeenCalledTimes(2);
       expect(request).toHaveBeenCalledWith(
         '/admin/neighborhood-access/visits/svc-1/entries/entry-1/wrong',
-        { method: 'POST', body: '{}' },
+        { method: 'POST', body: '{"code":"4242"}' },
       );
       expect(onGateChanged).toHaveBeenCalledTimes(1);
       expect(screen.getByRole('status')).toHaveTextContent('Reported. The office will check that code.');
+    });
+
+    it('a code the office changed meanwhile is refused and the route refreshes', async () => {
+      const request = vi.fn().mockRejectedValue(Object.assign(new Error('That code was changed. Check your route for the new one.'), { status: 409, code: 'entry_changed' }));
+      const onGateChanged = vi.fn();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      panel(gateStop(), { request, onGateChanged });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wrong code' })); });
+      expect(screen.getByRole('alert')).toHaveTextContent('That code was changed');
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
     });
 
     it('a code already reported shows that instead of the button', () => {
