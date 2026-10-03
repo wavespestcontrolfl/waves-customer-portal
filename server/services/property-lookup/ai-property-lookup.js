@@ -3214,8 +3214,11 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // the audit validate the wrong number. The house number is therefore
     // always taken from the ORIGINALLY TYPED address when one is supplied.
     if (options.typedAddress) {
-      const typedStreet = normalizeCountyStreetLine(String(options.typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' '));
-      const typedM = /^(\d+)\s+/.exec(typedStreet);
+      // Read from the RAW typed text: a hyphenated lead number ("14-384 …",
+      // a park-lot style Google reads as 14384) is ambiguous once
+      // normalization turns the hyphen into a space, so it never overrides —
+      // the canonical number stands. A plain leading number still wins.
+      const typedM = /^\s*(\d+)\b(?!\s*-\s*\d)/.exec(String(options.typedAddress));
       if (typedM) houseNumber = parseInt(typedM[1], 10);
     }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.

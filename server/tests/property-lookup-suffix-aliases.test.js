@@ -167,3 +167,21 @@ describe('auditAddressHouseNumber: roll rows with a bare trailing unit', () => {
     expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
   });
 });
+
+describe('typed house-number override', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  const roll = (rows) => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ features: rows.map((r) => ({ attributes: { SITUS_ADDRESS: r, SITUS_POSTAL_ZIP: '34219' } })) }) });
+  };
+  test('a hyphenated typed number never overrides the canonical one', async () => {
+    roll(['14384 EXAMPLE STONE LOOP']);
+    const audit = await auditAddressHouseNumber('14384 Example Stone Loop, Parrish, FL 34219', null, { typedAddress: '14-384 Example Stone Loop' });
+    expect(audit).toMatchObject({ houseNumber: 14384, hasExactMatch: true });
+  });
+  test('a plain typed number still overrides a snapped canonical number', async () => {
+    roll(['14384 EXAMPLE STONE LOOP']);
+    const audit = await auditAddressHouseNumber('14384 Example Stone Loop, Parrish, FL 34219', null, { typedAddress: '14386 Example Stone Loop, Parrish, FL 34219' });
+    expect(audit).toMatchObject({ houseNumber: 14386, hasExactMatch: false });
+  });
+});
