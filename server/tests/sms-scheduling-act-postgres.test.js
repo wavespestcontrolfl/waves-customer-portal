@@ -138,8 +138,9 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     expect(await sweep('2040-03-01T15:03:00Z')).toEqual({ finished: 0 });
     expect(await sweep('2040-03-01T15:10:00Z')).toEqual({ finished: 1 });
     expect(reminders.handleReschedule).toHaveBeenCalledTimes(1);
-    // Never a second confirmation: the sweep's sync sends no text.
-    expect(reminders.handleReschedule).toHaveBeenCalledWith(s.visitId, '2040-03-06T10:00', { expectSchedule: { date: '2040-03-06', windowStart: '10:00' }, sendNotification: false });
+    // Never a second confirmation: the sweep's sync sends no text, and it
+    // leaves a held confirmation (after hours, due at 8 AM) waiting.
+    expect(reminders.handleReschedule).toHaveBeenCalledWith(s.visitId, '2040-03-06T10:00', { expectSchedule: { date: '2040-03-06', windowStart: '10:00' }, sendNotification: false, keepPendingConfirmation: true });
     const row = await trx('sms_offer_decisions').where({ id: s.decisionId }).first('execution');
     expect(row.execution).toMatchObject({ date: '2040-03-06', start: '10:00' });
     // The /book snapshot sync ran too (no self-booking here: a no-op that is still stamped).

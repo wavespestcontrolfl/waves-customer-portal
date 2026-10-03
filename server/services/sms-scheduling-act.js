@@ -147,7 +147,12 @@ async function syncReminders({ dbh, decisionId, visitId, date, start, notify, de
   let synced = null;
   try {
     synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(
-      visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start }, ...(notify ? {} : { sendNotification: false }) },
+      visitId, `${date}T${start}`, {
+        expectSchedule: { date, windowStart: start },
+        // Silent, and a confirmation still waiting to go (the first attempt's
+        // after-hours hold, due at 8 AM) stays waiting.
+        ...(notify ? {} : { sendNotification: false, keepPendingConfirmation: true }),
+      },
     );
   } catch (err) {
     logger.error(`[sms-scheduling-act] reminder sync failed for ${visitId}: ${errorCode(err)}`);
