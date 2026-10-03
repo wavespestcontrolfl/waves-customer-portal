@@ -1570,7 +1570,7 @@ function ReportFlowForm({
     let filledRows = null;
     const rowsFor = (facts, productFill) => {
       if (!productVoice.read) return rows;
-      filledRows = filledRows || productVoice.settle(productFill, reportSprayMethod(facts));
+      filledRows = filledRows || productVoice.settle(productFill, reportSprayMethod(facts), form.note);
       return filledRows;
     };
     // A lane or typed read first fills the record (only what is empty and

@@ -4664,8 +4664,9 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
   } catch (err) { next(err); }
 });
 
-// The report flow's two voice-fill reads (any untyped pest visit, a regular visit
-// or a re-service; same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence).
+// The note's two voice-fill reads: the report flow (any untyped pest visit, a
+// regular visit or a re-service) and the lawn re-service sheet (while its own gate
+// is on). Same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence.
 // Each is a paid call with its own staff bucket, so a long note dictated in pieces
 // never spends the product read's budget.
 const voiceFillBucket = (max, error) => require('express-rate-limit')({
