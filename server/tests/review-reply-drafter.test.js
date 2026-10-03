@@ -585,6 +585,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     // parked after two drafts failed on that one word.
     expect(verify(good('Hello there, that is kind of you. Thanks for the rating.'), g)).toBeNull();
     expect(verify(good('Hello there, thanks for the kind words and the rating.'), g)).toBeNull();
+    // "kind" about staff still needs the reviewer's words (codex #5788 r1),
+    // and a review that negates it is never contradicted.
+    expect(verify(good("Hello there, we're glad our technician was kind. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    const notKind = grounding({ text: 'The technician was not kind, but the ants are gone.', rating: 4, mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hi Dana, we're glad our technician was kind and the ants are gone."), notKind)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, that is kind of you. We are glad the ants are gone.'), notKind)).toBeNull();
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
