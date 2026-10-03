@@ -549,6 +549,13 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
         conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'completed') AS recorded"),
         conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'incomplete') AS incomplete_record"))) || [];
     for (const noshow of noshows) {
+      // The sweep logs once the INTERNAL job block ends; the customer's promised
+      // arrival window can still be open (a 5 PM start runs to 7 PM). A same-day miss
+      // stays hidden until that promised window has passed (Codex #5610 r9).
+      if (calendarDay(noshow.original_date) === today) {
+        const promisedEnd = customerWindowEndMinutes({ window_start: missedWindowStart(noshow.original_window) });
+        if (promisedEnd != null && nowEtMinutes(now) < promisedEnd) continue;
+      }
       if (await noshowFollowedUp(conn, customerId, noshow)) continue;
       const startHms = missedWindowStart(noshow.original_window);
       return {

@@ -764,6 +764,15 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ status: 'no_show' })], [doneBadly])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
+  test('a same-day miss stays hidden until the PROMISED window has passed, not the internal job block (Codex #5610 r9)', async () => {
+    // NOW is 12:00 ET on 2026-10-01; a 10:00 start promises 10:00-12:00, an 11:00 start 11:00-1:00
+    const today = (start) => noshow({ original_date: '2026-10-01', ss_scheduled_date: '2026-10-01', original_window: `${start}-${start}`, window_start: start });
+    expect((await run([today('11:00:00')])).out.missedVisit).toBeNull();
+    expect((await run([today('09:00:00')])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // an earlier day is never held back
+    expect((await run([noshow({ original_window: '11:00:00-12:00:00', window_start: '11:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+  });
+
   test('a page of followed-up misses never hides an older open one', async () => {
     const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
     const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);
