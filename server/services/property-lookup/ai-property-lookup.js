@@ -2735,14 +2735,15 @@ function routeSearchCandidates(street) {
 
 // Every spelling a parcel search should try for one street: the canonical
 // key and its other spellings (routes, "Avenue C", a name-only suffix
-// "W LK" → "W LAKE"), then the street EXACTLY as typed (cleaned, never
-// canonicalized). The typed form guarantees a normalization change can
+// "W LK" → "W LAKE"), the pre-suffix-table spelling (directions + the
+// historical globals only, "100 EXAMPLE LAKE E"), then the street EXACTLY
+// as typed (cleaned, never canonicalized). The typed form guarantees a normalization change can
 // never make a previously searchable spelling unreachable — Charlotte
 // matches candidates by exact equality (pre-push audit, 10-02).
 function streetSpellingCandidates(address, street) {
   const typed = stripCountyLocationSuffix(String(address || '').split(',')[0]
     .toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim());
-  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), typed];
+  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), normalizeCountyStreetBase(address), typed];
 }
 
 function manateeAddressSearchCandidates(address) {
@@ -2966,7 +2967,12 @@ function canonicalizeCountyRouteStreet(street) {
   return `${houseNumber} ${preDirection}${type} ${routeNumber}${rest}`;
 }
 
-function normalizeCountyStreetLine(address) {
+// Directions and the long-standing global suffix rewrites, WITHOUT the
+// terminal suffix-table step — the spelling this normalizer produced before
+// the USPS table ("100 EXAMPLE LAKE E"). Parcel search sends it alongside
+// the canonical key so a roll matched by exact equality (Charlotte) never
+// loses a spelling it used to receive.
+function normalizeCountyStreetBase(address) {
   const firstLine = String(address || '').split(',')[0] || '';
   const cleaned = firstLine
     .toUpperCase()
@@ -2994,6 +3000,12 @@ function normalizeCountyStreetLine(address) {
     .replace(/\bSTREET\b/g, 'ST')
     .replace(/\bTERRACE\b/g, 'TER')
     .replace(/\bTRAIL\b/g, 'TRL')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeCountyStreetLine(address) {
+  return normalizeCountyStreetBase(address)
     .replace(TERMINAL_ONLY_SUFFIX_RE, (token) => TERMINAL_ONLY_SUFFIX_ALIASES[token])
     .replace(/\s+/g, ' ')
     .trim();

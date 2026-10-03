@@ -245,3 +245,10 @@ describe('round-3 pre-push fixes', () => {
     }
   });
 });
+
+describe('parcel search never loses a pre-suffix-table spelling', () => {
+  test('"100 Example Lake East" still sends the old "100 EXAMPLE LAKE E" alongside the new key', () => {
+    const c = _private.countyAddressSearchCandidates('100 Example Lake East, Port Charlotte, FL 33948');
+    expect(c).toEqual(expect.arrayContaining(['100 EXAMPLE LK E', '100 EXAMPLE LAKE E', '100 EXAMPLE LAKE EAST']));
+  });
+});
