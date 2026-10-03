@@ -78,6 +78,8 @@ describe('foldVisitUnit', () => {
     expect(foldVisitUnit(a, a, [stop('b', { lat: null, lng: null })])).toBe(null);
     expect(foldVisitUnit(a, a, [stop('b', { scheduled_date: '2035-03-07' })])).toBe(null);
     expect(foldVisitUnit(a, a, [stop('b', { status: 'on_site' })])).toBe(null);
+    // Staggered promises (the tapped service is not the earliest): the mover keeps each offset, so this stays unverified.
+    expect(foldVisitUnit(stop('a', { window_start: '10:00:00', window_end: '11:00:00' }), stop('a', { window_start: '10:00:00', window_end: '11:00:00' }), [stop('b')])).toBe(null);
     expect(foldVisitUnit({ ...a, lat: null }, a, [stop('b')])).toBe(null);
   });
 });

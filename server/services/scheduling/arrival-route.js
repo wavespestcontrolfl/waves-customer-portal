@@ -74,12 +74,15 @@ function comboRouteCheckLive() {
  *  summed work (the sum groupRouteStops uses for every other stop, exempt
  *  from owner planning minutes like any target) and their ids. Null when the
  *  members are not one clean stop — a different technician, different or
- *  missing coordinates, another day, or a member already under way — and the
- *  caller keeps today's answer (`grouped` → route_unverified). */
+ *  missing coordinates, another day, a member already under way, or members
+ *  promised different arrival times (the unit mover keeps each member's
+ *  offset, and one target window cannot stand for staggered promises) — and
+ *  the caller keeps today's answer (`grouped` → route_unverified). */
 function foldVisitUnit(target, stored, siblings) {
   const clean = hasCoords(target) && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
     && dateOnly(row.scheduled_date) === dateOnly(stored.scheduled_date)
     && hasCoords(row) && Number(row.lat) === Number(target.lat) && Number(row.lng) === Number(target.lng)
+    && String(row.window_start || '').slice(0, 5) === String(stored.window_start || '').slice(0, 5)
     && !['en_route', 'on_site'].includes(row.status));
   if (!clean) return null;
   // The tapped member's work is the EDITED row's (a pending length change
