@@ -1793,8 +1793,12 @@ async function executeTool(name, input = {}, ctx = {}) {
                   : 'The estimate already promised on this call is still owed, but this change could NOT be '
                     + 'saved to the office queue. ')
                   + 'Ask for what is missing and call capture_lead again with estimate_requested: true. If the '
-                  + 'caller declines to give it, respect that: tell them a Waves team member will call you back to '
-                  + 'confirm where to send it, and end the call normally.'
+                  // The no-flag capture is what releases the keep-the-call-open
+                  // hold this incomplete capture set; it withdraws nothing —
+                  // the promise and the card stand for a person to confirm.
+                  + 'caller declines to give it, respect that: call capture_lead again WITHOUT estimate_requested '
+                  + '(that closes the collection; the estimate already promised stays owed), tell them a Waves '
+                  + 'team member will call you back to confirm where to send it, and end the call normally.'
                 : 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
                   + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
                   + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '

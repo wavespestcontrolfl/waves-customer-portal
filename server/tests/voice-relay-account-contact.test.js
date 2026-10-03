@@ -364,6 +364,14 @@ describe('a written estimate for an established customer: ONE yes/no question (o
       const revise = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
       expect(revise[1]).toMatchObject({ city: 'Venice', address_line1: null });
       expect(revise[2]).toMatchObject({ stillMissing: ['address_line1'], sessionKey: 'sk-1', callSid: 'CA-acct-1', spokenExpectation: 'about_15_minutes' });
+      // Declining is a capture WITHOUT the flag: it releases the keep-open hold and withdraws nothing.
+      expect(incomplete).toMatch(/call capture_lead again WITHOUT estimate_requested[\s\S]*the estimate already promised stays owed/);
+      expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: true }));
+      const writes = surfaceEstimateRequestForCustomer.mock.calls.length;
+      await executeTool('capture_lead', { call_summary: 'Declined to give the new street.' }, ctx);
+      expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: false })); // the call can end
+      expect(surfaceEstimateRequestForCustomer.mock.calls.length).toBe(writes); // the card is left as revised
+      expect(notePromise).toHaveBeenCalledTimes(1); // the promise still stands
       // If that card write fails, the result does not claim the office saw the change.
       surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false });
       const unsaved = await ask({ city: 'Venice' }, ctx);
