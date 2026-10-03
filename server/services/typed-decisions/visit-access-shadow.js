@@ -46,6 +46,13 @@ const SUBJECT_TYPE = 'scheduled_services';
 // Visits asked per pass; the rest wait for the next hourly pass. Visits whose
 // state is already answered cost reads only and never count against it.
 const MAX_ASKED_VISITS = 80;
+// A visit that already has its first provider's answer and only retries
+// another provider's failed leg draws on its own budget, so a provider that
+// is down never keeps later visits from their first answer.
+const MAX_RETRY_VISITS = 40;
+const PRIMARY_PROVIDER = 'typesafe';
+// The daily review item reads rows created in its last 14 days.
+const REVIEW_AGE_MS = 13 * 24 * 60 * 60 * 1000;
 const WORKERS = 2;
 const MAX_TEXTS = 8;
 const TEXT_CHARS = 260;
@@ -207,6 +214,8 @@ async function loadSavedFacts(svc, dbh, day) {
   const petCount = Number.isInteger(prefs.pet_count) ? prefs.pet_count : 0;
   const notes = [
     labelled('Visit note', svc.notes, NOTE_CHARS),
+    // What the customer told Waves about THIS visit when it was booked.
+    labelled('Customer request for this visit', svc.customer_request, NOTE_CHARS),
     prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
     labelledAccessField('Access notes', prefs.access_notes),
     labelledAccessField('Side gate', prefs.side_gate_access),
@@ -231,30 +240,29 @@ async function loadSavedFacts(svc, dbh, day) {
 
 // Completed visits on days BEFORE this one. scheduled_services is the history
 // (a completed recurring visit can have no service_records row, as
-// completion-comms-context reads it): the count, and the day of the newest on
-// this visit's own service line, where the texts' window starts.
-// service_records supplies only the last technician note on that line.
+// completion-comms-context reads it): the count, and where the texts' window
+// starts: the newest same-line visit's COMPLETION time (so a one-visit
+// instruction sent before or during that visit does not carry into this one;
+// a legacy row without completed_at falls back to Eastern midnight of its
+// day). The last technician note comes from the shared same-line history
+// walk (utils/last-line-service.js), which pages until it finds the line.
 async function loadHistory(svc, dbh, day, serviceLine) {
   const { detectServiceLine } = require('../service-report/service-line-configs');
+  const { parseETDateTime } = require('../../utils/datetime-et');
+  const { loadRecentLineServices } = require('../../utils/last-line-service');
   const completed = await dbh('scheduled_services')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .whereNot({ id: svc.id })
     .where('scheduled_date', '<', day)
     .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
     .limit(200)
-    .select('service_type', 'scheduled_date');
-  const lastCompleted = completed.find((r) => detectServiceLine(r.service_type) === serviceLine);
-  const records = await dbh('service_records')
-    .where({ customer_id: svc.customer_id, status: 'completed' })
-    .where('service_date', '<', day)
-    .orderBy('service_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc')
-    .limit(100)
-    .select('service_type', 'service_line', 'service_date', 'technician_notes');
-  const lastRecord = records.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine);
-  const days = [lastCompleted && dayString(lastCompleted.scheduled_date), lastRecord && dayString(lastRecord.service_date)].filter(Boolean).sort();
+    .select('service_type', 'scheduled_date', 'completed_at');
+  const last = completed.find((r) => detectServiceLine(r.service_type) === serviceLine);
+  const { lineRecords } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 10 });
+  const lastRecord = lineRecords.find((r) => dayString(r.service_date) < day);
   return {
     count: completed.length,
-    lastDay: days.pop() || null,
+    textsFrom: last ? (last.completed_at ? new Date(last.completed_at) : parseETDateTime(`${dayString(last.scheduled_date)}T00:00`)) : null,
     lastNote: lastRecord ? (compact(redactForState(lastRecord.technician_notes), NOTE_CHARS) || null) : null,
   };
 }
@@ -314,16 +322,14 @@ async function buildVisitAccessState(svc, dbh) {
   if (!svc || !svc.id || !svc.customer_id || !day) return null;
   if (!(await singlePremises(svc, dbh))) return null;
   const { detectServiceLine } = require('../service-report/service-line-configs');
-  const { parseETDateTime } = require('../../utils/datetime-et');
   const serviceLine = detectServiceLine(svc.service_type) || null;
   const cutoff = stateCutoff(svc);
   const saved = await loadSavedFacts(svc, dbh, day);
   const history = await loadHistory(svc, dbh, day, serviceLine);
-  // The texts' window: from Eastern midnight of the last same-line visit's
-  // day (never UTC midnight), capped, up to this visit's start.
+  // The texts' window: from the last same-line visit's completion, capped,
+  // up to this visit's start.
   const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
-  const lastStart = history.lastDay ? parseETDateTime(`${history.lastDay}T00:00`) : null;
-  const floor = lastStart && lastStart > capFloor ? lastStart : capFloor;
+  const floor = history.textsFrom && history.textsFrom > capFloor ? history.textsFrom : capFloor;
   const state = {
     service_line: serviceLine,
     visit_count: history.count,
@@ -336,7 +342,7 @@ async function buildVisitAccessState(svc, dbh) {
 }
 
 const VISIT_COLUMNS = [
-  's.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes',
+  's.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes', 's.customer_request',
   // The primary address and the multi-home flag singlePremises reads.
   'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city',
   'c.has_multi_home',
@@ -362,9 +368,17 @@ async function shadowVisit(svc, { dbh, providers, out }) {
   const settled = (row) => row.subject_hash === built.subjectHash || row.label_status !== 'unreviewed' || row.sampled_for === 'heldout';
   const done = (provider) => questionIds.every((id) => existing.some((row) => row.provider === provider && row.question_id === id && settled(row)));
   const due = providers.filter((provider) => !done(provider));
-  if (!due.length) { out.unchanged += 1; return; }
-  if (out.askedVisits >= MAX_ASKED_VISITS) { out.deferred += 1; return; }
-  out.askedVisits += 1;
+  if (!due.length) {
+    out.unchanged += 1;
+    // The refresh is idempotent and runs on unchanged passes too, so one
+    // that failed after its rows were written is made good an hour later.
+    await settleCohorts({ dbh, pkg, svc, built });
+    return;
+  }
+  const retryOnly = !due.includes(PRIMARY_PROVIDER);
+  const budget = retryOnly ? 'retryVisits' : 'askedVisits';
+  if (out[budget] >= (retryOnly ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
+  out[budget] += 1;
 
   const legs = (await Promise.all(due.map(async (provider) => {
     out.asked += 1;
@@ -411,43 +425,38 @@ async function shadowVisit(svc, { dbh, providers, out }) {
     }
   }
 
-  // The cohort of every row for THIS state is then settled from the answers
-  // on record, with the recorder's own rule and draw and no model call. It
-  // covers what the recorder's lone-write rule cannot see from here: a stored
-  // sibling whose pair just arrived (a retry), and a new answer that would
-  // otherwise copy the cohort of a switched-off provider's row for an older
-  // state. Unreviewed rows that are not held out only.
-  // The answers are re-read: a fresh answer the recorder refused to store (its
-  // row is labeled or held out, and keeps its older state) must not count.
-  if (legs.length) {
-    const { sampleFor, stableDraw } = require('./shadow-recorder');
-    let persisted;
-    try {
-      persisted = await dbh(TABLE)
-        .where({ package_id: pkg.id, subject_type: SUBJECT_TYPE, subject_id: svc.id, subject_hash: built.subjectHash })
-        .select('id', 'capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id', 'jev_answer', 'label_status', 'sampled_for');
-    } catch (err) {
-      logger.warn(`[typed-decisions] visit access cohort refresh read failed: ${err.message}`);
-      return;
-    }
+  await settleCohorts({ dbh, pkg, svc, built });
+}
+
+// The cohort of every row for THIS state, settled from the answers actually
+// stored for it, with the recorder's own rule and draw and no model call. It
+// covers what the recorder's lone-write rule cannot see: a stored sibling
+// whose pair arrived on a later pass, a new answer that would otherwise copy
+// the cohort of a switched-off provider's row for an older state, and a fresh
+// answer the recorder refused to store (a labeled or held-out row keeps its
+// older state and is not read here). Unreviewed rows that are not held out
+// only. A queued row for an upcoming visit that is older than the daily review
+// item's window (the visit was answered, moved out and came back) restarts its
+// age. Idempotent: the same rows give the same result on every pass.
+async function settleCohorts({ dbh, pkg, svc, built }) {
+  const { sampleFor, stableDraw, TABLE } = require('./shadow-recorder');
+  try {
+    const persisted = await dbh(TABLE)
+      .where({ package_id: pkg.id, subject_type: SUBJECT_TYPE, subject_id: svc.id, subject_hash: built.subjectHash })
+      .select('id', 'capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id', 'jev_answer', 'label_status', 'sampled_for', 'created_at');
     const parsed = (row) => (typeof row.jev_answer === 'string' ? JSON.parse(row.jev_answer) : row.jev_answer);
     for (const row of persisted) {
       if (row.label_status !== 'unreviewed' || row.sampled_for === 'heldout') continue;
       const others = persisted.filter((other) => other.question_id === row.question_id && other.provider !== row.provider).map(parsed);
       const cohort = sampleFor(parsed(row), built.baselines[row.question_id], () => stableDraw(row), others);
-      // A re-answer (the row held an older state before this pass) is new
-      // evidence: its age restarts, so the daily review item's window, which
-      // reads created_at, sees a visit that moved out and came back.
-      const reanswered = asked.has(row.provider) && existing.some((old) => old.provider === row.provider && old.question_id === row.question_id && old.subject_hash !== built.subjectHash);
-      if (cohort === row.sampled_for && !reanswered) continue;
-      try {
-        await dbh(TABLE).where({ id: row.id, subject_hash: built.subjectHash, label_status: 'unreviewed' })
-          .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
-          .update({ sampled_for: cohort, ...(reanswered ? { created_at: dbh.fn.now() } : {}) });
-      } catch (err) {
-        logger.warn(`[typed-decisions] visit access (${row.provider}) cohort refresh failed: ${err.message}`);
-      }
+      const aged = cohort !== null && Date.now() - new Date(row.created_at).getTime() > REVIEW_AGE_MS;
+      if (cohort === row.sampled_for && !aged) continue;
+      await dbh(TABLE).where({ id: row.id, subject_hash: built.subjectHash, label_status: 'unreviewed' })
+        .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
+        .update({ sampled_for: cohort, ...(aged ? { created_at: dbh.fn.now() } : {}) });
     }
+  } catch (err) {
+    logger.warn(`[typed-decisions] visit access cohort refresh failed for ${svc.id}: ${err.message}`);
   }
 }
 
@@ -460,7 +469,7 @@ async function shadowVisit(svc, { dbh, providers, out }) {
  * @returns {Promise<{considered:number, asked:number, recorded:number, unchanged:number, skipped:number, failed:number, deferred:number, skippedReason?:string}>}
  */
 async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
-  const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0, deferred: 0, askedVisits: 0 };
+  const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0, deferred: 0, askedVisits: 0, retryVisits: 0 };
   if (!visitAccessShadowLive()) return { ...out, skippedReason: 'gate_off' };
   try {
     const conn = dbh || require('../../models/db');

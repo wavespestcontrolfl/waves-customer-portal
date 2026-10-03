@@ -127,7 +127,7 @@ describe('visit access shadow: rules that need no database', () => {
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw(`CREATE TABLE ??.customers (id uuid PRIMARY KEY, deleted_at timestamptz, address_line1 text, address_line2 text, zip text, city text, has_multi_home boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, service_type varchar(200),
-      scheduled_date date, window_start time, status text, notes text, service_address_line1 text, service_address_line2 text, service_address_zip text, service_address_city text,
+      scheduled_date date, window_start time, status text, notes text, customer_request text, completed_at timestamptz, service_address_line1 text, service_address_line2 text, service_address_zip text, service_address_city text,
       property_id uuid, source_estimate_id uuid)`, [schema]);
     await database.raw(`CREATE TABLE ??.customer_properties (id uuid PRIMARY KEY, customer_id uuid, address_line1 text, address_line2 text, city text, zip text)`, [schema]);
     await database.raw(`CREATE TABLE ??.estimates (id uuid PRIMARY KEY, address text)`, [schema]);
@@ -136,7 +136,8 @@ describe('visit access shadow: rules that need no database', () => {
       property_gate_code varchar(50), garage_code varchar(50), lockbox_code varchar(50), access_notes text, parking_notes text, special_instructions text,
       chemical_sensitivities boolean, chemical_sensitivity_details text)`, [schema]);
     await database.raw(`CREATE TABLE ??.service_records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status varchar(30),
-      service_type varchar(200), service_line varchar(40), service_date date, technician_notes text, created_at timestamptz DEFAULT now())`, [schema]);
+      service_type varchar(200), service_line varchar(40), service_date date, technician_notes text, created_at timestamptz DEFAULT now(),
+      started_at timestamptz, pressure_index integer, structured_notes jsonb, service_data jsonb, completion_source varchar(40))`, [schema]);
     await database.raw(`CREATE TABLE ??.sms_log (id uuid PRIMARY KEY, customer_id uuid, direction varchar(20), message_body text,
       message_type varchar(40), status varchar(30), metadata jsonb, created_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.decision_reviews (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), capability varchar(60) NOT NULL,
@@ -365,15 +366,61 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state.notes_text).toContain('Parking: Please be careful');
   });
 
-  test('a re-answered visit restarts its review age', async () => {
+  test('a queued row older than the review window restarts its age; an unqueued one is left alone', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { contact_before_arrival: yes } : {}));
     const visitId = await visit();
     await sweep();
     await database('decision_reviews').where({ subject_id: visitId }).update({ created_at: new Date('2026-09-01T12:00:00Z') });
-    expect(await sweep()).toMatchObject({ unchanged: 1 });
-    expect(new Date((await rows(visitId))[0].created_at).toISOString()).toBe('2026-09-01T12:00:00.000Z');
-    await text('The baby naps at noon now', '2026-10-05T13:45:00Z');
+    expect(await sweep()).toMatchObject({ unchanged: 1, asked: 0 });
+    for (const row of await rows(visitId)) {
+      const fresh = new Date(row.created_at).getTime() > new Date('2026-10-01T00:00:00Z').getTime();
+      expect(fresh).toBe(row.sampled_for !== null);
+    }
+    expect((await rows(visitId)).filter((r) => r.question_id === 'contact_before_arrival').every((r) => r.sampled_for)).toBe(true);
+  });
+
+  test('a cohort refresh that never ran is made good on the next unchanged pass', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { contact_before_arrival: yes } : {}));
+    const visitId = await visit();
     await sweep();
-    for (const row of await rows(visitId)) expect(new Date(row.created_at).getTime()).toBeGreaterThan(new Date('2026-10-01T00:00:00Z').getTime());
+    await database('decision_reviews').where({ subject_id: visitId, provider: 'typesafe', question_id: 'contact_before_arrival' }).update({ sampled_for: null });
+    expect(await sweep()).toMatchObject({ unchanged: 1 });
+    const pair = (await rows(visitId)).filter((r) => r.question_id === 'contact_before_arrival');
+    expect(pair[0].sampled_for).toBe(pair[1].sampled_for);
+    expect(pair[0].sampled_for).not.toBeNull();
+  });
+
+  test('the customer\'s request for this visit rides in the notes; the text window starts when the last visit finished', async () => {
+    await visit({ scheduled_date: '2026-09-01', status: 'completed', completed_at: new Date('2026-09-01T18:00:00Z') });
+    await text('Please knock today, baby asleep', '2026-09-01T13:00:00Z');
+    await text('The lanai had ants again', '2026-09-01T20:00:00Z');
+    const built = await build(await visit({ customer_request: 'Please knock first, we have a newborn' }));
+    expect(built.state.notes_text).toContain('Customer request for this visit: Please knock first, we have a newborn');
+    expect(built.state.recent_texts).toContain('The lanai had ants again');
+    expect(built.state.recent_texts).not.toContain('Please knock today');
+  });
+
+  test('the last technician note is found behind many newer records of another line', async () => {
+    await database('service_records').insert({ customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-01-05', technician_notes: 'Dog was loose in the yard.' });
+    await database('service_records').insert(Array.from({ length: 130 }, (_, i) => ({
+      customer_id: customerId, status: 'completed', service_type: 'Lawn Care', service_date: '2026-06-01', technician_notes: `Lawn visit ${i}`,
+    })));
+    const built = await build(await visit());
+    expect(built.state.last_tech_notes).toBe('Dog was loose in the yard.');
+  });
+
+  test('a provider that is down does not keep later visits from their first answer', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false, reason: 'error' } : reply()));
+    const first = await visit();
+    await sweep();
+    const second = await visit();
+    const result = await sweep();
+    expect(result).toMatchObject({ askedVisits: 1, retryVisits: 1 });
+    expect((await rows(second)).filter((r) => r.provider === 'typesafe')).toHaveLength(Object.keys(pkg.questions).length);
+    expect((await rows(first)).filter((r) => r.provider === 'typesafe')).toHaveLength(Object.keys(pkg.questions).length);
   });
 
   test('only upcoming statuses are read, and an answered visit never uses up the pass', async () => {
