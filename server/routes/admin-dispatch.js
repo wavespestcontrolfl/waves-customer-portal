@@ -4596,47 +4596,58 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dispatch/:serviceId/lawn-fast/context
+// Every lawn-fast route (the path param is NAMED :lawnFastServiceId, not :serviceId, so
+// router.param('serviceId') does not fire on it: that hook's lookup would raise Postgres
+// 22P02, a 500, on a malformed id before any handler ran). The handler runs the same
+// steps in this order: the dark gate (404 {enabled:false}, nothing read), the id must be
+// a uuid (404 not_found, scheduled_services.id is a uuid column), then the SAME ownership
+// assertion the sibling routes use (a technician only reaches their own visit, admins any;
+// assertRecapOwnership reads req.params.serviceId, set here after validation). Returns
+// the id, or null after answering. Behind the router-level adminAuthenticate +
+// requireTechOrAdmin above, like every route in this file.
+async function lawnFastRequestId(req, res) {
+  if (!lawnFastCompleteLive()) { res.status(404).json({ enabled: false }); return null; }
+  const id = req.params.lawnFastServiceId;
+  if (!require('../services/lawn-fast-complete').isUuid(id)) {
+    res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    return null;
+  }
+  req.params.serviceId = id;
+  return (await assertRecapOwnership(req, res)) ? id : null;
+}
+
+// GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
 // verdict with a reason, the visit identity (echoed back as `expectedVisit` on
-// /complete), the planned products each with its post-application watering
-// rule, whether a CONFIRMED lawn assessment exists, and the advisory photo
-// status. Read-only; dark behind GATE_LAWN_FAST_COMPLETE. The lawn re-service
-// keeps its own sheet. An ineligible visit answers 200 `eligible: false` with a
-// reason. See services/lawn-fast-complete.js.
-// Every lawn-fast route: the dark gate first (a request reads nothing while it is
-// off), then the path id must be a uuid (scheduled_services.id), or a malformed id
-// would raise Postgres 22P02 (a 500) in the ownership lookup. A regex path has no
-// :serviceId param, so this runs before router.param('serviceId')'s own lookup.
-router.use(/^\/([^/]+)\/lawn-fast(?:\/|$)/, (req, res, next) => {
-  if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
-  if (!require('../services/lawn-fast-complete').isUuid(req.params[0])) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
-  return next();
-});
-router.get('/:serviceId/lawn-fast/context', async (req, res, next) => {
+// /complete, with the `visitType` echoed in the `lawnFast` block), the planned
+// products each with its post-application watering rule, whether a CONFIRMED lawn
+// assessment exists, and the advisory photo status. Read-only; dark behind
+// GATE_LAWN_FAST_COMPLETE. The lawn re-service keeps its own sheet. An ineligible
+// visit answers 200 `eligible: false` with a reason. See services/lawn-fast-complete.js.
+router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
   try {
-    if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
-    if (!(await assertRecapOwnership(req, res))) return;
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(req.params.serviceId, { technicianId: req.technicianId });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/dispatch/:serviceId/lawn-fast/watering-preview
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview
 // body: { productIds: [catalog product ids] }
 // Each chosen product's watering rule and the one watering instruction the
 // customer report would print for them, built by the report's own functions so
 // the sheet's sentence can never differ from the report's. Read-only; sends
 // nothing. Dark behind GATE_LAWN_FAST_COMPLETE.
-router.post('/:serviceId/lawn-fast/watering-preview', async (req, res, next) => {
+router.post('/:lawnFastServiceId/lawn-fast/watering-preview', async (req, res, next) => {
   try {
-    if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
-    if (!(await assertRecapOwnership(req, res))) return;
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
     const result = await require('../services/lawn-fast-complete').buildLawnFastWateringPreview({
-      serviceId: req.params.serviceId,
+      serviceId,
       productIds: req.body?.productIds,
     });
     if (!result.ok) {

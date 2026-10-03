@@ -60,9 +60,10 @@ function invoke(method, routePath, { params = {}, body, actor = { techRole: 'adm
   });
 }
 
-const CONTEXT = '/:serviceId/lawn-fast/context';
-const PREVIEW = '/:serviceId/lawn-fast/watering-preview';
-const params = { serviceId: 'visit-1' };
+const CONTEXT = '/:lawnFastServiceId/lawn-fast/context';
+const PREVIEW = '/:lawnFastServiceId/lawn-fast/watering-preview';
+const VISIT = '00000000-0000-4000-8000-000000000001';
+const params = { lawnFastServiceId: VISIT };
 
 const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
@@ -127,7 +128,7 @@ describe('GET lawn-fast/context', () => {
     const res = await invoke('get', CONTEXT, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1' } });
-    expect(buildLawnFastContext).toHaveBeenCalledWith('visit-1', { technicianId: 'tech-1' });
+    expect(buildLawnFastContext).toHaveBeenCalledWith(VISIT, { technicianId: 'tech-1' });
   });
 
   test('an admin reads any visit; an ineligible visit is a 200 with its reason', async () => {
@@ -162,7 +163,7 @@ describe('POST lawn-fast/watering-preview', () => {
     const res = await invoke('post', PREVIEW, { params, body: { productIds: ['p-1'] }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatchObject({ enabled: true, sentence: 'Skip your turf watering until Tue.' });
-    expect(buildLawnFastWateringPreview).toHaveBeenCalledWith({ serviceId: 'visit-1', productIds: ['p-1'] });
+    expect(buildLawnFastWateringPreview).toHaveBeenCalledWith({ serviceId: VISIT, productIds: ['p-1'] });
   });
 
   test.each([
@@ -178,45 +179,67 @@ describe('POST lawn-fast/watering-preview', () => {
   });
 });
 
-describe('lawn-fast path guard (runs before router.param\'s ownership lookup)', () => {
+describe('lawn-fast path id (named :lawnFastServiceId so router.param(\'serviceId\') never runs its lookup first)', () => {
   const savedGate = process.env.GATE_LAWN_FAST_COMPLETE;
+  beforeEach(() => { process.env.GATE_LAWN_FAST_COMPLETE = 'true'; });
   afterEach(() => {
     if (savedGate === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedGate;
-  });
-  const guard = router.stack.find((l) => !l.route && l.keys.length === 1 && l.keys[0].name === 0 && l.regexp.test('/abc/lawn-fast/context'));
-  const GOOD = '00000000-0000-4000-8000-000000000001';
-  const run = (id) => {
-    const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(p) { this.body = p; return this; } };
-    let nexted = false;
-    guard.handle({ params: { 0: id } }, res, () => { nexted = true; });
-    return { res, nexted };
-  };
-
-  test('is registered, has no :serviceId param (so router.param does not run first), and matches only lawn-fast paths', () => {
-    expect(guard).toBeTruthy();
-    expect(guard.keys.map((k) => k.name)).toEqual([0]);
-    expect(guard.regexp.test('/abc/pest-recap/context')).toBe(false);
-    expect(guard.regexp.test('/abc/lawn-fastx')).toBe(false);
+    mockDbCurrent = null;
+    buildLawnFastContext.mockReset();
+    buildLawnFastWateringPreview.mockReset();
   });
 
-  test('gate off: 404 {enabled:false} before anything is read', () => {
+  test.each([['get', CONTEXT], ['post', PREVIEW]])('%s: the route does not use the :serviceId param (the router.param lookup would 500 on a malformed id)', (method, routePath) => {
+    expect(routePath).not.toContain(':serviceId');
+    expect(routeLayer(method, routePath).keys.map((k) => k.name)).toEqual(['lawnFastServiceId']);
+  });
+
+  test.each([['get', CONTEXT], ['post', PREVIEW]])('%s: gate off answers 404 {enabled:false} before the id is even looked at', async (method, routePath) => {
     delete process.env.GATE_LAWN_FAST_COMPLETE;
-    const { res, nexted } = run(GOOD);
+    const calls = [];
+    mockDbCurrent = dbWithOwner('tech-1', calls);
+    const res = await invoke(method, routePath, { params: { lawnFastServiceId: 'missing' }, body: { productIds: [] } });
     expect(res.statusCode).toBe(404);
     expect(res.body).toEqual({ enabled: false });
-    expect(nexted).toBe(false);
+    expect(calls).toEqual([]);
   });
 
-  test.each(['missing', 'visit-1', '123', `${GOOD}x`])('gate on, malformed id %p: 404, never reaches a uuid column', (id) => {
-    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
-    const { res, nexted } = run(id);
-    expect(res.statusCode).toBe(404);
-    expect(res.body).toEqual({ error: 'Service not found', code: 'not_found' });
-    expect(nexted).toBe(false);
+  test.each([
+    ['get', CONTEXT, 'missing'], ['get', CONTEXT, '123'], ['get', CONTEXT, `${VISIT}x`],
+    ['post', PREVIEW, 'missing'], ['post', PREVIEW, 'visit-1'],
+  ])('%s %s with the malformed id %p: 404 not_found, never a 500, no database read', async (method, routePath, id) => {
+    const calls = [];
+    mockDbCurrent = dbWithOwner('tech-1', calls);
+    for (const actor of [{ techRole: 'technician', technicianId: 'tech-1' }, { techRole: 'admin', technicianId: 'admin-1' }]) {
+      const res = await invoke(method, routePath, { params: { lawnFastServiceId: id }, body: { productIds: [] }, actor });
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ error: 'Service not found', code: 'not_found' });
+    }
+    expect(calls).toEqual([]);
+    expect(buildLawnFastContext).not.toHaveBeenCalled();
+    expect(buildLawnFastWateringPreview).not.toHaveBeenCalled();
   });
 
-  test('gate on, a uuid passes on to the routes', () => {
-    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
-    expect(run(GOOD).nexted).toBe(true);
+  test('a valid id reaches the service as the plain serviceId, after the ownership check the siblings use', async () => {
+    mockDbCurrent = dbWithOwner('tech-1');
+    buildLawnFastContext.mockResolvedValue({ ok: true, eligible: true, service: { id: VISIT } });
+    await invoke('get', CONTEXT, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(buildLawnFastContext).toHaveBeenCalledWith(VISIT, { technicianId: 'tech-1' });
+  });
+
+  test("a technician is still refused another technician's visit (403), exactly as the sibling routes", async () => {
+    mockDbCurrent = dbWithOwner('tech-2');
+    const res = await invoke('get', CONTEXT, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(res.statusCode).toBe(403);
+    expect(buildLawnFastContext).not.toHaveBeenCalled();
+  });
+
+  test('both routes are registered after the router-level auth, which is what the route-surface scanner counts as their guard', () => {
+    const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
+    expect(authIdx).toBeGreaterThan(-1);
+    for (const [method, routePath] of [['get', CONTEXT], ['post', PREVIEW]]) {
+      expect(router.stack.indexOf(routeLayer(method, routePath))).toBeGreaterThan(authIdx);
+    }
+    expect(router.stack.some((l) => !l.route && l.regexp && String(l.regexp).includes('lawn-fast'))).toBe(false);
   });
 });
