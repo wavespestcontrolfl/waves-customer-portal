@@ -417,17 +417,19 @@ describe('opt-in wiring: only a rendering caller makes the weather call', () => 
 const CUSTOMER = 'cust-lawn-p36';
 const DAY = '2026-11-10';
 const LOW_COLOR = { turf_density: 78, weed_suppression: 82, color_health: 45, stress_damage: 80, fungus_control: 80, thatch_level: 80 };
-const CUR = (day = DAY) => ({
+// `assessDay` is the day the assessment row carries (admin-lawn-assessment.js
+// stamps the CREATION day), which can differ from the visit's day.
+const CUR = (day = DAY, assessDay = day) => ({
   id: 'la-cur', customer_id: CUSTOMER, service_record_id: 'svc-cur', confirmed_by_tech: true,
-  service_date: day, visit_date: day, created_at: `${day}T14:00:00Z`, history_record_id: 'svc-cur', ...LOW_COLOR,
+  service_date: assessDay, visit_date: assessDay, created_at: `${assessDay}T14:00:00Z`, history_record_id: 'svc-cur', ...LOW_COLOR,
 });
-const fixtures = (day = DAY) => ({
+const fixtures = (day = DAY, assessDay = day) => ({
   service_products: [{ id: 'sp-1', service_record_id: 'svc-cur', product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: `${day}T18:00:00Z` }],
   property_geometries: [], property_zones: [], service_findings: [], service_photos: [], lawn_assessment_photos: [],
   lawn_water_intake_snapshots: [],
   scheduled_services: [{ id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: day, status: 'completed', service_type: 'Lawn Care Treatment Program' }],
   property_preferences: [],
-  lawn_assessments: [CUR(day)],
+  lawn_assessments: [CUR(day, assessDay)],
 });
 const service = (notes = {}, day = DAY, extra = {}) => ({
   id: 'svc-cur', scheduled_service_id: 'ss-cur', customer_id: CUSTOMER, service_line: 'lawn',
@@ -454,9 +456,12 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
   });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_MEASURED_COLD; else process.env.GATE_LAWN_MEASURED_COLD = saved; });
 
-  const records = (extra = {}) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK() }, ...extra } } });
-  const render = (recs = records(), { opts = {}, day = DAY, hooks, svc } = {}) => {
-    const { knex, log } = withRecords(fixtures(day), recs, hooks);
+  const records = (extra = {}, assessDay = DAY) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK(assessDay) }, ...extra } } });
+  const render = (recs = records(), { opts = {}, day = DAY, assessDay = day, hooks, svc } = {}) => {
+    history.installedForVisit.mockResolvedValue(CUR(day, assessDay));
+    history.historyForReport.mockResolvedValue({ current: CUR(day, assessDay), rows: [CUR(day, assessDay)], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR(day, assessDay), rows: [CUR(day, assessDay)], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    const { knex, log } = withRecords(fixtures(day, assessDay), recs, hooks);
     return buildReportV1Data(svc || service(recs['svc-cur'].structured_notes, day), 'token-p36', knex, opts).then((data) => ({ data, log }));
   };
   const on = () => { process.env.GATE_LAWN_MEASURED_COLD = 'true'; };
@@ -575,11 +580,105 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
     expect(data.lawnAssessment).toBeFalsy();
   });
 
+  describe('the visit day is the visit\'s, never the assessment\'s creation day', () => {
+    const cases = [
+      { name: 'visit Sep 30, assessment created Oct 1', visit: '2026-09-30', assessed: '2026-10-01', nightsEnd: '2026-09-29' },
+      { name: 'visit Oct 31, assessment created Nov 1', visit: '2026-10-31', assessed: '2026-11-01', nightsEnd: '2026-10-30' },
+      { name: 'visit Nov 10, assessment created Nov 14 (same month)', visit: '2026-11-10', assessed: '2026-11-14', nightsEnd: '2026-11-09' },
+    ];
+    test.each(cases)('$name: fetches and freezes the VISIT\'s week, not the assessment\'s', async ({ visit, assessed, nightsEnd }) => {
+      on();
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      const recs = records({}, assessed);
+      const { data, log } = await render(recs, { opts: { lawnMeasuredCold: true }, day: visit, assessDay: assessed });
+      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(1);
+      const dates = conditions.fetchNightlyMinsF.mock.calls[0][0].dates;
+      expect(dates[6]).toBe(nightsEnd);
+      expect(dates).toEqual(seasonality.trailingNightDates(visit));
+      expect(log.updates).toHaveLength(1);
+      const map = recs['svc-cur'].structured_notes.lawnMeasuredCold;
+      expect(Object.keys(map)).toEqual([visit]);
+      expect(map[visit].serviceDate).toBe(visit);
+      expect(colorCard(data).customerExplanation).toBe(DIP);
+    });
+    test('the report and the PDF key agree on the day: a peak-month visit assessed in a cooler month is measured and stamped; both peak is neither', async () => {
+      const off = await (async () => { const { knex } = withRecords(fixtures('2026-09-30', '2026-10-01'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-09-30', '2026-10-01')); return (await resolveCanonicalLawnRender(service({}, '2026-09-30'), knex, { propertyHistoryEnabled: false })).signature; })();
+      on();
+      const stamped = await (async () => { const { knex } = withRecords(fixtures('2026-09-30', '2026-10-01'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-09-30', '2026-10-01')); return (await resolveCanonicalLawnRender(service({}, '2026-09-30'), knex, { propertyHistoryEnabled: false })).signature; })();
+      expect(stamped).not.toBe(off);
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      await render(records({}, '2026-10-01'), { opts: { lawnMeasuredCold: true }, day: '2026-09-30', assessDay: '2026-10-01' });
+      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(1);
+      // visit and assessment both in July: no stamp, no fetch
+      conditions.fetchNightlyMinsF.mockClear();
+      const julyOn = await (async () => { const { knex } = withRecords(fixtures('2026-07-14', '2026-07-15'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-07-14', '2026-07-15')); return (await resolveCanonicalLawnRender(service({}, '2026-07-14'), knex, { propertyHistoryEnabled: false })).signature; })();
+      delete process.env.GATE_LAWN_MEASURED_COLD;
+      const julyOff = await (async () => { const { knex } = withRecords(fixtures('2026-07-14', '2026-07-15'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-07-14', '2026-07-15')); return (await resolveCanonicalLawnRender(service({}, '2026-07-14'), knex, { propertyHistoryEnabled: false })).signature; })();
+      expect(julyOn).toBe(julyOff);
+      on();
+      await render(records({}, '2026-07-15'), { opts: { lawnMeasuredCold: true }, day: '2026-07-14', assessDay: '2026-07-15' });
+      expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
+    });
+    test('an Oct 31 visit assessed Nov 1 is stamped whichever way the dates fall (never skipped by the assessment day)', async () => {
+      const stampOf = async (visit, assessed) => {
+        const { knex } = withRecords(fixtures(visit, assessed), records());
+        history.installedForVisit.mockResolvedValue(CUR(visit, assessed));
+        return (await resolveCanonicalLawnRender(service({}, visit), knex, { propertyHistoryEnabled: false })).signature;
+      };
+      const off = await stampOf('2027-04-30', '2027-05-01');
+      on();
+      // visit Apr 30 is in the cooler calendar even though the assessment says May 1
+      expect(await stampOf('2027-04-30', '2027-05-01')).not.toBe(off);
+    });
+    test('the service record\'s own date wins; a date-only Date and an ET timestamp both resolve to the ET day', async () => {
+      on();
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      for (const service_date of [new Date('2026-11-10T00:00:00Z'), '2026-11-10', new Date('2026-11-10T20:00:00-05:00')]) {
+        conditions.fetchNightlyMinsF.mockClear();
+        const recs = records({}, '2026-11-14');
+        await render(recs, { opts: { lawnMeasuredCold: true }, assessDay: '2026-11-14', svc: service(recs['svc-cur'].structured_notes, DAY, { service_date }) });
+        expect(conditions.fetchNightlyMinsF.mock.calls[0][0].dates[6]).toBe('2026-11-09');
+      }
+    });
+    test('no service_date falls back to the linked appointment\'s scheduled date', async () => {
+      on();
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      const recs = records({}, '2026-11-14');
+      await render(recs, { opts: { lawnMeasuredCold: true }, assessDay: '2026-11-14', svc: service(recs['svc-cur'].structured_notes, DAY, { service_date: null }) });
+      // fixtures() schedules ss-cur on DAY (Nov 10), not on the assessment's day
+      expect(conditions.fetchNightlyMinsF.mock.calls[0][0].dates[6]).toBe('2026-11-09');
+    });
+    test('an unknown visit day is an unknown verdict: no fetch, nothing frozen, no dip sentence; the key still moves', async () => {
+      on();
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      const recs = records({}, '2026-11-14');
+      const svc = { ...service(recs['svc-cur'].structured_notes, DAY, { service_date: null }), scheduled_service_id: null };
+      const { data, log } = await render(recs, { opts: { lawnMeasuredCold: true }, assessDay: '2026-11-14', svc });
+      expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
+      expect(log.updates).toHaveLength(0);
+      expect(colorCard(data).seasonal).toBeUndefined();
+      expect(JSON.stringify(data.reportV2)).not.toContain(DIP);
+      expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(false);
+      expect(data.lawnAssessment.weekWeatherPendingReason).toBeNull();
+      delete process.env.GATE_LAWN_MEASURED_COLD;
+      const off = await (async () => { const { knex } = withRecords(fixtures(DAY, '2026-07-14'), records()); history.installedForVisit.mockResolvedValue(CUR(DAY, '2026-07-14')); return (await resolveCanonicalLawnRender(svc, knex, { propertyHistoryEnabled: false })).signature; })();
+      on();
+      const onSig = await (async () => { const { knex } = withRecords(fixtures(DAY, '2026-07-14'), records()); history.installedForVisit.mockResolvedValue(CUR(DAY, '2026-07-14')); return (await resolveCanonicalLawnRender(svc, knex, { propertyHistoryEnabled: false })).signature; })();
+      expect(onSig).not.toBe(off);
+    });
+    test('the tech-tips route ranks by the visit\'s scheduled day', () => {
+      const src = read('routes/admin-dispatch.js');
+      expect(src).toMatch(/const visitDay = dateOnlyString\(svc\.scheduled_date\) \|\| null;/);
+      expect(src).toMatch(/readMeasuredCold\(\{ latitude: cust\.latitude, longitude: cust\.longitude, visitDay \}\)/);
+      expect(src).toMatch(/measuredColdLiftApplies\(visitDay\)/);
+    });
+  });
+
   describe('the PDF cache key', () => {
-    const sig = async (day = DAY) => {
-      history.installedForVisit.mockResolvedValue(CUR(day));
-      const { knex } = withRecords(fixtures(day), records());
-      return (await resolveCanonicalLawnRender(service({}, day), knex, { propertyHistoryEnabled: false })).signature;
+    const sig = async (day = DAY, assessDay = day, svc = service({}, day)) => {
+      history.installedForVisit.mockResolvedValue(CUR(day, assessDay));
+      const { knex } = withRecords(fixtures(day, assessDay), records());
+      return (await resolveCanonicalLawnRender(svc, knex, { propertyHistoryEnabled: false })).signature;
     };
     test('gate off: the key is what it was; gate on re-keys a cooler-calendar visit once', async () => {
       const off = await sig();

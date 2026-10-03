@@ -2736,6 +2736,42 @@ function lawnCadenceWeeks(serviceType) {
   return null;
 }
 
+// The VISIT's own ET calendar day for the measured-cold rule (GATE_LAWN_MEASURED_COLD):
+// the service record's service_date, else the linked appointment's scheduled
+// date. Never the assessment's own date: admin-lawn-assessment.js stamps
+// lawn_assessments.service_date with the day the assessment was CREATED, which
+// can be after the visit (and in the next month), and the verdict freezes
+// forever. { day: 'YYYY-MM-DD' | null, failed } - null with failed=false is a
+// record that names no visit day (unknown verdict, deterministic); failed=true
+// is a lookup that threw (transient).
+async function resolveMeasuredColdVisitDay(service, knex) {
+  const asDay = (value) => {
+    if (!value) return null;
+    try {
+      const day = etCalendarDayOf(value);
+      return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+    } catch { return null; }
+  };
+  const direct = asDay(service?.service_date);
+  if (direct) return { day: direct, failed: false };
+  if (!service?.scheduled_service_id) return { day: null, failed: false };
+  try {
+    const row = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('scheduled_date');
+    return { day: asDay(row?.scheduled_date), failed: false };
+  } catch {
+    return { day: null, failed: true };
+  }
+}
+
+// Whether the measured-cold rule has a say for this render: the visit's own
+// month is in the cooler calendar, OR the month the report's dormancy guard
+// reads (the assessment's date) is - the guard can print the dip from either
+// calendar, so a visit on Sep 30 assessed on Oct 1 is still measured. An
+// unknown visit day is always in (the report then withholds the dip sentence).
+function measuredColdAppliesTo(visitDay, guardDay) {
+  return visitDay === null || measuredColdApplies(visitDay) || measuredColdApplies(guardDay);
+}
+
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
@@ -2829,9 +2865,14 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // visits and gate-off keep their existing key. The verdict itself is frozen
   // before any render may be stored (an unsettled read is never cached), so
   // the constant stamp is enough.
-  const coldStamp = typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()
-    && measuredColdApplies(ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))
-    ? '|cold=1' : '';
+  // The day is the VISIT's (resolveMeasuredColdVisitDay), the same value the
+  // report resolves; an unknown day still stamps, because the report then
+  // withholds the dip sentence.
+  let coldStamp = '';
+  if (typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()) {
+    const { day: coldDay } = await resolveMeasuredColdVisitDay(service, knex);
+    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) coldStamp = '|cold=1';
+  }
   const stamp = crypto.createHash('sha1')
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}${coldStamp}`)
     .digest('hex')
@@ -3669,9 +3710,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // callers (measuredColdFetch) make the weather call, every other builder
   // replays a frozen verdict or reads as unknown (no dip sentence).
   if (measuredColdOut && typeof measuredColdOut === 'object') {
-    const coldDay = ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date);
-    if (measuredColdApplies(coldDay)) {
-      const cold = await resolveVisitMeasuredCold({ service, day: coldDay, knex, allowFetch: measuredColdFetch === true });
+    // The VISIT's day, not the assessment's (see resolveMeasuredColdVisitDay).
+    const { day: coldDay, failed: coldDayFailed } = await resolveMeasuredColdVisitDay(service, knex);
+    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) {
+      // An unknown visit day is an unknown verdict: no fetch, nothing frozen,
+      // no dip sentence. A lookup that threw is transient: never cache it.
+      const cold = coldDay === null
+        ? { met: null, unfrozen: coldDayFailed, pendingReason: null }
+        : await resolveVisitMeasuredCold({ service, day: coldDay, knex, allowFetch: measuredColdFetch === true });
       measuredColdOut.applies = true;
       measuredColdOut.met = cold.met;
       // A failed read or freeze is not reproducible: the same flags a failed
