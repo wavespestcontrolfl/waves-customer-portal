@@ -1587,3 +1587,22 @@ test('a visit heard quoted as several whole sentences (live Sonnet 5 shape) is g
   const made = validateFill(answer({ visit: visit({ pests: ['Ants'], heard: 'Ants everywhere. Sprayed the perimeter outside with Taurus.' }) }), ctx, t);
   expect(made.visit.pests).toEqual([]);
 });
+
+describe('Codex #5580 round 17', () => {
+  test.each(['Keypad is bluebird.', 'Alarm code is palm tree.', 'Lockbox is 4412.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    expect(validateFill(answer({ customerNote: t }), ctx, t).customerNote).toBe('Treated the garage.');
+  });
+
+  test('"Four ounces of Taurus, which I did not use" does not apply Taurus', () => {
+    const t = 'Four ounces of Taurus, which I did not use. Talstar outside.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Four ounces of Taurus' }] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('"I used Taurus, which worked well" still applies Taurus', () => {
+    const t = 'I used Taurus, which worked well.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'I used Taurus' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+  });
+});

@@ -847,7 +847,7 @@ function negatedPositions(tokens, breaks) {
   return out;
 }
 
-const AUXILIARY_WORDS = new Set(['all', 'was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
+const AUXILIARY_WORDS = new Set(['i', 'we', 'all', 'was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
 const POST_NEGATION_WINDOW = 4;
 function isNegatedMention(mention, world) {
   let from = mention.start;
@@ -866,7 +866,10 @@ function isNegatedMention(mention, world) {
   if (other) return true;
   // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
   // a negation after the name, past auxiliary words, in the same clause.
-  for (let j = mention.end; j < world.tokens.length && j - mention.end < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
+  // (a relative clause about the product crosses its comma: "Taurus, which I did not use")
+  const relative = world.breaks[mention.end] && ['which', 'that'].includes(world.tokens[mention.end]);
+  const after = relative ? mention.end + 1 : mention.end;
+  for (let j = after; j < world.tokens.length && j - after < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
     const token = world.tokens[j];
     // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
     if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
@@ -1309,7 +1312,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate (?:was|is) (?:locked|closed|shut)|locked gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:garage |gate )?(?:opener|remote|clicker)s?(?: code)? (?:is|was|=)|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate (?:was|is) (?:locked|closed|shut)|locked gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:garage |gate )?(?:opener|remote|clicker|keypad|alarm|lock ?box)s?(?: code| password| pin)? (?:is|was|=)|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
