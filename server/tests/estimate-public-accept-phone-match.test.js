@@ -267,6 +267,16 @@ describe('matchAcceptCustomerByPhone: the candidate\'s other owned addresses (sa
     expect((await matchAcceptCustomerByPhone(janeAtSecondProperty())).contradicted).toBe(true);
   });
 
+  it('a candidate with no account owns only itself: no sibling read, and the saved-property read is scoped to the candidate id', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    mockDbFixtures['customers:siblings'] = [{ id: 'cust-rental', address_line1: '742 Evergreen Ter', city: 'Sarasota', zip: '34236' }];
+    const dbMock = require('../models/db');
+    dbMock.mockClear();
+    const res = await matchAcceptCustomerByPhone(janeAtSecondProperty());
+    expect(res.contradicted).toBe(true);
+    expect(dbMock.mock.calls.map(([t]) => t).filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
   it('the properties are read only on the contradiction path, and a read failure throws (never reuses a stranger)', async () => {
     mockDbFixtures['customers:list'] = [BOB];
     mockDbFixtures['customer_properties:list'] = [{ address_line1: '742 Evergreen Ter' }];

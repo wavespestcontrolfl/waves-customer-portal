@@ -72,6 +72,7 @@ jest.mock('../models/db', () => {
         if (String(row[col]) !== String(val)) return false;
       }
     }
+    for (const [col, arr] of ctx.whereIns) if (!arr.includes(row[col])) return false;
     for (const col of ctx.nullCols) if (row[col] != null) return false;
     for (const col of ctx.notNullCols) if (row[col] == null) return false;
     for (const [col, arr] of ctx.notIn) if (arr.includes(row[col])) return false;
@@ -85,7 +86,7 @@ jest.mock('../models/db', () => {
   };
 
   const makeBuilder = (table) => {
-    const ctx = { eqFilters: [], nullCols: [], notNullCols: [], notIn: [], notEq: [], likes: [] };
+    const ctx = { eqFilters: [], nullCols: [], notNullCols: [], notIn: [], notEq: [], likes: [], whereIns: [] };
     const rows = () => (state.tables[table] = state.tables[table] || []);
     const matched = () => rows().filter((r) => rowMatches(r, ctx));
     const b = {};
@@ -108,7 +109,7 @@ jest.mock('../models/db', () => {
       else ctx.notEq.push([col, val]);
       return b;
     };
-    b.whereIn = (col, arr) => { ctx.eqFilters.push(...[]); ctx.whereIn = [col, arr]; return b; };
+    b.whereIn = (col, arr) => { ctx.whereIns.push([col, arr]); return b; };
     b.orderBy = () => b;
     b.orderByRaw = () => b;
     b.modify = (fn) => { fn(b); return b; };
@@ -4657,6 +4658,49 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(res.status).toBe(200);
     expect(storedEstimate().customer_id).toBe('cust-bob');
     expect(db.__state.tables.customers.find((c) => c.id === 'cust-bob').email).toBe('testy@example.com');
+  });
+
+  // ── B18 r5 (pre-push): the account's owned addresses include every live sibling's saved properties ──
+  // The lone candidate (Bob, email/address both differ from the estimate) shares an account with a
+  // sibling profile (different phone, so not a phone candidate) that owns the estimate address as a
+  // saved secondary property.
+  function siblingAccountSetup(id, { siblingDeleted = false, propertyActive = true } = {}) {
+    resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+    db.__state.tables.customers.push(
+      sharedPhoneRow(),
+      sharedPhoneRow({
+        id: 'cust-sib', phone: '(941) 555-0999', email: 'sib@example.com', address_line1: '77 Elm St',
+        deleted_at: siblingDeleted ? '2026-09-01T00:00:00Z' : null,
+      }),
+    );
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    db.__state.tables.customer_properties = [
+      { id: 'prop-sib-2', customer_id: 'cust-sib', active: propertyActive, address_line1: '123 Palm Ave', city: 'Bradenton', zip: '' },
+      { id: 'prop-other', customer_id: 'cust-elsewhere', active: true, address_line1: '123 Palm Ave', city: 'Bradenton', zip: '' },
+    ];
+  }
+
+  test('a live same-account sibling owning the estimate address as a saved secondary property keeps the match (no separate account, no alert)', async () => {
+    siblingAccountSetup('est-b18-s1');
+    conversionFor('cust-bob');
+    const res = await putAccept('tok-est-b18-s1-x0123456789');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test.each([
+    ['a soft-deleted sibling', { siblingDeleted: true }],
+    ['an inactive saved property', { propertyActive: false }],
+  ])('control: %s does not count as an owned address (the contradiction stands)', async (_label, opts) => {
+    // The "elsewhere" property above belongs to an unrelated account and never counts either.
+    siblingAccountSetup('est-b18-s2', opts);
+    conversionOk();
+    const res = await putAccept('tok-est-b18-s2-x0123456789');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).not.toBe('cust-bob');
+    expect(contradictionAlerts()).toHaveLength(1);
   });
 
   // ── B18 r5: a one-time card hold drops with the identity ────────────────────────────────────────

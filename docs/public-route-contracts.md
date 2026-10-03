@@ -1557,8 +1557,10 @@ address by the canonical street comparison, so `Street`/`St`, unit formats and a
 trailing city/ZIP agree, a different explicit unit, city or ZIP disagrees, and a
 missing unit, city or ZIP, or no street number on either side, cannot disagree
 (that comparison alone decides); the estimate address must also differ from every other address
-the candidate's account owns - its active saved properties (`customer_properties`) and its live
-same-account profiles - so a second property of the same account keeps the match — in which case the
+the candidate's account owns - the profile address and the active saved properties
+(`customer_properties`) of every live profile on that account (the candidate and its siblings;
+soft-deleted siblings and inactive property rows do not count) - so a second property of the same
+account keeps the match — in which case the
 accept mints a fresh profile on its own account and the accepter gets the
 normal card rules. That profile and its account are stored WITHOUT a phone
 (`customers.phone = ''`, the usual phone-less shape): the number is another

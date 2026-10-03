@@ -541,8 +541,8 @@ function acceptAddressProvablyDiffers(estimateAddress, candidate) {
   return !sameStreetAddress(estAddress, candidateAddress);
 }
 
-// `ownedAddresses` = the other addresses the candidate's ACCOUNT owns (active customer_properties rows
-// and live same-account profiles): the estimate's address is a different address only if it differs
+// `ownedAddresses` = the other addresses the candidate's ACCOUNT owns (the profile addresses and active
+// customer_properties rows of every live profile on it): the estimate's address is a different address only if it differs
 // from the candidate's primary AND from every one of them (a spouse accepting service at the account's
 // second property is not a contradiction). A row the comparator cannot decide on keeps the match.
 function acceptLoneCandidateContradicted(candidate, estimate, ownedAddresses = []) {
@@ -553,15 +553,19 @@ function acceptLoneCandidateContradicted(candidate, estimate, ownedAddresses = [
     && ownedAddresses.every((row) => acceptAddressProvablyDiffers(estimate.address, row));
 }
 
-// The candidate's other owned addresses, read only when the in-memory test already says "contradicted"
-// (the rare path). One read handle for preflight, authoritative match and final re-match.
+// The addresses the candidate's ACCOUNT owns, read only when the in-memory test already says
+// "contradicted" (the rare path): every live profile on the account (the candidate and its siblings;
+// soft-deleted ones excluded) contributes its profile address AND its active customer_properties rows
+// (`active` is the only liveness flag that table has) - two reads however many siblings. A candidate with
+// no account_id owns only itself. One read handle for preflight, authoritative match and final re-match.
 async function loadAcceptCandidateOwnedAddresses(candidate, database) {
   const cols = ['address_line1', 'address_line2', 'city', 'zip'];
-  const saved = await database('customer_properties').where({ customer_id: candidate.id, active: true }).select(cols);
-  const siblings = candidate.account_id
-    ? await database('customers').where({ account_id: candidate.account_id }).whereNot({ id: candidate.id }).whereNull('deleted_at').select(cols)
+  const profiles = candidate.account_id
+    ? await database('customers').where({ account_id: candidate.account_id }).whereNull('deleted_at').select(['id', ...cols])
     : [];
-  return [...saved, ...siblings];
+  const profileIds = [...new Set([candidate.id, ...profiles.map((p) => p.id)])];
+  const saved = await database('customer_properties').whereIn('customer_id', profileIds).where({ active: true }).select(cols);
+  return [...profiles, ...saved];
 }
 
 function pickAcceptCustomerMatch(candidates, estimate, loneOwnedAddresses = []) {
