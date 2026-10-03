@@ -304,6 +304,20 @@ describe('rule 3: color across a season change is seasonal', () => {
     }
   });
 
+  it('the seasonal line drops the "returns" claim while the seasonal_dip row is not approved (P16)', () => {
+    const row = ISSUE_ROWS.seasonal_dip;
+    const was = row.approved;
+    expect(run({ ...winter, days: 45, applied: [PRODUCT.granular] }).season.seasonalLine).toMatch(/nights warm/);
+    row.approved = false;
+    try {
+      const line = run({ ...winter, days: 45, applied: [PRODUCT.granular] }).season.seasonalLine;
+      expect(line).toMatch(/seasonal/);
+      expect(line).not.toMatch(/returns|nights warm/);
+    } finally {
+      row.approved = was;
+    }
+  });
+
   it('granular nitrogen builds no color item to call seasonal or anything else', () => {
     expect(run({ ...winter, days: 45, applied: [PRODUCT.granular], cur: { color_health: 30 } }).items).toEqual([]);
   });

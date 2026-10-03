@@ -131,4 +131,27 @@ describe('lawn report seasonal-dip card — P16 routes the approved row sentence
       row.approved = was;
     }
   });
+
+  test('the cross-season notes on the report drop the "returns" claim while the row is not approved', () => {
+    const row = ISSUE_ROWS.seasonal_dip;
+    const was = row.approved;
+    const build = () => buildLawnReportV2({
+      lawnAssessment: assessment({
+        beforeAfter: { before: { date: '2026-07-01', photoUrl: 'a' }, after: { date: '2026-01-10', photoUrl: 'b' } },
+        trend: [{ season: 'dormant', date: '2026-01-10' }, { season: 'peak', date: '2026-07-01' }],
+      }),
+    });
+    const on = build();
+    expect(on.progressionNote).toMatch(/nights warm/);
+    expect(on.trends.seasonalNote).toMatch(/nights warm/);
+    row.approved = false;
+    try {
+      const off = build();
+      expect(off.progressionNote).toMatch(/seasonal/);
+      expect(off.trends.seasonalNote).toMatch(/seasonal/);
+      expect(`${off.progressionNote} ${off.trends.seasonalNote}`).not.toMatch(/returns|nights warm/);
+    } finally {
+      row.approved = was;
+    }
+  });
 });

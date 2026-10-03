@@ -18,8 +18,7 @@ const { buildTreatmentSummary } = require('./treatment-summary');
 const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine } = require('./lawn-program-line');
-const { ISSUE_ROWS } = require('../../config/lawn-expectations');
-const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
+const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
@@ -611,8 +610,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       colorCat.seasonal = true;
       // The owner-approved seasonal-dip sentence, not a hand-written promise
       // (P16): the row says color often returns as nights warm, with no count.
-      const dip = ISSUE_ROWS.seasonal_dip;
-      colorCat.customerExplanation = dip && dip.approved && dip.visibleChange
+      const dip = approvedSeasonalDipRow();
+      colorCat.customerExplanation = dip
         ? dip.visibleChange
         : 'Color is a little muted right now, which is normal for this cooler stretch.';
     }

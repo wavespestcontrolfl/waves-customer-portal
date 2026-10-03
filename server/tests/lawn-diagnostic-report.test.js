@@ -8,7 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
-  expectationWithoutStaleTiming,
+  servedExpectation,
   residualDefinitiveClaim,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
@@ -942,13 +942,28 @@ describe('lawn diagnostic auto-release ladder', () => {
       expect(weeds).toBe('How fast weeds respond depends on the weed and the weather.');
       expect(weeds).not.toContain(row.visibleChange);
       expect(weeds).not.toMatch(/\d|days?|weeks?/i);
-      const stale = expectationWithoutStaleTiming('weeds', 'Visible weed response often takes 10-14 days.');
-      expect(stale).toBe(weeds);
-      // A stored line with no count is untouched either way.
-      expect(expectationWithoutStaleTiming('weeds', 'Weeds fade.')).toBe('Weeds fade.');
+      // Serve time: the stored string for weeds is never emitted, only today's line.
+      const row0 = PRODUCT_ROWS.herbicide_broadleaf;
+      expect(servedExpectation('weeds', 'Visible weed response often takes 10-14 days.')).toBe(weeds);
+      expect(servedExpectation('weeds', `${row0.visibleChange} ${row0.secondApp.line}`)).toBe(weeds);
+      expect(servedExpectation('weeds', null)).toBeNull();
     } finally {
       row.approved = was;
     }
+  });
+
+  test('servedExpectation always emits the current weed and insect line when the key is stored (P16)', () => {
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    const row = PRODUCT_ROWS.herbicide_broadleaf;
+    const current = `${row.visibleChange} ${row.secondApp.line}`;
+    expect(servedExpectation('weeds', 'Visible weed response often takes 10-14 days.')).toBe(current);
+    expect(servedExpectation('weeds', current)).toBe(current);
+    expect(servedExpectation('insects', 'The key sign is whether the damaged edge stops expanding over the next week.'))
+      .toBe('The key sign is whether the damaged edge stops expanding.');
+    // Other keys pass through as stored; a missing key stays missing.
+    expect(servedExpectation('fungus', 'Stored fungus line.')).toBe('Stored fungus line.');
+    expect(servedExpectation('turf_recovery', 'Stored.')).toBe('Stored.');
+    expect(servedExpectation('weeds', undefined)).toBeUndefined();
   });
 
   test('safeCustomerSummary drops only sentences that state result timing (P16 egress)', () => {

@@ -70,6 +70,22 @@ describe('lawn-seasonality', () => {
       expect(crossSeasonNote('2026-07-01', '2026-01-10')).not.toMatch(/greens back up|recover|as it warms/i);
       expect(crossSeasonNoteFromSeasons('peak', 'dormant')).not.toMatch(/greens back up|recover|as it warms/i);
     });
+    test('the "returns as nights warm" clause is the seasonal_dip row\'s claim: it follows `approved` at call time (P16)', () => {
+      const { ISSUE_ROWS } = require('../config/lawn-expectations');
+      const row = ISSUE_ROWS.seasonal_dip;
+      const was = row.approved;
+      expect(crossSeasonNote('2026-07-01', '2026-01-10')).toMatch(/, and color often returns as nights warm\.$/);
+      expect(crossSeasonNoteFromSeasons('peak', 'dormant')).toMatch(/ and often returns as nights warm\.$/);
+      row.approved = false;
+      try {
+        expect(crossSeasonNote('2026-07-01', '2026-01-10'))
+          .toBe('Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months.');
+        expect(crossSeasonNoteFromSeasons('peak', 'dormant'))
+          .toBe('Most of the change across these visits is seasonal — color naturally dips in the cooler months.');
+      } finally {
+        row.approved = was;
+      }
+    });
     test('same season → no note', () => {
       expect(crossSeasonNote('2026-06-01', '2026-07-01')).toBeNull();
     });

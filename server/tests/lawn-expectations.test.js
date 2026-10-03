@@ -1003,8 +1003,8 @@ describe('buildLawnExpectations', () => {
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
-        // P16: the seasonal-dip diagnosis card prints the approved seasonal-dip row sentence.
-        'services/service-report/lawn-report-v2.js',
+        // P16: the one shared seasonal-dip approval check (dormancy card, cross-season notes).
+        'services/service-report/lawn-seasonality.js',
       ]);
     });
   });

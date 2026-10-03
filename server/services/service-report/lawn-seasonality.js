@@ -15,6 +15,8 @@
  *      a winter-vs-summer photo/score diff never reads as decline.
  */
 
+const { ISSUE_ROWS } = require('../../config/lawn-expectations');
+
 function getSeason(month) {
   if (month >= 5 && month <= 9) return 'peak';
   if ((month >= 3 && month <= 4) || (month >= 10 && month <= 11)) return 'shoulder';
@@ -67,6 +69,18 @@ function dormancyLikely({ colorHealth, stressDamage, month, recentMinTempF } = {
   return { likely, pressure };
 }
 
+// The seasonal_dip expectation row is the only source of the "color returns as
+// nights warm" claim. `approved` is the switch that keeps an unsigned row from
+// a customer, so every seasonal copy site asks here, at call time: the row when
+// it is approved and has its sentence, otherwise null (say it without the claim).
+function approvedSeasonalDipRow() {
+  const row = ISSUE_ROWS.seasonal_dip;
+  return row && row.approved === true && row.visibleChange ? row : null;
+}
+function seasonalDipClaimApproved() {
+  return approvedSeasonalDipRow() !== null;
+}
+
 // When two compared visits fall in different seasons, surface that the difference is
 // largely seasonal so the before/after wipe + trend never imply decline from dormancy.
 function crossSeasonNote(dateA, dateB) {
@@ -74,7 +88,7 @@ function crossSeasonNote(dateA, dateB) {
   const b = seasonOfDate(dateB);
   if (!a || !b || a === b) return null;
   if (isCoolSeason(a) || isCoolSeason(b)) {
-    return 'Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months, and color often returns as nights warm.';
+    return `Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months${seasonalDipClaimApproved() ? ', and color often returns as nights warm' : ''}.`;
   }
   return 'These visits fall in different parts of the growing season, so some change is expected.';
 }
@@ -83,12 +97,13 @@ function crossSeasonNote(dateA, dateB) {
 function crossSeasonNoteFromSeasons(seasonA, seasonB) {
   if (!seasonA || !seasonB || seasonA === seasonB) return null;
   if (isCoolSeason(seasonA) || isCoolSeason(seasonB)) {
-    return 'Most of the change across these visits is seasonal — color naturally dips in the cooler months and often returns as nights warm.';
+    return `Most of the change across these visits is seasonal — color naturally dips in the cooler months${seasonalDipClaimApproved() ? ' and often returns as nights warm' : ''}.`;
   }
   return null;
 }
 
 module.exports = {
+  approvedSeasonalDipRow,
   getSeason,
   seasonOfDate,
   dormancyPressure,

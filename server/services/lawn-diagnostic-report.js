@@ -499,14 +499,15 @@ function weedsExpectation() {
 }
 const INSECTS_EXPECTATION = 'The key sign is whether the damaged edge stops expanding.';
 
-// Reports stored before the owner's 2026-10-03 timing ruling still carry the
-// hand-written "10-14 days" / "over the next week" lines. At egress a stored
-// weed or insect line that names a day, week or month count is swapped for the
-// current line; every other stored line passes through untouched.
-const STORED_TIMING_RE = /\d\s*(?:-|–|to)?\s*\d*\s*(?:days?|weeks?|months?)\b|\bnext week\b/i;
-function expectationWithoutStaleTiming(key, text) {
-  const fixed = { weeds: weedsExpectation, insects: () => INSECTS_EXPECTATION }[key];
-  return fixed && STORED_TIMING_RE.test(String(text || '')) ? fixed() : text;
+// The weed and insect lines are computed at SERVE time, never read back from
+// the stored contract: a stored line may be a hand-written pre-v0.7 timeline or
+// the text of a row that has since been un-approved, and inspecting stored text
+// cannot tell the two apart. When the stored contract has the key at all, the
+// public route emits the current line; every other key passes through as stored.
+const SERVED_EXPECTATION = { weeds: weedsExpectation, insects: () => INSECTS_EXPECTATION };
+function servedExpectation(key, stored) {
+  const current = SERVED_EXPECTATION[key];
+  return current && stored ? current() : stored;
 }
 
 function buildExpectations(findings = []) {
@@ -1208,7 +1209,7 @@ function buildDiagnosticReportContract(input = {}) {
 
 module.exports = {
   assessInputSufficiency,
-  expectationWithoutStaleTiming,
+  servedExpectation,
   buildDiagnosticReportContract,
   buildDiagnosis,
   buildReconciliationFlags,
