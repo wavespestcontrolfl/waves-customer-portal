@@ -152,6 +152,7 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'The treatment works immediately.',
     'The weeds begin fading right away.',
     'The weeds were treated and should fade in a week.',
+    'A selective herbicide was applied, and visible improvement develops after two weeks.',
     'The treatment will last weeks.',
     'Results should last months.',
   ])('any forward duration or calendar deadline fails: %s', (text) => {

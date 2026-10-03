@@ -380,7 +380,14 @@ function lawnResultTimingViolation(text) {
       const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 20);
       const before = sentence.slice(Math.max(0, m.index - 30), m.index);
       if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before)) continue;
-      if (LAWN_PAST_SENTENCE_RE.test(sentence) && !LAWN_FUTURE_WORD_RE.test(sentence)) continue;
+      // History is judged on the duration's own clause: "was applied, and
+      // improvement develops after two weeks" is a promise in its second clause.
+      const clauseStart = Math.max(...[',', ';', ':', ' and ', ' but ', ' so ', ' then ']
+        .map((sep) => { const i = sentence.lastIndexOf(sep, m.index); return i < 0 ? 0 : i + sep.length; }));
+      const tail = sentence.slice(m.index);
+      const nextSep = tail.search(/[,;:]|\s(?:and|but|so|then)\s/);
+      const clause = sentence.slice(clauseStart, nextSep < 0 ? sentence.length : m.index + nextSep);
+      if (LAWN_PAST_SENTENCE_RE.test(clause) && !LAWN_FUTURE_WORD_RE.test(clause)) continue;
       return true;
     }
   }
