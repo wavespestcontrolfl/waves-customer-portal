@@ -395,7 +395,7 @@ describe("Pay & Growth gate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Score" }));
     expect(await screen.findByText("Crew stop · Fixture account")).toBeVisible();
     expect(fetch.mock.calls.filter(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toHaveLength(1);
-    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/today/pay-growth");
   });
 
   it("shows the Score tab, with the tech-portal link, for a technician viewing their own service", async () => {
@@ -409,6 +409,6 @@ describe("Pay & Growth gate", () => {
     render(<MemoryRouter><ProtocolPanel service={{ ...service, technician_id: "tech-1" }} onClose={() => {}} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Score" }));
     expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
-    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/today/pay-growth");
   });
 });

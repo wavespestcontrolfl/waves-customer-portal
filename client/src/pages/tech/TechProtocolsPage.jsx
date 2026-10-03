@@ -25,6 +25,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { etParts } from '../../lib/timezone';
+import { useTechBasePath } from '../../components/tech/techBasePath';
 
 // Catalog categories are slugs like "Damage_id" / "Pest_id" ("identification
 // guide"); show them as "Damage ID" / "Pest ID" instead of the raw key.
@@ -64,6 +65,7 @@ const SERVICE_FILTERS = [
 
 export default function TechProtocolsPage() {
   const navigate = useNavigate();
+  const techBase = useTechBasePath();
   const [searchParams] = useSearchParams();
   const visit = searchParams.get('visit');
   const [activeTab, setActiveTab] = useState('photos');
@@ -135,7 +137,7 @@ export default function TechProtocolsPage() {
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button onClick={() => navigate(visit ? `/tech?visit=${encodeURIComponent(visit)}` : '/tech')} style={{
+        <button onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{
           background: 'transparent', border: `1px solid ${DARK.border}`,
           color: DARK.text, padding: '6px 10px', borderRadius: 8,
           fontSize: 12, cursor: 'pointer',

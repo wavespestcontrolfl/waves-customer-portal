@@ -198,10 +198,10 @@ describe('admin communications voice route', () => {
       expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
     });
 
-    test('gate on: a customer whose address names no office keeps the main line', async () => {
+    test('gate on: a customer whose address names no office gets Bradenton (owner 2026-10-02)', async () => {
       homeLineLive.mockReturnValue(true);
       const call = await callFor({ ...parrishCustomer, zip: '', city: '' });
-      expect(call.from).toBe(MAIN);
+      expect(call.from).toBe('+19413187612');
     });
 
     test('gate on: a service-contact number sent with customerIdHint calls from that customer\'s home line', async () => {

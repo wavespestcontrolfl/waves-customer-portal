@@ -16,6 +16,7 @@
 import { useState, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { useTechBasePath } from '../../components/tech/techBasePath';
 
 const API = import.meta.env.VITE_API_URL || '';
 const MAX_PHOTOS = 5;
@@ -99,6 +100,7 @@ function Card({ children, style }) {
 
 export default function TechLawnDiagnosticPage() {
   const navigate = useNavigate();
+  const techBase = useTechBasePath();
   const [searchParams] = useSearchParams();
   const visit = searchParams.get('visit');
   const [photos, setPhotos] = useState([]); // { id, dataUrl, base64, mimeType }
@@ -262,7 +264,7 @@ export default function TechLawnDiagnosticPage() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', color: D.text, fontFamily: BODY }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={() => navigate(visit ? `/tech?visit=${encodeURIComponent(visit)}` : '/tech')} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
+        <button type="button" onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
           ← Back
         </button>
         <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 700, color: D.white, margin: 0 }}>Lawn Diagnostic</h1>

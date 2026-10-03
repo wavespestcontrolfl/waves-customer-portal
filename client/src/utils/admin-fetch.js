@@ -47,7 +47,10 @@ export function adminLoginUrl({ pathname, search, hash }) {
   return pathname === '/admin/login' ? next : `/admin/login?next=${encodeURIComponent(next)}`;
 }
 
-export async function adminFetch(path, options = {}) {
+// redirectOn401: false hands a 401 back to the caller without navigating
+// (a caller that must first check the answer still belongs to the stored
+// token, e.g. the field workspace's staff check).
+export async function adminFetch(path, { redirectOn401 = true, ...options } = {}) {
   let attempt = 0;
    
   while (true) {
@@ -56,12 +59,12 @@ export async function adminFetch(path, options = {}) {
       headers: {
         'Content-Type': 'application/json',
         ...authHeader(),
-        ...(options.headers || {}),
+        ...options.headers,
       },
     });
 
     if (r.status === 401) {
-      window.location.href = adminLoginUrl(window.location);
+      if (redirectOn401) window.location.href = adminLoginUrl(window.location);
       const err = new Error('Session expired');
       err.status = 401;
       err.code = 'UNAUTHENTICATED';
@@ -91,9 +94,9 @@ export async function adminFetch(path, options = {}) {
       let serverBody = null;
       try {
         const body = await r.clone().json();
-        serverMsg = body?.error || '';
-        serverCode = body?.code || null;
-        serverBody = body || null;
+        serverMsg = body?.error;
+        serverCode = body?.code;
+        serverBody = body;
       } catch {
         try { serverMsg = await r.text(); } catch { /* ignore */ }
       }

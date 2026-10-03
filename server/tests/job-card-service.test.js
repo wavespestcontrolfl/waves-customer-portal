@@ -148,6 +148,17 @@ describe('validateParagraph', () => {
 
 describe('writeParagraph', () => {
   const template = 'Pets: dog. First visit on record.';
+  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
+  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
+
+  test('GATE_JOB_CARD_LLM off → template with no provider call', async () => {
+    for (const value of [undefined, 'false', '1', 'TRUE']) {
+      if (value === undefined) delete process.env.GATE_JOB_CARD_LLM; else process.env.GATE_JOB_CARD_LLM = value;
+      const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
+      expect(await jobCard.writeParagraph(template, [], { callModel })).toEqual({ text: template, source: 'template' });
+      expect(callModel).not.toHaveBeenCalled();
+    }
+  });
 
   test('model text that passes validation is returned as source=model', async () => {
     const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
@@ -174,6 +185,8 @@ describe('writeParagraph', () => {
 });
 
 describe('paragraphForVisit cache', () => {
+  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
+  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
   const makeDb = () => {
     const update = jest.fn(async () => 1);
     const chain = { where() { return this; }, update };
@@ -208,6 +221,49 @@ describe('paragraphForVisit cache', () => {
     expect(callModel).toHaveBeenCalledTimes(1);
     const written = JSON.parse(update.mock.calls[0][0].job_card);
     expect(written).toMatchObject({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, source: 'model' });
+  });
+
+  describe('GATE_JOB_CARD_LLM off (the template is the paragraph)', () => {
+    beforeEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
+
+    test('no cache → template stored, no provider call', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const callModel = jest.fn();
+      const out = await jobCard.paragraphForVisit(facts(null), { dbh, deps: { callModel } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(callModel).not.toHaveBeenCalled();
+      expect(JSON.parse(update.mock.calls[0][0].job_card)).toEqual({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, text: template, source: 'template' });
+    });
+
+    test('a cached MODEL paragraph for the same grounding is replaced by the template', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const callModel = jest.fn();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'model', text: 'Cached text.' }), { dbh, deps: { callModel } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(callModel).not.toHaveBeenCalled();
+      expect(JSON.parse(update.mock.calls[0][0].job_card)).toMatchObject({ grounding_hash: hash, source: 'template', text: template });
+    });
+
+    test('a cached template for the same grounding is a hit with no write', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'template', text: template }), { dbh, deps: { callModel: jest.fn() } });
+      expect(out).toEqual({ text: template, source: 'template', cached: true });
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    test('a cached template for older facts is rewritten with the current template', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const { dbh, update } = makeDb();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: 'stale', source: 'template', text: 'Old facts.' }), { dbh, deps: { callModel: jest.fn() } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(update).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -1291,6 +1347,42 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       { equipmentSystemId: 'sys-2', name: 'Tank #2', tankCapacityGal: 110 },
       { equipmentSystemId: 'sys-3', name: 'FlowZone Typhoon 3.0 #1', tankCapacityGal: 4 },
     ]);
+  });
+
+  describe('why they booked (GATE_JOB_CARD_CUSTOMER_CONTEXT)', () => {
+    const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
+    const booked = { customer_request: 'Still seeing roaches under the sink, try 4545# at the gate', customer_request_source: 'picker', customer_request_pests: '["german_roach","ant"]' };
+    const load = (row) => jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs }), deps);
+    afterEach(() => { delete process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT; });
+
+    test('off → no customerRequest key at all, and the paragraph is unchanged', async () => {
+      const off = await load(booked);
+      expect(off.notes).not.toHaveProperty('customerRequest');
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const on = await load(booked);
+      expect(jobCard.buildTemplateParagraph(on.facts)).toBe(jobCard.buildTemplateParagraph(off.facts));
+      expect(on.facts).not.toHaveProperty('customerRequest');
+    });
+
+    test('on → the words, their source and the picked pests, codes scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const out = await load(booked);
+      expect(out.notes.customerRequest).toEqual({ text: expect.stringMatching(/^Still seeing roaches under the sink/), source: 'picker', pests: ['german roach', 'ant'] });
+      expect(out.notes.customerRequest.text).not.toContain('4545');
+    });
+
+    test('on → nothing recorded is null; an unknown source is not trusted', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      expect((await load({})).notes.customerRequest).toBeNull();
+      expect((await load({ customer_request: 'Ants by the pool', customer_request_source: 'email' })).notes.customerRequest).toEqual({ text: 'Ants by the pool', source: null, pests: [] });
+    });
+
+    test('only exactly "true" turns it on', async () => {
+      for (const v of ['1', 'TRUE', 'yes']) {
+        process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = v;
+        expect((await load(booked)).notes).not.toHaveProperty('customerRequest');
+      }
+    });
   });
 
   test('schedule readiness uses the resolver without generating or caching a paragraph, or returning private facts', async () => {

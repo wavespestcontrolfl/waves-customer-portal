@@ -38,6 +38,15 @@ test('tier mirrors write-gates: two-step/legacy-bare = yellow, confirmed-endpoin
   expect(tierFor('query_customers')).toBe('green');
 });
 
+test('billing readers are reads: green tier, in no write-gate set, no approval contract effects', () => {
+  const sets = [gates.WRITE_TWO_STEP_TOOL_NAMES, gates.LEGACY_BARE_WRITE_TOOL_NAMES, gates.CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+    gates.UI_GATED_WRITE_TOOL_NAMES, gates.OUTSIDE_WRITE_TOOL_NAMES];
+  for (const name of ['get_customer_invoices', 'get_invoice_detail']) {
+    expect(tierFor(name)).toBe('green');
+    for (const set of sets) expect(set.has(name)).toBe(false);
+  }
+});
+
 test('every outside-write tool (Sentry/Cloudflare/Railway/GitHub/GSC) is irreversible — none has a portal-side undo', () => {
   // The two feature switches are undone by confirming the opposite value, so
   // theirs is derived from the preview (Codex r4 on #5514;

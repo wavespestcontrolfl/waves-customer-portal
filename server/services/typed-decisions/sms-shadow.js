@@ -77,9 +77,6 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   if ((fromPhone || toPhone) && !eligibleMessage(message)) return { ...out, skipped: 'ineligible_message' };
 
   const conn = require('../../models/db');
-  const { askPackage } = require('./jev');
-  const { recordDecisions } = require('./shadow-recorder');
-  const { packageFor } = require('./packages');
 
   let previous = lastOutboundBody;
   if (previous === undefined) {
@@ -92,45 +89,100 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   const subjectHash = smsSubjectHash({ previous, body: text });
 
   const providers = typedDecisionsClefLive() ? ['typesafe', 'cloudflare'] : ['typesafe'];
-  await Promise.all(QUESTIONS.map(async ({ packageId, question, rule }) => {
+  await Promise.all(QUESTIONS.map(({ packageId, question, rule }) => {
     const flag = typeof rules[rule] === 'boolean' ? rules[rule] : undefined;
-    // Ask every provider first, so each row can be recorded with the others'
-    // answers; a leg that fails (ok:false or a throw) is counted and skipped.
-    const legs = await Promise.all(providers.map(async (provider) => {
-      out.asked += 1;
-      try {
-        const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
-        if (!result || !result.ok) { out.failed += 1; return null; }
-        return { provider, result };
-      } catch (err) {
-        out.failed += 1;
-        require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) failed: ${err.message}`);
-        return null;
-      }
-    }));
-    const answered = legs.filter(Boolean);
-    await Promise.all(answered.map(async ({ provider, result }) => {
-      try {
-        const siblings = answered.filter((leg) => leg.provider !== provider).map((leg) => leg.result.answers);
-        const recorded = await recordDecisions({
-          capability: packageFor(packageId).capability,
-          pkg: packageFor(packageId),
-          provider,
-          subjectType: 'sms_log',
-          subjectId: smsLogId,
-          result,
-          baselines: { [question]: { rules: flag } },
-          siblingAnswers: siblings.length ? { [question]: siblings.map((answers) => answers[question]).filter(Boolean) } : {},
-          subjectHash,
-        });
-        if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
-      } catch (err) {
-        out.failed += 1;
-        require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) record failed: ${err.message}`);
-      }
-    }));
+    return askAndRecord({ packageId, question, baseline: { rules: flag }, state, smsLogId, subjectHash, providers, out });
   }));
   return out;
 }
 
-module.exports = { shadowInboundSms, readLastOutboundBody };
+// One question to every live provider, then one row per provider that
+// answered, each handed the others' answers. Counts into `out` per leg.
+async function askAndRecord({ packageId, question, baseline, state, smsLogId, subjectHash, providers, out }) {
+  const { askPackage } = require('./jev');
+  const { recordDecisions } = require('./shadow-recorder');
+  const { packageFor } = require('./packages');
+  // Ask every provider first, so each row can be recorded with the others'
+  // answers; a leg that fails (ok:false or a throw) is counted and skipped.
+  const legs = await Promise.all(providers.map(async (provider) => {
+    out.asked += 1;
+    try {
+      const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
+      if (!result || !result.ok) { out.failed += 1; return null; }
+      return { provider, result };
+    } catch (err) {
+      out.failed += 1;
+      require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) failed: ${err.message}`);
+      return null;
+    }
+  }));
+  const answered = legs.filter(Boolean);
+  await Promise.all(answered.map(async ({ provider, result }) => {
+    try {
+      const siblings = answered.filter((leg) => leg.provider !== provider).map((leg) => leg.result.answers);
+      const recorded = await recordDecisions({
+        capability: packageFor(packageId).capability,
+        pkg: packageFor(packageId),
+        provider,
+        subjectType: 'sms_log',
+        subjectId: smsLogId,
+        result,
+        baselines: { [question]: baseline },
+        siblingAnswers: siblings.length ? { [question]: siblings.map((answers) => answers[question]).filter(Boolean) } : {},
+        subjectHash,
+      });
+      if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
+    } catch (err) {
+      out.failed += 1;
+      require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) record failed: ${err.message}`);
+    }
+  }));
+}
+
+/**
+ * Unknown-sender shadow (sms_solicitation.v1): evidence for
+ * GATE_SMS_SPAM_CLASSIFIER before it is ever flipped. The webhook calls this
+ * for exactly the texts that gate's screen would see (no known relationship
+ * or outbound history, no media, not a reaction, not the AI line), whatever
+ * the gate's own mode, so the numbers exist before the flip. Baselines: the
+ * screen's regex marker (`rules`, isSolicitationPitch) always, and the
+ * classifier's own verdict (`production`) only when its model read this text
+ * (the gate in shadow or true mode). Help and opt keyword texts are skipped,
+ * as the screen skips them. SHADOW ONLY: nothing is silenced or changed.
+ *
+ * @param {object} p
+ * @param {string} p.smsLogId  the inbound sms_log row
+ * @param {string} p.body      the text
+ * @param {object|null} [p.verdict] the screen's result (screenInboundSms), if it ran
+ * @param {string} [p.fromPhone] / [p.toPhone] / [p.receivedAt] bound the previous-text read
+ * @returns {Promise<{asked:number, recorded:number, failed:number, skipped?:string}>}
+ */
+async function shadowUnknownSenderSms({ smsLogId, body, verdict = null, fromPhone, toPhone, receivedAt } = {}) {
+  const out = { asked: 0, recorded: 0, failed: 0 };
+  if (!typedDecisionsLive()) return { ...out, skipped: 'gate_off' };
+  const text = typeof body === 'string' ? body.replace(/\s+/g, ' ').trim() : '';
+  if (!smsLogId || !text) return { ...out, skipped: 'no_body' };
+  const { detectSmsOptCommand, detectHelp } = require('../messaging/opt-out-detector');
+  if (detectHelp(text).help) return { ...out, skipped: 'help' };
+  const command = detectSmsOptCommand(text);
+  if (command.action && /keyword$/.test(command.detectionMethod)) return { ...out, skipped: 'opt_keyword' };
+
+  const conn = require('../../models/db');
+  const previous = fromPhone && toPhone
+    ? await readLastOutboundBody({ conn, customerPhone: fromPhone, ourNumber: toPhone, before: receivedAt }).catch(() => null)
+    : null;
+  const { smsSubjectHash, smsCustomerText } = require('./subject-hash');
+  const { isSolicitationPitch } = require('../sms-solicitation-detector');
+  const raw = typeof body === 'string' ? body.trim() : '';
+  const state = { previous_waves_text: previous || null, customer_text: smsCustomerText(raw) };
+  const baseline = { rules: isSolicitationPitch(text) };
+  if (verdict && verdict.method === 'model' && typeof verdict.solicitation === 'boolean') baseline.production = verdict.solicitation;
+  const providers = typedDecisionsClefLive() ? ['typesafe', 'cloudflare'] : ['typesafe'];
+  await askAndRecord({
+    packageId: 'sms_solicitation.v1', question: 'is_solicitation', baseline, state, smsLogId,
+    subjectHash: smsSubjectHash({ previous, body: raw }), providers, out,
+  });
+  return out;
+}
+
+module.exports = { shadowInboundSms, shadowUnknownSenderSms, readLastOutboundBody };
