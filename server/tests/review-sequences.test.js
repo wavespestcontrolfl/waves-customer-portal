@@ -21,6 +21,9 @@ jest.mock('../config/feature-gates', () => ({
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
 const mockDraftTechVoice = jest.fn(async () => null);
+// The review-ask payment hold, stood in for in every test (askHold itself
+// runs for real): no hold unless a test says otherwise.
+let mockPaymentHold;
 jest.mock('../services/review-ask-drafter', () => ({
   // The real verifiers: the send path re-checks a reused older draft with them.
   verifyDraftBody: jest.requireActual('../services/review-ask-drafter').verifyDraftBody,
@@ -194,6 +197,9 @@ beforeEach(() => {
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
+  const Holds = require('../services/review-ask-holds');
+  mockPaymentHold?.mockRestore();
+  mockPaymentHold = jest.spyOn(Holds, 'paymentHold').mockResolvedValue(null);
   delete mockGates.reviewAskTechVoice;
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
 });
@@ -7735,5 +7741,111 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
     db.mockImplementation(mock);
     await ReviewService.processReviewSequences();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () => {
+
+  // A day-4 text due now, after a day-0 ask five days ago.
+  const book = (seqOver = {}) => makeMock({
+    customers: [{ id: 'hold-1', first_name: 'Rosa', last_name: 'M', phone: '+19410000301', nearest_location_id: 'bradenton' }],
+    review_sequences: [{
+      id: 'seq-hold', customer_id: 'hold-1', status: 'active', current_step: 1, touches_sent: 1,
+      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'email' }]),
+      started_at: new Date(Date.now() - 5 * 86400000), next_run_at: new Date(Date.now() - 60000), ...seqOver,
+    }],
+  });
+  const seqRow = (mock) => mock.__state.rows.review_sequences[0];
+  const decisionOf = (mock) => JSON.parse(seqRow(mock).decision);
+
+  test('switch off: no hold is read and the step sends as before', async () => {
+    const mock = book();
+    db.mockImplementation(mock);
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(mockPaymentHold).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a held final step completes the cadence at once (never left active past its plan)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ current_step: 2, touches_sent: 2, payment_hold_step: 2, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, completed: true, reason: 'ask_dropped_payment_hold' });
+    expect(seqRow(mock)).toMatchObject({ status: 'completed', stop_reason: 'completed', current_step: 3, next_run_at: null });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an overdue bill holds the ask a day at a time; past three days from the first hold the step is dropped and the cadence moves on', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book();
+    db.mockImplementation(mock);
+    mockPaymentHold.mockResolvedValue({ reason: 'overdue_invoice', invoiceId: 'inv-9' });
+    const first = await ReviewService._runSequenceStep('seq-hold');
+    expect(first).toMatchObject({ deferred: true, reason: 'payment_hold' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const held = decisionOf(mock);
+    expect(held).toMatchObject({ reason: 'payment_hold', detail: { step: 1, hold: 'overdue_invoice', invoiceId: 'inv-9' } });
+    const retryIn = new Date(seqRow(mock).next_run_at).getTime() - Date.now();
+    expect(retryIn).toBeGreaterThan(23 * 3600000);
+    expect(retryIn).toBeLessThanOrEqual(3 * 86400000);
+    // The hold's start rides its own columns, not the decision another deferral rewrites.
+    expect(seqRow(mock).payment_hold_step).toBe(1);
+    const since = new Date(seqRow(mock).payment_hold_since).getTime();
+    seqRow(mock).decision = JSON.stringify({ reason: 'spacing_lookup_unavailable' });
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(new Date(seqRow(mock).payment_hold_since).getTime()).toBe(since);
+    // Once the first hold is three days old the step is dropped.
+    seqRow(mock).payment_hold_since = new Date(Date.now() - 3 * 86400000 - 60000);
+    const later = await ReviewService._runSequenceStep('seq-hold');
+    expect(later).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
+    expect(decisionOf(mock)).toMatchObject({ reason: 'ask_dropped_payment_hold', detail: { step: 1, hold: 'overdue_invoice' } });
+  });
+
+  test('a step held past its window is dropped even when the bill was paid in between (it would go out late)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ payment_hold_step: 1, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisionOf(mock)).toMatchObject({ detail: { hold: 'cleared_after_window' } });
+    // A hold recorded for an EARLIER step never touches this one.
+    const other = book({ payment_hold_step: 0, payment_hold_since: new Date(Date.now() - 6 * 86400000) });
+    db.mockImplementation(other);
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a payment reminder in the last three days holds the ask until three days after that reminder', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book();
+    db.mockImplementation(mock);
+    const until = new Date(Date.now() + 2 * 86400000);
+    mockPaymentHold.mockResolvedValueOnce({ reason: 'payment_reminder_recent', at: new Date(Date.now() - 86400000), until });
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(new Date(seqRow(mock).next_run_at).getTime()).toBe(until.getTime());
+    expect(decisionOf(mock)).toMatchObject({ reason: 'payment_hold', detail: { hold: 'payment_reminder_recent' } });
+  });
+
+  test('a drafted text that repeats an earlier touch is held: nothing sent, no request row, the cadence moves to its next step', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ service_record_id: 'sr-hold' });
+    mock.__state.rows.service_records = [{ id: 'sr-hold', customer_id: 'hold-1', service_type: 'pest control', status: 'completed', service_date: new Date(Date.now() - 5 * 86400000) }];
+    db.mockImplementation(mock);
+    mockDraftTechVoice.mockRejectedValueOnce(Object.assign(new Error('held'), {
+      heldTouch: { step: 1, heldBody: 'How are the ants? {review_url}', sentence: 'How are the ants?', earlierQuote: 'How are the ants doing', earlierStep: 0 },
+    }));
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_held_repeat', step: 1 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests || []).toHaveLength(0);
+    expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
+    expect(decisionOf(mock)).toMatchObject({
+      reason: 'ask_held_repeat',
+      detail: { step: 1, heldBody: 'How are the ants? {review_url}', sentence: 'How are the ants?', earlierQuote: 'How are the ants doing', earlierStep: 0 },
+    });
   });
 });
