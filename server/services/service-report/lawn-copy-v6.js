@@ -120,6 +120,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
+  const visitKnown = Number.isFinite(ctx.nextVisitGapDays);
   const pieces = [];
   const picked = [];
   // Each printed sentence, in order, with whether it was timed from the gap to
@@ -130,6 +131,9 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     if (picked.length >= MAX_EXPECT_ROWS) break;
     const keys = [];
     for (const key of EXPECT_SENTENCE_KEYS) {
+      // "By your next visit..." needs a visit the report shows: with no known
+      // gap there is none, even for a row whose line is not timed by it.
+      if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
       const w = countWords(sentence.text);
@@ -137,7 +141,9 @@ function buildWhatToExpect(reportV2, ctx, deps) {
       words += w;
       pieces.push(sentence.text.trim());
       keys.push(key);
-      sentences.push({ key, text: sentence.text.trim(), gapBased: key === 'byNextVisit' && !row.judgedByAbsence });
+      sentences.push({
+        key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
+      });
     }
     if (keys.length) picked.push({ id: row.id, keys });
   }
@@ -180,16 +186,19 @@ function cleanFields(fields) {
 }
 
 // A frozen entry's fields for THIS render. Everything replays as frozen except
-// a sentence timed from the gap to the next visit: when the visit the report
-// now shows is on another day (a reschedule, or the booking is gone), that
-// sentence was timed for a date the page no longer shows, so it is left out
-// (never re-chosen: the rest of the frozen copy stands).
+// the by-next-visit sentences, which follow the visit the report now shows:
+// one TIMED from the gap is left out when that visit is on another day (a
+// reschedule), and every one is left out when the report shows no next visit
+// at all. Never re-chosen: the rest of the frozen copy stands.
 function replayFields(entry, ctx = {}) {
   const fields = cleanFields(entry.fields);
   const sentences = Array.isArray(entry.expectSentences) ? entry.expectSentences : null;
-  if (!sentences || !sentences.some((s) => s && s.gapBased)) return fields;
-  if ((entry.nextVisitIso || null) === (ctx.nextVisitIso || null)) return fields;
-  const kept = sentences.filter((s) => s && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
+  if (!sentences) return fields;
+  const shownIso = ctx.nextVisitIso || null;
+  const moved = (entry.nextVisitIso || null) !== shownIso;
+  const dropped = (s) => (s.gapBased && moved) || ((s.needsVisit || s.gapBased) && !shownIso);
+  if (!sentences.some((s) => s && dropped(s))) return fields;
+  const kept = sentences.filter((s) => s && !dropped(s) && clean(s.text)).map((s) => s.text.trim());
   return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null };
 }
 

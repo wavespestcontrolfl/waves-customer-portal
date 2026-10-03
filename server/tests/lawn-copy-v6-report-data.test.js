@@ -414,6 +414,34 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         expect(multi.data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
+      test('two lawn jobs on one day: the one at this home is shown whichever order they come back in', async () => {
+        live();
+        const here = { id: 'ss-b', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
+        const unplaced = { id: 'ss-a', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program' };
+        const cur = { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
+        for (const order of [[cur, unplaced, here], [cur, here, unplaced]]) {
+          const { data } = await render(records(), { scheduled_services: order });
+          expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
+        }
+      });
+
+      test('a completed report\'s FROZEN address is its property, whatever the linked visit resolves to now', async () => {
+        live();
+        const svc = {
+          ...service(records()['svc-cur'].structured_notes),
+          service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, address: { line1: '100 Test Palm Way', line2: null, city: 'Bradenton', state: 'FL', zip: '34201' } } }),
+        };
+        // The linked visit now resolves to another home (its property record was edited).
+        const { data } = await render(records(), {
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_B },
+            { id: 'ss-old-home', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+            { id: 'ss-new-home', customer_id: CUSTOMER, scheduled_date: '2027-01-08', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_B },
+          ],
+        }, svc);
+        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
+      });
+
       test('gate off: the customer-wide lookup, as before (the other home\'s date still shows)', async () => {
         const { data } = await render(records(), visitRows(HOME_B));
         expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
@@ -575,6 +603,9 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       expect(await sigWith([visit('2026-11-11')])).toBe(booked);
       expect(await sigWith([visit('2026-11-18')])).not.toBe(booked);
       expect(await sigWith([visit('2026-11-11', 'cancelled')])).not.toBe(booked);
+      // A -> B -> A during a render: same day again, but a new revision, so the key moves.
+      const revised = (updatedAt) => sigWith([{ ...visit('2026-11-11'), updated_at: updatedAt }]);
+      expect(await revised('2026-10-02T15:00:00Z')).not.toBe(await revised('2026-10-02T15:05:00Z'));
       // A corrected address behind a linked property (same ids and dates) moves the key.
       const linked = (address) => resolveCanonicalLawnRender({ ...svc, scheduled_service_id: 'ss-cur' }, makeKnex({
         ...fixtures(),

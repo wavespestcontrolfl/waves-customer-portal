@@ -146,15 +146,16 @@ describe('resolveLawnCopyV6ForRender', () => {
       expect(await replay(stored(), null)).toBe('Weeds curl and fade.');
     });
 
-    test('a by-next-visit line that is not timed from the gap (a row judged by absence) always stays', async () => {
+    test('a by-next-visit line not timed from the gap (a row judged by absence) survives a reschedule, but not a report with no next visit', async () => {
       const entry = stored({
         fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: 'Nothing changes visibly. By your next visit, success is damage that never showed up.', watching: null },
         expectSentences: [
-          { key: 'visibleChange', text: 'Nothing changes visibly.', gapBased: false },
-          { key: 'byNextVisit', text: 'By your next visit, success is damage that never showed up.', gapBased: false },
+          { key: 'visibleChange', text: 'Nothing changes visibly.', needsVisit: false, gapBased: false },
+          { key: 'byNextVisit', text: 'By your next visit, success is damage that never showed up.', needsVisit: true, gapBased: false },
         ],
       });
       expect(await replay(entry, '2026-10-20')).toBe(entry.fields.whatToExpect);
+      expect(await replay(entry, null)).toBe('Nothing changes visibly.');
     });
 
     test('an entry frozen before this field existed replays as frozen', async () => {
@@ -171,10 +172,14 @@ describe('resolveLawnCopyV6ForRender', () => {
       };
       const built = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
       expect(built.expectSentences).toEqual([
-        { key: 'visibleChange', text: 'Weeds curl.', gapBased: false },
-        { key: 'byNextVisit', text: 'Gone by your next visit.', gapBased: true },
-        { key: 'byNextVisit', text: 'Little to see by your next visit.', gapBased: false },
+        { key: 'visibleChange', text: 'Weeds curl.', needsVisit: false, gapBased: false },
+        { key: 'byNextVisit', text: 'Gone by your next visit.', needsVisit: true, gapBased: true },
+        { key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false },
       ]);
+      // No known visit: no "by your next visit" sentence at all, absence rows included.
+      const unknown = buildLawnCopyV6(reportV2(), { nextVisitGapDays: null }, deps);
+      expect(unknown.fields.whatToExpect).toBe('Weeds curl.');
+      expect(unknown.expectSentences.map((x) => x.key)).toEqual(['visibleChange']);
       const { knex, chain } = knexStub(1);
       await resolveLawnCopyV6ForRender({ structuredNotes: {}, serviceRecordId: 's1', assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitGapDays: 42, nextVisitIso: '2026-11-11' }, knex, deps });
       const written = JSON.parse(chain.update.mock.calls[0][0].structured_notes.bindings[0]).a1;

@@ -65,7 +65,7 @@ function isSameLineVisit(row, {
     && rodentCatalogNames.has(String(row?.service_type || '').trim().toLowerCase());
 }
 
-// The first of `rows` (already in date order) on the report's service line
+// The first of `rows` (already in date order; same-day rows in any order) on the report's service line
 // AND at the report's own property: on a multi-property account a booking
 // at another address is never this property's next visit. Same resolver as
 // the report's upcoming-visits card (visit-property-scope.js). Fails
@@ -86,12 +86,30 @@ async function nextSameLineVisitAtProperty({
     ? await loadRodentCatalogIndex(knex)
     : { serviceCategoryById: null, rodentCatalogNames: null };
   const caches = { propertyById: new Map(), estimateById: new Map(), onLookupFailure };
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (!isSameLineVisit(row, { serviceLine, rodentReportRefresh, ...catalog })) continue;
-     
-    const scope = await resolveVisitPropertyScope(row, knex, caches).catch(failed);
-    if (!scope?.key) return { state: 'unknown' };
-    if (sameResolvedProperty(scope.key, reportScope.key)) return { state: 'scheduled', row };
+  // Same-day bookings are judged TOGETHER: SQL does not order rows within a
+  // date, so a proven match on a day wins over an unplaceable booking on that
+  // same day, whichever came first. Only a day with no match and an
+  // unplaceable booking is 'unknown'.
+  const dayOf = (row) => {
+    const raw = row?.scheduled_date;
+    if (!raw) return null;
+    return raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+  };
+  const candidates = (Array.isArray(rows) ? rows : [])
+    .filter((row) => isSameLineVisit(row, { serviceLine, rodentReportRefresh, ...catalog }));
+  let index = 0;
+  while (index < candidates.length) {
+    const day = dayOf(candidates[index]);
+    const group = [candidates[index++]];
+    while (day && index < candidates.length && dayOf(candidates[index]) === day) group.push(candidates[index++]);
+    let unplaceable = false;
+    for (const row of group) {
+       
+      const scope = await resolveVisitPropertyScope(row, knex, caches).catch(failed);
+      if (!scope?.key) { unplaceable = true; continue; }
+      if (sameResolvedProperty(scope.key, reportScope.key)) return { state: 'scheduled', row };
+    }
+    if (unplaceable) return { state: 'unknown' };
   }
   return { state: 'none' };
 }

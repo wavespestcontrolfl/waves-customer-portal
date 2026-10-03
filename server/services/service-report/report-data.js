@@ -2683,8 +2683,9 @@ async function lawnUpcomingVisitsStamp(service, knex) {
       .andWhere('scheduled_date', '>', svcIso && svcIso > todayIso ? svcIso : todayIso)
       .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
       .orderBy('scheduled_date', 'asc')
+      .orderBy('id', 'asc')
       .limit(LAWN_NEXT_VISIT_SCAN)
-      .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
+      .select('id', 'scheduled_date', 'updated_at', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
     const days = (Array.isArray(rows) ? rows : [])
       // Every lawn row the render's scan reads, with every property column
       // the resolver reads (a unit or locality edit moves the match too).
@@ -2692,7 +2693,11 @@ async function lawnUpcomingVisitsStamp(service, knex) {
       .map((row) => {
         const raw = row.scheduled_date;
         const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-        return `${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}`;
+        // Each row's revision too: a booking moved A -> B -> A during a render
+        // ends on the same day, but not the same updated_at, so the
+        // post-render stability check sees it.
+        const revision = row.updated_at ? new Date(row.updated_at).toISOString() : '';
+        return `${row.id || ''}:${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}@${revision}`;
       });
     // ... and the visit the render's own resolver picks for this report, so a
     // corrected address behind a linked property (same ids, same dates) moves
@@ -3920,18 +3925,31 @@ async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
     // office rebooks (same rule as the nextAppointment queries below).
     .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .orderBy('scheduled_date', 'asc')
+    .orderBy('id', 'asc')
     .limit(LAWN_NEXT_VISIT_SCAN)
-    .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS)
+    .select('id', 'scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS)
     .catch(failSoft(readFailures, 'next_visit', null));
   if (!Array.isArray(rows)) return { state: 'unknown' };
   // A full page with no match could hide this property's booking further out.
   const noneOrUnknown = () => ({ state: rows.length < LAWN_NEXT_VISIT_SCAN ? 'none' : 'unknown' });
-  const reportVisit = service.scheduled_service_id
-    ? await knex('scheduled_services')
-      .where({ id: service.scheduled_service_id })
-      .first(...PROPERTY_SCOPE_COLUMNS)
-      .catch(failSoft(readFailures, 'next_visit', null))
-    : null;
+  // This report's property. A completed report FREEZES its address (identity
+  // snapshot): that frozen address is the scope, so a property record edited
+  // or merged afterwards never moves a permanent report onto another home's
+  // bookings. Otherwise the linked visit's own stamp / property / estimate.
+  const frozenAddress = readReportIdentitySnapshot(service)?.address;
+  const reportVisit = frozenAddress && frozenAddress.line1
+    ? {
+      service_address_line1: frozenAddress.line1,
+      service_address_line2: frozenAddress.line2 ?? null,
+      service_address_city: frozenAddress.city ?? null,
+      service_address_zip: frozenAddress.zip ?? null,
+    }
+    : (service.scheduled_service_id
+      ? await knex('scheduled_services')
+        .where({ id: service.scheduled_service_id })
+        .first(...PROPERTY_SCOPE_COLUMNS)
+        .catch(failSoft(readFailures, 'next_visit', null))
+      : null);
   if (reportVisit) {
     const found = await nextSameLineVisitAtProperty({
       knex, rows, reportVisit, serviceLine: 'lawn', onLookupFailure: noteFailure,
