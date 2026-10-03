@@ -793,11 +793,12 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     // (e.g. the fact-check publish lock, dispatchWithFallback's shared
     // deadline) need it to be a true wall-clock ceiling; the pre-failover
     // fact-check client was constructed with maxRetries:0 for the same reason.
-    const resp = (timeoutMs
-      ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0, signal })
-      : signal
-        ? await client.messages.create(req, { signal })
-        : await client.messages.create(req)) || {};
+    const resp = (timeoutMs || signal
+      ? await client.messages.create(req, {
+        ...(timeoutMs ? { timeout: timeoutMs, maxRetries: 0 } : {}),
+        ...(signal ? { signal } : {}),
+      })
+      : await client.messages.create(req)) || {};
     const out = anthropicText(resp);
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
     const code = anthropicVerdict(resp, req.max_tokens);
