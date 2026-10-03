@@ -291,6 +291,18 @@ describe('gate on', () => {
     expect(input.businessNameHint).toBeNull();
   });
 
+  test('a parent parcel on the record (the point sits inside a larger commercial parcel) suggests one space; staff still decide', async () => {
+    lookupPropertyFromAITrio.mockImplementation(async () => ({
+      ...noCountyRecord(),
+      _parentParcel: { parcelId: 'EXAMPLE-PARCEL', county: 'Examplecounty', situsAddress: '900 Example Rd', dorUseCode: '1600', precision: 'rooftop', edgeDistanceM: 40 },
+    }));
+    const asked = (await run()).enriched;
+    expect(asked).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
+    // Without the parent parcel the same lookup suggests nothing.
+    lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
+    expect((await run()).enriched.serviceScopeSuggestion).toBeNull();
+  });
+
   test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
     const baseline = await gateOffBaseline();
     const p = (await run({ occupancyAnswer: 'none' })).enriched;
