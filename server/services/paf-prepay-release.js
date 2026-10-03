@@ -179,7 +179,11 @@ async function releaseOne(row, now) {
   const term = invoice
     ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status')
     : null;
-  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
+  // A cancelled term is dead only while its bill is unpaid: a paid year
+  // cancelled to end at term keeps its coverage (coveredTermsAsOf) and is
+  // settled, never work for the office to bill (pre-push audit).
+  const paidBill = ['paid', 'prepaid'].includes(invStatus);
+  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || (String(term?.status || '') === 'cancelled' && !paidBill);
   // Settled before any visit = paid, or a BANK debit already initiated. A card
   // intent parked 'processing' is incomplete (the sweep treats it so): it
   // never releases the job before the first visit.

@@ -571,6 +571,15 @@ postgres('annual prepay charged after the first visit', () => {
       closeSpy.mockRestore();
     });
 
+    it('a paid year cancelled to end at term is settled, never office work (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+      await release();
+      expect((await jobOf(f)).status).not.toBe('cancelled_after_visit');
+    });
+
     it('a year cancelled after the first visit was performed rings the office to bill that visit', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
