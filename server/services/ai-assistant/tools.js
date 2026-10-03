@@ -12,6 +12,7 @@ const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
+const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -179,20 +180,38 @@ const OFFER_RESERVICE_LAWN_TOOL = {
     additionalProperties: false,
   },
 };
+// GATE_PORTAL_CHAT_EMAIL_CHANGE: an email change is a confirmed hand-off
+// (owner ruling 2026-10-02). The chat reads the new address back, and the
+// confirmed address goes to the office on one bell beside the address on
+// file; staff make the change. Nothing here writes the customer row.
+const REQUEST_EMAIL_CHANGE_TOOL = {
+  name: 'request_email_change',
+  description: 'For a customer who wants the email on their account changed. Call it first with customer_confirmed false: you are told to read the address back. Call it again with customer_confirmed true only after the customer confirms that address in their next message: the confirmed address then goes to the team, who make the change. You cannot change the email yourself.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      new_email: { type: 'string', description: 'The new email address, copied exactly as the customer typed it in this chat. Never guess, complete or correct one.' },
+      customer_confirmed: { type: 'boolean', description: 'true ONLY when the customer\'s message this turn confirms the address you read back in your last reply. false when they have only just given it, corrected it, or are unsure.' },
+    },
+    required: ['new_email', 'customer_confirmed'],
+    additionalProperties: false,
+  },
+};
 // The portal tool set for the gates that are live: the four base tools, the
 // fact and action tools, then escalate last.
-function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false } = {}) {
+function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false, emailChange = false } = {}) {
   return [
     ...PORTAL_TOOLS.slice(0, 4),
     ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
     ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
     ...(reservice ? [reserviceLawn ? OFFER_RESERVICE_LAWN_TOOL : OFFER_RESERVICE_TOOL] : []),
+    ...(emailChange ? [REQUEST_EMAIL_CHANGE_TOOL] : []),
     PORTAL_TOOLS[4],
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice']);
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change']);
 const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
 const TOOL_CANCELLATION_NAMES = new Set(['AbortError', 'KnexTimeoutError']);
 
@@ -208,6 +227,7 @@ const TOOL_EXECUTORS = new Map([
   ['show_recent_payments', ({ customerId, actions, cards, turn }) => showRecentPayments(customerId, actions, cards, turn)],
   ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
   ['offer_reservice', ({ customerId, input, actions, context, turn }) => offerReservice(customerId, input, actions, context, turn)],
+  ['request_email_change', ({ customerId, input, context, turn }) => requestEmailChange(customerId, input, context, turn)],
   // Handled in assistant.js before reaching here.
   ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
 ]);
@@ -226,7 +246,9 @@ function addAction(actions, action) {
 // under the reply and `cards` the fact cards; callers that cannot render
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
-// `context.customerMessage`: the customer's message this turn.
+// `context.customerMessage`: the customer's message this turn;
+// `context.emailChange` / `context.conversationId`: the email-change lane is
+// live, and the chat whose messages it checks.
 // `turn` belongs to authenticated portal chat. SMS uses this same dispatcher
 // without the portal coordinator and keeps its existing execution policy.
 // The portal caller is wired in the separate coordinator activation slice.
@@ -266,7 +288,7 @@ async function getUpcomingServices(customerId, turn) {
       'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
-  const services = turn ? await turn.query(query, 'upcoming services') : await query;
+  const services = await runQuery(query, turn, 'upcoming services');
 
   return {
     services: services.map(s => ({
@@ -329,7 +351,7 @@ async function offerRescheduleLink(customerId, actions, turn) {
       .orderBy('id')
       .limit(RESCHEDULE_PAGE)
       .offset(offset);
-    const rows = turn ? await turn.query(query, 'reschedule visits') : await query;
+    const rows = await runQuery(query, turn, 'reschedule visits');
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
       let svc;
@@ -676,6 +698,141 @@ async function offerReserviceResult(customerId, line, database = db) {
   };
 }
 
+// The model judges whether the customer confirmed; the code only verifies
+// what can be checked. The address that reaches the office is, character for
+// character, the one this tool told the model to read back in the previous
+// turn (its own logged result, never a re-reading of the reply), and the
+// assistant's last reply shows that same address. No list of confirmation
+// wording lives here.
+//
+// ONE definition of an address for every check below: the characters an
+// unquoted local part may hold, an @, and a dotted domain. A match ends at
+// the first character a domain cannot hold, so "a@b.com,cancel" and
+// "a@b.com/cancel" are the address and then other words.
+const EMAIL_ADDRESS = "[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+";
+const EMAIL_SHAPE = new RegExp(`^${EMAIL_ADDRESS}$`);
+const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
+// An address shown or typed as a whole: nothing an address can hold (or a
+// second @) in front of it, and after it the end, a space, or a character
+// no domain holds and no longer token continues with (a comma, a slash, a
+// full stop that ends the sentence). "a@b.com_x.net" is a longer token.
+const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[,;:!?)\\]>"/]|\\.(?![A-Za-z0-9]))`, 'g');
+const EMAIL_MAX_CHARS = 254;
+// Messages of the chat read for the check, newest first.
+const EMAIL_CHANGE_MESSAGES = 40;
+const EMAIL_HAND_OFF = {
+  sent: false,
+  instruction: 'The email change could not be checked right now. Use the escalate tool with topic account_change so the team follows up.',
+};
+const EMAIL_NOT_AN_ADDRESS = {
+  sent: false,
+  instruction: 'That is not a complete email address. Pass only the address, exactly as the customer typed it, or ask the customer to type their full new email address.',
+};
+const EMAIL_NOT_TYPED = {
+  sent: false,
+  instruction: 'This address is not in the customer\'s own messages in this chat. Ask the customer to type their new email address on its own, and never guess, complete or correct one. If they cannot, use the escalate tool with topic account_change.',
+};
+const EMAIL_UNCHANGED = {
+  sent: false,
+  instruction: 'This is already the email on the account. Tell the customer no change is needed.',
+};
+const emailReadBack = (address) => ({
+  sent: false,
+  read_back: address,
+  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address}, as plain text with a space on each side and no quotes or formatting around it, and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
+});
+const sameEmail = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+// A message with its addresses left out (the keyword hand-off match).
+const withoutEmails = (text) => String(text || '').replace(EMAIL_WORDS, ' ');
+// Whether `text` holds exactly this address as a whole word: the customer
+// typed it, or the assistant showed it. A longer address around it, in front
+// or behind, is a different address.
+function hasEmail(text, address) {
+  return (String(text || '').match(EMAIL_WHOLE_WORDS) || []).some((word) => sameEmail(word, address));
+}
+// The chat's rows the check reads, newest first.
+function emailChangeRows(conversationId) {
+  return db('agent_messages')
+    .where('conversation_id', conversationId)
+    .whereIn('role', ['user', 'assistant', 'tool_use'])
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .limit(EMAIL_CHANGE_MESSAGES)
+    .select('role', 'content', 'tool_results');
+}
+// The address this tool told the model to read back in the previous turn,
+// when the assistant's reply that turn shows it. `rows` are newest first.
+// The assistant's reply is the last row a turn saves, so the newest assistant
+// row is the last reply: everything above it is this turn (the customer's
+// message, tools already run for it), and the rows below it down to the next
+// customer message are what that reply's turn ran.
+function pendingReadBack(rows, customerMessage) {
+  const replyAt = rows.findIndex((r) => r.role === 'assistant');
+  if (replyAt === -1) return null;
+  // Only this turn's own message may sit above the reply (more than once
+  // when the portal sent it twice): any other customer message means the
+  // reply is not the one this message answers.
+  if (rows.slice(0, replyAt).some((r) => r.role === 'user' && r.content !== customerMessage)) return null;
+  const older = rows.slice(replyAt + 1);
+  const turnEnd = older.findIndex((r) => r.role === 'user');
+  const asked = (turnEnd === -1 ? older : older.slice(0, turnEnd))
+    .find((r) => r.role === 'tool_use' && r.content === 'request_email_change');
+  if (!asked) return null;
+  let result = asked.tool_results;
+  try { if (typeof result === 'string') result = JSON.parse(result); } catch { return null; }
+  const address = typeof result?.read_back === 'string' ? result.read_back : '';
+  return address && hasEmail(rows[replyAt].content, address) ? address : null;
+}
+// The address the chat read back last turn and this message answers, for a
+// hand-off the keyword match forces before the model sees the message (so
+// nobody judged whether it was confirmed). null when there is none or the
+// read fails.
+async function emailReadBackAwaitingAnswer(conversationId, customerMessage, turn = null) {
+  try {
+    const query = emailChangeRows(conversationId);
+    const rows = await runQuery(query, turn, 'email read-back');
+    return pendingReadBack(rows, customerMessage);
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] pending email read-back read failed: ${err.message}`);
+    return null;
+  }
+}
+
+async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}, turn = null) {
+  // Only under its gate: the tool is not in any other lane's set.
+  if (emailChange !== true) return { error: 'Unknown tool: request_email_change' };
+  if (!customerId || !conversationId) return EMAIL_HAND_OFF;
+  // Taken as given: no character is stripped or corrected.
+  const asked = String(input.new_email || '').trim();
+  if (asked.length > EMAIL_MAX_CHARS || !EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
+  let rows;
+  let customer;
+  try {
+    const historyQuery = emailChangeRows(conversationId);
+    rows = await runQuery(historyQuery, turn, 'email change history');
+    const customerQuery = db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+    customer = await runQuery(customerQuery, turn, 'email change customer');
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] email change check failed for ${customerId}: ${err.message}`);
+    return EMAIL_HAND_OFF;
+  }
+  if (!customer) return EMAIL_HAND_OFF;
+  // This turn's message first: its row is saved best-effort.
+  const typed = [customerMessage, ...rows.filter((r) => r.role === 'user').map((r) => r.content)]
+    .some((text) => hasEmail(text, asked));
+  if (!typed) return EMAIL_NOT_TYPED;
+  if (sameEmail(asked, String(customer.email || '').trim())) return EMAIL_UNCHANGED;
+  if (input.customer_confirmed !== true) return emailReadBack(asked);
+  // Confirmed means this turn's message answers the read-back of this same
+  // address; anything else is read back (again) first.
+  const pending = pendingReadBack(rows, customerMessage);
+  if (!pending || !sameEmail(pending, asked)) return emailReadBack(asked);
+  // Not a tool result the model sees: assistant.js hands off on it. The
+  // address is the one the read-back showed.
+  return { confirmed_email: pending };
+}
+
 function openPortalSection(section, actions, turn) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
@@ -702,4 +859,4 @@ async function getPestAdvice(topic, turn) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };

@@ -148,11 +148,21 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     expect(rows[c.id]).toMatchObject({ status: 'open', superseded_by: null, closed_at: null });
   }));
 
+  test('a same-kind offer from another Waves line leaves the first line\'s offer open', () => inTrx(async (trx) => {
+    const phone = '9415550110';
+    const visit = { scheduledServiceId: '11111111-1111-4111-8111-111111111111' };
+    const lineA = await offers.recordOfferForSend({ agentDecisionId: await insertDecision(trx, { lookup: visit }), outgoingBody: BODY, to: phone, from: '+19415550188', sentAt: SENT_AT, dbh: trx });
+    const lineB = await offers.recordOfferForSend({ agentDecisionId: await insertDecision(trx, { lookup: visit }), outgoingBody: BODY, to: phone, from: '+19415550199', sentAt: new Date(SENT_AT.getTime() + 3600000), dbh: trx });
+    const rows = Object.fromEntries((await trx('sms_offers').where({ phone_last10: phone }).select('id', 'status', 'waves_line')).map((r) => [r.id, r]));
+    expect(rows[lineA.id]).toMatchObject({ status: 'open', waves_line: '9415550188' });
+    expect(rows[lineB.id]).toMatchObject({ status: 'open', waves_line: '9415550199' });
+  }));
+
   test('the database refuses a second open offer for one phone and kind', () => inTrx(async (trx) => {
     const base = { phone_last10: '9415550103', kind: 'move_visit', slots: '[]', sent_at: SENT_AT, expires_at: SENT_AT, status: 'open' };
     await trx('sms_offers').insert({ ...base, agent_decision_id: await insertDecision(trx) });
     const decisionId = await insertDecision(trx);
     await expect(trx.transaction((sp) => sp('sms_offers').insert({ ...base, agent_decision_id: decisionId })))
-      .rejects.toThrow(/sms_offers_one_open_per_phone_kind/);
+      .rejects.toThrow(/sms_offers_one_open_per_phone_kind_line/);
   }));
 });

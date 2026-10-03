@@ -22,9 +22,13 @@
  * `Call SID:` marker, or window_start is within 2h of the confirmed wall
  * clock, or the row was created after the call — the office acted). A
  * pre-existing unrelated same-day appointment does NOT suppress the page.
- * A call with no linked customer_id cannot match a booking by definition
- * and is always a miss (doubly bad: unattributed AND unbooked; see
- * call-log-relink.js for the attribution side).
+ * A visit that carries the call itself (source_call_log_id, or the Call SID
+ * notes marker) clears the miss under ANY customer (owner 2026-10-03: the
+ * office booked a spouse's call on the household's account, the call had no
+ * customer because her number was not on file, and the pager kept ringing
+ * for a booked visit). Without that provenance, a call with no linked
+ * customer_id cannot match a booking and is a miss (unattributed AND
+ * unbooked; see call-log-relink.js for the attribution side).
  *
  * ET semantics: confirmed_start_at is parsed with the same wall-clock
  * contract as the booking path's v2IsoToEtWallClock — an ET offset (either
@@ -158,9 +162,16 @@ function windowStartMinutes(windowStart) {
 // durable call-linked appointment can legitimately live on a different date
 // than the originally confirmed slot — it is still booked, not missed. Only
 // the window-proximity fallback requires the original ET date.
-function rowClearsSlot(row, call, slot) {
+//
+// rowCarriesCall is that provenance on its own: the row names THIS call, so
+// it is the call's booking whichever customer it sits under.
+function rowCarriesCall(row, call) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
-  if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
+  return !!call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`);
+}
+
+function rowClearsSlot(row, call, slot) {
+  if (rowCarriesCall(row, call)) return true;
   if (row.sched_date !== slot.dateET) return false;
   // A cancelled / rescheduled row clears the miss ONLY through the provenance
   // branches above (owner 2026-10-01: a visit booked from the call and later
@@ -179,7 +190,8 @@ function rowClearsSlot(row, call, slot) {
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
 // ANY status: cancelled/rescheduled rows clear only on call provenance
-// (rowClearsSlot; a missing status counts as active).
+// (rowClearsSlot; a missing status counts as active). Provenance clears under
+// any customer; the window-proximity fallback only under the call's own.
 function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const misses = [];
@@ -188,9 +200,9 @@ function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
     if (!createdAt || createdAt > graceCutoff) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
-    const cleared = !!call.customer_id && bookedRows.some((row) => (
-      row.customer_id === call.customer_id
-      && rowClearsSlot(row, call, slot)
+    const cleared = bookedRows.some((row) => (
+      rowCarriesCall(row, call)
+      || (!!call.customer_id && row.customer_id === call.customer_id && rowClearsSlot(row, call, slot))
     ));
     if (cleared) continue;
     misses.push({ call, slot, serviceDateET: slot.dateET });
@@ -275,25 +287,28 @@ async function runInner({ now = new Date() } = {}) {
     .map((m) => m.call.twilio_call_sid)
     .filter(Boolean)
     .map((sid) => `%Call SID: ${sid}%`);
-  let bookedRows = [];
-  if (customerIds.length && dates.length) {
-    // Three OR'd fetch branches, matching rowClearsSlot's evidence: the
-    // confirmed date (window-proximity fallback) PLUS date-agnostic
-    // provenance (source_call_log_id / Call SID marker) — an in-place
-    // reschedule moves the call-linked row to another date and it must
-    // still be fetched or the watchdog pages a booked visit as missed.
-    bookedRows = await db('scheduled_services')
-      .whereIn('customer_id', customerIds)
-      .where(function bookedEvidence() {
-        this.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates])
-          .orWhereIn('source_call_log_id', callIds);
-        if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
-      })
-      .select(
-        'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
-        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
-      );
-  }
+  // Three OR'd fetch branches, matching the evidence computeBookingMisses
+  // reads: date-agnostic, customer-agnostic provenance (source_call_log_id /
+  // Call SID marker) — an in-place reschedule moves the call-linked row to
+  // another date, and the office may book the call under another household
+  // member, and either row must still be fetched or the watchdog pages a
+  // booked visit as missed — PLUS the calls' own customers on the confirmed
+  // dates (window-proximity fallback).
+  const bookedRows = await db('scheduled_services')
+    .where(function bookedEvidence() {
+      this.whereIn('source_call_log_id', callIds);
+      if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
+      if (customerIds.length) {
+        this.orWhere(function ownCustomerOnDate() {
+          this.whereIn('customer_id', customerIds)
+            .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates]);
+        });
+      }
+    })
+    .select(
+      'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
+      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
+    );
   const misses = computeBookingMisses(calls, bookedRows, { now });
 
   // Office dismissal and last-ring lookups, only for calls a repeat could
@@ -454,6 +469,7 @@ module.exports = {
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
+  rowCarriesCall,
   LOOKBACK_HOURS,
   GRACE_MINUTES,
   MAX_ALERTS_PER_RUN,

@@ -199,9 +199,13 @@ const routedTypedOf = (service) => (service?.reportFlow === true && service.type
 
 // Whether the live visit is still one this sheet takes as it was routed: a
 // lane visit its lane, a typed visit its form, any other one the short form.
+// A plain pest visit routed into the report flow also needs the live context
+// to say that flow is on (context.reportFlow); an answer without the field is
+// not a yes.
 function routeStillHolds(context, service) {
   if (service?.typedFlow) return context?.typedType === service.typedType;
   if (service?.laneFlow) return context?.lane === service.laneKey;
+  if (service?.reportFlow === true && context?.reportFlow !== true) return false;
   return context?.eligible === true;
 }
 
@@ -761,7 +765,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
       <div className="tech-visit-body" {...picker.coverProps}>
         {/* One mic at a time: the note's mic recording (the upload path is not stopped
             by another tap) holds this one. */}
-        <VoiceFillMicBar voice={voice} serviceId={service?.id} locked={locked || dictationPending} onPendingChange={setVoiceMicPending} />
+        <VoiceFillMicBar voice={voice} locked={locked || dictationPending} onPendingChange={setVoiceMicPending} />
         {/* Disabled as one block while the voice mic is live, so no control inside
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>

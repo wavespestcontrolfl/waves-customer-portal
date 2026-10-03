@@ -259,4 +259,4 @@ service.
 3. VOICE for customer-facing copy; escalate high-stakes to FLAGSHIP.
 4. Cross-provider → `ROUTES` + `llm/call.js` + Claude fallback.
 5. `npm run check:domain-rules` passes.
-6. New env vars documented in CLAUDE.md's Environment Variables section.
+6. New env vars documented in `docs/gates-and-env.md` (not `CLAUDE.md`).

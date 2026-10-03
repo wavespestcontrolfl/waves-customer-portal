@@ -59,6 +59,19 @@ function wire(channel, customerId = null) {
   db.__rows = (q) => (q.sql.includes('from "agent_sessions"') ? [conversationFor(channel, customerId)] : []);
 }
 
+function coordinatedTurn(requestRowId) {
+  return {
+    requestRowId,
+    query: (query) => query,
+    transaction: (_stage, work) => work(db),
+    assertActive: jest.fn(),
+    providerOptions: () => undefined,
+    registerFallbackExtras: jest.fn(),
+    persistCommittedResult: async (_executor, result) => result,
+    rememberCommittedResult: (result) => result,
+  };
+}
+
 const toolNames = (call) => call.tools.map((t) => t.name);
 
 beforeEach(() => {
@@ -165,9 +178,10 @@ test('a card and a hand-off asked for in one response: the card runs first and r
   escalate.mockRestore();
 });
 
-test('a portal escalation checkpoints its exact handoff and completed cards inside the escalation transaction', async () => {
-  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
+test.each([undefined, 'new@example.test'])('a portal escalation checkpoints its exact handoff and completed cards (email=%s)', async (newEmail) => {
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'old@example.test' };
   const escalation = { id: 'esc-1' };
+  const insertEscalation = jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) });
   const cards = [{ type: 'payments', title: 'Your most recent payment', rows: [{ id: 'p1' }] }];
   const actions = [{ type: 'tab', label: 'Open Billing', tab: 'billing' }];
   const trx = Object.assign(jest.fn((table) => {
@@ -175,7 +189,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     if (table === 'ai_escalations') return {
       where: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(null),
-      insert: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) }),
+      insert: insertEscalation,
     };
     if (table === 'agent_sessions') return { where: jest.fn().mockReturnThis(), update: jest.fn().mockResolvedValue(1) };
     if (table === 'agent_messages') return {
@@ -206,9 +220,17 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
     'Please help with this charge',
     'Customer needs billing help',
-    { gap: true, topic: 'billing', turn },
+    { gap: true, topic: newEmail ? 'account_change' : 'billing', newEmail, turn },
   );
 
+  if (newEmail) {
+    expect(insertEscalation).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'account_change', summary: expect.stringContaining(newEmail),
+    }));
+    expect(insertEscalation.mock.calls[0][0].summary).toContain(customer.email);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ newEmail, trx }));
+    expect(result.reply).toContain('email change request');
+  }
   expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
     escalated: true,
     escalationId: 'esc-1',
@@ -300,6 +322,136 @@ test.each([
     expect.stringMatching(/insert into "agent_messages".*returning "id"/),
   ]));
   expect(queries.some((sql) => /update "agent_sessions" set "message_count"/.test(sql))).toBe(increments);
+});
+
+test('a crash retry finishes the expired conversation that owns its durable user row instead of a newer active session', async () => {
+  process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE = 'true';
+  const originalAsk = 'What did you treat in my kitchen?';
+  const queries = [];
+  let ordinaryLookupCalled = false;
+  db.__rows = (query) => {
+    queries.push(query);
+    if (query.sql.includes('inner join "agent_sessions" as "conversation"')) {
+      return [{
+        id: 'conv-old', customer_id: 'cust-1', channel: 'portal_chat',
+        channel_identifier: 'property-scoped-session', status: 'timeout',
+        timeout_at: new Date('2026-10-01T14:30:00.000Z'), message_count: 1,
+        context_snapshot: { version: 2, firstName: 'Pat' },
+        portal_turn_message_id: '00000000-0000-4000-8000-000000000001',
+        portal_turn_message_content: originalAsk,
+      }];
+    }
+    if (query.sql.includes('from "agent_sessions"')) {
+      ordinaryLookupCalled = true;
+      return [{ ...conversationFor('portal_chat', 'cust-1'), id: 'conv-new' }];
+    }
+    return [];
+  };
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'The kitchen treatment is in your report.' }] });
+
+  const result = await assistant.processMessage({
+    message: 'different caller text must not replace the saved ask',
+    channel: 'portal_chat', channelIdentifier: 'property-scoped-session', customerId: 'cust-1',
+    turn: coordinatedTurn('request-row-crashed'),
+  });
+
+  const modelMessages = JSON.stringify(mockCreate.mock.calls[0][0].messages);
+  expect(modelMessages).toContain(originalAsk);
+  expect(modelMessages).not.toContain('different caller text');
+  expect(toolNames(mockCreate.mock.calls[0][0])).not.toContain('request_email_change');
+  delete process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE;
+  expect(result).toEqual(expect.objectContaining({
+    reply: 'The kitchen treatment is in your report.', conversationId: 'conv-old', generated: true,
+  }));
+  expect(ordinaryLookupCalled).toBe(false);
+  const recoveryQuery = queries.find((query) => query.sql.includes('inner join "agent_sessions" as "conversation"'));
+  expect(recoveryQuery.sql).toMatch(/"message"\."portal_chat_request_id".*"conversation"\."channel".*"conversation"\."channel_identifier".*"conversation"\."customer_id"/);
+  expect(recoveryQuery.bindings).toEqual(expect.arrayContaining([
+    'request-row-crashed', 'user', 'portal_chat', 'property-scoped-session', 'cust-1',
+  ]));
+  expect(queries.some((query) => /insert into "agent_sessions"/.test(query.sql))).toBe(false);
+  expect(queries.some((query) => /update "agent_sessions" set "message_count"/.test(query.sql))).toBe(false);
+  const transcriptInserts = queries.filter((query) => /insert into "agent_messages"/.test(query.sql));
+  expect(transcriptInserts).toHaveLength(2);
+  expect(transcriptInserts.every((query) => query.bindings.includes('conv-old'))).toBe(true);
+});
+
+test('a crash retry bounds newest history at its immutable ask even after many later turns', async () => {
+  const originalAsk = 'Were the baseboards treated?';
+  const originalId = '00000000-0000-4000-8000-000000000020';
+  const originalAt = new Date(Date.now() - 60_000);
+  let historyQuery;
+  db.__rows = (query) => {
+    if (query.sql.includes('inner join "agent_sessions" as "conversation"')) {
+      return [{
+        id: 'conv-shared', customer_id: 'cust-1', channel: 'portal_chat',
+        channel_identifier: 'sess-1', status: 'active',
+        timeout_at: new Date(Date.now() + 60_000), message_count: 48,
+        context_snapshot: { version: 2, firstName: 'Pat' },
+        portal_turn_message_id: originalId,
+        portal_turn_message_content: originalAsk,
+      }];
+    }
+    if (query.sql.includes('from "agent_messages"') && query.sql.includes('order by')) {
+      historyQuery = query;
+      return [
+        { id: originalId, role: 'user', content: originalAsk, created_at: originalAt },
+        { id: '00000000-0000-4000-8000-000000000019', role: 'assistant', content: 'Earlier reply', created_at: new Date(originalAt - 1) },
+        { id: '00000000-0000-4000-8000-000000000018', role: 'user', content: 'Earlier ask', created_at: new Date(originalAt - 2) },
+      ];
+    }
+    return [];
+  };
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Yes, the baseboards were treated.' }] });
+
+  await assistant.processMessage({
+    message: originalAsk, channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1',
+    turn: coordinatedTurn('request-row-old-window'),
+  });
+
+  expect(historyQuery.sql).toMatch(/"created_at" < .* or \("created_at" = .* and "id" <= .*\)/);
+  expect(historyQuery.sql).toMatch(/order by "created_at" desc, "id" desc limit/);
+  expect(historyQuery.sql.match(/select "created_at" from "agent_messages" where "id" = \$\d+/g)).toHaveLength(2);
+  expect(historyQuery.bindings.filter((value) => value === originalId)).toHaveLength(3);
+  expect(historyQuery.bindings.some((value) => value instanceof Date)).toBe(false);
+  const modelMessages = JSON.stringify(mockCreate.mock.calls[0][0].messages);
+  expect(modelMessages).toContain(originalAsk);
+  expect(modelMessages).not.toContain('later ask');
+  expect(mockCreate.mock.calls[0][0].messages.at(-1).role).toBe('user');
+});
+
+test('a retry on an active legacy-context session isolates the immutable ask', async () => {
+  const originalAsk = 'Was the garage included?';
+  let historyRead = false;
+  db.__rows = (query) => {
+    if (query.sql.includes('inner join "agent_sessions" as "conversation"')) {
+      return [{
+        id: 'conv-legacy', customer_id: 'cust-1', channel: 'portal_chat',
+        channel_identifier: 'property-scoped-session', status: 'active',
+        timeout_at: new Date(Date.now() + 60_000), message_count: 4,
+        context_snapshot: { firstName: 'Pat', propertyAddress: 'legacy private context' },
+        portal_turn_message_id: '00000000-0000-4000-8000-000000000030',
+        portal_turn_message_content: originalAsk,
+        portal_turn_message_created_at: new Date(Date.now() - 60_000),
+      }];
+    }
+    if (query.sql.includes('from "agent_messages"') && query.sql.includes('order by')) historyRead = true;
+    return [];
+  };
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'I can help with that.' }] });
+
+  await assistant.processMessage({
+    message: 'different caller text', channel: 'portal_chat',
+    channelIdentifier: 'property-scoped-session', customerId: 'cust-1',
+    turn: coordinatedTurn('request-row-legacy'),
+  });
+
+  expect(historyRead).toBe(false);
+  const modelMessages = mockCreate.mock.calls[0][0].messages;
+  expect(modelMessages).toHaveLength(1);
+  expect(modelMessages[0].role).toBe('user');
+  expect(JSON.stringify(modelMessages)).toContain(originalAsk);
+  expect(JSON.stringify(modelMessages)).not.toMatch(/different caller text|legacy private context/);
 });
 
 test('GATE_PORTAL_CHAT_VISIT_FACTS on: structured facts to the model, the summary on a card, and the gates compose', async () => {

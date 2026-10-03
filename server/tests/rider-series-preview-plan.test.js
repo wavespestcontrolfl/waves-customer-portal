@@ -255,3 +255,69 @@ describe('rider-series planRiderDates', () => {
     expect(forward.cancel.map((c) => c.id)).toEqual(['c']);
   });
 });
+
+// Second batch of ride pairs (owner ruling 2026-10-01): each rider cadence has
+// its own gaps, so on a MONTHLY lawn host a monthly rider takes every lawn
+// date, a bi-monthly one every 2nd, a quarterly one every 3rd, a semiannual
+// one every 6th, and a seasonal (Feb-Oct) one every in-season date. The lawn
+// dates come from the seeder's own monthly walk, from 24 start dates across a
+// year, so 28- and 35-day lawn gaps, weekend shifts and both sides of the
+// winter are all covered.
+describe('rider gaps per cadence on a monthly lawn host', () => {
+  const Seeder = require('../services/recurring-appointment-seeder');
+  const { riderGapsFor } = require('../services/rider-series-preview');
+  const starts = datesEvery('2097-01-07', 15, 24);
+  const lawnFollowUps = (start) => Seeder.buildRecurringFollowUpRows(
+    { id: 'lawn', customer_id: 'c1', scheduled_date: start, service_type: 'Lawn Care' },
+    { pattern: 'monthly', visitsPerYear: 12, skipWeekends: true },
+  ).map((r) => r.scheduled_date);
+  const ride = (start, pattern) => {
+    const hosts = lawnFollowUps(start);
+    const wanted = Seeder.plannedVisitCountForPattern(pattern, {}) - 1;
+    const plan = planRiderDates({
+      hostDates: [start, ...hosts], lastRiderDate: start, horizonDate: addDays(start, 730), skipWeekends: true, gaps: riderGapsFor(pattern),
+    }).slice(0, wanted);
+    return { hosts, wanted, plan };
+  };
+
+  test('the quarterly gaps are the rule every existing pair already uses', () => {
+    expect(riderGapsFor('quarterly')).toEqual({ min: MIN_GAP_DAYS, target: TARGET_GAP_DAYS, max: MAX_WAIT_DAYS });
+    expect(riderGapsFor('triannual')).toBe(riderGapsFor('quarterly'));
+    const hostDates = datesEvery('2026-01-01', 42, 12);
+    const args = { hostDates, lastRiderDate: '2026-01-01', horizonDate: '2027-02-01' };
+    expect(planRiderDates({ ...args, gaps: riderGapsFor('quarterly') })).toEqual(planRiderDates(args));
+  });
+
+  test.each([
+    ['monthly', 1], ['bimonthly', 2], ['quarterly', 3], ['semiannual', 6],
+  ])('a %s rider takes every lawn date number %i, for its whole first year', (pattern, step) => {
+    for (const start of starts) {
+      const { hosts, wanted, plan } = ride(start, pattern);
+      expect(hosts).toHaveLength(11);
+      expect(plan).toEqual(Array.from({ length: wanted }, (_, k) => hosts[(k + 1) * step - 1]));
+    }
+  });
+
+  test('a seasonal mosquito rider takes every Feb-Oct lawn date and none in Nov-Jan', () => {
+    const month = (d) => Number(d.slice(5, 7));
+    for (const start of starts) {
+      const { hosts, wanted, plan } = ride(start, 'seasonal_feb_oct');
+      expect(wanted).toBe(8);
+      expect(plan).toEqual(hosts.filter((d) => month(d) >= 2 && month(d) <= 10).slice(0, 8));
+      expect(plan).toHaveLength(8);
+    }
+  });
+
+  test('a seasonal rider with no lawn date to take stands alone on its own in-season date, never in winter', () => {
+    const plan = planRiderDates({
+      hostDates: [], lastRiderDate: '2097-10-08', horizonDate: '2098-04-01', skipWeekends: true, gaps: riderGapsFor('seasonal_feb_oct'),
+    });
+    expect(plan[0]).toBe(Seeder.seasonalFebOctDate('2097-10-08', 1));
+    expect(plan.every((d) => Number(d.slice(5, 7)) >= 2 && Number(d.slice(5, 7)) <= 10)).toBe(true);
+    // An overdue one (the plan floor is in winter) waits for the season to open.
+    const overdue = planRiderDates({
+      hostDates: [], lastRiderDate: '2097-06-01', earliestDate: '2097-12-10', horizonDate: '2098-03-01', gaps: riderGapsFor('seasonal_feb_oct'),
+    });
+    expect(overdue[0]).toBe('2098-02-01');
+  });
+});

@@ -20,7 +20,7 @@ const {
   scoresFromAssessmentRow,
 } = require('../services/service-report/lawn-progress');
 const { judgeProgress, buildLawnExpectations } = require('../services/service-report/lawn-expectations');
-const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+const { PRODUCT_ROWS, ISSUE_ROWS } = require('../config/lawn-expectations');
 
 const DAY = 86400000;
 const addDays = (ymd, n) => new Date(Date.parse(`${ymd}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
@@ -31,8 +31,15 @@ const scores = (over = {}) => ({ ...FLAT, ...over });
 const PRIOR_DATE = '2026-06-01';
 
 // A product per family (exact catalog names) and the tag that makes a family curative.
+// Owner 2026-10-03: broadleaf, granular, fungicide-curative and insecticide-curative
+// have no progress window (the day counts were unsourced), so they build no
+// item; they stay here so the tests can prove that. Celsius WG is the one
+// product row still judged, and the issue rows below carry the other windows.
 const PRODUCT = {
-  broadleaf: { name: 'Celsius WG' },
+  broadleaf: { name: 'LESCO Three-Way Selective Herbicide' },
+  celsius: { name: 'Celsius WG' },
+  speedZone: { name: 'SpeedZone Southern' },
+  sedgeHammer: { name: 'SedgeHammer Plus' },
   sedge: { name: 'Dismiss' },
   preEmergent: { name: 'Prodiamine 65 WDG' },
   granular: { name: 'LESCO 24-0-11' },
@@ -46,12 +53,12 @@ const PRODUCT = {
 // One comparison: the prior visit applied `applied`, `days` later the lawn scored `cur`.
 function run({
   days = 30, applied = [], checks = [], cur = {}, prior = {}, confidence = 'moderate', priorSeason = 'peak',
-  curSeason = 'peak', priorDate = PRIOR_DATE, band, overallBand, isBaseline = false, sinceLast,
+  curSeason = 'peak', priorDate = PRIOR_DATE, band, overallBand, isBaseline = false, sinceLast, issues,
 } = {}) {
   return buildLawnProgress({
     current: { date: addDays(priorDate, days), season: curSeason, isBaseline, scores: scores(cur), confidence },
     prior: { date: priorDate, season: priorSeason, scores: scores(prior) },
-    sinceLast: sinceLast === undefined ? { priorDate, applied, checks } : sinceLast,
+    sinceLast: sinceLast === undefined ? { priorDate, applied, checks, ...(issues ? { issues } : {}) } : sinceLast,
     band,
     overallBand,
   });
@@ -59,13 +66,21 @@ function run({
 
 const item = (progress, rowId, metric) => progress.items.find((i) => i.rowId === rowId && (!metric || i.metric === metric));
 
+// Issue rows are frozen by name on the prior visit (sinceLast.issues) and the
+// engine only builds rows when the visit applied something, so a judged issue
+// rides beside one Celsius application. Its item carries the issue row's id.
+const ISSUE_ID = Object.fromEntries(Object.entries(ISSUE_ROWS).map(([key, row]) => [key, row.id]));
+const withIssue = (key, over = {}) => run({ applied: [PRODUCT.celsius], issues: [key], ...over });
+
 describe('rule 1: too_early is never behind', () => {
   const families = Object.entries(PRODUCT).filter(([, app]) => (
     Object.keys(buildLawnExpectations({ applications: [app], visitDate: PRIOR_DATE }, { includeUnapproved: true }).rows[0]?.metricWindows || {}).length
   ));
+  const issueKeys = Object.entries(ISSUE_ROWS).filter(([, row]) => Object.keys(row.metricWindows).length).map(([key]) => key);
 
-  it('covers every family that can be judged (config-derived)', () => {
-    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'fungicideCurative', 'granular', 'insecticideCurative', 'sedge']);
+  it('covers every family and issue row that can be judged (config-derived)', () => {
+    expect(families.map(([k]) => k).sort()).toEqual(['celsius']);
+    expect(issueKeys.sort()).toEqual(['chinch', 'dry_spot', 'large_patch', 'mowed_short']);
   });
 
   it.each(families)('%s: no behind on any day up to the close of the metric window, at any delta', (_name, app) => {
@@ -80,21 +95,86 @@ describe('rule 1: too_early is never behind', () => {
     }
   });
 
+  it.each(issueKeys.map((k) => [k]))('issue row %s: no behind on any day up to the close of the metric window, at any delta', (key) => {
+    const row = ISSUE_ROWS[key];
+    for (let days = 1; days <= 120; days += 1) {
+      for (const d of [-60, -30, -9, -8, -3, 0, 3, 8, 30]) {
+        const progress = withIssue(key, { days, cur: { weed_suppression: 70 + d, color_health: 70 + d, stress_damage: 70 + d, turf_density: 70 + d } });
+        const own = progress.items.filter((it) => it.rowId === row.id);
+        expect(own.length).toBeGreaterThan(0);
+        for (const it of own) {
+          if (days <= row.metricWindows[it.metric].closeDays) expect(it.state).not.toBe('behind');
+        }
+      }
+    }
+  });
+
   it('a window that has not opened reads too_early even with a big drop', () => {
-    const progress = run({ days: 2, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 40 } });
-    expect(item(progress, 'herbicide_broadleaf').state).toBe('too_early');
-    expect(item(progress, 'herbicide_broadleaf').rawVerdict).toBe('too_early');
+    // Celsius opens on day 1, so the not-yet-open window is a spread issue (day 3).
+    const progress = withIssue('chinch', { days: 2, cur: { stress_damage: 40 } });
+    expect(item(progress, ISSUE_ID.chinch).state).toBe('too_early');
+    expect(item(progress, ISSUE_ID.chinch).rawVerdict).toBe('too_early');
   });
 
   it('an open window with no clear gain is too_early (in_window), still never behind', () => {
-    const progress = run({ days: 10, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 71 } });
-    expect(item(progress, 'herbicide_broadleaf')).toMatchObject({ state: 'too_early', rawVerdict: 'in_window' });
+    const progress = run({ days: 10, applied: [PRODUCT.celsius], cur: { weed_suppression: 71 } });
+    expect(item(progress, 'herbicide_celsius')).toMatchObject({ state: 'too_early', rawVerdict: 'in_window' });
   });
 
   it('density is judged on its own 60 to 90 day window, so a 29 day gap is too_early for it', () => {
-    const progress = run({ days: 29, applied: [PRODUCT.granular], cur: { color_health: 85, turf_density: 50 } });
-    expect(item(progress, 'granular_fertilizer', 'color_health').state).toBe('on_track');
-    expect(item(progress, 'granular_fertilizer', 'turf_density').state).toBe('too_early');
+    const progress = withIssue('mowed_short', { days: 29, cur: { color_health: 85, turf_density: 50 } });
+    expect(item(progress, ISSUE_ID.mowed_short, 'color_health').state).toBe('on_track');
+    expect(item(progress, ISSUE_ID.mowed_short, 'turf_density').state).toBe('too_early');
+  });
+});
+
+describe('rows with no progress window build no item (owner 2026-10-03)', () => {
+  // The day counts were unsourced estimates, so these rows carry metric null and
+  // no metricWindows: nothing to judge a score against, not even "holding steady".
+  const UNJUDGED = ['broadleaf', 'granular', 'fungicideCurative', 'insecticideCurative', 'speedZone', 'sedgeHammer', 'sedge'];
+  const rowOf = (app) => buildLawnExpectations({ applications: [app], visitDate: PRIOR_DATE }, { includeUnapproved: true }).rows[0];
+
+  it.each(UNJUDGED.map((k) => [k]))('%s: the config row has no metric and no window', (name) => {
+    const row = rowOf(PRODUCT[name]);
+    expect(row.metric).toBeNull();
+    expect(row.metricWindows).toEqual({});
+    expect(row.behindEligible).toBe(false);
+  });
+
+  it.each(UNJUDGED.map((k) => [k]))('%s: no item at any score, day or season, and no unmapped name', (name) => {
+    for (const days of [1, 5, 10, 21, 29, 40, 90, 100, 200]) {
+      for (const d of [-60, -9, 0, 9, 40]) {
+        for (const season of [{}, { priorSeason: 'dormant', priorDate: '2026-01-10' }]) {
+          const progress = run({
+            days, applied: [PRODUCT[name]], ...season,
+            cur: { weed_suppression: 70 + d, color_health: 70 + d, stress_damage: 70 + d, turf_density: 70 + d },
+          });
+          expect(progress.items).toEqual([]);
+          expect(progress.unmapped).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it.each(UNJUDGED.map((k) => [k]))('%s: judgeProgress never says behind, ahead, too_early or on_track for any metric', (name) => {
+    const row = rowOf(PRODUCT[name]);
+    for (const metric of ['weed_suppression', 'color_health', 'stress_damage', 'turf_density']) {
+      for (const days of [1, 5, 10, 21, 29, 40, 100, 200]) {
+        for (const scoreDelta of [-60, -9, 0, 9, 40]) {
+          const verdict = judgeProgress(row, { metric, daysSinceApplication: days, scoreDelta, band: CATEGORY_BAND });
+          expect(verdict).toBe('holding_steady');
+        }
+      }
+    }
+  });
+
+  it('both products of the broadleaf family and a second granular blend still build nothing', () => {
+    const progress = run({
+      days: 30,
+      applied: [{ name: 'LESCO Three-Way Selective Herbicide' }, { name: 'Atrazine 4L' }, { name: 'LESCO 24-2-11' }],
+      cur: { weed_suppression: 85, color_health: 85 },
+    });
+    expect(progress.items).toEqual([]);
   });
 });
 
@@ -122,20 +202,21 @@ describe('rule 2: low confidence is always unclear', () => {
 
   it('moderate and high compare normally', () => {
     for (const level of ['moderate', 'high']) {
-      const progress = run({ days: 30, applied: [PRODUCT.broadleaf], confidence: level, cur: { weed_suppression: 85 } });
-      expect(item(progress, 'herbicide_broadleaf').state).toBe('on_track');
+      const progress = run({ days: 30, applied: [PRODUCT.celsius], confidence: level, cur: { weed_suppression: 85 } });
+      expect(item(progress, 'herbicide_celsius').state).toBe('on_track');
     }
   });
 
   it('a metric the two models disagreed on is unclear while the others still compare', () => {
     const progress = run({
       days: 30,
-      applied: [PRODUCT.broadleaf, PRODUCT.granular],
+      applied: [PRODUCT.celsius],
+      issues: ['dry_spot'],
       confidence: { level: 'high', divergentMetrics: ['weed_suppression'] },
       cur: { weed_suppression: 85, color_health: 85, overall: 80 },
     });
-    expect(item(progress, 'herbicide_broadleaf')).toMatchObject({ state: 'unclear', gate: 'low_confidence' });
-    expect(item(progress, 'granular_fertilizer', 'color_health').state).toBe('on_track');
+    expect(item(progress, 'herbicide_celsius')).toMatchObject({ state: 'unclear', gate: 'low_confidence' });
+    expect(item(progress, ISSUE_ID.dry_spot, 'color_health').state).toBe('on_track');
     expect(progress.overall.direction).toBe('up');
   });
 
@@ -143,14 +224,14 @@ describe('rule 2: low confidence is always unclear', () => {
     const progress = buildLawnProgress({
       current: { date: addDays(PRIOR_DATE, 30), season: 'peak', scores: scores({ weed_suppression: 85 }), confidence: 'high' },
       prior: { date: PRIOR_DATE, season: 'peak', scores: scores(), confidence: 'low' },
-      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.broadleaf], checks: [] },
+      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.celsius], checks: [] },
     });
-    expect(item(progress, 'herbicide_broadleaf').state).toBe('unclear');
+    expect(item(progress, 'herbicide_celsius').state).toBe('unclear');
   });
 
   it('a prior with no stated confidence is not held against the comparison (the report path reads only the current photos)', () => {
-    const progress = run({ days: 30, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 85 } });
-    expect(item(progress, 'herbicide_broadleaf').state).toBe('on_track');
+    const progress = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 85 } });
+    expect(item(progress, 'herbicide_celsius').state).toBe('on_track');
   });
 });
 
@@ -201,18 +282,30 @@ describe('deriveAssessmentConfidence', () => {
 describe('rule 3: color across a season change is seasonal', () => {
   const winter = { priorDate: '2026-02-01', priorSeason: 'dormant', curSeason: 'shoulder' };
 
-  it('color reads seasonal, never behind, whatever the drop and whatever the product', () => {
-    for (const app of [PRODUCT.granular, PRODUCT.iron, PRODUCT.potassium]) {
-      for (const days of [10, 30, 60, 100]) {
-        const progress = run({ ...winter, days, applied: [app], cur: { color_health: 30 } });
-        const color = progress.items.filter((i) => i.metric === 'color_health');
-        expect(color.length).toBeGreaterThan(0);
-        for (const it of color) {
-          expect(it.state).toBe('seasonal');
-          expect(it.gate).toBe('seasonal');
-        }
+  // Color is still judged for the short-lived feeds (no window, holding steady)
+  // and for the dry-spot and mowed-short issue rows (a gain window). Granular
+  // nitrogen builds no item at all since 2026-10-03.
+  const COLOR_CASES = [
+    ['iron', { applied: [PRODUCT.iron] }],
+    ['potassium', { applied: [PRODUCT.potassium] }],
+    ['dry_spot issue', { applied: [PRODUCT.celsius], issues: ['dry_spot'] }],
+    ['mowed_short issue', { applied: [PRODUCT.celsius], issues: ['mowed_short'] }],
+  ];
+
+  it.each(COLOR_CASES)('color reads seasonal, never behind, whatever the drop (%s)', (_name, input) => {
+    for (const days of [10, 30, 60, 100]) {
+      const progress = run({ ...winter, ...input, days, cur: { color_health: 30 } });
+      const color = progress.items.filter((i) => i.metric === 'color_health');
+      expect(color.length).toBeGreaterThan(0);
+      for (const it of color) {
+        expect(it.state).toBe('seasonal');
+        expect(it.gate).toBe('seasonal');
       }
     }
+  });
+
+  it('granular nitrogen builds no color item to call seasonal or anything else', () => {
+    expect(run({ ...winter, days: 45, applied: [PRODUCT.granular], cur: { color_health: 30 } }).items).toEqual([]);
   });
 
   it('carries the supplied seasonal line and the two seasons', () => {
@@ -222,25 +315,26 @@ describe('rule 3: color across a season change is seasonal', () => {
   });
 
   it('only color is seasonal: a non-color metric of the same visit is still judged', () => {
-    const progress = run({ ...winter, days: 45, applied: [PRODUCT.broadleaf, PRODUCT.granular], cur: { weed_suppression: 85, color_health: 30 } });
-    expect(item(progress, 'herbicide_broadleaf').state).toBe('on_track');
-    expect(item(progress, 'granular_fertilizer', 'color_health').state).toBe('seasonal');
+    const progress = run({ ...winter, days: 45, applied: [PRODUCT.celsius], issues: ['dry_spot'], cur: { weed_suppression: 85, color_health: 30 } });
+    expect(item(progress, 'herbicide_celsius').state).toBe('on_track');
+    expect(item(progress, ISSUE_ID.dry_spot, 'color_health').state).toBe('seasonal');
   });
 
   it('the same season is not seasonal, and peak to shoulder also counts as a cool change', () => {
-    expect(item(run({ days: 30, applied: [PRODUCT.granular], cur: { color_health: 30 } }), 'granular_fertilizer', 'color_health').state).toBe('behind');
-    const peakToShoulder = run({ priorDate: '2026-09-20', priorSeason: 'peak', curSeason: 'shoulder', days: 30, applied: [PRODUCT.granular], cur: { color_health: 30 } });
-    expect(item(peakToShoulder, 'granular_fertilizer', 'color_health').state).toBe('seasonal');
+    const base = { applied: [PRODUCT.celsius], issues: ['dry_spot'], days: 30, cur: { color_health: 30 } };
+    expect(item(run(base), ISSUE_ID.dry_spot, 'color_health').state).toBe('behind');
+    const peakToShoulder = run({ ...base, priorDate: '2026-09-20', priorSeason: 'peak', curSeason: 'shoulder' });
+    expect(item(peakToShoulder, ISSUE_ID.dry_spot, 'color_health').state).toBe('seasonal');
   });
 
   it('derives the season from the dates when the rows carry none', () => {
     const progress = buildLawnProgress({
       current: { date: '2026-03-20', scores: scores({ color_health: 30 }), confidence: 'moderate' },
       prior: { date: '2026-02-01', scores: scores() },
-      sinceLast: { priorDate: '2026-02-01', applied: [PRODUCT.granular], checks: [] },
+      sinceLast: { priorDate: '2026-02-01', applied: [PRODUCT.celsius], issues: ['dry_spot'], checks: [] },
     });
     expect(progress.season).toMatchObject({ prior: 'dormant', current: 'shoulder', seasonChange: true });
-    expect(item(progress, 'granular_fertilizer', 'color_health').state).toBe('seasonal');
+    expect(item(progress, ISSUE_ID.dry_spot, 'color_health').state).toBe('seasonal');
   });
 
   it('a drop across a cool-season change gives the overall no direction; a rise keeps it', () => {
@@ -250,8 +344,8 @@ describe('rule 3: color across a season change is seasonal', () => {
   });
 
   it('low confidence still wins over seasonal', () => {
-    const progress = run({ ...winter, days: 45, applied: [PRODUCT.granular], confidence: 'low', cur: { color_health: 30 } });
-    expect(item(progress, 'granular_fertilizer', 'color_health').state).toBe('unclear');
+    const progress = run({ ...winter, days: 45, applied: [PRODUCT.celsius], issues: ['dry_spot'], confidence: 'low', cur: { color_health: 30 } });
+    expect(item(progress, ISSUE_ID.dry_spot, 'color_health').state).toBe('unclear');
   });
 });
 
@@ -306,48 +400,58 @@ describe('rule 4: a recheck verdict comes only from a technician chip', () => {
   });
 
   it('a recheck never changes an applied item, and photo score deltas never change a check', () => {
-    const withChip = run({ days: 30, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch', recheck: { verdict: 'worse', source: 'photo_pair' } }] });
-    const without = run({ days: 30, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch' }] });
-    expect(item(withChip, 'herbicide_broadleaf')).toEqual(item(without, 'herbicide_broadleaf'));
+    const withChip = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch', recheck: { verdict: 'worse', source: 'photo_pair' } }] });
+    const without = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch' }] });
+    expect(item(withChip, 'herbicide_celsius')).toMatchObject({ state: 'on_track' });
+    expect(item(withChip, 'herbicide_celsius')).toEqual(item(without, 'herbicide_celsius'));
     expect(withChip.items.find((i) => i.kind === 'check').state).toBe('behind');
     expect(without.items.find((i) => i.kind === 'check').state).toBe('unclear');
   });
 });
 
 describe('state matrix (verdicts come from P10 judgeProgress, renamed)', () => {
-  const rowOf = (app) => buildLawnExpectations({ applications: [app], visitDate: PRIOR_DATE }, { includeUnapproved: true }).rows[0];
+  // Each judged row: how to build it, the row id its item carries.
+  const CASES = {
+    celsius: { applied: [PRODUCT.celsius], rowId: 'herbicide_celsius' }, // gain, opens day 1, full 7, closes 28
+    dryspot: { applied: [PRODUCT.celsius], issues: ['dry_spot'], rowId: ISSUE_ID.dry_spot }, // gain, opens day 0, full 14, closes 21
+    largepatch: { applied: [PRODUCT.celsius], issues: ['large_patch'], rowId: ISSUE_ID.large_patch }, // hold, opens day 3, closes 7
+    mowedshort: { applied: [PRODUCT.celsius], issues: ['mowed_short'], rowId: ISSUE_ID.mowed_short }, // density gain, opens 60, closes 90
+  };
+  const rowOf = ({ applied, issues, rowId }) => buildLawnExpectations({ applications: applied, issues, visitDate: PRIOR_DATE }, { includeUnapproved: true })
+    .rows.find((r) => r.id === rowId);
 
-  // [product, days, delta on the row's metric, metric, expected state, expected judgeProgress verdict]
+  // [case, days, delta on the metric, metric, expected state, expected judgeProgress verdict]
   const MATRIX = [
-    ['broadleaf', 2, -20, 'weed_suppression', 'too_early', 'too_early'],
-    ['broadleaf', 10, 1, 'weed_suppression', 'too_early', 'in_window'],
-    ['broadleaf', 10, 9, 'weed_suppression', 'improving', 'ahead'],
-    ['broadleaf', 25, 9, 'weed_suppression', 'on_track', 'on_track'],
-    ['broadleaf', 30, 0, 'weed_suppression', 'behind', 'behind'],
-    ['broadleaf', 30, -9, 'weed_suppression', 'behind', 'behind'],
-    ['broadleaf', 30, 7, 'weed_suppression', 'behind', 'behind'], // under the band is not a gain
-    ['broadleaf', 30, 8, 'weed_suppression', 'on_track', 'on_track'], // the band itself is
-    ['sedge', 10, 0, 'weed_suppression', 'too_early', 'in_window'],
-    ['sedge', 40, 0, 'weed_suppression', 'behind', 'behind'],
-    ['granular', 10, 9, 'color_health', 'improving', 'ahead'],
-    ['granular', 29, 9, 'color_health', 'on_track', 'on_track'],
-    ['granular', 29, 0, 'color_health', 'behind', 'behind'],
-    ['granular', 40, 0, 'turf_density', 'too_early', 'too_early'],
-    ['granular', 100, 0, 'turf_density', 'behind', 'behind'],
-    ['granular', 100, 9, 'turf_density', 'on_track', 'on_track'],
-    ['fungicideCurative', 15, 0, 'stress_damage', 'on_track', 'on_track'], // hold mode: it stopped falling
-    ['fungicideCurative', 15, -9, 'stress_damage', 'behind', 'behind'],
-    ['fungicideCurative', 5, -9, 'stress_damage', 'too_early', 'in_window'],
+    ['celsius', 1, -20, 'weed_suppression', 'too_early', 'in_window'], // opens on day 1, so a drop that early is still only in_window
+    ['celsius', 3, 1, 'weed_suppression', 'too_early', 'in_window'],
+    ['celsius', 3, 9, 'weed_suppression', 'improving', 'ahead'],
+    ['celsius', 10, 9, 'weed_suppression', 'on_track', 'on_track'],
+    ['celsius', 28, 0, 'weed_suppression', 'too_early', 'in_window'], // the close day itself is still open
+    ['celsius', 29, 0, 'weed_suppression', 'behind', 'behind'],
+    ['celsius', 29, -9, 'weed_suppression', 'behind', 'behind'],
+    ['celsius', 29, 7, 'weed_suppression', 'behind', 'behind'], // under the band is not a gain
+    ['celsius', 29, 8, 'weed_suppression', 'on_track', 'on_track'], // the band itself is
+    ['dryspot', 10, 9, 'color_health', 'improving', 'ahead'],
+    ['dryspot', 14, 9, 'color_health', 'on_track', 'on_track'],
+    ['dryspot', 22, 0, 'color_health', 'behind', 'behind'],
+    ['largepatch', 2, -9, 'stress_damage', 'too_early', 'too_early'],
+    ['largepatch', 5, -9, 'stress_damage', 'too_early', 'in_window'],
+    ['largepatch', 8, 0, 'stress_damage', 'on_track', 'on_track'], // hold mode: it stopped falling
+    ['largepatch', 8, -9, 'stress_damage', 'behind', 'behind'],
+    ['mowedshort', 40, 0, 'turf_density', 'too_early', 'too_early'],
+    ['mowedshort', 100, 0, 'turf_density', 'behind', 'behind'],
+    ['mowedshort', 100, 9, 'turf_density', 'on_track', 'on_track'],
   ];
 
-  it.each(MATRIX)('%s day %i delta %i on %s -> %s', (product, days, delta, metric, state, verdict) => {
+  it.each(MATRIX)('%s day %i delta %i on %s -> %s', (name, days, delta, metric, state, verdict) => {
+    const c = CASES[name];
     const cur = { [metric]: 70 + delta };
-    const progress = run({ days, applied: [PRODUCT[product]], cur });
-    const it = progress.items.find((i) => i.metric === metric);
+    const progress = run({ days, applied: c.applied, issues: c.issues, cur });
+    const it = progress.items.find((i) => i.rowId === c.rowId && i.metric === metric);
     expect(it.state).toBe(state);
     expect(it.rawVerdict).toBe(verdict);
     // And it is exactly what P10 says: this engine adds no verdict of its own.
-    expect(judgeProgress(rowOf(PRODUCT[product]), { metric, daysSinceApplication: days, scoreDelta: delta, band: CATEGORY_BAND })).toBe(verdict);
+    expect(judgeProgress(rowOf(c), { metric, daysSinceApplication: days, scoreDelta: delta, band: CATEGORY_BAND })).toBe(verdict);
   });
 
   it('every state the engine can emit is in the closed set, across a wide sweep', () => {
@@ -358,7 +462,7 @@ describe('state matrix (verdicts come from P10 judgeProgress, renamed)', () => {
           for (const confidence of ['high', 'low']) {
             for (const season of [{}, { priorSeason: 'dormant', priorDate: '2026-01-10' }]) {
               const progress = run({
-                days, applied: [app], confidence, ...season,
+                days, applied: [app], issues: ['dry_spot', 'large_patch', 'mowed_short'], confidence, ...season,
                 checks: [{ key: 'weeds', status: 'watch', recheck: { verdict: 'better', source: 'photo_pair' } }],
                 cur: { weed_suppression: 70 + d, color_health: 70 + d, stress_damage: 70 + d, turf_density: 70 + d },
               });
@@ -378,19 +482,19 @@ describe('state matrix (verdicts come from P10 judgeProgress, renamed)', () => {
   });
 
   it('a missing score is unclear, never a verdict', () => {
-    const progress = run({ days: 30, applied: [PRODUCT.broadleaf], cur: { weed_suppression: null } });
-    expect(item(progress, 'herbicide_broadleaf')).toMatchObject({ state: 'unclear', gate: 'missing_scores' });
+    const progress = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: null } });
+    expect(item(progress, 'herbicide_celsius')).toMatchObject({ state: 'unclear', gate: 'missing_scores' });
     const gone = buildLawnProgress({
       current: { date: addDays(PRIOR_DATE, 30), season: 'peak', scores: scores(), confidence: 'high' },
       prior: { date: PRIOR_DATE, season: 'peak', scores: { ...scores(), weed_suppression: null } },
-      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.broadleaf], checks: [] },
+      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.celsius], checks: [] },
     });
-    expect(item(gone, 'herbicide_broadleaf')).toMatchObject({ state: 'unclear', gate: 'missing_scores' });
+    expect(item(gone, 'herbicide_celsius')).toMatchObject({ state: 'unclear', gate: 'missing_scores' });
     expect(gone.deltas.weed_suppression).toBeNull();
   });
 
   it('a wider band needs a bigger gain to be on track, and a drop inside it is not a drop', () => {
-    const at = (band) => item(run({ days: 30, applied: [PRODUCT.broadleaf], cur: { weed_suppression: 79 }, band }), 'herbicide_broadleaf');
+    const at = (band) => item(run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 79 }, band }), 'herbicide_celsius');
     expect(at(8).state).toBe('on_track');
     expect(at(10).state).toBe('behind');
     expect(at(10).basis.band).toBe(10);
@@ -424,8 +528,23 @@ describe('transient, absence and unmapped rows are never behind', () => {
   });
 
   it('two products of one family are one row', () => {
-    const progress = run({ days: 30, applied: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }], cur: { weed_suppression: 85 } });
-    expect(progress.items.filter((i) => i.rowId === 'herbicide_broadleaf')).toHaveLength(1);
+    const progress = run({ days: 30, applied: [{ name: 'LESCO Chelated Iron Plus' }, { name: 'Chelated Iron Plus' }], cur: { color_health: 85 } });
+    expect(progress.items.filter((i) => i.rowId === 'iron_micros')).toHaveLength(1);
+  });
+
+  it('a row with nothing to judge against builds no comparison at all, whatever the score did', () => {
+    // SpeedZone, SedgeHammer Plus and the no-timing sedge row: no label
+    // efficacy timeline, so not even "holding steady" is said for them.
+    for (const app of [PRODUCT.speedZone, PRODUCT.sedgeHammer, PRODUCT.sedge, { name: 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide' }]) {
+      for (const weed of [20, 70, 95]) {
+        const progress = run({ days: 30, applied: [app], cur: { weed_suppression: weed } });
+        expect(progress.items.filter((i) => i.kind === 'applied')).toEqual([]);
+        expect(progress.unmapped).toEqual([]);
+      }
+    }
+    // Beside Celsius, only Celsius is judged.
+    const both = run({ days: 30, applied: [PRODUCT.celsius, PRODUCT.speedZone], cur: { weed_suppression: 85 } });
+    expect(both.items.filter((i) => i.kind === 'applied').map((i) => i.rowId)).toEqual(['herbicide_celsius']);
   });
 });
 
@@ -442,12 +561,12 @@ describe('missing prior, baseline and ineligible inputs', () => {
   });
 
   it('a baseline visit has no comparison, even with a prior', () => {
-    expect(run({ days: 30, isBaseline: true, applied: [PRODUCT.broadleaf] })).toMatchObject({ eligible: false, reason: 'baseline', items: [] });
+    expect(run({ days: 30, isBaseline: true, applied: [PRODUCT.celsius] })).toMatchObject({ eligible: false, reason: 'baseline', items: [] });
   });
 
   it('a prior that is not strictly earlier (same day, later) is no prior', () => {
-    expect(run({ days: 0, applied: [PRODUCT.broadleaf] })).toMatchObject({ eligible: false, reason: 'no_prior' });
-    expect(run({ days: -5, applied: [PRODUCT.broadleaf] })).toMatchObject({ eligible: false, reason: 'no_prior' });
+    expect(run({ days: 0, applied: [PRODUCT.celsius] })).toMatchObject({ eligible: false, reason: 'no_prior' });
+    expect(run({ days: -5, applied: [PRODUCT.celsius] })).toMatchObject({ eligible: false, reason: 'no_prior' });
   });
 
   it('a prior with no scores or no date is no prior', () => {
@@ -465,10 +584,10 @@ describe('missing prior, baseline and ineligible inputs', () => {
     const progress = buildLawnProgress({
       current: { date: addDays(PRIOR_DATE, 30), season: 'peak', scores: scores({ weed_suppression: 85 }), confidence: 'high' },
       prior: { scores: scores(), season: 'peak' },
-      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.broadleaf], checks: [] },
+      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.celsius], checks: [] },
     });
     expect(progress.daysSincePrior).toBe(30);
-    expect(item(progress, 'herbicide_broadleaf').state).toBe('on_track');
+    expect(item(progress, 'herbicide_celsius').state).toBe('on_track');
   });
 
   it('accepts Date objects as well as day strings', () => {
@@ -513,7 +632,7 @@ describe('output shape', () => {
     const input = {
       current: { date: addDays(PRIOR_DATE, 30), season: 'peak', scores: scores({ weed_suppression: 85 }), confidence: { level: 'high', divergentMetrics: [] } },
       prior: { date: PRIOR_DATE, season: 'peak', scores: scores() },
-      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.broadleaf, PRODUCT.fungicideCurative], checks: [{ key: 'weeds', status: 'watch' }] },
+      sinceLast: { priorDate: PRIOR_DATE, applied: [PRODUCT.celsius, PRODUCT.fungicideCurative], checks: [{ key: 'weeds', status: 'watch' }] },
     };
     const snapshot = JSON.stringify(input);
     const a = buildLawnProgress(input);
@@ -523,8 +642,12 @@ describe('output shape', () => {
   });
 
   it('a named curative target selects the curative row (the engine reuses P10 row resolution)', () => {
-    const progress = run({ days: 15, applied: [PRODUCT.fungicideCurative], cur: { stress_damage: 70 } });
-    expect(progress.items.map((i) => `${i.rowId}:${i.metric}`)).toEqual(['fungicide_curative:stress_damage']);
+    const rowIds = (app) => buildLawnExpectations({ applications: [app], visitDate: PRIOR_DATE }, { includeUnapproved: true }).rows.map((r) => r.id);
+    expect(rowIds(PRODUCT.fungicideCurative)).toEqual(['fungicide_curative']);
+    expect(rowIds(PRODUCT.fungicidePreventive)).toEqual(['fungicide_preventive']);
+    // The curative row has no progress window (2026-10-03): no item. The
+    // preventive row is still built, and only ever holds steady.
+    expect(run({ days: 15, applied: [PRODUCT.fungicideCurative], cur: { stress_damage: 70 } }).items).toEqual([]);
     const preventive = run({ days: 15, applied: [PRODUCT.fungicidePreventive], cur: { stress_damage: 40 } });
     expect(preventive.items[0]).toMatchObject({ rowId: 'fungicide_preventive', state: 'holding_steady' });
   });
@@ -692,7 +815,15 @@ describe('frozen named issues (codex r4)', () => {
     sinceLast: { priorDate: '2026-08-31', applied: [{ name: 'Artavia 2 SC', targets: [] }], checks: [], ...(issues ? { issues } : {}) },
   });
   it('a target-less fungicide is curative when the prior visit froze large_patch, preventive otherwise', () => {
-    expect(run(['large_patch']).items.map((i) => i.rowId)).toContain('fungicide_curative');
+    const rowIds = (issues) => buildLawnExpectations(
+      { applications: [{ name: 'Artavia 2 SC', targets: [] }], issues: issues || [], visitDate: '2026-08-31' },
+      { includeUnapproved: true },
+    ).rows.map((r) => r.id);
+    expect(rowIds(['large_patch'])).toContain('fungicide_curative');
+    expect(rowIds(null)).toContain('fungicide_preventive');
+    // The engine reads the same frozen issues. The curative row has no window, so
+    // it builds no item (and the large-patch issue row it supersedes builds none).
+    expect(run(['large_patch']).items).toEqual([]);
     expect(run(null).items.map((i) => i.rowId)).toContain('fungicide_preventive');
     expect(run(['not_a_key']).items.map((i) => i.rowId)).toContain('fungicide_preventive');
   });

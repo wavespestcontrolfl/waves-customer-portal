@@ -75,32 +75,53 @@ const labelExtractLimiter = require('express-rate-limit')({
   message: { error: 'Too many label reads. Try again in ten minutes.' },
 });
 const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
-router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
-router.use('/:id/label-review', (req, res, next) => {
-  if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
-  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
-  next();
-});
-router.get('/:id/label-review', async (req, res, next) => {
-  try { res.json(await labelReview.getLabelReview(req.params.id)); } catch (err) { next(err); }
-});
-router.post('/:id/label-review/extract', labelExtractLimiter, async (req, res, next) => {
-  try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId)); } catch (err) { next(err); }
-});
-router.post('/:id/label-review/decision', async (req, res, next) => {
-  try {
-    if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
-      return res.status(400).json({ error: 'A candidate id and review decision are required.' });
-    }
-    res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body));
-  } catch (err) { next(err); }
-});
-router.post('/:id/label-review/revoke', async (req, res, next) => {
-  try {
-    if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
-    res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId));
-  } catch (err) { next(err); }
-});
+const { rateGateOn } = require('../services/product-label-rates');
+router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE'), rates: rateGateOn() }));
+// One handler set per kind of label evidence; the service holds the shared
+// flow. Paths stay literal below so the staff route census can read them.
+// The use() guards are inline so the public-route scanner can prove they are
+// not routers.
+function labelReviewHandlers(kind, enabled) {
+  return {
+    guard: (req, res, next) => {
+      if (!enabled()) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
+      if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
+      next();
+    },
+    get: async (req, res, next) => {
+      try { res.json(await labelReview.getLabelReview(req.params.id, kind)); } catch (err) { next(err); }
+    },
+    extract: async (req, res, next) => {
+      try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId, kind)); } catch (err) { next(err); }
+    },
+    decision: async (req, res, next) => {
+      try {
+        if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
+          return res.status(400).json({ error: 'A candidate id and review decision are required.' });
+        }
+        res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body, kind));
+      } catch (err) { next(err); }
+    },
+    revoke: async (req, res, next) => {
+      try {
+        if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
+        res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId, kind));
+      } catch (err) { next(err); }
+    },
+  };
+}
+const weatherReview = labelReviewHandlers('weather', () => gateEnvValue('GATE_LABEL_PIPELINE'));
+router.use('/:id/label-review', (req, res, next) => weatherReview.guard(req, res, next));
+router.get('/:id/label-review', weatherReview.get);
+router.post('/:id/label-review/extract', labelExtractLimiter, weatherReview.extract);
+router.post('/:id/label-review/decision', weatherReview.decision);
+router.post('/:id/label-review/revoke', weatherReview.revoke);
+const rateReview = labelReviewHandlers('rates', rateGateOn);
+router.use('/:id/label-rate-review', (req, res, next) => rateReview.guard(req, res, next));
+router.get('/:id/label-rate-review', rateReview.get);
+router.post('/:id/label-rate-review/extract', labelExtractLimiter, rateReview.extract);
+router.post('/:id/label-rate-review/decision', rateReview.decision);
+router.post('/:id/label-rate-review/revoke', rateReview.revoke);
 
 // Robust quantity → total oz: normalizeQuantityToOz handles simple "128 oz"
 // forms; parsePackSize additionally handles supported multipack/fraction
