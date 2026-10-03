@@ -890,7 +890,11 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
   if (!customerId) return { released: 0, inFlight: 0 };
   const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
   if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: String(customerId) }, pending);
-  return releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice });
+  // Whole-or-nothing, like every multi-intent release: a Stripe cancel cannot be rolled back with the
+  // refused payer edit, so nothing is cancelled while any intent of the set has money in flight.
+  const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice });
+  if (plan.inFlight > 0) return { released: 0, inFlight: plan.inFlight };
+  return applyStampedSessionRelease(database, plan);
 }
 
 // The pay.combined.customer namespace matches createInvoicePaymentIntent /

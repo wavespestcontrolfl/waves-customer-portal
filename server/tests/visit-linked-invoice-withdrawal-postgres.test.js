@@ -193,6 +193,26 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     await expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [open.visitId])).rejects.toThrow(/payer NOT changed/);
   });
 
+  test('the customer release cancels nothing while any of the customer\'s intents is in flight (mixed sessions)', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const payerId = await payer();
+    const first = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_mixed_open' } });
+    // A second linked invoice of the same customer, with a bank debit already confirming.
+    const second = randomUUID();
+    const visit2 = randomUUID();
+    const record2 = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visit2, customer_id: first.customerId, service_type: 'Fixture General Pest Control', scheduled_date: first.date, status: 'completed' });
+    await mockPg('service_records').insert({ id: record2, customer_id: first.customerId, scheduled_service_id: visit2, service_type: 'Fixture General Pest Control', service_date: first.date });
+    await mockPg('invoices').insert({ id: second, customer_id: first.customerId, invoice_number: `FIX-${second.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 70, service_record_id: record2, stripe_payment_intent_id: 'pi_mixed_processing' });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: id === 'pi_mixed_processing' ? 'processing' : 'requires_payment_method', metadata: {} }));
+    const pending = { customerPatch: { customerId: first.customerId, payer_id: payerId } };
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, first.customerId, { invalidateLinked: true, pending }))
+      .toEqual({ released: 0, inFlight: 1 });
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await invoiceRow(first.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_mixed_open' });
+  });
+
   test('the customer-default and payer-activation releases cancel single checkouts only where the owner would move', async () => {
     const PayCombined = require('../services/pay-combined');
     const payerId = await payer(false);
