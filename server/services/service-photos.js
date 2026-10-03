@@ -16,6 +16,10 @@ const STAGED_SERVICE_PHOTO_PREFIX = 'service-photo-staging/';
 const MAX_SERVICE_PHOTO_BYTES = 15 * 1024 * 1024;
 const MAX_COMPLETION_PHOTO_DATA_URL_BYTES = 2 * 1024 * 1024;
 const VALID_PHOTO_TYPES = new Set(['before', 'after', 'issue', 'progress']);
+const SERVICE_PHOTO_VISIT_COLUMNS = [
+  'id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_type',
+  'scheduled_date', 'status',
+];
 
 const s3 = new S3Client({
   region: config.s3?.region,
@@ -65,6 +69,83 @@ function parseJsonOrNull(value) {
 function dateOrNow(value) {
   const date = value ? new Date(value) : new Date();
   return Number.isNaN(date.getTime()) ? new Date() : date;
+}
+
+function visitDate(value) {
+  if (value == null) return '';
+  return (value instanceof Date ? value.toISOString() : String(value)).slice(0, 10);
+}
+
+function servicePhotoVisitSnapshot(visit) {
+  if (!visit) return null;
+  const identity = [
+    String(visit.id ?? ''),
+    String(visit.customer_id ?? ''),
+    String(visit.property_id ?? ''),
+    String(visit.technician_id ?? ''),
+    String(visit.service_id ?? ''),
+    String(visit.service_type ?? ''),
+    visitDate(visit.scheduled_date),
+  ];
+  return {
+    customerId: visit.customer_id ?? null,
+    propertyId: visit.property_id ?? null,
+    technicianId: visit.technician_id ?? null,
+    catalogServiceId: visit.service_id ?? null,
+    serviceType: visit.service_type ?? null,
+    scheduledDate: visitDate(visit.scheduled_date),
+    status: visit.status ?? null,
+    // scheduled_services has no revision column. This opaque digest versions
+    // only the fields that decide which visit/property owns the photo;
+    // updated_at is intentionally excluded because unrelated visit writes
+    // (including photo work) may touch it.
+    revision: crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24),
+  };
+}
+
+function parseExpectedServicePhotoVisit(value) {
+  if (value == null || value === '') return null;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { parsed = null; }
+  }
+  const keys = [
+    'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
+    'scheduledDate', 'status', 'revision',
+  ];
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+    || keys.some((key) => !(key in parsed))
+    || typeof parsed.revision !== 'string') {
+    const err = new Error('expectedVisit must be a complete visit snapshot');
+    err.statusCode = 400;
+    err.code = 'invalid_expected_visit';
+    err.isOperational = true;
+    throw err;
+  }
+  return parsed;
+}
+
+const sameVisitValue = (left, right) => String(left ?? '') === String(right ?? '');
+const SERVICE_PHOTO_LIVE_STATUSES = new Set([
+  'pending', 'confirmed', 'en_route', 'on_site', 'completed',
+]);
+function servicePhotoVisitChanged(expected, visit) {
+  const live = servicePhotoVisitSnapshot(visit);
+  // Lifecycle eligibility is authoritative even for older callers that omit
+  // the optional identity snapshot.
+  if (!SERVICE_PHOTO_LIVE_STATUSES.has(String(live.status || ''))) return true;
+  if (!expected) return false;
+  if (!sameVisitValue(expected.customerId, live.customerId)
+    || !sameVisitValue(expected.propertyId, live.propertyId)
+    || !sameVisitValue(expected.technicianId, live.technicianId)
+    || !sameVisitValue(expected.catalogServiceId, live.catalogServiceId)
+    || !sameVisitValue(expected.serviceType, live.serviceType)
+    || visitDate(expected.scheduledDate) !== live.scheduledDate
+    || expected.revision !== live.revision) return true;
+  // Lifecycle can advance while a selected file is waiting or retrying. The
+  // identity fields above still bind the bytes to the same visit; only a
+  // cancelled/skipped/rescheduled or an unknown terminal state closes uploads.
+  return false;
 }
 
 function safePhotoName(value, fallback = 'service-photo.jpg') {
@@ -416,6 +497,139 @@ async function uploadStagedServicePhotoBuffer({
   }
 }
 
+// One commit boundary for field-photo uploads. Locking scheduled_services
+// before deciding between staging and service_photos closes both races that
+// matter here: completion cannot pass the upload while it is staging, and a
+// reassignment/reschedule cannot land after an unlocked ownership check but
+// before the photo row is committed.
+async function uploadServicePhotoForVisit({
+  scheduledServiceId,
+  actor,
+  expectedVisit,
+  expectedServiceRecordId,
+  buffer,
+  originalName,
+  mimeType,
+  photoType = 'progress',
+  sortOrder = 0,
+  caption,
+  thumbnailKey,
+  stateBadge,
+  zoneId,
+  findingId,
+  gpsLat,
+  gpsLng,
+  capturedAt,
+  device,
+  appVersion,
+  aiTags,
+  annotation,
+  knex = db,
+}) {
+  const expected = parseExpectedServicePhotoVisit(expectedVisit);
+  const newlyUploadedObjects = [];
+  return withPhotoDbTransaction(knex, async (trx) => {
+    const visit = await trx('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .forUpdate()
+      .first(...SERVICE_PHOTO_VISIT_COLUMNS);
+    if (!visit) {
+      throw Object.assign(new Error('Service not found'), {
+        statusCode: 404, code: 'service_not_found', isOperational: true,
+      });
+    }
+    const { technicianVisitRowInScope } = require('./technician-visit-scope');
+    if (!technicianVisitRowInScope(actor, visit)) {
+      throw Object.assign(new Error('Not assigned to this service'), {
+        statusCode: 403, code: 'not_assigned', isOperational: true,
+      });
+    }
+    if (servicePhotoVisitChanged(expected, visit)) {
+      throw Object.assign(new Error('This visit changed since the photo was selected. Reopen it and review the current visit.'), {
+        statusCode: 409, code: 'visit_identity_changed', isOperational: true,
+      });
+    }
+
+    const serviceRecordQuery = trx('service_records').where({
+      scheduled_service_id: scheduledServiceId,
+      ...(expectedServiceRecordId ? { id: expectedServiceRecordId } : {}),
+    });
+    if (!expectedServiceRecordId) serviceRecordQuery.orderBy('created_at', 'desc');
+    const serviceRecord = await serviceRecordQuery.first('id');
+    if (expectedServiceRecordId && !serviceRecord) {
+      throw Object.assign(new Error('The completion record changed since photo recovery was saved.'), {
+        statusCode: 409, code: 'visit_identity_changed', isOperational: true,
+      });
+    }
+    if (serviceRecord) {
+      const photo = await uploadServicePhotoBuffer({
+        serviceRecordId: serviceRecord.id,
+        buffer,
+        originalName,
+        mimeType,
+        photoType,
+        sortOrder,
+        caption,
+        thumbnailKey,
+        stateBadge,
+        zoneId,
+        findingId,
+        gpsLat,
+        gpsLng,
+        // A recovered attachment must append after the closeout chain.
+        capturedAt: undefined,
+        device,
+        appVersion,
+        aiTags,
+        annotation,
+        newlyUploadedObjects,
+        knex: trx,
+      });
+      return {
+        photo,
+        staged: false,
+        reconcileRequired: true,
+        serviceRecordId: serviceRecord.id,
+        visit: servicePhotoVisitSnapshot(visit),
+      };
+    }
+
+    const photo = await uploadStagedServicePhotoBuffer({
+      scheduledServiceId,
+      technicianId: actor?.technicianId,
+      buffer,
+      originalName,
+      mimeType,
+      photoType,
+      sortOrder,
+      caption,
+      gpsLat,
+      gpsLng,
+      capturedAt,
+      newlyUploadedObjects,
+      knex: trx,
+    });
+    return {
+      photo,
+      staged: true,
+      reconcileRequired: false,
+      serviceRecordId: null,
+      visit: servicePhotoVisitSnapshot(visit),
+    };
+  }).catch(async (err) => {
+    // The inner upload helpers can clean up insert-time failures, but their
+    // success still precedes this outer transaction's commit. If that commit
+    // rolls back, remove only objects created by this attempt; deduped rows
+    // are deliberately absent from this list.
+    // A driver can report a failed COMMIT after Postgres accepted it. Verify
+    // from a fresh connection before deleting bytes, or that ambiguous result
+    // can leave a committed photo row pointing at an object we just removed.
+    const cleanupKnex = knex?.isTransaction ? db : knex;
+    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects, { verifyAbsentWith: cleanupKnex });
+    throw err;
+  });
+}
+
 async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId, knex = db }) {
   if (!scheduledServiceId || !serviceRecordId) return [];
   return withPhotoDbTransaction(knex, async (trx) => {
@@ -641,8 +855,12 @@ module.exports = {
   uniqueServicePhotoCount,
   withTrackedServicePhotoTransaction,
   uploadServicePhotoBuffer,
+  uploadServicePhotoForVisit,
   uploadServicePhotoDataUrls,
   uploadStagedServicePhotoBuffer,
+  parseExpectedServicePhotoVisit,
+  servicePhotoVisitChanged,
+  servicePhotoVisitSnapshot,
   updateStagedServicePhotoCaption,
   deleteStagedServicePhoto,
   promoteStagedServicePhotos,
