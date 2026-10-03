@@ -25928,9 +25928,13 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
         catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         for (const row of catalogRows) {
-          const named = Boolean(row?.name)
-            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
-          if (named) mentionedCatalogNames.push(row.name);
+          // By its name or its short display name. A registered alias the
+          // prompt writes out is screened in the shared builder
+          // (mentionedText): aliases are staff shorthand, matched whole.
+          const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+            .filter((label) => CompletionRecap.containsProductName(fullUserMessage, [{ name: label }], { wholeWord: true }));
+          const named = mentioned.length > 0;
+          mentionedCatalogNames.push(...mentioned);
           // Its actives too: a draft must not swap the named product for
           // its active ingredient; and an active the prompt names on its own
           // ("azoxystrobin" in a note) is screened even with no product name.
@@ -25954,6 +25958,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         db,
         wholeCatalog: writerRulesOn,
         catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);

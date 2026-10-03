@@ -79,6 +79,14 @@ describe('catalog-wide brand screen', () => {
     expect(screen('We set snap stations in the garage.')).toBe(true);
   });
 
+  test('an alias the prompt writes out is screened in any case, and only then', async () => {
+    const copy = 'Talstar p was discussed, and we added a dispatch wetting agent to the tank.';
+    expect((await build())(copy)).toBe(false);
+    expect((await build({ mentionedText: 'Customer asked about talstar p.' }))(copy)).toBe(true);
+    expect((await build({ mentionedText: 'Tech note: used DISPATCH wetting agent.' }))(copy)).toBe(true);
+    expect((await build({ mentionedText: 'Treated the thresholds.' }))(copy)).toBe(false);
+  });
+
   test('off by default: no catalog-wide screen without wholeCatalog', async () => {
     const screen = await buildReportTradeNameScreen({ products: [], catalogRows: CATALOG });
     expect(screen('We used Termidor along the thresholds.')).toBe(false);
