@@ -87,6 +87,12 @@ describe('evaluateDecision', () => {
     expect(verdict.refusals).toContain(reason);
   });
 
+  test('a same-day slot whose start has passed (Eastern) is in the past; one still ahead is not', () => {
+    // 10:00 ET on Oct 6 = 14:00Z (EDT).
+    expect(evaluate({ now: new Date('2026-10-06T15:00:00Z') }).refusals).toContain('slot_in_past');
+    expect(evaluate({ now: new Date('2026-10-06T13:30:00Z') }).refusals).not.toContain('slot_in_past');
+  });
+
   test('the quote check ignores case, curly quotes and spacing, never wording', () => {
     expect(evaluate({ inboundBody: 'TUESDAY   works  for us', decision: accept(1, 'tuesday works') }).outcome).toBe('would_move');
     expect(evaluate({ inboundBody: 'We can’t do Tuesday', decision: accept(1, "can't do Tuesday") }).refusals).toEqual([]);

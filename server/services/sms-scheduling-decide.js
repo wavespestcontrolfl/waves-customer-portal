@@ -23,7 +23,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
-const { etDateString, dateOnlyString } = require('../utils/datetime-et');
+const { etDateString, dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
@@ -155,7 +155,10 @@ function evaluateDecision({ offer, decision, inboundBody, customer, fromPhone, v
   const onFile = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer?.[col])));
   if (!sender.some((key) => onFile.has(key))) refusals.push('phone_not_on_file');
   if (slot && (!slot.date || !slot.start || !slot.end)) refusals.push('slot_unresolved');
-  if (slot?.date && slot.date < etDateString(now)) refusals.push('slot_in_past');
+  // Already started (Eastern wall clock): a same-day slot whose start has
+  // passed is as gone as yesterday's.
+  if (slot?.date && (slot.date < etDateString(now)
+    || (slot.start && parseETDateTime(`${slot.date}T${slot.start}`).getTime() <= new Date(now).getTime()))) refusals.push('slot_in_past');
 
   const target = slot ? { date: slot.date || null, start: slot.start || null, end: slot.end || null } : null;
   let would = null;
