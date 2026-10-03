@@ -226,6 +226,11 @@ describe('the whole lookup when every fact provider fails', () => {
     const failed = {};
     await lookupPropertyFromAITrio(TYPED, geo, failed, { commercialSuiteSizing: true });
     expect(failed.parentParcelCheckRan).toBe(false);
+    // The county layer cleanly finds nothing, then the statewide fallback errors fast: still not an answer.
+    lookupCountyParcelByPoint.mockResolvedValue(null);
+    const fallbackFailed = {};
+    await lookupPropertyFromAITrio(TYPED, geo, fallbackFailed, { commercialSuiteSizing: true });
+    expect(fallbackFailed.parentParcelCheckRan).toBe(false);
     // No usable geocode point: the check cannot apply, which is definitive.
     const noPoint = {};
     await lookupPropertyFromAITrio(TYPED, { county: 'Examplecounty' }, noPoint, { commercialSuiteSizing: true });

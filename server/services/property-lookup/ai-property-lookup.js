@@ -2467,7 +2467,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
         // A county-layer failure stays a failure unless the statewide layer
         // actually finds the parcel (checked below).
-        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, pointLeg(fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })));
+        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, pointLeg(fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, {
+          timeoutMs: fdorTimeoutMs,
+          // The statewide layer swallows its own errors by default; here a
+          // failed query must read as a failure, not as "no parcel".
+          rethrowErrors: true,
+        })));
       } else {
         pointLookupFailed = true;
       }
