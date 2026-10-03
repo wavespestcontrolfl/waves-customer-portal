@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const migration = require('../models/migrations/20261002230000_portal_chat_requests');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { runPortalTurn, turnScopeKey } = require('../services/ai-assistant/portal-turn');
 
 const url = process.env.PORTAL_CHAT_TEST_DATABASE_URL;
@@ -143,6 +144,7 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     }, { budgetMs: 3_000 }));
 
     expect(response.reply).toMatch(/trouble getting that answer/);
+    expect(response.reply).toContain(WAVES_SUPPORT_PHONE_DISPLAY);
     await pause(150);
     expect(await mockApp('ai_escalations').count('* as n').first()).toMatchObject({ n: '0' });
     const receipt = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
@@ -189,6 +191,109 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     expect(response.reply).toMatch(/trouble getting that answer/);
     expect(response.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
     expect(response.cards).toEqual([expect.objectContaining({ type: 'payments' })]);
+  });
+
+  test('a normal result survives failed receipt completion and replays without rerunning', async () => {
+    const requestId = randomUUID();
+    let processCalls = 0;
+    const normal = {
+      reply: 'Your next service is Tuesday morning.',
+      conversationId: null,
+      escalated: false,
+      generated: true,
+      actions: [{ type: 'tab', label: 'Open Schedule', tab: 'schedule' }],
+    };
+    await mockApp.raw(`
+      CREATE FUNCTION reject_normal_reply_completion() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.state = 'completed' AND OLD.state <> 'completed' THEN
+          RAISE EXCEPTION 'synthetic normal completion failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await mockApp.raw(`
+      CREATE TRIGGER reject_normal_reply_completion_trigger
+      BEFORE UPDATE ON portal_chat_requests
+      FOR EACH ROW EXECUTE FUNCTION reject_normal_reply_completion()
+    `);
+
+    try {
+      const first = await runPortalTurn(args(requestId, async () => {
+        processCalls += 1;
+        return normal;
+      }));
+      expect(first).toEqual({ ...normal, requestId });
+      expect(processCalls).toBe(1);
+
+      const checkpoint = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
+      expect(checkpoint.state).toBe('processing');
+      expect(checkpoint.response).toEqual({ ...normal, requestId });
+    } finally {
+      await mockApp.raw('DROP TRIGGER IF EXISTS reject_normal_reply_completion_trigger ON portal_chat_requests');
+      await mockApp.raw('DROP FUNCTION IF EXISTS reject_normal_reply_completion()');
+    }
+
+    const replay = await runPortalTurn(args(requestId, async () => {
+      processCalls += 1;
+      return { reply: 'must not rerun', escalated: false };
+    }));
+    expect(replay).toEqual({ ...normal, requestId });
+    expect(processCalls).toBe(1);
+    expect((await mockApp('portal_chat_requests').where({ request_id: requestId }).first()).state)
+      .toBe('completed');
+  });
+
+  test('a claim that finishes after the work deadline remains retryable and never runs the turn', async () => {
+    const requestId = randomUUID();
+    let processCalls = 0;
+    await mockApp.raw(`
+      CREATE FUNCTION delay_portal_claim_past_work_deadline() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.state = 'processing' AND OLD.state = 'pending' THEN
+          PERFORM pg_sleep(GREATEST(
+            0,
+            EXTRACT(EPOCH FROM (NEW.lease_expires_at - clock_timestamp())) - 0.35
+          ));
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await mockApp.raw(`
+      CREATE TRIGGER delay_portal_claim_past_work_deadline_trigger
+      BEFORE UPDATE ON portal_chat_requests
+      FOR EACH ROW EXECUTE FUNCTION delay_portal_claim_past_work_deadline()
+    `);
+
+    let receipt;
+    try {
+      const first = await runPortalTurn(args(requestId, async () => {
+        processCalls += 1;
+        return { reply: 'must not run', escalated: false };
+      }, { budgetMs: 2_000 }));
+      expect(first).toMatchObject({ pending: true, retryable: true, requestId });
+      expect(first.reply).toMatch(/still finishing/);
+      expect(processCalls).toBe(0);
+
+      receipt = await mockApp('portal_chat_requests').where({ request_id: requestId }).first();
+      expect(receipt.state).toBe('processing');
+      expect(receipt.response).toBeNull();
+    } finally {
+      await mockApp.raw('DROP TRIGGER IF EXISTS delay_portal_claim_past_work_deadline_trigger ON portal_chat_requests');
+      await mockApp.raw('DROP FUNCTION IF EXISTS delay_portal_claim_past_work_deadline()');
+    }
+
+    await pause(Math.max(0, new Date(receipt.lease_expires_at).getTime() - Date.now()) + 50);
+    const retry = await runPortalTurn(args(requestId, async () => {
+      processCalls += 1;
+      return { reply: 'completed on retry', escalated: false };
+    }));
+    expect(retry.reply).toBe('completed on retry');
+    expect(processCalls).toBe(1);
+    expect((await mockApp('portal_chat_requests').where({ request_id: requestId }).first()).state)
+      .toBe('completed');
   });
 
   test('a committed handoff survives hanging optional work, lost finish acknowledgement, and retry', async () => {
