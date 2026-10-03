@@ -68,7 +68,7 @@ describe('rule 1: too_early is never behind', () => {
   ));
 
   it('covers every family that can be judged (config-derived)', () => {
-    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative', 'speedZone']);
+    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative']);
   });
 
   it.each(families)('%s: no behind on any day up to the close of the metric window, at any delta', (_name, app) => {

@@ -57,11 +57,11 @@ const FAMILY = {
   CELSIUS: 'herbicide_celsius',
   SPEEDZONE: 'herbicide_speedzone',
   SEDGEHAMMER: 'herbicide_sedgehammer',
-  // Sedge products whose label was not read for a results timeline: the row
-  // states no timing at all.
+  // Sedge products with no timeline this engine can state: the 75% SedgeHammer
+  // (label not read) and Dismiss / Dismiss NXT (their 60-day claim holds only
+  // inside a labeled rate range, and the engine is not given the rate). The
+  // row states no timing at all.
   SEDGE: 'herbicide_sedge',
-  DISMISS: 'herbicide_dismiss',
-  DISMISS_NXT: 'herbicide_dismiss_nxt',
   PRE_EMERGENT: 'pre_emergent',
   GRANULAR_N: 'granular_fertilizer',
   POTASSIUM: 'potassium_feed',
@@ -84,9 +84,9 @@ const PRODUCT_CLASS_ENTRIES = [
   // The 75% formulation is a different label (not EPA 81880-24), so it does
   // not borrow SedgeHammer Plus's two-week sentence.
   ['Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide', FAMILY.SEDGE],
-  ['Dismiss', FAMILY.DISMISS],
-  ['Dismiss 64 oz', FAMILY.DISMISS],
-  ['Dismiss NXT', FAMILY.DISMISS_NXT],
+  ['Dismiss', FAMILY.SEDGE],
+  ['Dismiss 64 oz', FAMILY.SEDGE],
+  ['Dismiss NXT', FAMILY.SEDGE],
 
   // Pre-emergent (judged by absence)
   ['Prodiamine 65 WDG', FAMILY.PRE_EMERGENT],
@@ -257,7 +257,9 @@ const PRODUCT_ROWS = {
       first: label(0, 1, 'EPA 432-1507 (2021)', CELSIUS_LABEL_QUOTE),
       full: label(7, 28, 'EPA 432-1507 (2021)', CELSIUS_LABEL_QUOTE),
     },
-    visibleChange: 'Treated weeds stop growing within hours. They then yellow or turn reddish-purple and die back, with control in about 1 to 4 weeks depending on the weed and the weather.',
+    // Kept short enough that any by-next-visit line below fits beside it under
+    // the report's what-to-expect word cap.
+    visibleChange: 'Treated weeds stop growing within hours, then yellow or redden and die back over about 1 to 4 weeks, depending on the weed and the weather.',
     limits: [],
     secondApp: {
       possible: true,
@@ -268,9 +270,9 @@ const PRODUCT_ROWS = {
       cap: CELSIUS_YTD_CAP,
     },
     byNextVisit: {
-      partial: 'By your next visit, treated weeds should have stopped growing and may be yellowing or turning reddish-purple.',
+      partial: 'By your next visit, treated weeds should have stopped growing and may be changing color.',
       visible: 'By your next visit, most treated weeds should be yellowing, browning or both.',
-      complete: 'By your next visit, most treated weeds should be yellow, brown or fading. Any still green then get a second look.',
+      complete: 'By your next visit, most treated weeds should be yellow, brown or fading.',
     },
     contactTrigger: 'If treated weeds are still green and growing after about 4 weeks, let us know.',
   },
@@ -283,9 +285,9 @@ const PRODUCT_ROWS = {
     mode: null,
     appliesTo: 'selective weed control',
     metric: 'weed_suppression',
-    metricWindows: {
-      weed_suppression: judged('gain', { startDays: 1, fullMinDays: 7, closeDays: 21 }),
-    },
+    // No progress window: the label says death "can occur" in 7 to 14 days,
+    // a possibility, so there is no day by which a gain is due.
+    metricWindows: {},
     transient: false,
     judgedByAbsence: false,
     approved: true,
@@ -326,64 +328,24 @@ const PRODUCT_ROWS = {
       first: label(14, 14, 'EPA 81880-24 (2020)', SEDGEHAMMER_LABEL_QUOTE),
       full: null,
     },
-    visibleChange: 'Sedge usually shows the treatment within about 2 weeks, starting at the base of the plant. Its leaves can stay green for a while even though the treatment is working.',
+    visibleChange: 'Sedge usually shows the treatment within about 2 weeks, starting at its base. Its leaves can stay green while the treatment is working.',
     limits: ['Larger or older sedge can need a second treatment about 6 to 10 weeks later.'],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Sedge usually takes up to about 2 weeks to show the treatment, so your next visit may be early for a read.',
-      visible: 'By your next visit, treated sedge should show the treatment at its base, even if its leaves are still green.',
+      too_early: 'Your next visit may be too early to see the treatment on the sedge.',
+      visible: 'By your next visit, treated sedge is likely to show the treatment at its base.',
     },
     // Six weeks is our service choice (the start of the label's 6 to 10 week
     // second-treatment interval), not a label instruction to wait.
     contactTrigger: 'If sedge is still growing strongly after about 6 weeks, let us know.',
   },
 
-  // Dismiss, EPA Reg. 279-3295 (2024 label): "will generally control sedges
-  // for at least 60 days." The turf directions give no speed of results (the
-  // master label's "Visible results in 24 hours" is optional marketing claim
-  // text), so there is no speed line, no by-next-visit line and no progress
-  // window: with no day by which a gain is due, the row is never judged.
-  herbicide_dismiss: {
-    id: 'herbicide_dismiss',
-    family: FAMILY.DISMISS,
-    mode: null,
-    appliesTo: 'sedge control',
-    metric: 'weed_suppression',
-    metricWindows: {},
-    transient: false,
-    judgedByAbsence: false,
-    approved: true,
-    windows: { first: null, full: null },
-    visibleChange: 'This treatment generally controls sedge for at least 60 days.',
-    limits: ['Sedge regrows from underground tubers, so repeat treatment is common.'],
-    secondApp: null,
-    byNextVisit: {},
-    contactTrigger: 'If treated sedge keeps spreading, let us know.',
-  },
-
-  // Dismiss NXT, EPA Reg. 101563-315 (2026 label): "will generally control
-  // sedges for up to 60 days." A different claim from Dismiss's "at least",
-  // so it has its own row and its own word. Same omissions as Dismiss.
-  herbicide_dismiss_nxt: {
-    id: 'herbicide_dismiss_nxt',
-    family: FAMILY.DISMISS_NXT,
-    mode: null,
-    appliesTo: 'sedge control',
-    metric: 'weed_suppression',
-    metricWindows: {},
-    transient: false,
-    judgedByAbsence: false,
-    approved: true,
-    windows: { first: null, full: null },
-    visibleChange: 'This treatment generally controls sedge for up to 60 days.',
-    limits: ['Sedge regrows from underground tubers, so repeat treatment is common.'],
-    secondApp: null,
-    byNextVisit: {},
-    contactTrigger: 'If treated sedge keeps spreading, let us know.',
-  },
-
-  // Sedge products with no label-read timeline (SedgeHammer 75%). One line,
-  // carried over from the old shared sedge row, and no timing of any kind.
+  // Sedge products with no timeline to state: the 75% SedgeHammer, Dismiss
+  // (EPA 279-3295) and Dismiss NXT (EPA 101563-315). The Dismiss labels say
+  // sedge is generally controlled for "at least" / "up to" 60 days, but only
+  // inside a labeled rate range, and their turf directions give no speed of
+  // results. One line, carried over from the old shared sedge row, and no
+  // timing, by-next-visit line or progress window.
   herbicide_sedge: {
     id: 'herbicide_sedge',
     family: FAMILY.SEDGE,
@@ -800,7 +762,7 @@ const ISSUE_ROWS = {
     behindEligible: false,
     approved: true,
     // Only used when no herbicide row applies on this visit.
-    onlyWithoutRows: [FAMILY.BROADLEAF, FAMILY.CELSIUS, FAMILY.SPEEDZONE, FAMILY.SEDGEHAMMER, FAMILY.DISMISS, FAMILY.DISMISS_NXT, FAMILY.SEDGE],
+    onlyWithoutRows: [FAMILY.BROADLEAF, FAMILY.CELSIUS, FAMILY.SPEEDZONE, FAMILY.SEDGEHAMMER, FAMILY.SEDGE],
     windows: { first: null, full: null },
     visibleChange: 'Treatment for the weeds seen is planned for the next visit.',
     limits: [],
@@ -818,8 +780,6 @@ const ROW_PRIORITY = [
   'herbicide_speedzone',
   'herbicide_broadleaf',
   'herbicide_sedgehammer',
-  'herbicide_dismiss',
-  'herbicide_dismiss_nxt',
   'herbicide_sedge',
   'fungicide_curative',
   'insecticide_curative',
