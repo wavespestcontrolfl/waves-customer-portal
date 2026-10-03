@@ -121,28 +121,41 @@ async function resolveOnTransition({ jobId, toStatus, resolvedBy = null, trx = n
   return resolveForService({ serviceId: jobId, resolution, resolvedBy, trx });
 }
 
-// One unresolved flagged row by id (the card's two person actions).
-async function loadOpenLog(t, logId) {
+// One flagged row by id, LOCKED: the two person decisions, a completion, a
+// cancellation and a rebooker move all settle the same row, so a decision reads it
+// under FOR UPDATE and acts on what the lock shows — never on an earlier read.
+async function lockLog(t, logId) {
   return t('reschedule_log')
     .where({ id: logId, reason_code: 'customer_noshow' })
-    .whereNull('resolved_at')
-    .first('id', 'scheduled_service_id', 'miss_confirmed_at');
+    .forUpdate()
+    .first('id', 'scheduled_service_id', 'resolved_at', 'miss_confirmed_at');
 }
 
 /**
  * "This was a miss": the row stays open (it still needs rebooking) and is now a
  * confirmed miss. The card is replaced by one that says so, through the alert
  * writer, so every connected dispatcher sees the change.
+ *
+ * `reopen`: a person marking the visit no-show in dispatch when the nightly check
+ * had ALREADY flagged that same occurrence (admin-dispatch skips a second log
+ * row). That person's call stands even on a row settled earlier — a "not a miss"
+ * dismissal or the backlog clear — so the row is reopened as a confirmed miss.
+ * The card's own button never reopens: a settled row is `not_found` there.
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-async function confirmMiss({ logId, confirmedBy = null } = {}) {
+async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
-    const log = await loadOpenLog(t, logId);
+    const log = await lockLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
-    if (!log.miss_confirmed_at) {
-      await t('reschedule_log').where({ id: logId }).whereNull('resolved_at')
-        .update({ miss_confirmed_at: t.fn.now(), miss_confirmed_by: confirmedBy ? String(confirmedBy).slice(0, 80) : null });
+    if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
+    const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
+    if (log.resolved_at) {
+      await t('reschedule_log').where({ id: logId })
+        .update({ resolved_at: null, resolution: null, resolved_by: null, miss_confirmed_at: t.fn.now(), miss_confirmed_by: by });
+    } else if (!log.miss_confirmed_at) {
+      await t('reschedule_log').where({ id: logId })
+        .update({ miss_confirmed_at: t.fn.now(), miss_confirmed_by: by });
     }
     if (log.scheduled_service_id && queueEnabled()) {
       const service = await t('scheduled_services').where({ id: log.scheduled_service_id })
@@ -174,8 +187,8 @@ async function confirmMiss({ logId, confirmedBy = null } = {}) {
 async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
-    const log = await loadOpenLog(t, logId);
-    if (!log) return { ok: false, reason: 'not_found' };
+    const log = await lockLog(t, logId);
+    if (!log || log.resolved_at) return { ok: false, reason: 'not_found' };
     const by = dismissedBy ? String(dismissedBy).slice(0, 80) : null;
     const reason = String(note || '').trim().slice(0, 200);
     await t('reschedule_log').where({ id: logId }).whereNull('resolved_at').update({

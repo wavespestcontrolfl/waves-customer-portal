@@ -3287,6 +3287,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
             });
           })
           .first('id');
+        if (alreadyFlagged) {
+          // The nightly check already flagged this occurrence, so no second row is
+          // logged — but a person has now called it a no-show: that confirms the
+          // existing row (reopening one settled earlier) and its card.
+          await require('../services/not-closed-out').confirmMiss({
+            logId: alreadyFlagged.id, confirmedBy: req.technicianId, reopen: true,
+          });
+        }
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
           // the occurrence as it stood under the transition's row lock
@@ -6554,7 +6562,13 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert } = require('../services/dispatch-alerts');
+    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+    // A decision-only card (a visit not closed out) is settled by its own
+    // decision routes; a bare resolve would close it and record nothing.
+    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
+    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
     const row = await resolveAlert({
       id: req.params.id,
       resolvedBy: req.technicianId,

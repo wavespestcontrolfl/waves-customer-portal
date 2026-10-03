@@ -22,11 +22,13 @@ jest.mock('../services/dispatch-alerts', () => ({
 // update/first/select act on the filtered set. transaction(fn) runs fn on itself.
 const mockTables = { reschedule_log: [], dispatch_alerts: [], scheduled_services: [] };
 let mockFailTransaction = false;
+const mockLocks = [];
 function mockTable(name) {
   let rows = mockTables[name] || [];
   const q = {
     where(cond) { rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
     whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
+    forUpdate() { mockLocks.push(name); return q; },
     async update(patch) {
       for (const r of rows) for (const [k, v] of Object.entries(patch)) r[k] = v && v.__raw ? `raw:${v.__raw}` : v;
       return rows.length;
@@ -61,6 +63,7 @@ const service = { id: 'visit-1', technician_id: 'tech-1', scheduled_date: '2026-
 beforeEach(() => {
   mockGateOn = true;
   mockFailTransaction = false;
+  mockLocks.length = 0;
   mockCreateAlertOnce.mockClear();
   mockResolveAlert.mockClear();
   mockTables.reschedule_log = [logRow()];
@@ -168,6 +171,22 @@ describe('the dispatcher\'s two decisions', () => {
     await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF });
     expect(mockTables.reschedule_log[1].resolved_at).toBeNull();
     expect(mockResolveAlert).not.toHaveBeenCalled();
+  });
+
+  test('both decisions read the row under a lock, so a settle that landed first wins', async () => {
+    await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
+    await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF });
+    expect(mockLocks.filter((tbl) => tbl === 'reschedule_log')).toHaveLength(2);
+  });
+
+  test('a dispatch no-show on an already-flagged visit confirms the existing row, reopening one settled earlier', async () => {
+    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'backlog', resolved_by: 'migration' })];
+    mockTables.dispatch_alerts = [];
+    // the card's own button never reopens a settled row
+    expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF })).toEqual({ ok: false, reason: 'not_found' });
+    expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF, reopen: true })).toEqual({ ok: true });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: null, resolution: null, resolved_by: null, miss_confirmed_at: 'NOW', miss_confirmed_by: STAFF });
+    expect(mockCreateAlertOnce.mock.calls[0][0].payload).toMatchObject({ log_id: 'log-1', miss_confirmed: true });
   });
 
   test('a row that is already settled, or not a flagged visit, is not_found for both decisions', async () => {
