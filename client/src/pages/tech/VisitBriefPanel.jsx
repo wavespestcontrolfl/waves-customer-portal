@@ -121,7 +121,109 @@ const CODE_LABELS = [
   ['lockbox', 'Lockbox'],
 ];
 
-function AccessSection({ alerts, access }) {
+const gateBtnStyle = {
+  minHeight: 36, padding: '4px 12px', borderRadius: 6, fontSize: 14, cursor: 'pointer',
+  border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.text,
+};
+
+// Neighborhood gate codes from the visit (GATE_NEIGHBORHOOD_TECH_ACTIONS).
+// `gate` ({ visitId, request, onChanged }) is set when this stop's
+// neighborhood can take them: a neighborhood code alert then offers "Wrong
+// code" (the office checks it; it is never removed here) and the section
+// offers "Add gate code" (live for every stop in the neighborhood).
+function useGateCodeActions(gate) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
+  const post = async (suffix, body, ok) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await gate.request(`/admin/neighborhood-access/visits/${gate.visitId}/entries${suffix}`, { method: 'POST', body: JSON.stringify(body) });
+      setNote({ ok });
+      gate.onChanged?.();
+      return true;
+    } catch (err) {
+      setNote({ error: err?.message || 'Could not save. Try again.' });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  return {
+    busy,
+    note,
+    clearNote: () => setNote(null),
+    markWrong: (alert) => {
+      if (!window.confirm(`Report "${alert.text}" as not working? The office will check it.`)) return;
+      post(`/${alert.neighborhoodEntryId}/wrong`, {}, 'Reported. The office will check that code.');
+    },
+    add: (code) => post('', { code }, 'Saved. Every stop in this neighborhood now shows it.'),
+  };
+}
+
+function GateAlertControl({ alert, actions }) {
+  if (alert.reportedWrong) return <span style={{ color: DARK.muted, flexShrink: 0 }}>Reported wrong</span>;
+  return (
+    <button type="button" disabled={actions.busy} onClick={() => actions.markWrong(alert)} style={{ ...gateBtnStyle, flexShrink: 0, opacity: actions.busy ? 0.6 : 1 }}>
+      Wrong code
+    </button>
+  );
+}
+
+function GateAddCode({ actions }) {
+  const [adding, setAdding] = useState(false);
+  const [code, setCode] = useState('');
+  const typed = code.trim();
+  const close = () => { setAdding(false); setCode(''); };
+  const submit = async (e) => {
+    e.preventDefault();
+    if (typed && await actions.add(typed)) close();
+  };
+  return (
+    <>
+      {adding ? (
+        <form onSubmit={submit} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+          <input
+            aria-label="Neighborhood gate code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            inputMode="tel"
+            autoComplete="off"
+            maxLength={12}
+            placeholder="Gate code"
+            style={{ ...gateBtnStyle, cursor: 'text', flex: '1 1 120px', minWidth: 0 }}
+          />
+          <button type="submit" disabled={actions.busy || !typed} style={{ ...gateBtnStyle, opacity: actions.busy || !typed ? 0.6 : 1 }}>
+            {actions.busy ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" disabled={actions.busy} onClick={() => { close(); actions.clearNote(); }} style={gateBtnStyle}>Cancel</button>
+        </form>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <button type="button" disabled={actions.busy} onClick={() => { setAdding(true); actions.clearNote(); }} style={gateBtnStyle}>Add gate code</button>
+        </div>
+      )}
+      {actions.note?.ok && <p role="status" style={factMutedStyle}>{actions.note.ok}</p>}
+      {actions.note?.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red }}>{actions.note.error}</p>}
+    </>
+  );
+}
+
+const alertRowStyle = (a, split) => {
+  const accent = a?.type === 'chemical' ? DARK.red : a?.type === 'no_card_on_file' ? DARK.amber : null;
+  return {
+    fontSize: 14,
+    color: accent || DARK.text,
+    fontWeight: a?.type === 'no_card_on_file' ? 600 : undefined,
+    marginBottom: 3,
+    paddingLeft: 8,
+    borderLeft: `2px solid ${accent || DARK.teal}`,
+    ...(split ? { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } : {}),
+  };
+};
+
+function AccessSection({ alerts, access, gate = null }) {
+  const gateActions = useGateCodeActions(gate);
   const codeRows = access
     ? CODE_LABELS.map(([key, label]) => (access.codes?.[key] ? [label, access.codes[key]] : null)).filter(Boolean)
     : [];
@@ -135,24 +237,18 @@ function AccessSection({ alerts, access }) {
       access.specialInstructions ? ['Instructions', access.specialInstructions] : null,
     ].filter(Boolean)
     : [];
-  if (!alerts.length && !codeRows.length && !noteRows.length) return null;
+  if (!alerts.length && !codeRows.length && !noteRows.length && !gate) return null;
   return (
     <>
       <SectionLabel>Access</SectionLabel>
       {alerts.map((a, i) => {
         const text = typeof a === 'string' ? a : a?.text;
         if (!text) return null;
-        const accent = a?.type === 'chemical' ? DARK.red : a?.type === 'no_card_on_file' ? DARK.amber : null;
+        const canReport = !!gate && !!a?.neighborhoodEntryId;
         return (
-          <div key={i} style={{
-            fontSize: 14,
-            color: accent || DARK.text,
-            fontWeight: a?.type === 'no_card_on_file' ? 600 : undefined,
-            marginBottom: 3,
-            paddingLeft: 8,
-            borderLeft: `2px solid ${accent || DARK.teal}`,
-          }}>
-            {text}
+          <div key={i} style={alertRowStyle(a, canReport)}>
+            {canReport ? <span>{text}</span> : text}
+            {canReport && <GateAlertControl alert={a} actions={gateActions} />}
           </div>
         );
       })}
@@ -167,6 +263,7 @@ function AccessSection({ alerts, access }) {
           <span style={{ color: DARK.muted }}>{label}: </span>{value}
         </p>
       ))}
+      {gate && <GateAddCode actions={gateActions} />}
     </>
   );
 }
@@ -834,7 +931,7 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null }) {
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
@@ -891,6 +988,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   }
   const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
+  // The day row marks a member whose neighborhood takes gate codes from the visit.
+  const gateVisit = request ? stop.services.find((m) => m.neighborhoodGateActions === true) : null;
   const grouped = stop.services.length > 1;
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
@@ -972,7 +1071,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       )}
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 
-      <AccessSection alerts={alerts} access={access} />
+      <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
 
       <CustomerFlaggedSection
         serviceId={customerFlaggedMember?.service?.id}

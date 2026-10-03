@@ -525,21 +525,13 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
 }
 
-// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
-// The neighborhood's gate entries for each visit, keyed by visit id, so the
-// office's day feed can show "Gate: …" for a customer with no gate code of
-// their own. The visit's own property (scheduled_services.property_id), else
-// the customer's ONE active property — and then only when the visit carries no
-// stamped service address, or one on that property's street and ZIP (a visit
-// can be stamped at another address with no property link); none or several
-// = no fallback. Shown:
-// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
-// (a conflict shows every code, flagged) — never an unconfirmed instruction,
-// which may be meant for one house only. Raw codes: staff surfaces only, never
-// an LLM prompt or a customer page.
-async function neighborhoodGateEntriesForVisits(conn, visits) {
-  const out = new Map();
-  if (!visits?.length) return out;
+// Visit id → the neighborhood its stop is in: the visit's own property, or
+// for a visit with no property the customer's ONLY active property when the
+// visit carries no stamped address or the same street and ZIP. A visit that
+// resolves to none is absent.
+async function visitNeighborhoodIds(conn, visits) {
+  const visitNeighborhood = new Map();
+  if (!visits?.length) return visitNeighborhood;
   const withProperty = visits.filter((v) => v.property_id);
   const withoutProperty = visits.filter((v) => !v.property_id && v.customer_id);
   const propertyNeighborhood = new Map();
@@ -562,7 +554,6 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
   // A real five-digit ZIP or nothing: two blank or malformed ZIPs never
   // "match" (the street alone does not establish the town).
   const zip5 = (z) => { const m = /^(\d{5})(?:-?\d{4})?$/.exec(String(z || '').trim()); return m ? m[1] : null; };
-  const visitNeighborhood = new Map();
   for (const v of visits) {
     let n = null;
     if (v.property_id) n = propertyNeighborhood.get(v.property_id);
@@ -576,6 +567,35 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     }
     if (n) visitNeighborhood.set(v.id, n);
   }
+  return visitNeighborhood;
+}
+
+// The visits whose stop is in an ACTIVE neighborhood: where a gate code can
+// be added or marked wrong from the visit (routes/admin-neighborhood-access.js
+// lockVisitNeighborhood applies the same two tests).
+async function gateActionVisitIds(conn, visits) {
+  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
+  if (!visitNeighborhood.size) return new Set();
+  const active = new Set(await conn('neighborhoods')
+    .whereIn('id', [...new Set(visitNeighborhood.values())]).where({ active: true }).pluck('id'));
+  return new Set([...visitNeighborhood].filter(([, n]) => active.has(n)).map(([visitId]) => visitId));
+}
+
+// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
+// The neighborhood's gate entries for each visit, keyed by visit id, so the
+// office's day feed can show "Gate: …" for a customer with no gate code of
+// their own. The visit's own property (scheduled_services.property_id), else
+// the customer's ONE active property — and then only when the visit carries no
+// stamped service address, or one on that property's street and ZIP (a visit
+// can be stamped at another address with no property link); none or several
+// = no fallback. Shown:
+// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
+// (a conflict shows every code, flagged) — never an unconfirmed instruction,
+// which may be meant for one house only. Raw codes: staff surfaces only, never
+// an LLM prompt or a customer page.
+async function neighborhoodGateEntriesForVisits(conn, visits) {
+  const out = new Map();
+  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
   if (!visitNeighborhood.size) return out;
   const entries = await conn('neighborhood_access')
     .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
@@ -584,7 +604,7 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
-    .select('neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status');
+    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at');
   const byNeighborhood = new Map();
   for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
   for (const [visitId, n] of visitNeighborhood) {
@@ -607,4 +627,6 @@ module.exports = {
   countyHint,
   VALUE_HASH_SQL,
   neighborhoodGateEntriesForVisits,
+  visitNeighborhoodIds,
+  gateActionVisitIds,
 };

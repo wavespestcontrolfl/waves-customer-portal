@@ -12,6 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 const mockOpenKeys = jest.fn(async () => []);
 const mockClose = jest.fn(async () => 0);
