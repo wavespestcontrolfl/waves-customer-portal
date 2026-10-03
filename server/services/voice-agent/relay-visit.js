@@ -116,10 +116,12 @@ async function todayEtaText(customerId, { tier = 'redacted', recognisedContact =
     // refusal still cannot be read as a signal about today.
     if (!recognisedContact) return refusal;
     return `${refusal} This caller's number is a contact on the account, so do not end the call there: `
-      + 'say you cannot give today\'s schedule on this call, then save a follow-up for THIS caller with '
-      + 'capture_lead so the office goes over it with them. Promise that follow-up to the caller only '
-      + 'after capture_lead confirms it. Never promise that Waves will contact the account holder, and '
-      + 'never say the account holder\'s name.';
+      + 'say you cannot give today\'s schedule on this call, and in THIS SAME turn save a follow-up for '
+      + 'THIS caller with capture_lead so the office goes over it with them. You already have the number '
+      + 'they are calling from — do NOT ask for a name, address or email first; call capture_lead now with '
+      + 'a one-line summary of what they asked. Promise that follow-up to the caller only after capture_lead '
+      + 'confirms it. Never promise that Waves will contact the account holder, and never say the account '
+      + 'holder\'s name.';
   }
   const db = require('../../models/db');
   const { etDateString } = require('../../utils/datetime-et');
