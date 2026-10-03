@@ -803,7 +803,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       if (name === 'get_today_eta') {
         const { todayEtaText } = require('./relay-visit');
-        return await todayEtaText(targetCustomerId, { tier });
+        // The caller's OWN number matched this account (directly or through a
+        // ref that resolves back to it) — as opposed to an account they looked up.
+        const recognisedContact = Boolean(ctx.customerId) && targetCustomerId === ctx.customerId;
+        return await todayEtaText(targetCustomerId, { tier, recognisedContact });
       }
       if (name === 'get_open_estimates') {
         const { openEstimatesText } = require('./relay-money');
@@ -1272,6 +1275,107 @@ async function executeTool(name, input = {}, ctx = {}) {
           // The lead still records the request; a failed suppression must not
           // lose the lead, and the owner alert below still pages a human.
           logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+        }
+      }
+      // ⭐ A RECOGNISED CONTACT GETS AN OFFICE BELL, NEVER A LEAD (owner ruling
+      // 2026-10-03). The caller's own, verified number sits in a secondary slot
+      // on a customer's account: a lead here would file an existing household
+      // as a new prospect under the contact's number, linked to nothing. The
+      // bell is tied to the customer; the caller stays unverified, so nothing
+      // on the customer's record is read or changed. If the bell cannot be
+      // raised the capture falls through to the lead path below, so a human
+      // still has an artifact to work.
+      if (ctx.customerId && callerVerified && matchedCallerTier(ctx) === 'redacted') {
+        const { alertOfficeContactFollowUp } = require('./relay-alert');
+        // ⭐ HOW TO REACH THEM IS STICKY FOR THE CALL. Name, email, address and
+        // service already accumulate in `extracted`; the rest is merged here
+        // with what earlier captures on this call gave, so a later capture
+        // that only adds an email cannot revert an alternate callback number
+        // or drop "email only, stop calling". A restriction, once asked for,
+        // stays; a channel or number changes only when a new one is given.
+        const prior = typeof ctx.getContactFollowUp === 'function' ? ctx.getContactFollowUp() : {};
+        const followUp = {
+          callbackPhone: input.callback_phone ? callerPhone : (prior.callbackPhone || callerPhone),
+          method: extracted.preferred_contact_method || prior.method || null,
+          preference: scrubbedField(extracted.contact_preference) || prior.preference || null,
+          timing: extracted.preferred_date_time || prior.timing || null,
+          // ⭐ THE CODE DOES NOT JUDGE WHICH CHANNELS A RESTRICTION COVERS.
+          // "Stop texting me, call me instead", "do not contact me except by
+          // email" and "never contact me again" are all a restriction; telling
+          // them apart is a language judgement, and a word list here would
+          // get one of them wrong. Any restriction is flagged, the caller's
+          // own words ride the bell, a person reads them — and the agent, who
+          // heard them, is told to promise only what they did not decline.
+          restricted: input.do_not_contact_request === true || smsOptOut || prior.restricted === true,
+          textsStopped: smsSuppressionApplied || prior.textsStopped === true,
+          estimateAsked: estimateRequested || prior.estimateAsked === true,
+          // WHY they called is the FIRST capture's summary and stays: a later
+          // capture that only adds a detail ("added their email") must not
+          // replace the reason the office is reaching out.
+          request: prior.request || extracted.call_summary || extracted.requested_service || null,
+        };
+        // Every later capture's summary is kept too, in order (a third capture
+        // must not erase what the second one added).
+        const latestSummary = extracted.call_summary || '';
+        const laterSoFar = prior.later ? String(prior.later).split(' | ') : [];
+        if (latestSummary && latestSummary !== followUp.request && !laterSoFar.includes(latestSummary)) laterSoFar.push(latestSummary);
+        followUp.later = laterSoFar.join(' | ') || null;
+        if (typeof ctx.noteContactFollowUp === 'function') ctx.noteContactFollowUp(followUp);
+        const belled = await alertOfficeContactFollowUp({
+          customerId: ctx.customerId,
+          callbackPhone: followUp.callbackPhone,
+          summary: followUp.request || '',
+          callSid: ctx.callSid || null,
+          // The claim-owner nonce: the bell write re-proves ownership under the
+          // call row's lock, like the lead capture below.
+          sessionKey: ctx.sessionKey || null,
+          // ⭐ EVERYTHING THE LEAD ROW WOULD HAVE HELD rides the bell, since
+          // the bell is this call's only artifact: who they said they are and
+          // how to reach them, what they want and when, and HOW they asked to
+          // be contacted — with whether the text opt-out landed.
+          notes: [
+            [extracted.first_name, extracted.last_name].filter(Boolean).length
+              ? `Gave their name as ${[extracted.first_name, extracted.last_name].filter(Boolean).join(' ')}.` : null,
+            extracted.email ? `Email: ${extracted.email}.` : null,
+            [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).length
+              ? `Address given: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}.` : null,
+            followUp.later ? `Later on the call: ${followUp.later}` : null,
+            extracted.requested_service ? `Service: ${extracted.requested_service}.` : null,
+            followUp.timing ? `Timing: ${followUp.timing}.` : null,
+            extracted.pain_points ? `Problem: ${extracted.pain_points}.` : null,
+            followUp.estimateAsked ? 'Asked for a written estimate — none was queued.' : null,
+            followUp.method ? `Prefers: ${followUp.method}.` : null,
+            followUp.preference ? `Contact preference: “${followUp.preference}”.` : null,
+            followUp.restricted
+              ? `Has a contact restriction${followUp.textsStopped ? ' (texts to their number are already stopped)' : ''} — read their words before reaching out.`
+              : null,
+          ].filter(Boolean),
+        });
+        if (belled === 'superseded') {
+          return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+            + 'tools and do not answer account questions; say goodbye briefly.';
+        }
+        if (belled) {
+          if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
+          if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+          // ⭐ NO PROMISE THE CALLER DECLINED. With a restriction on file the
+          // agent promises only a channel they did not decline — and nothing
+          // at all if they asked for no contact.
+          if (followUp.restricted) {
+            return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
+              + 'lead was created and none should be. The office has their request and exactly how they asked to be '
+              + 'contacted. Promise a follow-up ONLY by a way they did not decline; if they asked for no contact at '
+              + 'all, promise none and say their request has been passed to the office. Do not say a new request or '
+              + 'appointment was created. Never promise that Waves will contact the account holder.'
+              + (estimateRequested ? ' NO written estimate was queued — do not promise one.' : '')
+              + (followUp.textsStopped ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
+          }
+          return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
+            + 'lead was created and none should be. The office has their number and your summary. Tell '
+            + 'the caller a Waves team member will follow up with THEM, and do not say a new request or appointment '
+            + 'was created. Never promise that Waves will contact the account holder.'
+            + (estimateRequested ? ' NO written estimate was queued — do not promise one; the office will go over it with them.' : '')
+            + (smsSuppressionApplied ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
         }
       }
       // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE LEAD COMMITS. Writing it

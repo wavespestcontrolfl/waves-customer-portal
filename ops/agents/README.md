@@ -102,6 +102,32 @@ what was asked; never dump full tables or the variable store.
 
 ## Usage
 
+### Build and alert evidence
+
+`node ops/agents/agents-report.js --build-evidence=/path/to/evidence.json`
+prints the twelve capability rows separately from the AI call ledger. Add
+`--json` for structured output. This mode reads only the named local file;
+it does not load database credentials, inspect live gates, or change anything.
+The file has a `capabilities` array keyed by `id`: `alerts`, `dunning`,
+`offline`, `lawn-progress`, `portal-chat`, `pest-forecast`, `build-operation`,
+`corrections`, `lawn-diagnosis`, `product-use`, `photo-id`, `sms-booking`.
+Omitted rows and evidence remain unknown. Each supplied `mergedCommit`,
+`deployment`, `configuration`, `exposure`, `usage`, or `acceptance` field is
+`{ "value": "observed result", "sources": ["evidence reference"],
+"observedAt": "2026-10-02T18:00:00-04:00" }`; `nextAction` is text.
+Supply the successful deployment's actual commit separately from the merged
+commit. A gate value does not prove exposure or usage, and a provider submission
+does not prove delivery. The report preserves the operator's observations and
+timestamps; it does not verify their truth or freshness. Keep customer records
+and secrets out of evidence files.
+
+`node ops/agents/needs-me.js --quality --json` adds bounded alert quality to
+the usual Needs Me result. Counts cover only returned alerts after filters
+and pagination, excluding standing-condition rows from the denominator.
+Warnings mean partial coverage; zero counts with no readable alerts are not
+evidence of quality. Link presence does not prove a focused destination or a
+working clearing predicate. Use the normal cursor to inspect the next page.
+
 ```sh
 # Read-only: is every Twilio number registered, on the canonical webhooks, and compliance-covered?
 railway run node ops/agents/twilio-number-audit.js
