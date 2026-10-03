@@ -706,7 +706,7 @@ const LEFT_CANDIDATE_SET_SKIPS = [
 // latency — comfortably under the 10-minute stale-'pending' window that
 // already bounds a single run; anything past this is another writer.
 const ENRICH_TOUCH_WINDOW_MS = 15 * 60 * 1000;
-async function recentLookupVerdict(row) {
+async function recentLookupVerdict(row, { stalePendingCools = false } = {}) {
   try {
     const { addressKey: cacheKey } = require('./property-lookup/lookup-cache');
     const { hash } = cacheKey(propertyRowAddress(row));
@@ -723,7 +723,11 @@ async function recentLookupVerdict(row) {
       // that will never produce a result; cooling it for the full
       // window stranded the row for weeks while the call-time retry
       // ladder had already (correctly) moved on after ten minutes.
-      if (attempt.last_attempt_status === 'pending'
+      // stalePendingCools (the deploy-kill retry): a stale 'pending' is the
+      // lookup the killed run had in flight and may already have paid for.
+      // The retry leaves it for tomorrow's run, so every lookup a retry buys
+      // is a new ledger row and backfillBudgetLeft counts it.
+      if (attempt.last_attempt_status === 'pending' && !stalePendingCools
           && !(Number.isFinite(attemptedAt) && attemptedAt > Date.now() - PENDING_ACTIVE_MINUTES * 60 * 1000)) {
         return null;
       }
@@ -1074,7 +1078,7 @@ async function reconcileCustomerMirrors() {
 // cooldown shielding anything already attempted.
 const CALL_TIME_RECOVERY_WINDOW_DAYS = 7;
 
-async function sweepUnenrichedProperties({ limit } = {}) {
+async function sweepUnenrichedProperties({ limit, stalePendingCools = false } = {}) {
   const backfillOn = gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL');
   const callTimeOn = gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
   // Reconciliation heals the CALL-TIME lane's enrich↔booking race, so it
@@ -1128,7 +1132,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     let leftSetThisPage = 0;
     for (const row of page) {
       if (processed >= batch) break;
-      const verdict = await recentLookupVerdict(row);
+      const verdict = await recentLookupVerdict(row, { stalePendingCools });
       if (verdict === 'cooldown') { cooled += 1; continue; }
       if (verdict === 'parked') { parked += 1; continue; }
       try {
@@ -1172,10 +1176,12 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   };
 }
 
-// How much of the nightly batch is left, from the attempt ledger: every
-// lookup attempt in the window counts, the killed run's and any earlier
-// retry's alike. Call-time lookups stamp the same ledger, so this can only
-// under-count what is left — a retry never buys past the nightly cap.
+// How much of the nightly batch is left, from the attempt ledger (one row
+// per address): every address attempted in the window counts, the killed
+// run's and any earlier retry's alike. The retry never re-buys an address
+// (stalePendingCools), so addresses attempted = lookups bought. Call-time
+// lookups stamp the same ledger, so this can only under-count what is left —
+// a retry never buys past the nightly cap.
 const RETRY_BUDGET_WINDOW_HOURS = 12;
 async function backfillBudgetLeft() {
   const res = await db('property_lookups')
@@ -1194,7 +1200,7 @@ async function backfillBudgetLeft() {
 async function sweepUnenrichedPropertiesAfterKill() {
   const limit = await backfillBudgetLeft();
   if (limit <= 0) return { skipped: 'budget_spent' };
-  return sweepUnenrichedProperties({ limit });
+  return sweepUnenrichedProperties({ limit, stalePendingCools: true });
 }
 
 module.exports = {

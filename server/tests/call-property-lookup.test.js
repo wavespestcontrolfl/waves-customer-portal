@@ -974,6 +974,10 @@ describe('recentLookupVerdict', () => {
 
     mockLedger({ last_attempt_status: 'pending', last_attempt_at: stale });
     expect(await _private.recentLookupVerdict(row)).toBe(null);
+    // The deploy-kill retry never re-buys the lookup the killed run had in
+    // flight: it may already be paid for, and the retry's budget counts
+    // ledger rows.
+    expect(await _private.recentLookupVerdict(row, { stalePendingCools: true })).toBe('cooldown');
     mockLedger({ last_attempt_status: 'pending', last_attempt_at: live });
     expect(await _private.recentLookupVerdict(row)).toBe('cooldown');
     // Terminal unproductive statuses cool for the full window regardless

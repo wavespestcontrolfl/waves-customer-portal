@@ -38,6 +38,7 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { runExclusive } = require('../utils/cron-lock');
+const { etDateString } = require('../utils/datetime-et');
 const { triggerNotification } = require('./notification-triggers');
 const { lookupPropertyFromCountyByParcel, searchCountyParcelByAddress } = require('./property-lookup/ai-property-lookup');
 const { lookupParcelByPoint } = require('./property-lookup/parcel-gis');
@@ -387,7 +388,12 @@ async function runPropertyLookupCanaryInner() {
       failing: alertFailures.length,
       failures: alertFailures,
     });
-    const stats = await triggerNotification('property_lookup_canary_failed', { failures: alertFailures });
+    // One alert per ET day. A deploy can kill this run between the alert and
+    // the state write below; the retry (utils/deploy-kill-retry.js) then runs
+    // the canary again, and the key turns its alert into a no-op that still
+    // reads as delivered.
+    const stats = await triggerNotification('property_lookup_canary_failed', { failures: alertFailures },
+      { dedupeKey: `property-lookup-canary:${etDateString(new Date())}` });
     delivered = notificationDelivered(stats);
     if (!delivered && pendingAlerts.length) {
       // The bell write didn't land (triggerNotification never throws — it
