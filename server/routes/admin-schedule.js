@@ -17618,9 +17618,14 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // in invoice.js, after the mint commits); no payment row or invoice change is
     // made automatically.
     if (receipt && receipt.reason === 'membership_dues_covered') {
-      await db('scheduled_services')
-        .where({ id: req.params.id, prepaid_at: updated[0].prepaid_at })
+      // prepaid_at is written by now() (microseconds) but comes back as a JS
+      // Date (milliseconds): compare at millisecond precision, or the guard
+      // matches no row and the refused marker stays.
+      const undone = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .whereRaw("date_trunc('milliseconds', prepaid_at) = date_trunc('milliseconds', ?::timestamptz)", [updated[0].prepaid_at])
         .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      if (!undone) logger.warn(`[schedule] prepaid marker on ${req.params.id} was not undone after a covered receipt mint (the marker changed since it was written)`);
       const covering = await duesInvoiceCoveringPlanVisit(req.params.id);
       return res.status(409).json(covering
         ? duesCoversPrepaidRefusal(covering)

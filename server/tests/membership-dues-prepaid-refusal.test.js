@@ -38,7 +38,9 @@ describe('POST /:id/prepaid on a dues-covered plan visit', () => {
 
   test('a receipt-requested marker whose month got covered before the receipt mint undoes the marker it wrote (only that one) and refuses the same way', () => {
     expect(route).toMatch(/receipt\.reason === 'membership_dues_covered'/);
-    expect(route).toMatch(/\.where\(\{ id: req\.params\.id, prepaid_at: updated\[0\]\.prepaid_at \}\)\s*\n\s*\.update\(\{ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null \}\)/);
+    // Millisecond comparison: now() keeps microseconds, the returned JS Date does not.
+    expect(route).toMatch(/\.whereRaw\("date_trunc\('milliseconds', prepaid_at\) = date_trunc\('milliseconds', \?::timestamptz\)", \[updated\[0\]\.prepaid_at\]\)\s*\n\s*\.update\(\{ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null \}\)/);
+    expect(route).not.toMatch(/\.where\(\{ id: req\.params\.id, prepaid_at: updated\[0\]\.prepaid_at \}\)/);
     expect(route.indexOf("receipt.reason === 'membership_dues_covered'")).toBeLessThan(route.indexOf('res.json({ success: true, ...updated[0], receipt })'));
   });
 
