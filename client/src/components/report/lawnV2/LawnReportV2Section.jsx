@@ -18,6 +18,7 @@ import {
   LawnFollowUpCard,
   LawnInsightCards,
   LawnPhotoStrip,
+  LawnPhotoFindings,
   LawnProgressionSlider,
   VisualDiagnosisCards,
   WaterIntakeBar,
@@ -42,6 +43,7 @@ function LawnReportV2LeadSection({ data, print }) {
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
       {(data.photos?.length || data.photoSet?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} photoSet={data.photoSet} summary={data.photoSummary} lead /> : null}
+      {data.photoSet?.length && data.photoFindings?.length ? <LawnPhotoFindings findings={data.photoFindings} /> : null}
       {/* A planned follow-up the lead could not carry (its reason was watering
           wording under the banner, or over its word cap) keeps its own card,
           without the "Your part" line: the banner and the lead own that
@@ -69,9 +71,11 @@ export default function LawnReportV2Section({ data, print = false }) {
       {data.snapshot ? <LawnSnapshotHero snapshot={data.snapshot}>
         {(data.photos?.length || data.photoSet?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} photoSet={data.photoSet} summary={data.photoSummary} embedded /> : null}
       </LawnSnapshotHero> : null}
+      {data.snapshot && data.photoSet?.length && data.photoFindings?.length ? <LawnPhotoFindings findings={data.photoFindings} /> : null}
       {data.followUp?.scheduled ? <LawnFollowUpCard followUp={data.followUp} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} /> : null}
       {!data.snapshot && (data.photos?.length || data.photoSet?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} photoSet={data.photoSet} summary={data.photoSummary} /> : null}
+      {!data.snapshot && data.photoSet?.length && data.photoFindings?.length ? <LawnPhotoFindings findings={data.photoFindings} /> : null}
       {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}
       {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} /> : null}
       {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}

@@ -2518,6 +2518,54 @@ router.post('/:id/archive', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /:id/receipt-address — the address this invoice's documents display
+// (receipt page, PDF, billing emails): its frozen snapshot, else the live
+// customer address.
+router.get('/:id/receipt-address', async (req, res, next) => {
+  try {
+    const { getInvoiceDisplayedAddress } = require('../services/invoice-address');
+    const address = await getInvoiceDisplayedAddress(db, req.params.id);
+    if (!address) return res.status(404).json({ error: 'Invoice not found' });
+    res.json({ address });
+  } catch (err) { next(err); }
+});
+
+// PUT /:id/receipt-address — correct the address printed on ONE invoice and
+// its receipt, at any status (a paid invoice included). Presentation only:
+// amounts, status, the customer profile and payer bill-to are untouched, and
+// nothing is re-sent — the operator resends the receipt if they want to.
+// The before/after audit row commits with the change.
+router.put('/:id/receipt-address', async (req, res, next) => {
+  try {
+    const { correctInvoiceAddress } = require('../services/invoice-address');
+    const { recordAuditEvent } = require('../services/audit-log');
+    const result = await db.transaction(async (trx) => {
+      const corrected = await correctInvoiceAddress(trx, req.params.id, req.body || {});
+      if (!corrected) return null;
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'invoice.address.correct',
+        resource_type: 'invoice',
+        resource_id: corrected.invoice.id,
+        metadata: { customerId: corrected.invoice.customer_id, before: corrected.before, after: corrected.after },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent') || null,
+        critical: true,
+        trx,
+      });
+      return corrected;
+    });
+    if (!result) return res.status(404).json({ error: 'Invoice not found' });
+    res.json({ address: result.after });
+  } catch (err) {
+    if (err?.isOperational && err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
+});
+
 // POST /:id/unarchive — pulls an archived invoice back into the default view.
 router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
   try {

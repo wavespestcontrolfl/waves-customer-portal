@@ -518,6 +518,41 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       ]);
     });
 
+    describe('"What the photos showed"', () => {
+      const FINDINGS = [
+        { label: 'Weed pressure', photos: [{ url: SET[0].url, label: 'Front yard' }, { url: SET[2].url, label: 'Close-up' }] },
+        { label: 'General lawn stress', photos: [], confirm: 'The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.' },
+      ];
+
+      it('prints each finding, its thumbnails and its one fixed sentence, with no links', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const block = container.querySelector('[data-testid="doc-photo-findings"]');
+        expect(block).not.toBeNull();
+        expect(block.textContent).toContain('What the photos showed');
+        expect(block.textContent).toContain('Weed pressure');
+        expect(block.textContent).toContain('General lawn stress');
+        expect(block.textContent).toContain('The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.');
+        expect([...block.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual([SET[0].url, SET[2].url]);
+        expect(block.querySelector('a')).toBeNull();
+      });
+
+      it('prints nothing for an empty list', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: [] })} token="tok123" />);
+        expect(container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+      });
+
+      it('prints nothing without a set, and a thumbnail that fails to load drops itself', () => {
+        const noSet = render(<ServiceReportDocument data={lawnData({ photoFindings: FINDINGS })} token="tok123" />);
+        expect(noSet.container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+        noSet.unmount();
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const thumb = container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`);
+        fireEvent.error(thumb);
+        expect(container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`)).toBeNull();
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBeGreaterThan(0);
+      });
+    });
+
     it('keeps approved moments and the gauge photo beside the set', () => {
       const data = { ...lawnData({ photoSet: SET }), proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/moment.jpg', mediaType: 'image', customerCaption: 'Entry point sealed' }], mowingHeight: { heightIn: 3.5, photoUrl: 'https://cdn.example.com/gauge.jpg' } };
       const { container } = render(<ServiceReportDocument data={data} token="tok123" />);

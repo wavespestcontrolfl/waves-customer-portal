@@ -78,6 +78,7 @@ import {
 // - alert-fg discipline: spec reserves red for overdue / failed /
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
+import InvoiceAddressDialog from "../../components/admin/InvoiceAddressDialog";
 import { useSearchParams } from "react-router-dom";
 import {
   ExternalLink,
@@ -1608,6 +1609,7 @@ function InvoiceList({
   const [batchSending, setBatchSending] = useState(false);
   const [sendModalInvoice, setSendModalInvoice] = useState(null);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
+  const [addressModalInvoice, setAddressModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
@@ -3010,6 +3012,21 @@ function InvoiceList({
                                 : "Send receipt"}
                             </Button>
                           )}
+                          {isAdminUser && inv.status !== "void" && (
+                            <Button
+                              onClick={() => setAddressModalInvoice(inv)}
+                              title="Correct the address printed on this invoice and its receipt"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
+                            >
+                              Edit address
+                            </Button>
+                          )}
                         </div>
                         {canCollect && inv.status !== "draft" && (
                           <FollowupPanel
@@ -3150,6 +3167,17 @@ function InvoiceList({
             onRefresh();
           }}
           onError={(msg) => showToast(msg, "error")}
+        />
+      )}
+
+      {addressModalInvoice && (
+        <InvoiceAddressDialog
+          invoice={addressModalInvoice}
+          onClose={() => setAddressModalInvoice(null)}
+          onSaved={() => {
+            setAddressModalInvoice(null);
+            showToast("Invoice address updated");
+          }}
         />
       )}
 

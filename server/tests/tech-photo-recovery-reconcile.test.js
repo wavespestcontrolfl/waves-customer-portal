@@ -58,7 +58,11 @@ jest.mock('../services/service-photos', () => ({
 const mockEnqueue = jest.fn();
 jest.mock('../services/service-report/pdf-queue', () => ({ enqueuePdfRenderJob: (...a) => mockEnqueue(...a) }));
 const mockAlert = jest.fn();
-jest.mock('../services/dispatch-alerts', () => ({ createAlertOnce: (...a) => mockAlert(...a) }));
+const mockResolveAlert = jest.fn();
+jest.mock('../services/dispatch-alerts', () => ({
+  createAlertOnce: (...a) => mockAlert(...a),
+  resolveAlert: (...a) => mockResolveAlert(...a),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -97,8 +101,10 @@ async function withServer(fn) {
   try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
 }
 
-const reconcile = (baseUrl, token = 'tech') => fetch(`${baseUrl}/api/tech/services/svc-1/photos/reconcile`, {
-  method: 'POST', headers: { Authorization: `Bearer ${token}` },
+const reconcile = (baseUrl, token = 'tech', body = null) => fetch(`${baseUrl}/api/tech/services/svc-1/photos/reconcile`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+  ...(body ? { body: JSON.stringify(body) } : {}),
 });
 
 describe('POST /:id/photos/reconcile', () => {
@@ -171,6 +177,39 @@ describe('POST /:id/photos/reconcile', () => {
     });
   });
 
+  test('a prior completion owner can hand inaccessible reconciliation to the office with its receipt', async () => {
+    const receipt = {
+      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
+      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'receipt-revision',
+    };
+    tables.scheduled_services[0].technician_id = 'tech-2';
+    tables.service_records = [{
+      id: 'rec-1', scheduled_service_id: 'svc-1', technician_id: 'tech-1',
+      structured_notes: { servicePhotoVisit: receipt },
+    }];
+    await withServer(async (baseUrl) => {
+      const handedOff = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: false, expectedVisit: receipt, expectedServiceRecordId: 'rec-1',
+      });
+      expect(handedOff.status).toBe(409);
+      expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
+      expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'service_photo_reconciliation_required', jobId: 'svc-1',
+        payload: expect.objectContaining({ source: 'photo_recovery_access_lost', serviceRecordId: 'rec-1' }),
+      }));
+      expect(updates).toHaveLength(0);
+
+      const denied = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: false,
+        expectedVisit: { ...receipt, technicianId: 'tech-other', revision: 'wrong' },
+        expectedServiceRecordId: 'rec-1',
+      });
+      expect(denied.status).toBe(403);
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('409 not_completed when the visit has no completion record', async () => {
     tables.service_records = [];
     await withServer(async (baseUrl) => {
@@ -178,6 +217,65 @@ describe('POST /:id/photos/reconcile', () => {
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('not_completed');
       expect(updates).toHaveLength(0);
+    });
+  });
+
+  test('a stale recovery receipt cannot reconcile a newer completion record', async () => {
+    const storedReceipt = {
+      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
+      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'new-completion',
+    };
+    tables.service_records[0].structured_notes = { servicePhotoVisit: storedReceipt };
+    await withServer(async (baseUrl) => {
+      const response = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: true,
+        expectedVisit: { ...storedReceipt, revision: 'old-completion' },
+        expectedServiceRecordId: 'rec-1',
+      });
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('photo_reconciliation_handed_off');
+      expect(updates).toHaveLength(0);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+      expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'service_photo_reconciliation_required', jobId: 'svc-1',
+        payload: expect.objectContaining({ source: 'photo_recovery_identity_changed', serviceRecordId: 'rec-1' }),
+      }));
+    });
+  });
+
+  test('reconciles the persisted completion record even when a newer record exists', async () => {
+    tables.scheduled_services[0] = {
+      ...tables.scheduled_services[0], property_id: 'property-1', service_id: 'catalog-pest',
+      service_type: 'Pest Control', status: 'completed',
+    };
+    const receipt = require('../services/service-photos').servicePhotoVisitSnapshot({
+      ...tables.scheduled_services[0], status: 'on_site',
+    });
+    const uploadReceipt = { ...receipt, status: 'completed' };
+    tables.service_records = [
+      { id: 'rec-newer', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
+      { id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
+    ];
+    tables.dispatch_alerts = [
+      { id: 'alert-rec-1', type: 'service_photo_reconciliation_required', job_id: 'svc-1', resolved_at: null,
+        payload: { source: 'photo_recovery_access_lost', serviceRecordId: 'rec-1' } },
+      { id: 'alert-newer', type: 'service_photo_reconciliation_required', job_id: 'svc-1', resolved_at: null,
+        payload: { source: 'photo_recovery_access_lost', serviceRecordId: 'rec-newer' } },
+      { id: 'alert-legacy', type: 'service_photo_reconciliation_required', job_id: 'svc-1', resolved_at: null,
+        payload: { source: 'photo_recovery_access_lost' } },
+    ];
+    await withServer(async (baseUrl) => {
+      const response = await reconcile(baseUrl, 'tech', {
+        abandonMissingPhotos: false, expectedVisit: uploadReceipt, expectedServiceRecordId: 'rec-1',
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).serviceRecordId).toBe('rec-1');
+      expect(updates).toContainEqual({
+        table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null },
+      });
+      expect(mockResolveAlert).toHaveBeenCalledTimes(1);
+      expect(mockResolveAlert).toHaveBeenCalledWith({ id: 'alert-rec-1', resolvedBy: 'tech-1', auto: true });
     });
   });
 
@@ -379,6 +477,25 @@ describe('POST /:id/photos/reconcile — parked photo summary', () => {
       expect((await res.json()).code).toBe('photos_still_missing');
       expect(updates).toHaveLength(0);
       expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  test('explicit abandonment suppresses the incomplete summary and reconciles the committed photos', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];
+    tables.service_photos = [{ id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).photoSummary).toEqual({ pending: true, restored: false, abandoned: true });
+      expect(updates).toHaveLength(2);
+      expect(JSON.parse(updates[0].patch.service_data).typedReportSnapshot).toEqual({
+        photoSummary: null, serviceLabel: 'Pest',
+      });
+      expect(updates[1].patch).toEqual({ pdf_storage_key: null });
+      expect(tables.service_photos).toEqual([
+        { id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' },
+      ]);
     });
   });
 

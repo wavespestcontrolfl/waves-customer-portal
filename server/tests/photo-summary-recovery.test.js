@@ -4,7 +4,8 @@
  */
 const {
   PENDING_KEY, stripPhotoSummaryForRecovery, hasPendingPhotoSummary,
-  restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered, expectedImageHashesFor,
+  restorePhotoSummaryAfterRecovery, abandonPhotoSummaryRecovery,
+  completionPhotosFullyRecovered, expectedImageHashesFor,
 } = require('../services/service-report/photo-summary-recovery');
 
 describe('strip / restore', () => {
@@ -23,6 +24,14 @@ describe('strip / restore', () => {
     const sd = { typedReportSnapshot: { photoSummary: null, [PENDING_KEY]: 'kept' } };
     expect(stripPhotoSummaryForRecovery(sd).changed).toBe(false);
     expect(sd.typedReportSnapshot[PENDING_KEY]).toBe('kept');
+  });
+
+  test('explicit abandonment keeps the incomplete summary suppressed', () => {
+    const sd = { typedReportSnapshot: { photoSummary: null, [PENDING_KEY]: 'describes missing photos', other: 1 } };
+    expect(abandonPhotoSummaryRecovery(sd).changed).toBe(true);
+    expect(sd.typedReportSnapshot).toEqual({ photoSummary: null, other: 1 });
+    expect(hasPendingPhotoSummary(sd)).toBe(false);
+    expect(abandonPhotoSummaryRecovery(sd).changed).toBe(false);
   });
 
   test('no snapshot / no summary / non-object input are no-ops', () => {

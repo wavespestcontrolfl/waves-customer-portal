@@ -150,7 +150,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null,
+  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null, reCheck: '',
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -232,6 +232,8 @@ function contextFrom(data, service) {
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
     photoStatus: data?.photoStatus || null,
+    // The prior visit's rainfast re-check line (GATE_LAWN_RAINFAST_WATCH), shown as sent.
+    reCheck: typeof data?.reCheck?.line === 'string' ? data.reCheck.line.trim() : '',
     ...optionalContextFields(data),
   };
 }
@@ -666,6 +668,7 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
+          {ctx.reCheck && <p className="tech-visit-muted tech-visit-status--warn" role="status">{ctx.reCheck}</p>}
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
               <h3 className="tech-visit-section-title">Lawn photos</h3>

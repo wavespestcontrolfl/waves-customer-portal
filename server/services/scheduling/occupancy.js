@@ -20,8 +20,12 @@
  * so a slot offered on technician B's day is not refused at confirm because
  * technician A has an overlapping or nearby stop. No `technicianId`, gate off,
  * or capacity off: the tech-blind behavior above, byte for byte. Callers that
- * never pass it (admin, rebooker series, phone agent, follow-ups) are
- * unaffected by the gate. Concurrency is unchanged: every writer behind this
+ * pass it (owner 2026-10-03: the /book commit, the public-reschedule probe,
+ * admin-schedule.js create/series, the phone agent's commit, call follow-up
+ * re-spacing, staff lead booking, and the completion follow-up dry-run) do so
+ * only where the row being saved already carries its technician; callers that
+ * never pass it (rebooker series, availability.js, slot-reservation.js,
+ * visit-groups.js, the completion follow-up write) are unaffected by the gate. Concurrency is unchanged: every writer behind this
  * probe takes the date-wide rung-1 lock (`occupancy:<date>`, below) first, so
  * two confirms for DIFFERENT technicians — or one assigned and one unassigned
  * — still serialize per calendar date, and an unassigned row can never be

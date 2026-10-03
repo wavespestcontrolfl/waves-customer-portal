@@ -56,6 +56,15 @@ const CASES = {
     },
   ),
   'a set entry with no link is ignored': payload({ photoSet: [...SET, { url: '', shot: 'trouble', label: 'Trouble spot' }], photos: [{ url: U('strip-1') }] }),
+  'a set with "What the photos showed" thumbnails (one of them not in the gallery)': payload({
+    photoSet: SET,
+    photoFindings: [
+      { label: 'Weed pressure', photos: [{ url: U('set-front'), label: 'Front yard' }, { url: U('thumb-extra'), label: 'Close-up' }], confirm: 'The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.' },
+      { label: 'Thinning turf', photos: [] },
+      { label: 'Gray leaf spot', photos: [{ url: '', label: 'Back yard' }] },
+    ],
+  }),
+  'findings without a set are not printed': payload({ photoFindings: [{ label: 'Weed pressure', photos: [{ url: U('thumb-extra'), label: 'Close-up' }] }], photos: [{ url: U('strip-1') }] }),
   'an empty set behaves as no set': payload({ photoSet: [], photos: [{ url: U('strip-1') }] }),
   'a set URL that repeats a service photo URL prints once': payload({ photoSet: [{ url: U('service-photo'), shot: 'front', label: 'Front yard' }, ...SET.slice(1)] }),
 };
