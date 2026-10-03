@@ -578,6 +578,17 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         customer_properties: [{ id: 'prop-2', address_line1: address, city: 'Bradenton', zip: '34201' }],
       })).then((r) => r.signature);
       expect(await linked('100 Test Palm Way')).not.toBe(await linked('200 Sample Oak Ln'));
+      // No booking: the plan-cadence estimate keys the PDF, and so does its passing.
+      const cadenceSvc = { ...svc, scheduled_service_id: 'ss-cur', service_type: 'Lawn Care every 6 weeks' };
+      const cadenceSig = () => resolveCanonicalLawnRender(cadenceSvc, makeKnex({
+        ...fixtures(),
+        service_records: [],
+        scheduled_services: [{ id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care every 6 weeks', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' }],
+      })).then((r) => r.signature);
+      const ahead = await cadenceSig();
+      jest.setSystemTime(new Date('2026-12-01T16:00:00Z'));
+      expect(await cadenceSig()).not.toBe(ahead);
+      jest.setSystemTime(new Date('2026-10-02T16:00:00Z'));
       const failedA = await sigWith(FAIL);
       expect(failedA).not.toBe(booked);
       expect(await sigWith(FAIL)).not.toBe(failedA);

@@ -2650,6 +2650,21 @@ async function lawnWateringRuleStamp(service, knex) {
 }
 
 const LAWN_NEXT_VISIT_SCAN = 200;
+// The plan cadence in weeks a lawn service type names ("every 6 weeks",
+// "monthly"...), or null: the report's estimated next visit and the PDF key
+// read the same rule.
+function lawnCadenceWeeks(serviceType) {
+  const t = String(serviceType || '').toLowerCase();
+  const m = t.match(/every\s+(\d+)\s+week/);
+  if (m) return Number(m[1]);
+  if (/bi-?weekly/.test(t)) return 2;
+  if (/bi-?monthly/.test(t)) return 8;
+  if (/monthly/.test(t)) return 4;
+  if (/quarterly/.test(t)) return 13;
+  if (/weekly/.test(t)) return 1;
+  return null;
+}
+
 // The customer's upcoming lawn bookings, for the PDF key while
 // GATE_LAWN_REPORT_COPY_V6 is live: the lead's next-visit line, and the frozen
 // copy's gap-timed sentence it can drop, both follow those bookings, so a
@@ -2687,7 +2702,16 @@ async function lawnUpcomingVisitsStamp(service, knex) {
     if (failures.size) return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
     const pickedRaw = picked.state === 'scheduled' ? picked.row.scheduled_date : null;
     const pickedIso = pickedRaw ? (pickedRaw instanceof Date ? pickedRaw.toISOString().slice(0, 10) : String(pickedRaw).slice(0, 10)) : '';
-    return `:nv=${crypto.createHash('sha1').update(`${days.join('|')}#${picked.state}:${pickedIso}`).digest('hex').slice(0, 8)}`;
+    // With no booking here the render shows the plan-cadence estimate only
+    // while it is still ahead, and the frozen gap-timed sentence goes with it.
+    let estimate = '';
+    const weeks = picked.state === 'none' && svcIso ? lawnCadenceWeeks(service.service_type) : null;
+    if (weeks) {
+      const est = new Date(`${svcIso}T12:00:00Z`);
+      est.setUTCDate(est.getUTCDate() + weeks * 7);
+      estimate = `${est.toISOString().slice(0, 10)}:${est.getTime() > Date.now() ? 'ahead' : 'past'}`;
+    }
+    return `:nv=${crypto.createHash('sha1').update(`${days.join('|')}#${picked.state}:${pickedIso}#${estimate}`).digest('hex').slice(0, 8)}`;
   } catch {
     return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
   }
@@ -5747,16 +5771,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           } else if (svcIso && !(scopedNext && scopedNext.state === 'unknown')) {
             // An unknown property match shows nothing: a cadence estimate beside
             // a real booking we could not place would be a second, wrong date.
-            const t = String(service.service_type || '').toLowerCase();
-            const m = t.match(/every\s+(\d+)\s+week/);
-            let weeks = m ? Number(m[1]) : null;
-            if (weeks == null) {
-              if (/bi-?weekly/.test(t)) weeks = 2;
-              else if (/bi-?monthly/.test(t)) weeks = 8;
-              else if (/monthly/.test(t)) weeks = 4;
-              else if (/quarterly/.test(t)) weeks = 13;
-              else if (/weekly/.test(t)) weeks = 1;
-            }
+            const weeks = lawnCadenceWeeks(service.service_type);
             if (weeks) {
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
