@@ -216,7 +216,91 @@ describe('dropInvalidSprayHolds (the queue read)', () => {
   test('the list route reads the visit status in its one joined select and filters only the unresolved view', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(src).toMatch(/'s\.status as visit_status'/);
-    expect(src).toMatch(/unresolved\s*\?\s*await require\('\.\.\/services\/dispatch-alerts'\)\.dropInvalidSprayHolds\(allRows/);
+    expect(src).toMatch(/unresolved\s*\?\s*await require\('\.\.\/services\/dispatch-alerts'\)\.readOpenQueue\(/);
+    expect(src).toMatch(/whereNotIn\('a\.id', excludedIds\)/);
+  });
+});
+
+describe('readOpenQueue (stale spray holds are filtered before the page limit counts them)', () => {
+  const LIMIT = 50;
+  const spray = (i) => ({ id: `stale-${i}`, type: 'lawn_spray_hold', job_id: `v-${i}`, resolved_at: null, payload: { for_date: '2026-10-03', window_start: '09:00:00' },
+    visit_status: 'cancelled', scheduled_date: '2026-10-03', window_start: '09:00:00' });
+  const alert = (i) => ({ id: `ok-${i}`, type: 'missed_photo', job_id: null, resolved_at: null, payload: {}, visit_status: null });
+  const validSpray = (i) => ({ ...spray(i), id: `valid-${i}`, visit_status: 'confirmed' });
+
+  // An ordered table: runQuery returns the first `limit` rows not excluded, like LIMIT + whereNotIn.
+  function source(all) {
+    const calls = [];
+    const runQuery = jest.fn(async (excluded) => {
+      calls.push([...excluded]);
+      return all.filter((r) => !excluded.includes(r.id)).slice(0, LIMIT);
+    });
+    return { runQuery, calls };
+  }
+  const tx = (updateFails = false) => {
+    const { trx } = fakeTrx({ updateReturns: [] });
+    const db = require('../models/db');
+    if (updateFails) {
+      db.mockImplementation(() => { throw new Error('write failed'); });
+      db.transaction = async () => { throw new Error('write failed'); };
+    } else {
+      db.mockImplementation(trx);
+      db.transaction = async (fn) => fn(trx);
+    }
+  };
+
+  test('50 newer stale holds over 5 valid alerts of other types: the 5 are returned', async () => {
+    tx();
+    const all = [...Array.from({ length: 50 }, (_, i) => spray(i)), ...Array.from({ length: 5 }, (_, i) => alert(i))];
+    const { runQuery, calls } = source(all);
+    const out = await dispatchAlerts.readOpenQueue(runQuery, { limit: LIMIT, today: '2026-10-03' });
+    expect(out.map((r) => r.id)).toEqual(['ok-0', 'ok-1', 'ok-2', 'ok-3', 'ok-4']);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual([]);
+    expect(calls[1]).toHaveLength(50);
+  });
+
+  test('a mix: a full page of valid rows, original order, no repeats', async () => {
+    tx();
+    const all = [];
+    for (let i = 0; i < 30; i += 1) all.push(i % 2 ? alert(i) : spray(i));
+    for (let i = 30; i < 90; i += 1) all.push(i % 3 ? alert(i) : validSpray(i));
+    const { runQuery } = source(all);
+    const out = await dispatchAlerts.readOpenQueue(runQuery, { limit: LIMIT, today: '2026-10-03' });
+    const expected = all.filter((r) => !r.id.startsWith('stale-')).slice(0, LIMIT).map((r) => r.id);
+    expect(out.map((r) => r.id)).toEqual(expected);
+    expect(out).toHaveLength(LIMIT);
+    expect(new Set(out.map((r) => r.id)).size).toBe(LIMIT);
+  });
+
+  test('supersede failing: the dropped cards are still excluded on the refill', async () => {
+    tx(true);
+    const all = [...Array.from({ length: 50 }, (_, i) => spray(i)), alert(1)];
+    const { runQuery, calls } = source(all);
+    const out = await dispatchAlerts.readOpenQueue(runQuery, { limit: LIMIT, today: '2026-10-03' });
+    expect(out.map((r) => r.id)).toEqual(['ok-1']);
+    expect(calls[1]).toHaveLength(50);
+  });
+
+  test('nothing dropped (or a short page): exactly one query', async () => {
+    tx();
+    const { runQuery } = source([validSpray(1), alert(1)]);
+    const out = await dispatchAlerts.readOpenQueue(runQuery, { limit: LIMIT, today: '2026-10-03' });
+    expect(out).toHaveLength(2);
+    expect(runQuery).toHaveBeenCalledTimes(1);
+    // A short page that drops something is already the whole source: no refill either.
+    const short = source([spray(1), alert(2)]);
+    expect((await dispatchAlerts.readOpenQueue(short.runQuery, { limit: LIMIT, today: '2026-10-03' })).map((r) => r.id)).toEqual(['ok-2']);
+    expect(short.runQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('the refill is bounded: at most 3 refills, then the page may be short', async () => {
+    tx();
+    const all = [...Array.from({ length: 400 }, (_, i) => spray(i)), alert(1)];
+    const { runQuery } = source(all);
+    const out = await dispatchAlerts.readOpenQueue(runQuery, { limit: LIMIT, today: '2026-10-03' });
+    expect(runQuery).toHaveBeenCalledTimes(4);
+    expect(out).toEqual([]);
   });
 });
 

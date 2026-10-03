@@ -510,29 +510,60 @@ async function supersedeInvalidSprayHolds({ jobId, resolvedBy, trx } = {}) {
  * failed write never fails the read. No extra query when there is no spray
  * hold in the rows; no row locks.
  */
-async function dropInvalidSprayHolds(rows, today) {
+async function judgeSprayHolds(rows, today) {
   const holds = rows.filter((r) => r.type === 'lawn_spray_hold' && !r.resolved_at);
-  if (!holds.length) return rows;
+  if (!holds.length) return { kept: rows, dropped: [] };
   const { cardStillValid } = require('./lawn-spray-card-validity');
-  const dropped = new Set();
+  const dropped = [];
   for (const r of holds) {
     if (r.visit_status === undefined) continue; // a caller that did not join the visit cannot judge it
     const visit = r.job_id && (r.visit_status || r.scheduled_date)
       ? { status: r.visit_status, scheduled_date: r.scheduled_date, window_start: r.window_start } : null;
     if (cardStillValid(visit, r.payload, today)) continue;
-    dropped.add(r.id);
+    dropped.push(r.id);
     try {
       await resolveAlert({ id: r.id, auto: true });
     } catch (err) {
       logger.warn(`[dispatch-alerts] spray hold supersede on read failed: ${err.message}`);
     }
   }
-  return rows.filter((r) => !dropped.has(r.id));
+  const gone = new Set(dropped);
+  return { kept: rows.filter((r) => !gone.has(r.id)), dropped };
+}
+
+async function dropInvalidSprayHolds(rows, today) {
+  return (await judgeSprayHolds(rows, today)).kept;
+}
+
+/**
+ * The Action Queue page with stale spray holds filtered BEFORE the limit
+ * counts them. `runQuery(excludedIds)` runs the list query (same ordering,
+ * LIMIT `limit`, `a.id NOT IN excludedIds` when any) and returns its rows.
+ * Common case: one query, nothing dropped. When a pass drops cards, the query
+ * runs again excluding every id dropped so far (the exclusion does not
+ * depend on the best-effort supersede having succeeded), so older valid
+ * alerts fill the page in the original order, with no repeats or gaps: each
+ * pass is the same ordered scan minus ids already judged stale. Stops when a
+ * pass drops nothing, when a short page shows the source is exhausted, or
+ * after MAX_QUEUE_REFILLS refills (a card left after that is simply not shown
+ * this read). The route takes only `limit` (no offset or cursor), so there is
+ * no page boundary a refill could cross.
+ */
+const MAX_QUEUE_REFILLS = 3;
+async function readOpenQueue(runQuery, { limit, today, maxRefills = MAX_QUEUE_REFILLS } = {}) {
+  const excluded = [];
+  for (let pass = 0; ; pass += 1) {
+    const rows = await runQuery(excluded);
+    const { kept, dropped } = await judgeSprayHolds(rows, today);
+    if (!dropped.length || rows.length < limit || pass >= maxRefills) return kept;
+    excluded.push(...dropped);
+  }
 }
 
 module.exports = {
   emitAlert,
   dropInvalidSprayHolds,
+  readOpenQueue,
   supersedeInvalidSprayHolds,
   createAlert,
   createAlertOnce,

@@ -6352,48 +6352,52 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
       ? Math.min(Math.max(requestedLimit, 1), 200)
       : 50;
 
-    const q = db('dispatch_alerts as a')
-      .leftJoin('technicians as t', 'a.tech_id', 't.id')
-      .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
-      .leftJoin('customers as c', 's.customer_id', 'c.id')
-      .select(
-        'a.id',
-        'a.type',
-        'a.severity',
-        'a.tech_id',
-        'a.job_id',
-        'a.payload',
-        'a.created_at',
-        'a.resolved_at',
-        'a.resolved_by',
-        't.name as tech_name',
-        'c.first_name as customer_first_name',
-        'c.last_name as customer_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
-        's.service_type',
-        's.scheduled_date',
-        's.window_start',
-        's.window_end',
-        's.status as visit_status'
-      )
-      // Newest first; alerts written in one transaction share created_at
-      // (now() is per-transaction), so a tech-out batch orders by its own
-      // bump_order (#1 first). Rows without one keep pure recency.
-      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
-      .limit(limit);
+    // Built per call so a refill can re-run it with the stale ids excluded.
+    const buildQuery = (excludedIds = []) => {
+      const q = db('dispatch_alerts as a')
+        .leftJoin('technicians as t', 'a.tech_id', 't.id')
+        .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
+        .leftJoin('customers as c', 's.customer_id', 'c.id')
+        .select(
+          'a.id',
+          'a.type',
+          'a.severity',
+          'a.tech_id',
+          'a.job_id',
+          'a.payload',
+          'a.created_at',
+          'a.resolved_at',
+          'a.resolved_by',
+          't.name as tech_name',
+          'c.first_name as customer_first_name',
+          'c.last_name as customer_last_name',
+          'c.address_line1',
+          'c.address_line2',
+          'c.city',
+          'c.state',
+          'c.zip',
+          's.service_type',
+          's.scheduled_date',
+          's.window_start',
+          's.window_end',
+          's.status as visit_status'
+        )
+        // Newest first; alerts written in one transaction share created_at
+        // (now() is per-transaction), so a tech-out batch orders by its own
+        // bump_order (#1 first). Rows without one keep pure recency.
+        .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
+        .limit(limit);
 
-    if (unresolved) q.whereNull('a.resolved_at');
+      if (unresolved) q.whereNull('a.resolved_at');
+      if (excludedIds.length) q.whereNotIn('a.id', excludedIds);
+      return q;
+    };
 
     // An open pre-day spray hold whose visit moved, started or closed is left
     // out and superseded here (every date/time writer, gate on or off).
-    const allRows = await q;
     const rows = unresolved
-      ? await require('../services/dispatch-alerts').dropInvalidSprayHolds(allRows, etDateString(new Date()))
-      : allRows;
+      ? await require('../services/dispatch-alerts').readOpenQueue((excludedIds) => buildQuery(excludedIds), { limit, today: etDateString(new Date()) })
+      : await buildQuery();
 
     const alerts = rows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.
