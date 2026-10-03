@@ -150,7 +150,8 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
 // from the task's consumed actions, so a resumed task keeps its count) plus
 // this model message's calls that could run direct, decided once before any
 // of them runs. A call of a capped tool whose preview says it would run
-// direct is refused with a pointer to the bulk tool (one card), never minted
+// direct is refused before anything is stored, with a pointer to the bulk
+// tool (one card), never minted
 // as separate cards the write frontier would cut to one (Codex r1 on
 // #5675); a call the preview cards (notes over existing notes, a grouped
 // stop) still reaches its card (Codex r2). A preview-dependent call counts

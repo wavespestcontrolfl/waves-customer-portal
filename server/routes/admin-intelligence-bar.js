@@ -998,7 +998,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, refuseBeforePersist = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1675,6 +1675,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
     }
   }
+
+  // A caller's last word on the finished preview, before anything is stored
+  // (the owner-direct bulk cap): a refusal here leaves no pending action, so
+  // the task's write frontier stays open for the bulk card that follows.
+  const refusal = refuseBeforePersist ? refuseBeforePersist(preview) : null;
+  if (refusal) return { failed: true, modelResult: refusal };
 
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
@@ -3014,21 +3020,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
               task: activeTask,
               taskContext,
+              // Three or more same-tool edits that would run direct: refused
+              // as a set, pointing at the bulk tool (one card). Judged on the
+              // finished preview, so an edit the preview cards still reaches
+              // its card (Codex r2), and before the approval is stored, so
+              // the bulk card that follows is not blocked (pre-push P1).
+              refuseBeforePersist: directCapped.has(toolUse.name)
+                ? preview => (OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview) ? { ...OwnerDirect.BULK_LIMIT_RESULT } : null)
+                : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && directCapped.has(toolUse.name)
-              && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
-              // Three or more same-tool edits that would run direct: refused
-              // as a set, pointing at the bulk tool (one card), and the
-              // approval just minted is released. Judged after the preview,
-              // so an edit the preview cards still reaches its card (Codex r2).
-              await Promise.resolve().then(() => PendingActions.cancelPendingAction(proposed.clientPayload.id, getAdminActorId(req))).catch(() => {});
-              result = { ...OwnerDirect.BULK_LIMIT_RESULT };
-              failed = true;
-              errorMessage = result.error;
             } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm

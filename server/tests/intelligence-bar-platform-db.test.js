@@ -809,27 +809,36 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // Three same-tool edits in one model message: refused as a set with a
       // pointer to the bulk tool (bulk cap, owner ruling 2026-10-02) — no
       // direct commit and no stray cards; nothing is written.
-      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+      // The model then does what the refusal says: the bulk tool, which gets
+      // its one card (nothing stored by the refusals blocks it).
+      mockModel.mockClear();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'bulk update customer fields' }, 'discover'))
         .mockResolvedValueOnce({ content: [source('google', 'a'), source('facebook', 'b'), source('yelp', 'c')], usage: {} })
-        .mockResolvedValueOnce(answer('Use the bulk tool.'));
+        .mockResolvedValueOnce(tools('bulk_update_customers', { customer_ids: [customerA], updates: { lead_source: 'yelp' } }, 'bulk'))
+        .mockResolvedValueOnce(answer('Tap Confirm.'));
       const triple = await api('/query', request(`Change the lead source for ${nameA} three times`, { session_id: crypto.randomUUID() }), ownerToken);
-      expect(triple.body.pendingActions).toEqual([]);
-      expect(JSON.stringify(mockModel.mock.calls)).toContain('owner_direct_bulk_limit');
+      const refused = JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1));
+      expect(refused.match(/owner_direct_bulk_limit/g)).toHaveLength(3);
+      expect(triple.body.pendingActions).toHaveLength(1);
+      expect(triple.body.pendingActions[0].tool).toBe('bulk_update_customers');
       expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
-      // Each minted approval was released: nothing is left to confirm.
-      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).whereNot('status', 'cancelled').count('* as count').first()).toEqual({ count: '0' });
+      // The refusals stored nothing: the bulk card is the task's only action.
+      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).count('* as count').first()).toEqual({ count: '1' });
+      await db('ib_pending_actions').where('id', triple.body.pendingActions[0].id).update({ status: 'cancelled' });
 
       // A capped tool's call that the preview cards (notes over existing
       // notes) still reaches its card; only the would-be-direct calls are
       // refused (Codex r2 on #5675).
       const notesOver = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} over` } }, id: 'n' };
+      mockModel.mockClear();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
-        .mockResolvedValueOnce({ content: [notesOver, source('google', 'x'), source('yelp', 'y')], usage: {} })
+        .mockResolvedValueOnce({ content: [source('google', 'x'), source('yelp', 'y'), notesOver], usage: {} })
         .mockResolvedValueOnce(answer('Tap Confirm.'));
       const mixed = await api('/query', request(`Update ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(mixed.body.pendingActions).toHaveLength(1);
       expect(mixed.body.pendingActions[0].tool).toBe('update_customer');
-      expect(JSON.stringify(mockModel.mock.calls)).toContain('owner_direct_bulk_limit');
+      expect(JSON.stringify(mixed.body.pendingActions[0].contract)).toContain('REPLACES the existing notes');
+      expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1)).match(/owner_direct_bulk_limit/g)).toHaveLength(2);
       expect(await db('customers').where('id', customerA).first('crm_notes', 'lead_source')).toEqual({ crm_notes: note, lead_source: 'referral' });
       await db('ib_pending_actions').where('id', mixed.body.pendingActions[0].id).update({ status: 'cancelled' });
     } finally {
