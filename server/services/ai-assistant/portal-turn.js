@@ -1,12 +1,13 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const logger = require('../logger');
 
 const TURN_BUDGET_MS = 15_000;
 const FINALIZE_RESERVE_MS = 650;
 const RETRY_POLL_MS = 45;
 
-const TIMEOUT_REPLY = "I'm having trouble getting that answer right now. Please try again, or call us at (941) 318-7612.";
+const TIMEOUT_REPLY = `I'm having trouble getting that answer right now. Please try again, or call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 const BUSY_REPLY = "I'm still finishing your earlier question. Please try again in a moment.";
 
 class PortalTurnDeadlineError extends Error {
@@ -178,19 +179,23 @@ function createTurnContext({ row, attemptId, workDeadlineAt, hardDeadlineAt, wor
       }
     },
     async persistCommittedResult(executor, result) {
-      context.assertActive('committed handoff persistence');
+      context.assertActive('committed response persistence');
       const response = { ...result, requestId: context.requestId };
-      const changed = await executor('portal_chat_requests').where({
+      const persisted = await executor('portal_chat_requests').where({
         id: context.requestRowId,
         state: 'processing',
         attempt_id: context.attemptId,
       }).update({
-        response,
-        conversation_id: result.conversationId || null,
+        response: executor.raw('COALESCE(response, ?::jsonb)', [JSON.stringify(response)]),
+        conversation_id: executor.raw(
+          'CASE WHEN response IS NULL THEN ? ELSE conversation_id END',
+          [result.conversationId || null],
+        ),
         updated_at: executor.fn.now(),
-      });
-      if (changed !== 1) throw new PortalTurnDeadlineError('stale committed handoff');
-      return response;
+      }).returning('response');
+      const authoritative = parseJson(persisted?.[0]?.response);
+      if (!authoritative) throw new PortalTurnDeadlineError('stale committed response');
+      return authoritative;
     },
     rememberCommittedResult(result) {
       committedResult = result ? structuredClone({ ...result, requestId: context.requestId }) : null;
@@ -375,28 +380,46 @@ async function claimRequest(row, attemptId, leaseExpiresAt, root) {
   }
 }
 
-async function finishRequest(context, result) {
+async function checkpointResult(context, result) {
+  const remembered = context.committedResult();
+  if (remembered) return remembered;
+
   const response = { ...result, requestId: context.requestId };
-  // A model-led handoff can commit its response and then lose the transaction
-  // acknowledgement. processMessage deliberately converts that error to a
-  // fallback result, so finalization must choose the already-stored response
-  // atomically instead of overwriting it with the resolved fallback.
   const persisted = await context.query(
     db('portal_chat_requests')
       .where({ id: context.requestRowId, state: 'processing', attempt_id: context.attemptId })
       .update({
-        state: 'completed',
         response: db.raw('COALESCE(response, ?::jsonb)', [JSON.stringify(response)]),
         conversation_id: db.raw(
           'CASE WHEN response IS NULL THEN ? ELSE conversation_id END',
           [result.conversationId || null],
         ),
+        updated_at: db.fn.now(),
+      })
+      .returning('response'),
+    'reply checkpoint',
+    true,
+  );
+  const authoritative = parseJson(persisted?.[0]?.response);
+  if (authoritative) return context.rememberCommittedResult(authoritative);
+  const recovered = await recoverCommittedResult(context);
+  if (recovered) return recovered;
+  throw new PortalTurnDeadlineError('stale reply checkpoint');
+}
+
+async function finishRequest(context) {
+  const persisted = await context.query(
+    db('portal_chat_requests')
+      .where({ id: context.requestRowId, state: 'processing', attempt_id: context.attemptId })
+      .whereNotNull('response')
+      .update({
+        state: 'completed',
         attempt_id: null,
         lease_expires_at: null,
         updated_at: db.fn.now(),
       })
       .returning('response'),
-    'reply persistence',
+    'reply completion',
     true,
   );
   const authoritative = parseJson(persisted?.[0]?.response);
@@ -406,7 +429,7 @@ async function finishRequest(context, result) {
     'reply reconciliation',
     true,
   );
-  return parseJson(reconciled?.response) || fallbackResult(context.requestId);
+  return parseJson(reconciled?.response) || context.committedResult() || fallbackResult(context.requestId);
 }
 
 async function recoverCommittedResult(context) {
@@ -419,7 +442,7 @@ async function recoverCommittedResult(context) {
         state: 'processing',
         attempt_id: context.attemptId,
       }).whereNotNull('response').first('response'),
-      'committed handoff recovery',
+      'committed response recovery',
       true,
     );
     const recovered = parseJson(row?.response);
@@ -513,6 +536,12 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     });
     if (claim?.kind === 'completed') return { ...claim.response, requestId };
     if (claim?.kind !== 'claimed') return fallbackResult(requestId, BUSY_REPLY, { pending: true, retryable: true });
+    // A claim transaction can begin before the work deadline and finish in
+    // the finalization reserve. Do not turn that unstarted attempt into a
+    // completed timeout; its short lease lets a retry reclaim it safely.
+    if (workController.signal.aborted || Date.now() >= workDeadlineAt) {
+      return fallbackResult(requestId, BUSY_REPLY, { pending: true, retryable: true });
+    }
 
     turn = createTurnContext({
       row, attemptId, workDeadlineAt, hardDeadlineAt,
@@ -528,13 +557,14 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
       result = await recoverCommittedResult(turn)
         || fallbackResult(requestId, TIMEOUT_REPLY, turn.fallbackExtras());
     }
-    return await finishRequest(turn, result);
+    await checkpointResult(turn, result);
+    return await finishRequest(turn);
   } catch (err) {
     if (err?.status === 409) throw err;
     if (err?.code !== 'PORTAL_CHAT_DEADLINE') {
       logger.error(`[portal-chat] request coordination failed: ${err.message}`, { customerId, requestId });
     }
-    const committed = turn?.committedResult();
+    const committed = turn ? await recoverCommittedResult(turn) : null;
     return committed
       || fallbackResult(requestId, TIMEOUT_REPLY, { ...turn?.fallbackExtras(), retryable: true });
   } finally {
