@@ -61,10 +61,18 @@ describe('foldVisitUnit', () => {
     const unit = foldVisitUnit(a, a, [b]);
     expect(unit.memberIds).toEqual(['a', 'b']);
     expect(unit.id).toBe('a');
-    // The tapped row is untouched; b's work is max(45-minute span, 45) = 45.
+    // The tapped row is untouched; b's work is workDuration(b), exactly what
+    // groupRouteStops charges a member of any other stop (owner planning
+    // minutes included when they apply): max(45-minute span, 45) = 45 here.
     expect(unit.estimated_duration_minutes).toBe(30);
     expect(unit.siblingWorkMinutes).toBe(45);
     expect(unit.memberServices.map((s) => s.service_type)).toEqual(['Pest Control', 'Lawn Care']);
+  });
+
+  test('a sibling is charged what groupRouteStops charges it, planning minutes included', () => {
+    const { workDuration } = require('../services/scheduling/arrival-route');
+    const sibling = stop('b', { service_type: 'Lawn Care', is_recurring: true });
+    expect(foldVisitUnit(stop('a'), stop('a'), [sibling]).siblingWorkMinutes).toBe(workDuration(sibling));
   });
 
   test('the placed work is the tapped service for THIS candidate window plus the siblings, the same from the offered hours and the picked hour', () => {

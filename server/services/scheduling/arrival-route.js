@@ -91,13 +91,15 @@ function foldVisitUnit(target, stored, siblings) {
   // The tapped member keeps its own row untouched: its work is resolved per
   // candidate window by buildPlacementTarget, exactly as for a visit alone
   // (so the offered hours and the picked-hour verdict agree, and a pending
-  // length change counts). The siblings' work is as stored and is added
-  // there. Every member's service is kept for the technician capability
+  // length change counts). The siblings' work is added there. Every member's service is kept for the technician capability
   // checks, which must cover the whole combo.
   return {
     ...target,
     memberIds: [stored.id, ...siblings.map(row => row.id)],
-    siblingWorkMinutes: siblings.reduce((sum, row) => sum + workDuration({ ...row, planning_exempt: true }), 0),
+    // workDuration as groupRouteStops calls it for any member of a stop:
+    // owner planning minutes apply to the siblings; only the tapped row is
+    // exempt, as every target is.
+    siblingWorkMinutes: siblings.reduce((sum, row) => sum + workDuration(row), 0),
     memberServices: [target, ...siblings].map(row => ({ service_type: row.service_type, service_id: row.service_id })),
   };
 }

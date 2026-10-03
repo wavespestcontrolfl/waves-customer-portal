@@ -224,9 +224,10 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
     });
     // A whole visit (unit): the technician must be able to do every service
-    // on it, as the offered hours require. One switched off = no verdict,
-    // never a certified fit.
-    if (fit.feasible && fit.target?.memberServices && (await require('../technician-capabilities')
+    // on it, as the offered hours require. One switched off = no verdict at
+    // all — not a certified fit, and not "doesn't fit the route" either (no
+    // hour would).
+    if (fit.target?.memberServices && (await require('../technician-capabilities')
       .inactiveCapabilitiesForServices(require('../../models/db'), [technicianId], fit.target.memberServices)).length) {
       return noVerdict('route_unverified');
     }

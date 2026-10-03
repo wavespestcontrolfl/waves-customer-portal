@@ -571,6 +571,12 @@ test('arrival-window mode scores the picked hour with the shared route checker: 
     body = await (await post(req)).json();
     expect(body.picked).toBeUndefined();
     expect(inactive).toHaveBeenLastCalledWith(expect.anything(), ['t1'], memberServices);
+    // The same when the route also misses: no "doesn't fit", since no hour would.
+    checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'arrival_window', target: { memberServices } });
+    inactive.mockResolvedValueOnce([{ technician_id: 't1', capability: 'lawn' }]);
+    body = await (await post(req)).json();
+    expect(body.picked).toBeUndefined();
+    checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 9, target: { memberServices } });
     inactive.mockResolvedValueOnce([]);
     body = await (await post(req)).json();
     expect(body.picked).toMatchObject({ start: '09:00', fits: true });
