@@ -318,3 +318,19 @@ it('a recurring combo moved together moves this visit only: no "later visits" li
   }
 });
 
+it('a separation that committed is disclosed when the edit after it fails', async () => {
+  fetch.mockImplementation(async (url, options) => (
+    String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT'
+      ? { ok: false, status: 500, json: async () => ({ error: 'boom' }) }
+      : okJson(url)));
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('This service was separated from the stop, but the other changes were not saved. Save failed: boom');
+  // Retrying never splits a second time.
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(3));
+  expect(writeUrls().filter((u) => u.includes('/split'))).toHaveLength(1);
+});
+

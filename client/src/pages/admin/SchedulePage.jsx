@@ -1933,7 +1933,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   });
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const [saveError, setSaveError] = useState("");
+  const [saveError, setSaveErrorState] = useState("");
+  const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
   // "Apply price & service change to" — series rows only, rendered only when
@@ -3176,6 +3177,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (form.scheduledDate !== initialScheduledDate ||
       (form.windowStart || "") !== initialWindowStart) &&
     !!form.windowStart;
+  // Whether a move text can be offered. For a combo this modal already
+  // moved once, "moved" is measured from where the stop now is, not from the
+  // slot the form opened on: a second move (back to the original time
+  // included) must be able to text again.
+  const moveNotifyOffered = comboVisit && comboDoneRef.current.moved
+    ? comboPlaceChanged && !!form.windowStart
+    : scheduleMoved;
 
   // See lineDiscountSaveBlocked's own comment for the compounding hazard
   // this guards against. Also the ONE condition (interaction between the
@@ -3479,6 +3487,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
     }
     let comboMovedThisSave = false;
+    let comboSeparatedThisSave = false;
     let comboMoveWarnings = [];
     try {
       // Only manage add-on lines when there are any to send (or any existed
@@ -3490,7 +3499,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // payload's gross convention apart from MobileServiceEditModal's net
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
-      const notifyOnMove = scheduleMoved && notificationType === "sms";
+      const notifyOnMove = moveNotifyOffered && notificationType === "sms";
       // A combo's date/time change runs first, through the action that owns
       // it; the PUT below then carries the row's (now current) slot and
       // saves everything else.
@@ -3499,6 +3508,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           method: "POST", body: JSON.stringify({ serviceId: service.id }),
         });
         comboDoneRef.current.separated = true;
+        comboSeparatedThisSave = true;
       } else if (comboSlotChanged) {
         if (comboLengthChanged) {
           throw new Error("Moving both services keeps each one's length. Save the move first, or choose Separate to change this service's length.");
@@ -3825,6 +3835,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
+      // A combo's move or split is its own committed action. When the edit
+      // after it fails, say what already happened — every branch below — so
+      // nobody re-does the move or closes on an unnoticed split.
+      const committed = comboMovedThisSave
+        ? "Both services were moved, but the other changes were not saved. "
+        : (comboSeparatedThisSave ? "This service was separated from the stop, but the other changes were not saved. " : "");
+      const setSaveError = (message) => setSaveErrorState(committed + message);
       const ack = parseSeriesAckError(e);
       if (ack?.code === SERIES_ACK_REQUIRED) {
         // Nothing saved, nothing moved — the server refused up front. Show
@@ -3857,7 +3874,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       } else {
         // The stop already moved (its own committed action); say so, so the
         // operator fixes the rest instead of re-doing the move.
-        setSaveError(`${comboMovedThisSave ? "Both services were moved, but the other changes were not saved. " : ""}Save failed: ${e.message}`);
+        setSaveError("Save failed: " + e.message);
       }
     }
     savingRef.current = false;
@@ -6121,7 +6138,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {scheduleMoved && (
+              {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Client booking notifications</label>{" "}
