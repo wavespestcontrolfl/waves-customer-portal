@@ -43,7 +43,8 @@ jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
   markSendFailed: jest.fn(async () => true),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+const mockHomeLineLive = jest.fn(() => false);
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), homeLineLive: () => mockHomeLineLive() }));
 const mockCallsCreate = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ calls: { create: mockCallsCreate } })));
 jest.mock('../config', () => ({ twilio: { accountSid: 'ACtest', authToken: 'tok' } }));
@@ -312,6 +313,26 @@ test('balance drift vs approved snapshot ⇒ cancelled, never dialed', async () 
   expect(mockCallsCreate).not.toHaveBeenCalled();
 });
 
+test('GATE_HOME_LINE: the collections call dials from the customer home line (owner 2026-10-02)', async () => {
+  mockHomeLineLive.mockReturnValue(true);
+  try {
+    const parrishCustomer = { ...CUSTOMER, address_line1: '1 A St', city: '', zip: '34219' };
+    const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), chain('collection_cases', { returningRows: [{ id: 'case-1' }] })],
+      customers: [chain('customers', { first: parrishCustomer }), chain('customers', { first: parrishCustomer })],
+      call_log: [chain('call_log', { first: undefined }), insertChain, chain('call_log')],
+    });
+    const res = await originateCollectionCall('case-1', { now: NOW });
+    expect(res.dialed).toBe(true);
+    expect(mockCallsCreate.mock.calls[0][0].from).toBe('+19412972817');
+    // call_log.from_phone is what the script reads back to the customer.
+    expect(insertChain._inserted.from_phone).toBe('+19412972817');
+  } finally {
+    mockHomeLineLive.mockReturnValue(false);
+  }
+});
+
 test('happy path: ledger → call_log insert → calls.create, in that order', async () => {
   const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
@@ -338,6 +359,9 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   expect(args.machineDetection).toBe('DetectMessageEnd');
   expect(args.url).toContain('/api/webhooks/twilio/collections-vestibule?');
   expect(args.to).toBe('+19415551234');
+  // GATE_HOME_LINE off: the main line, as before.
+  expect(args.from).toBe('+19412975749');
+  expect(insertChain._inserted.from_phone).toBe('+19412975749');
   // The atomic claim moved the case to dialing pre-create; no later state
   // write repeats it.
   expect(stateChain._updated).toBeUndefined();

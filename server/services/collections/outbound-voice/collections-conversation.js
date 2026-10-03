@@ -452,6 +452,8 @@ class CollectionsConversation {
         // SMS consent happened on this number — a send must never follow a
         // mid-call phone edit to a number that did neither.
         dialedPhone: row.to_phone || null,
+        // The caller ID this call presented — the number the script speaks.
+        callerIdPhone: row.from_phone || null,
         // The pay-link target is the LIVE eligible set's OLDEST-DUE invoice
         // (gh prb-r5 + hook r2): the balance disclosed in-call is computed
         // from it, and a link to a snapshot invoice paid since dialing would
@@ -1171,7 +1173,7 @@ class CollectionsConversation {
     }
     this.verifyAttempts += 1;
     if (this.verifyAttempts >= VERIFY_MAX_ATTEMPTS) {
-      this.say(script.verificationFailedClose());
+      this.say(script.verificationFailedClose(this._ctx?.callerIdPhone));
       await this._finish('conversation_verification_failed', { endSession: true });
       return 'Verification failed — the call was ended without any account details.';
     }
@@ -1800,7 +1802,7 @@ class CollectionsConversation {
     // A callback is only PROMISED when its card actually persisted (gh
     // prb-r3: notifyAdmin resolves null on a failed insert) — otherwise
     // the honest copy gives the number without the promise.
-    this.say((callbackCard && callbackCard.id) ? script.callbackPromise() : script.callbackNumberOnly());
+    this.say((callbackCard && callbackCard.id) ? script.callbackPromise(this._ctx?.callerIdPhone) : script.callbackNumberOnly(this._ctx?.callerIdPhone));
     await this._finish('conversation_transferred', { endSession: true, handoff: { next: 'callback' } });
   }
 
