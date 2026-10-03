@@ -77,7 +77,12 @@ describe('sender-line lookup is scoped for a technician (codex #5683 r1)', () =>
     expect(guard).toBeLessThan(lookup);
     const block = handler.slice(guard, lookup);
     expect(block).toMatch(/!customerId \|\| !\(await technicianServicesCustomer\(req, customerId\)\)\) return res\.json\(\{ fromNumber: null \}\)/);
-    expect(block).toMatch(/ownLast10 !== fullPhoneLast10\(phone\)\) return res\.json\(\{ fromNumber: null \}\)/);
+    expect(block).toMatch(/ownKey !== phoneIdentityKey\(phone\)\) return res\.json\(\{ fromNumber: null \}\)/);
+    // Full-number identity for non-NANP numbers, last-10 for NANP (codex #5733 r1).
+    const { phoneIdentityKey } = require('../utils/phone');
+    expect(phoneIdentityKey('+447911123456')).toBe('+447911123456');
+    expect(phoneIdentityKey('+447911123456')).not.toBe(phoneIdentityKey('+337911123456'));
+    expect(phoneIdentityKey('(941) 555-0123')).toBe(phoneIdentityKey('+19415550123'));
   });
 });
 

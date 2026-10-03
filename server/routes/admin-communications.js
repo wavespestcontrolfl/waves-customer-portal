@@ -1853,8 +1853,10 @@ router.get('/sender', async (req, res, next) => {
     if (isTechnicianRequest(req)) {
       if (!customerId || !(await technicianServicesCustomer(req, customerId))) return res.json({ fromNumber: null });
       const owner = await db('customers').where({ id: customerId }).first('phone');
-      const ownLast10 = fullPhoneLast10(owner?.phone);
-      if (!ownLast10 || ownLast10 !== fullPhoneLast10(phone)) return res.json({ fromNumber: null });
+      // phoneIdentityKey, not a last-10 compare: an international customer
+      // number keeps its full-number identity (codex #5733 r1).
+      const ownKey = phoneIdentityKey(owner?.phone);
+      if (!ownKey || ownKey !== phoneIdentityKey(phone)) return res.json({ fromNumber: null });
     }
     const { fromNumber, reason } = await require('../services/home-line').staffTextSender({ phone, customerId });
     const line = TWILIO_NUMBERS.findByNumber(fromNumber);
