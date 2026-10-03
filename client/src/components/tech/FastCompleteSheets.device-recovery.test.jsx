@@ -50,6 +50,30 @@ for (const [name, Sheet, reportFlow] of [
     expect(completed).toHaveBeenCalledTimes(1);
   });
 
+  test(`${name} keeps a refused completion whose copy will not clear, to discard (GitHub Codex P2 on 102b99cb1b)`, async () => {
+    const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
+    await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit summary' });
+    let refuse;
+    const request = vi.fn((path) => {
+      if (!path.endsWith('/complete')) return Promise.reject(Object.assign(new Error('Context unavailable'), { status: 503 }));
+      return new Promise((_resolve, reject) => { refuse = () => reject(Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' })); });
+    });
+    render(<Sheet service={{ id: 'visit-a', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+    await waitFor(() => expect(refuse).toBeTypeOf('function'));
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    try {
+      refuse();
+      expect(await screen.findByText(/could not clear its saved copy of this completion/)).toBeInTheDocument();
+    } finally { globalThis.indexedDB = store; }
+    fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+    await waitFor(async () => expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Discard saved retry' })).not.toBeInTheDocument();
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+  });
+
   test(`${name} says when this device could not clear the saved copy (GitHub Codex P2 on 0fdeda8a25)`, async () => {
     const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
     await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit summary' });

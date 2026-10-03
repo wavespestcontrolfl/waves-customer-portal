@@ -243,6 +243,22 @@ function isLawnReserviceFastCompleteEligible(service) {
 // the live route now says completed. Report-flow bodies overlap the typed
 // findings used by the lawn and Tree & Shrub sheets, so their frozen report
 // base wins; the remaining findings type identifies the focused sheet.
+// When a saved completion was stored on this device, for the picker, which
+// otherwise shows nothing that tells two off-route attempts apart (GitHub
+// Codex P2 on 102b99cb1b).
+function savedAtLabel(storedAt) {
+  const when = Number(storedAt);
+  if (!Number.isFinite(when) || when <= 0) return '';
+  return new Date(when).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+// The scan without one service's attempt: a tap's own read found it gone.
+function withoutRecoveryAttempt(scan, serviceId) {
+  if (!scan.attempts.has(String(serviceId))) return scan;
+  const attempts = new Map(scan.attempts);
+  attempts.delete(String(serviceId));
+  return { ...scan, attempts };
+}
+const RECOVERY_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
 function fastCompletionRecoveryKind(attempt) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
@@ -483,6 +499,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
   const [fastRecoveryScan, setFastRecoveryScan] = useState(() => ({ operatorId: null, attempts: new Map() }));
   const reportRouteSeq = useRef(0);
+  const [recoveryReadNotice, setRecoveryReadNotice] = useState('');
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -933,7 +950,7 @@ export default function TechHomePage({ section = 'today' }) {
       .filter((attempt) => !selectedVisitKey && !myServices.some((service) => String(service.id) === attempt.serviceId))
       .map((attempt) => ({ id: attempt.serviceId, customerName: 'Saved completion',
         serviceType: attempt.summary || 'Unfinished completion', status: 'unknown',
-        fastCompletionRecoveryOnly: true })),
+        savedAt: attempt.storedAt, fastCompletionRecoveryOnly: true })),
   ];
   // Existing live-visit routing stays behind the recovery check below.
   const openPestCompletion = useCallback((service) => {
@@ -958,6 +975,7 @@ export default function TechHomePage({ section = 'today' }) {
   // retry; routing that row to recap or Dispatch would strand the attempt.
   const openServiceReport = useCallback(async (service) => {
     const seq = ++reportRouteSeq.current;
+    setRecoveryReadNotice('');
     // Re-read at the tap: another tab or a just-closed sheet may have
     // discarded or completed the attempt since the picker was rendered.
     const result = staffIdForDevice
@@ -975,7 +993,15 @@ export default function TechHomePage({ section = 'today' }) {
       else setFastCompleteService(recoveryService);
       return;
     }
-    if (service.fastCompletionRecoveryOnly) return;
+    if (service.fastCompletionRecoveryOnly) {
+      // The tap's own read is the word on this device: a read that found no
+      // saved attempt (another tab discarded or finished it) drops the stale
+      // entry; an unreadable device says so on the tool (GitHub Codex P2 on
+      // 102b99cb1b).
+      if (result.available === false) setRecoveryReadNotice(RECOVERY_READ_NOTICE);
+      else setFastRecoveryScan((scan) => withoutRecoveryAttempt(scan, service.id));
+      return;
+    }
     if (fieldWorkspace && TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
@@ -1003,7 +1029,7 @@ export default function TechHomePage({ section = 'today' }) {
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
-    { label: completionRoutesLoading ? 'Checking Saved Completions…' : soleRecovery ? 'Recover Completion' : 'Project Report', description: soleRecovery ? 'Retry the unfinished completion saved on this device' : 'Open the existing service report workflow', icon: 'project', disabled: completionRoutesLoading || projectServices.length === 0, onClick: handleProjectQuickAction },
+    { label: completionRoutesLoading ? 'Checking Saved Completions…' : soleRecovery ? 'Recover Completion' : 'Project Report', description: recoveryReadNotice || (soleRecovery ? 'Retry the unfinished completion saved on this device' : 'Open the existing service report workflow'), icon: 'project', disabled: completionRoutesLoading || projectServices.length === 0, onClick: handleProjectQuickAction },
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
@@ -1744,10 +1770,12 @@ function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect 
                   }}
                 >
                   <div style={{ fontSize: 14, fontWeight: 700 }}>
-                    {service.customer_name || service.customerName || 'Customer'}
+                    {service.fastCompletionRecoveryOnly
+                      ? [service.customerName, savedAtLabel(service.savedAt)].filter(Boolean).join(' · ')
+                      : service.customer_name || service.customerName || 'Customer'}
                   </div>
                   <div style={{ fontSize: 12, color: DARK.muted, marginTop: 3 }}>
-                    {service.fastCompletionRecoveryOnly ? 'saved on this device' : status.replace(/_/g, ' ')}
+                    {service.fastCompletionRecoveryOnly ? `saved on this device · ${service.serviceType}` : status.replace(/_/g, ' ')}
                     {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
                     {recoveryServiceIds?.has(String(service.id)) ? ' · saved completion to retry' : ''}
                   </div>

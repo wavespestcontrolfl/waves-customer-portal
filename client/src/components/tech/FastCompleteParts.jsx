@@ -299,6 +299,9 @@ export function RecoveredCompletion({ submission }) {
     );
   }
   const canRetry = submission.hasPendingBody() && submission.retryPending;
+  // A request refused for good whose saved copy would not clear keeps it here
+  // to discard, never to retry.
+  const canDiscard = submission.hasPendingBody() && (submission.retryPending || submission.failure === 'terminal');
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body">
@@ -314,7 +317,7 @@ export function RecoveredCompletion({ submission }) {
         onSubmit={submission.retry}
         missingReason={canRetry ? '' : 'Close and reopen this visit to make a new completion.'}
       >
-        {canRetry && (
+        {canDiscard && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.discard}>
             Discard saved retry
           </Button>

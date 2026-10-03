@@ -20,6 +20,9 @@ const CONFIRM_FLAGS = { report_rules_review: 'reportRulesConfirmed', promise_mar
 // its Retry resends the same key, so it only confirms this save.
 const SAVED_COPY_NOTICE = 'This device could not clear its saved copy. If this visit offers it again, Retry only confirms this save.';
 const savedNotice = (cleared) => (cleared ? {} : { notice: SAVED_COPY_NOTICE });
+// A request refused for good whose stored copy this device could not clear:
+// the saved-attempt view stays up with Discard, never a retry.
+const KEPT_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
 const STORAGE_WARNING = 'This device can’t save a reload-safe copy right now. Keep this screen open. You can still send after this warning.';
 
 function completionFailureOutcome(err, { confirmable = false } = {}) {
@@ -140,13 +143,14 @@ export default function useFastCompleteSubmit({
     return true;
   }, []);
 
-  // After a saved completion: removes the exact row the send stood on. A
-  // delete that removed nothing is re-read: another tab may have removed the
-  // row, or saved a newer revision, which stays. While this exact body is
-  // still there (or storage cannot be read), the delete runs once more, and a
-  // row that still stands is reported, so a later scan offering this visit's
-  // saved completion is explained (GitHub Codex P2 on 0fdeda8a25).
-  const clearSaved = useCallback(async (scope, storedBody) => {
+  // After a settled send (saved, or refused for good): removes the exact row
+  // the send stood on. A delete that removed nothing is re-read: another tab
+  // may have removed the row, or saved a newer revision, which stays. While
+  // this exact body is still there (or storage cannot be read), the delete
+  // runs once more; false means the row still stands, which the caller
+  // reports, so a later scan offering it is explained (GitHub Codex P2s on
+  // 0fdeda8a25 and 102b99cb1b).
+  const clearSettled = useCallback(async (scope, storedBody) => {
     const stillStored = async () => {
       const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
       return !current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(storedBody);
@@ -203,14 +207,21 @@ export default function useFastCompleteSubmit({
 
   const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    const clear = outcome === 'saved' ? clearSaved : clearStored;
-    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clear(scope, storedBody) : true;
+    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearSettled(scope, storedBody) : true;
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
       rejectedBodyRef.current = persistedBodyRef.current;
     }
-    pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
+    // A request refused for good whose saved copy still stands stays in hand:
+    // the saved-attempt view says so and offers Discard, so a later scan never
+    // offers it as a retry (GitHub Codex P2 on 102b99cb1b).
+    const keptTerminal = outcome === 'terminal' && !removed;
+    pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' || keptTerminal ? body : null;
     pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
+    if (keptTerminal) {
+      setRestored(true);
+      setStorageWarning(KEPT_COPY_NOTICE);
+    }
     if (outcome === 'correctable') {
       if (removed) persistedBodyRef.current = null;
       keyRef.current = genIdempotencyKey();
@@ -228,7 +239,7 @@ export default function useFastCompleteSubmit({
     }
     setFailure(outcome === 'correctable' ? null : outcome);
     setError(outcomeMessage(outcome, err));
-  }, [clearStored, clearSaved, confirmable]);
+  }, [clearSettled, confirmable]);
 
   const submit = useCallback(async (buildBody, summary) => {
     if (inFlight.current || recovering) return;
@@ -269,7 +280,7 @@ export default function useFastCompleteSubmit({
       if (persistence !== 'send') return;
       storedBody = persistedBodyRef.current;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      const cleared = await clearSaved(scope, storedBody);
+      const cleared = await clearSettled(scope, storedBody);
       if (!sameScope(scopeRef.current, scope)) return;
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
@@ -283,7 +294,7 @@ export default function useFastCompleteSubmit({
         inFlight.current = false;
       }
     }
-  }, [base, request, recovering, clearStored, clearSaved, persistPrepared, settleFailure]);
+  }, [base, request, recovering, clearStored, clearSettled, persistPrepared, settleFailure]);
 
   const retry = useCallback(() => {
     if (!pendingBodyRef.current) return;
@@ -308,6 +319,9 @@ export default function useFastCompleteSubmit({
     const scope = scopeRef.current;
     const body = pendingBodyRef.current;
     const storedBody = persistedBodyRef.current || body;
+    // A request refused for good stays refused: discarding its saved copy
+    // keeps the sheet's answer and its lock.
+    const refused = failure === 'terminal';
     inFlight.current = true;
     setSubmitting(true);
     try {
@@ -326,8 +340,11 @@ export default function useFastCompleteSubmit({
       keyRef.current = genIdempotencyKey();
       persistedBodyRef.current = null;
       setRestored(false);
-      setFailure(null);
-      setError('');
+      setStorageWarning((warning) => (warning === KEPT_COPY_NOTICE ? '' : warning));
+      if (!refused) {
+        setFailure(null);
+        setError('');
+      }
       setPrompt(null);
     } finally {
       if (sameScope(scopeRef.current, scope)) {
@@ -335,7 +352,7 @@ export default function useFastCompleteSubmit({
         setSubmitting(false);
       }
     }
-  }, [clearStored]);
+  }, [clearStored, failure]);
 
   return {
     recovering, restored, submitting, error, failure, done, prompt, storageWarning,

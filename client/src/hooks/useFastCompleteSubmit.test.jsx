@@ -426,6 +426,33 @@ describe('a saved completion whose stored copy will not clear (GitHub Codex P2 o
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(newer);
   });
 
+  it('a request refused for good whose copy will not clear stays in hand to discard, and discarding keeps the refusal (GitHub Codex P2 on 102b99cb1b)', async () => {
+    const { view, release } = await sendRestored(() => { throw Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' }); });
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    try { await release(); } finally { globalThis.indexedDB = store; }
+    expect(view.result.current.failure).toBe('terminal');
+    expect(view.result.current.restored).toBe(true);
+    expect(view.result.current.hasPendingBody()).toBe(true);
+    expect(view.result.current.storageWarning).toMatch(/could not clear its saved copy of this completion/);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(attempt);
+    await act(async () => { await view.result.current.discard(); });
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+    expect(view.result.current.failure).toBe('terminal');
+    expect(view.result.current.error).toMatch(/Another completion for this visit/);
+    expect(view.result.current.restored).toBe(false);
+    expect(view.result.current.storageWarning).toBe('');
+  });
+
+  it('a refusal whose copy clears keeps nothing in hand', async () => {
+    const { view, release } = await sendRestored(() => { throw Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' }); });
+    await release();
+    expect(view.result.current.failure).toBe('terminal');
+    expect(view.result.current.hasPendingBody()).toBe(false);
+    expect(view.result.current.storageWarning).toBe('');
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
   it('a copy that clears says nothing', async () => {
     const { view, release } = await sendRestored(() => ({ success: true }));
     await release();

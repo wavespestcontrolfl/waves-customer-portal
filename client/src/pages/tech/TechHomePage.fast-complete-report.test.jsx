@@ -7,7 +7,7 @@
 // routing; a closed visit stays on the recap editor either way.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -183,4 +183,41 @@ it('keeps an earlier completion reachable when it is absent from today’s route
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
   expect(await sheetService()).toMatchObject({ id: 'prior-day', reportFlow: true });
+});
+
+it('a saved completion a tap finds gone leaves the list (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  // Another tab discards it after this page's scan.
+  mocks.getAttempt.mockImplementation(async () => ({ available: true, attempt: null }));
+  fireEvent.click(recover);
+  const reportTool = await screen.findByRole('button', { name: /Project Report/ });
+  expect(reportTool).toBeDisabled();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('an unreadable device says so on the tool and keeps the saved completion (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Recover Completion/ })).toBeInTheDocument();
+});
+
+it('two off-route saved completions show when each was saved and what it holds (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-a', { body: { idempotencyKey: 'a-key', reportDraftBase: {} }, summary: 'Taurus SC · Perimeter', storedAt: Date.UTC(2026, 9, 2, 19, 15) });
+  mocks.attempts.set('prior-b', { body: { idempotencyKey: 'b-key', reportDraftBase: {} }, summary: 'Advion WDG · Kitchen', storedAt: Date.UTC(2026, 9, 1, 13, 5) });
+  rows = [];
+  mount();
+  await openFromTools();
+  const picker = await screen.findByRole('dialog');
+  expect(within(picker).getByText(/^Saved completion · Oct 2, 3:15\sPM$/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^Saved completion · Oct 1, 9:05\sAM$/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^saved on this device · Taurus SC · Perimeter/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^saved on this device · Advion WDG · Kitchen/)).toBeInTheDocument();
 });
