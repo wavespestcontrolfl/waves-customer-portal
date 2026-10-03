@@ -110,16 +110,18 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   const payments = gates.portalChatFactsLive();
   const visits = gates.portalChatVisitFactsLive();
   const reservice = gates.portalChatReserviceLive();
+  // The lawn line of the re-service offer: its own gate, on top of the offer's.
+  const reserviceLawn = reservice && gates.portalChatReserviceLawnLive();
   return {
-    prompt: portalPrompt({ payments, visits, reservice }),
-    tools: portalToolsFor({ payments, visits, reservice }),
+    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn }),
+    tools: portalToolsFor({ payments, visits, reservice, reserviceLawn }),
     actions: [],
     cards: payments || visits ? [] : null,
     portal: true,
     // Whether the payment card and re-service tools are in this lane.
     payments,
     reservice,
-    context: { secondaryProperty: secondaryProperty !== false },
+    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn },
   };
 }
 
@@ -268,6 +270,9 @@ ${renderCompanyFactsSection()}
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
 }
 
+// The pest-only prompt's lawn sentence, which the lawn gate replaces.
+const RESERVICE_LAWN_ESCALATION = 'A lawn problem (weeds, brown or thin grass) is not this tool\'s: escalate it with topic pest_problem.';
+
 // GATE_PORTAL_CHAT_RESERVICE on top of any portal prompt: pests back between
 // visits go to offer_reservice, which alone decides whether a visit is free.
 function withReservice(prompt) {
@@ -278,21 +283,32 @@ function withReservice(prompt) {
     .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests back since the visit follow PESTS BACK BETWEEN VISITS below.')
     .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:
-When the customer reports household pests back or still there between scheduled visits, call offer_reservice in that same turn, with service line pest, and follow its instruction. It reads the customer's message from that turn only. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead. A lawn problem (weeds, brown or thin grass) is not this tool's: escalate it with topic pest_problem.
+When the customer reports household pests back or still there between scheduled visits, call offer_reservice in that same turn, with service line pest, and follow its instruction. It reads the customer's message from that turn only. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead. ${RESERVICE_LAWN_ESCALATION}
 
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
+}
+
+// GATE_PORTAL_CHAT_RESERVICE_LAWN on top of the re-service prompt: a lawn
+// problem happening now goes to offer_reservice too. The model judges that
+// and quotes the customer; the server verifies the quote (owner ruling
+// 2026-10-03).
+function withReserviceLawn(prompt) {
+  return prompt
+    .replace('- Offer a free re-service when pests come back between visits (offer_reservice)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)')
+    .replace(RESERVICE_LAWN_ESCALATION, `For a lawn problem (weeds, turf insects, brown, thin or dying grass) the customer says is happening now, call offer_reservice in that same turn with service line lawn, current_problem true, and customer_quote set to their exact words about it from this message, copied word for word. A question about lawn care, a what-if, a past problem or one they say is fixed is NOT a current problem: answer it and do not call the tool with current_problem true.`);
 }
 
 // Every portal prompt, built once per gate combination: the text sent to the
 // model for a combination never varies between requests (it carries the
 // cache breakpoint).
 const PORTAL_PROMPTS = new Map();
-function portalPrompt({ payments, visits, reservice }) {
-  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}`;
+function portalPrompt({ payments, visits, reservice, reserviceLawn }) {
+  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}`;
   if (!PORTAL_PROMPTS.has(key)) {
     let prompt = payments ? PORTAL_FACTS_PROMPT : PORTAL_SYSTEM_PROMPT;
     if (visits) prompt = withVisitFacts(prompt);
     if (reservice) prompt = withReservice(prompt);
+    if (reserviceLawn) prompt = withReserviceLawn(prompt);
     PORTAL_PROMPTS.set(key, prompt);
   }
   return PORTAL_PROMPTS.get(key);

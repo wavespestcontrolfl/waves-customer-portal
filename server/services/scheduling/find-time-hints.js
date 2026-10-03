@@ -378,7 +378,7 @@ function emptyDayStatus(reasons) {
  * and deduped by day + start (best-ranked technician wins). Hours are in
  * clock order; ranking by added drive is the consumer's call.
  */
-function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
+function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, offDates }) {
   const byDate = new Map();
   for (let date = from; date <= to; date = nextYmd(date)) byDate.set(date, []);
   for (const slot of slots) {
@@ -395,9 +395,49 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
   }
   return [...byDate].map(([date, hours]) => ({
     date,
-    status: hours.length ? 'open' : emptyDayStatus(rejectionsByDate?.[date]),
+    // 'off' = the searched technician is marked absent (the engine skips the
+    // day before any candidate, so it would otherwise read as 'full').
+    status: hours.length ? 'open' : (offDates?.has(date) ? 'off' : emptyDayStatus(rejectionsByDate?.[date])),
+    // A day the business does not normally work. Staff may still book it,
+    // so its hours stay listed; the strip labels it and never offers it as
+    // the "closest" alternative.
+    ...(closedDates?.has(date) ? { closed: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
+}
+
+/**
+ * What the calendar says about each summary day, beyond the route: closed
+ * days (owner blackout dates, weekly days off, and Sundays — the day every
+ * customer surface skips) and, for a search scoped to one technician, that
+ * technician's absences. Advisory labels only: any lookup failure leaves the
+ * set empty and the summary answers as before.
+ */
+async function loadSummaryDayFacts(plan, technicianId) {
+  const closedDates = new Set();
+  const offDates = new Set();
+  if (!plan.summary) return { closedDates, offDates };
+  for (let date = plan.from; date <= plan.to; date = nextYmd(date)) {
+    if (new Date(`${date}T12:00:00Z`).getUTCDay() === 0) closedDates.add(date);
+  }
+  try {
+    const { getBlackoutDates } = require('./blackout-dates');
+    for (const date of await getBlackoutDates(plan.from, plan.to)) closedDates.add(date);
+  } catch (err) {
+    logger.warn(`[find-time] summary blackout lookup failed (no closed labels): ${err.message}`);
+  }
+  if (technicianId) {
+    try {
+      const { absentTechDays } = require('../technician-eligibility');
+      const absent = await absentTechDays(require('../../models/db'), {
+        dateFrom: plan.from, dateTo: plan.to, technicianIds: [technicianId],
+      });
+      for (const key of absent) offDates.add(String(key).slice(String(key).lastIndexOf(':') + 1));
+    } catch (err) {
+      logger.warn(`[find-time] summary absence lookup failed (no off labels): ${err.message}`);
+    }
+  }
+  return { closedDates, offDates };
 }
 
 // Budget for the strip's eleven days (the plain hint's range search covers
@@ -405,19 +445,19 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
 const SUMMARY_SLOW_MS = 1500;
 
 /** The response's `summary` for a summary plan; undefined for any other. */
-function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt }) {
+function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt, closedDates, offDates }) {
   if (!plan.summary) return undefined;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
   return {
-    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate }),
+    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates }),
     elapsed_ms: elapsedMs,
   };
 }
 
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour,
-  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS,
+  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
 };

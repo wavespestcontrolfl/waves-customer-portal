@@ -45,16 +45,18 @@ function suppressesCustomerArtifacts(structuredNotes = {}) {
 // status is 'completed', filtered before the limit and in the total, so an
 // incomplete visit is never described as a completed one. The route leaves
 // it off and lists every record, as before.
-async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, type = null, scope = null, completedOnly = false } = {}) {
-  let query = db('service_records')
+async function listPortalServiceHistory(customerId, {
+  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, database = db,
+} = {}) {
+  let query = database('service_records')
     .where({ 'service_records.customer_id': customerId })
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
     .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
     .select(
       'service_records.*',
       'technicians.name as technician_name',
-      db.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
-      db.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
+      database.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
+      database.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
     )
     .orderBy('service_records.service_date', 'desc')
     .orderBy('service_records.id', 'desc')
@@ -76,13 +78,13 @@ async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, ty
 
     const products = suppressCustomerArtifacts
       ? []
-      : await db('service_products')
+      : await database('service_products')
         .where({ service_record_id: svc.id })
         .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'notes');
 
     const photoCount = suppressCustomerArtifacts
       ? { count: 0 }
-      : await db('service_photos')
+      : await database('service_photos')
         .where({ service_record_id: svc.id })
         .count('id as count')
         .first();
@@ -143,7 +145,7 @@ async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, ty
   }));
 
   // Get total count for pagination
-  let totalQuery = db('service_records')
+  let totalQuery = database('service_records')
     .where({ 'service_records.customer_id': customerId });
   if (scope) {
     totalQuery = scopeRecordsToProperty(

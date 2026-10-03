@@ -74,19 +74,23 @@ describe('whatToExpect: approved rows only, their own sentences word for word', 
     expect(buildLawnCopyV6(reportV2(), {}, deps).fields.whatToExpect).toBeNull();
   });
 
-  test('the visible-change sentence of the first two approved rows that have one, verbatim, ids recorded; never timing', () => {
+  test('each row\'s visible-change then by-next-visit sentence, verbatim, ids recorded; the gap is handed to the engine', () => {
     const deps = expectationsReturning([
       row('r1', [['visibleChange', 'Treated weeds curl and fade.'], ['limit1', 'Some weeds need a second pass.'], ['byNextVisit', 'Most should be gone by your next visit.']]),
       row('r2', [['limit1', 'Results vary by weed.']]),
-      row('r3', [['visibleChange', 'Color deepens over the coming weeks.']]),
+      row('r3', [['visibleChange', 'Color deepens.']]),
       row('r4', [['visibleChange', 'Never reached.']]),
     ]);
-    const out = buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30' }, deps);
-    expect(out.fields.whatToExpect).toBe('Treated weeds curl and fade. Color deepens over the coming weeks.');
-    expect(out.expectRows).toEqual([{ id: 'r1', keys: ['visibleChange'] }, { id: 'r3', keys: ['visibleChange'] }]);
-    const call = deps.buildExpectations.mock.calls[0][0];
-    expect(call.visitDate).toBe('2026-09-30');
-    expect(call).not.toHaveProperty('nextVisitGapDays');
+    const out = buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30', nextVisitGapDays: 42 }, deps);
+    expect(out.fields.whatToExpect).toBe('Treated weeds curl and fade. Most should be gone by your next visit. Color deepens.');
+    expect(out.expectRows).toEqual([{ id: 'r1', keys: ['visibleChange', 'byNextVisit'] }, { id: 'r3', keys: ['visibleChange'] }]);
+    expect(deps.buildExpectations).toHaveBeenCalledWith(expect.objectContaining({ visitDate: '2026-09-30', nextVisitGapDays: 42 }));
+  });
+
+  test('an unknown gap is not handed on (the engine then materializes no by-next-visit sentence)', () => {
+    const deps = expectationsReturning([row('r1', [['visibleChange', 'Treated weeds curl and fade.']])]);
+    buildLawnCopyV6(reportV2(), { visitDate: '2026-09-30', nextVisitGapDays: null }, deps);
+    expect(deps.buildExpectations.mock.calls[0][0].nextVisitGapDays).toBeUndefined();
   });
 
   test('a sentence that would pass the 42-word cap is left out whole, never cut', () => {
@@ -115,8 +119,85 @@ describe('resolveLawnCopyV6ForRender', () => {
     const deps = expectationsReturning([]);
     const stored = { v: 1, assessmentId: 'a1', fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null } };
     const out = await resolveLawnCopyV6ForRender({ structuredNotes: { lawnCopyV6: { a1: stored } }, assessmentId: 'a1', reportV2: reportV2(), deps });
-    expect(out).toEqual({ copy: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null }, unfrozen: false });
+    expect(out).toEqual({ copy: { headline: 'Frozen', whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null }, unfrozen: false });
     expect(deps.buildExpectations).not.toHaveBeenCalled();
+  });
+
+  describe('a frozen by-next-visit sentence follows the visit the report shows', () => {
+    const stored = (over = {}) => ({
+      v: 1, assessmentId: 'a1', nextVisitIso: '2026-11-11',
+      fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: 'Weeds curl and fade. Most should be gone by your next visit.', watching: null },
+      expectSentences: [
+        { key: 'visibleChange', text: 'Weeds curl and fade.', gapBased: false },
+        { key: 'byNextVisit', text: 'Most should be gone by your next visit.', gapBased: true },
+      ],
+      ...over,
+    });
+    const replay = (entry, nextVisitIso) => resolveLawnCopyV6ForRender({
+      structuredNotes: { lawnCopyV6: { a1: entry } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso },
+    }).then((r) => r.copy.whatToExpect);
+
+    test('same visit day: replays byte for byte', async () => {
+      expect(await replay(stored(), '2026-11-11')).toBe('Weeds curl and fade. Most should be gone by your next visit.');
+    });
+
+    test('the visit was rescheduled (or is gone): the timed sentence is left out, the rest stands', async () => {
+      expect(await replay(stored(), '2026-10-20')).toBe('Weeds curl and fade.');
+      expect(await replay(stored(), null)).toBe('Weeds curl and fade.');
+    });
+
+    test('a by-next-visit line not timed from the gap (a row judged by absence) survives a reschedule, but not a report with no next visit', async () => {
+      const entry = stored({
+        fields: { headline: 'Frozen', whatWeDid: null, whatToExpect: 'Nothing changes visibly. By your next visit, success is damage that never showed up.', watching: null },
+        expectSentences: [
+          { key: 'visibleChange', text: 'Nothing changes visibly.', needsVisit: false, gapBased: false },
+          { key: 'byNextVisit', text: 'By your next visit, success is damage that never showed up.', needsVisit: true, gapBased: false },
+        ],
+      });
+      expect(await replay(entry, '2026-10-20')).toBe(entry.fields.whatToExpect);
+      expect(await replay(entry, null)).toBe('Nothing changes visibly.');
+    });
+
+    test('the static version (what a PDF prints) leaves every by-next-visit sentence out, whatever the visit', async () => {
+      const staticOf = (entry, nextVisitIso) => resolveLawnCopyV6ForRender({
+        structuredNotes: { lawnCopyV6: { a1: entry } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso },
+      }).then((r) => r.copy.whatToExpectStatic);
+      expect(await staticOf(stored(), '2026-11-11')).toBe('Weeds curl and fade.');
+      const onlyVisit = stored({ expectSentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false }] });
+      expect(await staticOf(onlyVisit, '2026-11-11')).toBeNull();
+      // An entry frozen before sentences were recorded has only its whole text.
+      const legacy = stored({ expectSentences: undefined, nextVisitIso: undefined });
+      expect(await staticOf(legacy, null)).toBe(legacy.fields.whatToExpect);
+    });
+
+    test('an entry frozen before this field existed replays as frozen', async () => {
+      const legacy = stored({ expectSentences: undefined, nextVisitIso: undefined });
+      expect(await replay(legacy, '2026-10-20')).toBe(legacy.fields.whatToExpect);
+    });
+
+    test('a build marks only gap-timed sentences, and the freeze records the visit day', async () => {
+      const deps = {
+        buildExpectations: () => ({ rows: [
+          { id: 'r1', approved: true, judgedByAbsence: false, sentences: [{ key: 'visibleChange', text: 'Weeds curl.' }, { key: 'byNextVisit', text: 'Gone by your next visit.' }] },
+          { id: 'r2', approved: true, judgedByAbsence: true, sentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.' }] },
+        ] }),
+      };
+      const built = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
+      expect(built.expectSentences).toEqual([
+        { key: 'visibleChange', text: 'Weeds curl.', needsVisit: false, gapBased: false },
+        { key: 'byNextVisit', text: 'Gone by your next visit.', needsVisit: true, gapBased: true },
+        { key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false },
+      ]);
+      // No known visit: no "by your next visit" sentence at all, absence rows included.
+      const unknown = buildLawnCopyV6(reportV2(), { nextVisitGapDays: null }, deps);
+      expect(unknown.fields.whatToExpect).toBe('Weeds curl.');
+      expect(unknown.expectSentences.map((x) => x.key)).toEqual(['visibleChange']);
+      const { knex, chain } = knexStub(1);
+      await resolveLawnCopyV6ForRender({ structuredNotes: {}, serviceRecordId: 's1', assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitGapDays: 42, nextVisitIso: '2026-11-11' }, knex, deps });
+      const written = JSON.parse(chain.update.mock.calls[0][0].structured_notes.bindings[0]).a1;
+      expect(written.nextVisitIso).toBe('2026-11-11');
+      expect(written.expectSentences).toHaveLength(3);
+    });
   });
 
   test('a degraded read creates no freeze and carries nothing', async () => {

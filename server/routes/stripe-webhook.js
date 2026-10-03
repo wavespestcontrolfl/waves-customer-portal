@@ -6701,13 +6701,22 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
 }
 
 /**
- * payment_intent.requires_action — Customer must complete a step (e.g. micro-
- * deposit verification for ACH). Notify customer to finish setup.
+ * payment_intent.requires_action — Customer must complete a step. Only the ACH
+ * micro-deposit case has a customer notice (bank verification incomplete). Any
+ * other next_action (card 3DS: use_stripe_sdk, redirect_to_url, ...) gets none:
+ * that copy is wrong for a card, an on-session payer completes 3DS in their own
+ * browser, and an off-session autopay charge parked on 3DS is reported to the
+ * office by billing-cron (autopay-sca-parked.js), not here.
  */
 async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const nextAction = paymentIntent.next_action?.type || 'unknown';
   logger.warn(`[stripe-webhook] PaymentIntent requires action: ${piId} (${nextAction})`);
+
+  if (nextAction !== 'verify_with_microdeposits') {
+    logger.info(`[stripe-webhook] requires_action ${piId} (${nextAction}) is not an ACH micro-deposit step — no customer notice`);
+    return;
+  }
 
   try {
     const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
@@ -6766,6 +6775,10 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   await db('payments')
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded', 'disputed'])
+    // A failed row parked on card authentication (stripe.js stamps metadata.requires_action) is a
+    // debt still OWED; billing-cron cancels its live intent on purpose, and flipping the row to
+    // 'canceled' would drop it from the overdue balance (failed-payments.js counts only 'failed').
+    .whereRaw("NOT (status = 'failed' AND COALESCE(metadata->>'requires_action', '') = 'true')")
     .update({ status: 'canceled' });
 
   // PI canceled AFTER entering processing (codex r20 P2, a rare but
