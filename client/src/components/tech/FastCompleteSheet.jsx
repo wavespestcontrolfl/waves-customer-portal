@@ -1003,11 +1003,13 @@ const NO_PRODUCT_HOLDS = {
 const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
 
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
-// reads the products out of the note first, so an empty list does not hold it.
+// reads the products out of the note first, so neither an empty list nor a row
+// still missing its amount holds it; both are judged again once the note is read.
 function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
-  const missingAmount = active.find((row) => !hasAmount(row));
-  const noProduct = stage === 'generate' && productsFromNote ? null : noProductHold(mode);
+  const unread = stage === 'generate' && productsFromNote;
+  const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
+  const noProduct = unread ? null : noProductHold(mode);
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
@@ -1535,11 +1537,12 @@ function ReportFlowForm({
     makeRow: (product, extras) => productRow(product, { serviceType: service.serviceType, added: true, lane: productLane, ...extras }),
   }), [service.serviceType, mode, productLane]);
   const productVoice = useProductVoiceFill({ enabled: voiceFill, request, serviceId: service.id, products, ctx, ops: voiceOps, sprayFromNote: !mode });
-  // With no product on the sheet yet (a lane visit, a first cleanout), the note
-  // is read for products BEFORE the report: `noneHeardIn` is the note that named
-  // none, which then holds Generate the way an empty product list always has.
+  // A sheet with no product on it yet (a lane visit, a first cleanout), or a row
+  // still missing its amount, reads the note for products BEFORE the report.
+  // `readNote` is the note the last read was of: until the note changes, an empty
+  // list or a missing amount holds Generate the way it always has.
   const [preReading, setPreReading] = useState(false);
-  const [noneHeardIn, setNoneHeardIn] = useState(null);
+  const [readNote, setReadNote] = useState(null);
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
   const traceAvailable = trace.enabled && service.traceEligible !== false;
@@ -1556,7 +1559,7 @@ function ReportFlowForm({
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({
-    ...holdInputs, stage: 'generate', productsFromNote: !!productVoice.read && noteText !== '' && noneHeardIn !== noteText,
+    ...holdInputs, stage: 'generate', productsFromNote: !!productVoice.read && noteText !== '' && readNote !== noteText,
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
@@ -1581,18 +1584,22 @@ function ReportFlowForm({
 
   const write = async (fresh) => {
     if (writing || preReading || generateMissing.reason) return;
-    // No product on the sheet and the visit needs one: the note is read for
-    // products first. A note that names none stays on the visit, held as an
-    // empty product list always is, and no report is written from nothing.
+    // What Generate would hold on, were this note not about to be read: no
+    // product where the visit needs one, or a row with no amount. The note is
+    // then read for products first, and the rows it leaves are judged: a note
+    // that settles neither stays on the visit, held as it always was, and no
+    // report is written.
+    const unsettled = (list) => {
+      const on = list.filter((row) => row.active);
+      return (!on.length && !!noProductHold(mode)) || on.some((row) => !hasAmount(row));
+    };
     let preFilled = null;
-    if (!active.length && productVoice.read && noProductHold(mode)) {
+    if (productVoice.read && readNote !== noteText && unsettled(rows)) {
       setPreReading(true);
       preFilled = productVoice.settle(await productVoice.read(form.note), DEFAULT_METHOD, form.note);
       setPreReading(false);
-      if (!preFilled.some((row) => row.active)) {
-        setNoneHeardIn(noteText);
-        return;
-      }
+      setReadNote(noteText);
+      if (unsettled(preFilled)) return;
     }
     setStep('report');
     // The rows the report is written from: with voice fill, the rows as the
@@ -1602,6 +1609,7 @@ function ReportFlowForm({
       if (filledRows) return filledRows;
       if (!productVoice.read) return rows;
       filledRows = productVoice.settle(productFill, reportSprayMethod(facts), form.note);
+      setReadNote(noteText);
       return filledRows;
     };
     // A lane or typed read first fills the record (only what is empty and

@@ -25,6 +25,7 @@ vi.mock('./DictationButton', () => ({
 }));
 
 import FastCompleteSheet from './FastCompleteSheet';
+import { PRODUCT_READ_FAILED } from './FastCompleteVoiceFill';
 
 vi.setConfig({ testTimeout: 30000 });
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); mic.props = null; });
@@ -153,6 +154,22 @@ describe('a specialty visit, voice fill on', () => {
     await generate();
     await screen.findByText(NO_PRODUCT);
     expect(request.bodies('generate-report')).toEqual([]);
+  });
+
+  test('a failed read beside a product already on the sheet: the report is written, and a Check holds the send', async () => {
+    const request = makeRequest({ fill: () => { throw Object.assign(new Error('down'), { status: 502 }); } });
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /^Taurus SC\b/ }));
+    fireEvent.change(within(screen.getByRole('group', { name: 'Taurus SC' })).getByLabelText('How much?'), { target: { value: '2' } });
+    await generate();
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    // the note may name another product: it is not on the record unless the tech adds it
+    expect(within(screen.getByRole('region', { name: 'Check' })).getByText(PRODUCT_READ_FAILED)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
   });
 
   test('no row follows a How here: the way said for a product is set on its row', async () => {

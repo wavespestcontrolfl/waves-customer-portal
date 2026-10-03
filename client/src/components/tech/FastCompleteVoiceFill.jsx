@@ -161,6 +161,10 @@ const withFill = (rows, added, patches) => {
   ];
 };
 
+// A read that failed fills nothing, so the tech is told: a product they said aloud
+// is not on the record unless they add it.
+export const PRODUCT_READ_FAILED = "I couldn't read the products from your note. Add any product you applied (Products, Edit).";
+
 // The products the note names, read when the report is written and applied as
 // unconfirmed rows: `read(note)` asks, `settle(fill, sprayMethod)` turns the answer
 // into taps and answers the rows as they then stand (the report is written from
@@ -192,15 +196,29 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     try {
       return await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/products`, { method: 'POST', body: JSON.stringify({ note }) });
     } catch (err) {
-      if (err?.status === 404) setUnavailable(true);
-      // A failed read fills nothing; the tech picks the products by hand.
+      // Gate turned off since the sheet opened: voice fill is simply gone.
+      if (err?.status === 404) {
+        setUnavailable(true);
+        return { status: 'unavailable' };
+      }
+      // A failed read: `settle` raises a Check for it.
       return null;
     }
   }, [request, serviceId]);
 
   const settle = useCallback((fill, sprayMethod, note) => {
     const rows = rowsRef.current;
-    if (!fill || fill.status !== 'read') return rows;
+    if (fill?.status === 'unavailable') return rows;
+    if (!fill || fill.status !== 'read') {
+      // Nothing was filled, and the tech has not been told so yet for this sheet.
+      setChecks((prev) => (prev.some((check) => check.text === PRODUCT_READ_FAILED) || answered.current.has(PRODUCT_READ_FAILED)
+        ? prev
+        : [...prev, { text: PRODUCT_READ_FAILED, id: ++nextId.current }]));
+      return rows;
+    }
+    // A read that worked: an earlier failure is answered, and a later one is told again.
+    answered.current.delete(PRODUCT_READ_FAILED);
+    setChecks((prev) => (prev.some((check) => check.text === PRODUCT_READ_FAILED) ? prev.filter((check) => check.text !== PRODUCT_READ_FAILED) : prev));
     const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps, sprayFromNote: stripSprays } = latest.current;
     const plan = planVoiceFill({
       fill: {
