@@ -16,6 +16,7 @@ const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const subjectMigration = require('../models/migrations/20261003101500_decision_reviews_scheduled_services_subject');
+const statesMigration = require('../models/migrations/20261003140000_visit_access_states');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 const access = require('../services/typed-decisions/visit-access-shadow');
 
@@ -152,6 +153,7 @@ describe('visit access shadow: rules that need no database', () => {
       CONSTRAINT decision_reviews_provider_subject_question_uniq UNIQUE (capability, package_id, provider, subject_type, subject_id, question_id),
       CONSTRAINT decision_reviews_subject_type_check CHECK (subject_type IN ('call_log','sms_log','social_post')))`, [schema]);
     await subjectMigration.up(database);
+    await statesMigration.up(database);
     await database('customers').insert({ id: customerId, address_line1: '100 Example St', zip: '34200', city: 'Bradenton' });
   });
   afterAll(async () => {
@@ -163,7 +165,7 @@ describe('visit access shadow: rules that need no database', () => {
     gates(true);
     mockAsk.mockReset();
     mockAsk.mockResolvedValue(reply());
-    for (const t of ['decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
+    for (const t of ['visit_access_states', 'decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -346,7 +348,6 @@ describe('visit access shadow: rules that need no database', () => {
     const rental = await visit({ service_address_line1: '77 Sample Rd', service_address_zip: '34201', service_address_city: 'Bradenton' });
     expect(await build(rental)).toBeNull();
     expect(await build(home)).toBeNull();
-    expect(await access.liveVisitAccess(home, database)).toBeNull();
     await database('scheduled_services').where({ id: rental }).del();
     const propertyId = randomUUID();
     await database('customer_properties').insert({ id: propertyId, customer_id: customerId, address_line1: '9 Other Way', city: 'Sarasota', zip: '34230' });
@@ -515,19 +516,35 @@ describe('visit access shadow: rules that need no database', () => {
     }
   });
 
-  test('the review route\'s rebuild matches the stored digest after the visit is completed', async () => {
+  test('the reviewer sees the state that was judged, whatever is edited after the visit', async () => {
+    await database('property_preferences').insert({ customer_id: customerId, pet_count: 1, pet_details: 'One old beagle' });
     await text('The dog will be inside today', '2026-10-04T15:00:00Z');
-    const visitId = await visit();
+    const visitId = await visit({ notes: 'Customer asked for the lanai too' });
     await sweep();
     const stored = (await rows(visitId))[0].subject_hash;
-    // The visit runs: it completes, its own record lands, the customer texts after.
-    await database('scheduled_services').where({ id: visitId }).update({ status: 'completed' });
-    await database('service_records').insert({ customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-10-06', technician_notes: 'All good today.' });
+    // Afterwards: the visit completes, staff edit the preferences and the note, the customer texts.
+    await database('scheduled_services').where({ id: visitId }).update({ status: 'completed', notes: 'Edited later' });
+    await database('property_preferences').where({ customer_id: customerId }).update({ pet_count: 4, pet_details: 'Four cats' });
     await text('Thanks for coming', '2026-10-06T18:00:00Z');
-    const live = await access.liveVisitAccess(visitId, database);
-    expect(live.hash).toBe(stored);
-    expect(live.text).toContain('The dog will be inside today');
-    expect(live.text).not.toContain('Thanks for coming');
-    expect(await access.liveVisitAccess(randomUUID(), database)).toBeNull();
+    const shown = (await access.storedVisitAccess([{ subjectId: visitId, subjectHash: stored }], database)).get(`${visitId}:${stored}`);
+    expect(shown.hash).toBe(stored);
+    expect(shown.text).toContain('The dog will be inside today');
+    expect(shown.text).toContain('One old beagle');
+    expect(shown.text).toContain('Customer asked for the lanai too');
+    expect(shown.text).not.toMatch(/Four cats|Edited later|Thanks for coming/);
+    expect((await access.storedVisitAccess([{ subjectId: visitId, subjectHash: 'f'.repeat(64) }], database)).size).toBe(0);
+  });
+
+  test('one stored state per digest; an unchanged pass stores nothing new; old states are pruned', async () => {
+    const visitId = await visit();
+    await sweep();
+    await sweep();
+    expect(await database('visit_access_states').where({ scheduled_service_id: visitId })).toHaveLength(1);
+    await text('We got a puppy', '2026-10-05T13:50:00Z');
+    await sweep();
+    expect(await database('visit_access_states').where({ scheduled_service_id: visitId })).toHaveLength(2);
+    await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
+    await sweep();
+    expect(await database('visit_access_states')).toHaveLength(0);
   });
 });

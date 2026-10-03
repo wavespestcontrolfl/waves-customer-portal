@@ -140,15 +140,14 @@ async function loadSubjects(rows) {
         });
       }
     }
-    // A visit (visit_access): the state is rebuilt exactly as the sweep built
-    // it, already redacted, so the reviewer reads what the models read.
-    const visitIds = subjectIds(VISIT_SUBJECT);
-    if (visitIds.length) {
-      const { liveVisitAccess } = require('../services/typed-decisions/visit-access-shadow');
-      await Promise.all(visitIds.map(async (id) => {
-        const visit = await liveVisitAccess(id, db).catch(() => null);
-        if (visit) subjects.set(`${VISIT_SUBJECT}:${id}`, { type: VISIT_SUBJECT, text: visit.text, at: visit.at, hash: visit.hash });
-      }));
+    // A visit (visit_access): the stored state each row was judged on, already
+    // redacted, read once for the page. Keyed by visit AND digest, so two rows
+    // of one visit answered on different states each show their own.
+    const visitRows = rows.filter((r) => r.subject_type === VISIT_SUBJECT && r.subject_hash);
+    if (visitRows.length) {
+      const { storedVisitAccess } = require('../services/typed-decisions/visit-access-shadow');
+      const stored = await storedVisitAccess(visitRows.map((r) => ({ subjectId: r.subject_id, subjectHash: r.subject_hash })), db);
+      for (const [key, visit] of stored) subjects.set(`${VISIT_SUBJECT}:${key}`, { type: VISIT_SUBJECT, text: visit.text, at: visit.at, hash: visit.hash });
     }
   } catch (err) {
     logger.warn(`[typed-decisions] review subject read failed: ${err.message}`);
@@ -190,7 +189,8 @@ router.get('/reviews', async (req, res, next) => {
     if (req.query.capability) query.where('capability', String(req.query.capability));
     const rows = await query.select('*');
     const subjects = await loadSubjects(rows);
-    res.json({ reviews: rows.map((row) => mapReview(row, subjects.get(`${row.subject_type}:${row.subject_id}`))), count: rows.length });
+    const subjectOf = (row) => subjects.get(`${row.subject_type}:${row.subject_id}:${row.subject_hash}`) || subjects.get(`${row.subject_type}:${row.subject_id}`);
+    res.json({ reviews: rows.map((row) => mapReview(row, subjectOf(row))), count: rows.length });
   } catch (err) {
     next(err);
   }
@@ -244,8 +244,10 @@ async function liveSubjectHash(target) {
     return call ? callSubjectHash(call.transcription) : null;
   }
   if (target.subject_type === VISIT_SUBJECT) {
-    const visit = await require('../services/typed-decisions/visit-access-shadow').liveVisitAccess(target.subject_id, db);
-    return visit ? visit.hash : null;
+    // The stored state IS what was judged: present = unchanged, absent = gone.
+    const stored = await require('../services/typed-decisions/visit-access-shadow')
+      .storedVisitAccess([{ subjectId: target.subject_id, subjectHash: target.subject_hash }], db);
+    return stored.has(`${target.subject_id}:${target.subject_hash}`) ? target.subject_hash : null;
   }
   const text = await db('sms_log').where({ id: target.subject_id }).modify(excludeUnresolvedSendReservations)
     .first('from_phone', 'to_phone', 'message_body', 'created_at');

@@ -31,11 +31,12 @@
  * (singlePremises); a multi-property account is left out.
  *
  * The state is a function of the visit and of facts dated before it, never of
- * "now": texts stop at the visit's own start (stateCutoff) and history counts
- * only days before its date. So the review route rebuilds the same state, and
- * the same digest, after the visit is done; a visit whose state did change
- * (a new text, an edited note) is asked again on the next pass and its
- * unreviewed rows are replaced.
+ * "now" (texts stop at the visit's own start), so a repeat pass over an
+ * unchanged visit builds the same digest and asks nobody; a visit whose state
+ * did change (a new text, an edited note) is asked again and its unreviewed
+ * rows are replaced. Each state asked about is stored, already redacted, in
+ * visit_access_states: the review route shows and labels against that stored
+ * state, so a later edit to the inputs never strands a row.
  */
 const crypto = require('crypto');
 const logger = require('../logger');
@@ -43,6 +44,7 @@ const { visitAccessShadowLive, typedDecisionsClefLive } = require('../../config/
 
 const PACKAGE_ID = 'visit_access.v1';
 const SUBJECT_TYPE = 'scheduled_services';
+const STATES_TABLE = 'visit_access_states';
 // Visits asked per pass; the rest wait for the next hourly pass. Visits whose
 // state is already answered cost reads only and never count against it.
 const MAX_ASKED_VISITS = 80;
@@ -398,6 +400,10 @@ async function shadowVisit(svc, { dbh, providers, out }) {
   const budget = retryOnly ? 'retryVisits' : 'askedVisits';
   if (out[budget] >= (retryOnly ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
   out[budget] += 1;
+  // The state is kept before anyone is asked, so every stored answer has the
+  // exact text it was judged on, whatever is edited later.
+  await dbh(STATES_TABLE).insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state) })
+    .onConflict(['scheduled_service_id', 'subject_hash']).ignore();
 
   const legs = (await Promise.all(due.map(async (provider) => {
     out.asked += 1;
@@ -518,6 +524,8 @@ async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
       }
     };
     await Promise.all(Array.from({ length: Math.min(WORKERS, queue.length) }, worker));
+    await conn(STATES_TABLE).where('created_at', '<', new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000)).del()
+      .catch((err) => logger.warn(`[typed-decisions] visit access state prune failed: ${err.message}`));
   } catch (err) {
     logger.error(`[typed-decisions] visit access sweep failed: ${err.message}`);
     return { ...out, skippedReason: 'error' };
@@ -537,16 +545,33 @@ function renderVisitAccessState(state) {
   ].join('\n\n');
 }
 
-// The live state of a visit for the review route: null when it is gone.
-async function liveVisitAccess(scheduledServiceId, dbh) {
-  const svc = await dbh('scheduled_services as s').join('customers as c', 's.customer_id', 'c.id').where('s.id', scheduledServiceId).first(VISIT_COLUMNS);
-  if (!svc) return null;
-  const built = await buildVisitAccessState(svc, dbh);
-  if (!built) return null;
-  return { text: renderVisitAccessState(built.state), at: dayString(svc.scheduled_date), hash: built.subjectHash };
+// What the review route shows and labels against: the stored state a row was
+// judged on (visit_access_states), never a rebuild from data that may have
+// been edited since. One read for a whole page of rows. Keyed
+// `<visit id>:<digest>`; a row whose state was never stored has no entry.
+async function storedVisitAccess(pairs, dbh) {
+  const out = new Map();
+  const ids = [...new Set(pairs.map((pair) => pair.subjectId))];
+  if (!ids.length) return out;
+  const hashes = new Set(pairs.map((pair) => `${pair.subjectId}:${pair.subjectHash}`));
+  const rows = await dbh(`${STATES_TABLE} as v`)
+    .leftJoin('scheduled_services as s', 's.id', 'v.scheduled_service_id')
+    .whereIn('v.scheduled_service_id', ids)
+    .select('v.scheduled_service_id', 'v.subject_hash', 'v.state', 's.scheduled_date');
+  for (const row of rows) {
+    const key = `${row.scheduled_service_id}:${row.subject_hash}`;
+    if (!hashes.has(key)) continue;
+    const state = typeof row.state === 'string' ? JSON.parse(row.state) : row.state;
+    out.set(key, { text: renderVisitAccessState(state), at: dayString(row.scheduled_date), hash: row.subject_hash });
+  }
+  return out;
 }
 
+// States older than this are dropped by the sweep: the daily review item
+// reads 14 days and a label is rarely given later than a few weeks.
+const STATE_RETENTION_DAYS = 180;
+
 module.exports = {
-  runVisitAccessSweep, buildVisitAccessState, liveVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
+  runVisitAccessSweep, buildVisitAccessState, storedVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
   redactForState, stateCutoff, PACKAGE_ID, SUBJECT_TYPE,
 };
