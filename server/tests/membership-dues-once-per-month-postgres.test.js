@@ -613,23 +613,62 @@ postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () =>
     } finally { await cleanup(f); }
   });
 
-  // The rule is judged against the STORED invoice only: a stamped line keeps its
-  // marker while its month, category and amount are unchanged (a wording fix
-  // to the description is fine); change the amount or category and it goes.
+  // A stamped invoice IS the month's dues: an edit that would change its dues
+  // line set is REFUSED (never stripped), so coverage is released only by an
+  // explicit void. Judged against the locked stored invoice.
+  const lockedRefusal = /membership dues; its dues line cannot be changed/;
   test.each([
-    ['AMOUNT', { unit_price: 60, amount: 60 }],
-    ['CATEGORY', { category: 'Other' }],
-  ])('editing a stamped line\'s %s strips the marker → the next unpriced plan visit bills the month', async (_name, edit) => {
+    ['AMOUNT', (li) => ({ ...li, unit_price: 60, amount: 60 })],
+    ['CATEGORY', (li) => ({ ...li, category: 'Other' })],
+  ])('editing a stamped line\'s %s is refused: invoice unchanged, month still covered, the next visit mints nothing', async (_name, change) => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care');
-      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, ...edit } : li));
-      await InvoiceService.update(a.invoice.id, { line_items: lines });
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
-      // The month is uncovered again: the next plan visit mints dues.
+      const before = await reload(a.invoice.id);
+      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? change(li) : li));
+      await expect(InvoiceService.update(a.invoice.id, { line_items: lines })).rejects.toMatchObject({
+        code: 'MEMBERSHIP_DUES_LINE_LOCKED', statusCode: 409, isOperational: true,
+      });
+      await expect(InvoiceService.update(a.invoice.id, { line_items: lines })).rejects.toThrow(lockedRefusal);
+      const after = await reload(a.invoice.id);
+      expect(after.line_items).toEqual(before.line_items);
+      expect(Number(after.total)).toBe(Number(before.total));
+      expect(stampedOf(after)).toBeDefined();
       await mintDues(f, 'Pest Control');
-      expect((await liveInvoicesFor(f)).filter((r) => stampedOf(r))).toHaveLength(1);
-      expect(await invoicesFor(f)).toHaveLength(2);
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('automated rewrites that leave the dues set intact never trip the refusal: a tax-rate-only retotal and a notes/due-date edit keep the stamp', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await InvoiceService.update(a.invoice.id, { tax_rate: 0 });
+      await InvoiceService.update(a.invoice.id, { notes: 'office note', due_date: etDateString() });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 49 });
+    } finally { await cleanup(f); }
+  });
+
+  test('removing the dues line is refused too', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const lines = [...a.invoice.line_items.filter((li) => !li.membership_dues_month), { description: 'Other work', quantity: 1, unit_price: 20, amount: 20, category: 'Other' }];
+      await expect(InvoiceService.update(a.invoice.id, { line_items: lines })).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_LINE_LOCKED' });
+      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
+    } finally { await cleanup(f); }
+  });
+
+  test('a client that DROPS the hidden marker on an otherwise unchanged dues set is accepted, and the server keeps the marker', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const noMarker = [...a.invoice.line_items.map(({ membership_dues_month: _m, ...li }) => li),
+        { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }];
+      await InvoiceService.update(a.invoice.id, { line_items: noMarker });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 49 });
+      await mintDues(f, 'Pest Control');
+      expect(await invoicesFor(f)).toHaveLength(1);
     } finally { await cleanup(f); }
   });
 
@@ -668,13 +707,13 @@ postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () =>
     } finally { await cleanup(f); }
   });
 
-  test('a marker for a DIFFERENT month than the stored stamp is stripped', async () => {
+  test('a marker naming a DIFFERENT month on an unchanged dues set is normalized back to the stored month (the server owns it)', async () => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care');
       const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, membership_dues_month: '2099-01' } : li));
       await InvoiceService.update(a.invoice.id, { line_items: lines });
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      expect(stampedOf(await reload(a.invoice.id)).membership_dues_month).toBe(monthOf(etDateString()));
     } finally { await cleanup(f); }
   });
 
@@ -769,34 +808,35 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
     } finally { await cleanup(f); }
   });
 
-  test('a stripping edit and a void each WAIT for the dues-month lock (they take it before committing)', async () => {
+  test('an edit of a stamped invoice and a void each WAIT for the dues-month lock (they take it before committing)', async () => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care');
       const hold = await holdDuesLock(f.customerId);
-      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, unit_price: 60, amount: 60 } : li));
+      const lines = [...a.invoice.line_items, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }];
       const edit = InvoiceService.update(a.invoice.id, { line_items: lines });
       expect(await settled(edit)).toBe('pending');
-      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
+      expect((await reload(a.invoice.id)).line_items).toHaveLength(a.invoice.line_items.length);
       await hold.commit();
       await edit;
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      expect((await reload(a.invoice.id)).line_items).toHaveLength(a.invoice.line_items.length + 1);
 
-      const b = await mintDues(f, 'Pest Control');
+      const b = await mintDues(f, 'Pest Control').catch(() => null);
+      expect(b).not.toBeUndefined();
       const hold2 = await holdDuesLock(f.customerId);
-      const voiding = InvoiceService.voidInvoice(b.invoice.id);
+      const voiding = InvoiceService.voidInvoice(a.invoice.id);
       expect(await settled(voiding)).toBe('pending');
-      expect((await reload(b.invoice.id)).status).not.toBe('void');
+      expect((await reload(a.invoice.id)).status).not.toBe('void');
       await hold2.commit();
       await voiding;
-      expect((await reload(b.invoice.id)).status).toBe('void');
+      expect((await reload(a.invoice.id)).status).toBe('void');
     } finally { await cleanup(f); }
   });
 
   // The stamp decision is made from the LOCKED row, never the pre-read: an edit
-  // that read stamped A, paused, and resumes after another edit stripped A and
-  // a completion billed the month on B must not put the stamp back.
-  test('a preserving edit paused before its transaction cannot restore a stamp another edit stripped (stripping edit → replacement B → preserving edit resumes)', async () => {
+  // that read stamped A, paused, and resumes after A was voided and a completion
+  // billed the month on B must not bring A back or put its stamp back.
+  test('a preserving edit paused before its transaction cannot revive A after A was voided and B billed the month (void → replacement B → edit resumes)', async () => {
     const f = await seedMember();
     // Pause the NEXT BEGIN (the preserving edit's transaction); every other BEGIN passes.
     const driver = Object.getPrototypeOf(mockPg.client);
@@ -820,22 +860,20 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
       const preserving = InvoiceService.update(a.invoice.id, { line_items: renamed });
       for (let i = 0; i < 40 && !paused; i += 1) await sleep(50);
       expect(paused).toBe(true);
-      // Meanwhile: another edit strips A's stamp, and a completion bills the month on B.
-      const stripped = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, unit_price: 60, amount: 60 } : li));
-      await InvoiceService.update(a.invoice.id, { line_items: stripped });
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      // Meanwhile: A is voided, and a completion bills the month on B.
+      await InvoiceService.voidInvoice(a.invoice.id);
       const b = await mintDues(f, 'Pest Control');
       expect(stampedOf(b.invoice)).toBeDefined();
-      // The preserving edit resumes against the locked, now-unstamped A.
+      // The edit resumes against the locked, now-void A and is refused.
       release();
-      await preserving;
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      await expect(preserving).rejects.toThrow();
+      expect((await reload(a.invoice.id)).status).toBe('void');
       const stamped = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
       expect(stamped.map((r) => r.id)).toEqual([b.invoice.id]);
     } finally { release(); driver._query = originalQuery; await cleanup(f); }
   });
 
-  test('a forged marker naming ANOTHER month is stripped and the edit locks only the stored month', async () => {
+  test('a forged marker naming ANOTHER month: the edit locks only the stored month and the server keeps the stored one', async () => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care');
@@ -846,7 +884,7 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
       const forged = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, membership_dues_month: '2099-01' } : li));
       const edit = InvoiceService.update(a.invoice.id, { line_items: forged });
       expect(await settled(edit)).toBe('done');
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      expect(stampedOf(await reload(a.invoice.id)).membership_dues_month).toBe(monthOf(etDateString()));
     } finally { await cleanup(f); }
   });
 
@@ -880,19 +918,20 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
     } finally { await cleanup(f); }
   });
 
-  test('editing a top-up invoice: the dues set unchanged keeps the stamp (even with a fee added); a changed top-up or primary strips it', async () => {
+  test('editing a top-up invoice: a fee added keeps the stamp; changing the top-up or the primary is refused', async () => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care', { primary_line_price: 30 });
-      const base = a.invoice.line_items;
-      await InvoiceService.update(a.invoice.id, { line_items: [...base, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }] });
+      await InvoiceService.update(a.invoice.id, { line_items: [...a.invoice.line_items, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }] });
       expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
       const withFee = (await reload(a.invoice.id)).line_items;
-      // change the top-up line's amount
-      await InvoiceService.update(a.invoice.id, {
+      await expect(InvoiceService.update(a.invoice.id, {
         line_items: withFee.map((li) => (/^scheduled_price_topup_/.test(li.client_id || '') ? { ...li, unit_price: 5, amount: 5 } : li)),
-      });
-      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      })).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_LINE_LOCKED' });
+      await expect(InvoiceService.update(a.invoice.id, {
+        line_items: withFee.map((li) => (li.membership_dues_month ? { ...li, unit_price: 31, amount: 31 } : li)),
+      })).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_LINE_LOCKED' });
+      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
     } finally { await cleanup(f); }
   });
 

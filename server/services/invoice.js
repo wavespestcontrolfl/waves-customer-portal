@@ -1886,30 +1886,56 @@ const duesSetCents = (set) => set.reduce((sum, li) => sum + duesLineCents(li), 0
 // categories (order-independent).
 const duesSetSignature = (set) => `${duesSetCents(set)}|${set.map((li) => String(li.category || "")).sort().join(",")}`;
 
-// Judged against the STORED invoice only — no customer or visit read, so a
-// later rate or lane change cannot erase the month's dedupe evidence and
-// there is no read to fail. A marker survives only on the stored stamped line
-// with the same month whose dues SET (membershipDuesLineSet) is unchanged in
-// summed amount and categories; the description may change (a wording fix
-// keeps the stamp). First such line only; a marker the stored invoice did not
-// carry — or carried for another month — is stripped, so an edit can keep a
-// stamp but never create one. Mint-time provenance
-// (stampMembershipDuesUnderLock) stays the only authority for creating it.
-function sanitizeMembershipDuesMarkers(existing, newLines) {
-  if (!Array.isArray(newLines) || !newLines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
-    return newLines;
-  }
-  const storedLines = parseInvoiceLineItems(existing.line_items);
+// A stamped invoice IS its customer's dues for that month, and that identity
+// must not depend on editable line attributes: the marker is never stripped
+// or restored by an edit. Judged against the LOCKED stored invoice only (no
+// customer or visit read, so a later rate or lane change cannot matter):
+//  - the stored invoice carries no stamp → any incoming marker is dropped
+//    (forged; never an error, never a stamp);
+//  - it carries one → the incoming lines must still contain the dues line and
+//    leave its dues SET (membershipDuesLineSet) unchanged in summed amount and
+//    categories; the description may change. The dues line is found by the
+//    marker, else by the stored line's client_id, else (a stored line with no
+//    client_id) by the same category and amount, so a client that dropped the
+//    hidden key on an otherwise unchanged set is NOT treated as a change. The
+//    server then owns the marker: it is re-attached to that line and stripped
+//    from any other line.
+//  - anything else (the set changed, or the dues line is gone) is REFUSED with
+//    the update path's operational 409: the only ways to release a month's
+//    coverage are void / refund / cancel, which are explicit and serialized.
+// Mint-time provenance (stampMembershipDuesUnderLock) is still the only
+// authority for creating a stamp.
+function enforceMembershipDuesLines(locked, newLines) {
+  if (!Array.isArray(newLines)) return newLines;
+  const storedLines = parseInvoiceLineItems(locked.line_items);
   const stored = storedLines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
   if (!stored) return stripMembershipDuesMarkers(newLines);
+  const month = String(stored[MEMBERSHIP_DUES_LINE_KEY]);
   const storedSignature = duesSetSignature(membershipDuesLineSet(storedLines, stored));
-  let kept = false;
+  const positive = (li) => li && li._kind !== "discount" && duesLineCents(li) > 0;
+  const primary = newLines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] === month)
+    || (stored.client_id ? newLines.find((li) => li && li.client_id === stored.client_id) : null)
+    || (!stored.client_id
+      ? newLines.find((li) => positive(li)
+        && String(li.category || "") === String(stored.category || "")
+        && duesLineCents(li) === duesLineCents(stored))
+      : null);
+  if (!primary || duesSetSignature(membershipDuesLineSet(newLines, primary)) !== storedSignature) {
+    const [y, m] = month.split("-").map(Number);
+    const label = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+    const err = new Error(
+      `This invoice is the customer's ${label} membership dues; its dues line cannot be changed — void it (the month is then billed again by the next plan visit or the monthly charge) or add a separate line for anything extra.`,
+    );
+    err.status = 409;
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = "MEMBERSHIP_DUES_LINE_LOCKED";
+    throw err;
+  }
   return newLines.map((li) => {
-    if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
-    const unchanged = !kept
-      && li[MEMBERSHIP_DUES_LINE_KEY] === stored[MEMBERSHIP_DUES_LINE_KEY]
-      && duesSetSignature(membershipDuesLineSet(newLines, li)) === storedSignature;
-    if (unchanged) { kept = true; return li; }
+    if (!li) return li;
+    if (li === primary) return { ...li, [MEMBERSHIP_DUES_LINE_KEY]: month };
+    if (li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
     const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
     return rest;
   });
@@ -9864,12 +9890,12 @@ const InvoiceService = {
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
-      // Keep a marker only where the LOCKED row still carries that stamp and
-      // its dues set is unchanged against it; an edit can never restore one
-      // that another edit stripped meanwhile.
+      // The dues line of a stamped invoice cannot change (an edit that would
+      // is refused); otherwise the server owns the marker — kept on the stored
+      // dues line, never created (see enforceMembershipDuesLines).
       if (data.line_items !== undefined) {
         data.line_items = JSON.stringify(
-          sanitizeMembershipDuesMarkers(lockedRow, parseInvoiceLineItems(data.line_items)),
+          enforceMembershipDuesLines(lockedRow, parseInvoiceLineItems(data.line_items)),
         );
       }
       const inFlightNow = await client("invoice_followup_sequences")
