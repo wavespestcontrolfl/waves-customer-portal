@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => ({
     whereILike: () => ({
-      orderBy: () => ({ limit: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])) }),
+      orderBy: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])),
     }),
   }));
   return fn;
@@ -232,5 +232,28 @@ describe('get_product_info product match', () => {
     const result = await executeTechTool('get_product_info', { product_name: 'Velista' }, {});
     expect(result.default_rate).toBe('0.5');
     expect(result.label_rate_per_1000).toBeUndefined();
+  });
+
+  test('ambiguity is decided across every match, not the first page of rows', async () => {
+    // 24 retired rows sort first, then two active ones: a row cap would have
+    // hidden the second active match and answered for the first.
+    mockRows = [
+      ...Array.from({ length: 24 }, (_, i) => ({ name: `Bifen Old ${String(i).padStart(2, '0')}`, active: false })),
+      { name: 'Bifen XTS', active: true, default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED },
+      { name: 'Bifen Zeta', active: true },
+    ];
+    const result = await ask('Bifen');
+    expect(result.ambiguous).toBe(true);
+    expect(result.candidates).toEqual(['Bifen XTS', 'Bifen Zeta']);
+    expect(result.default_rate).toBeUndefined();
+  });
+
+  test('an exact name deep in the matches still wins, and a long candidate list says how many more', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({ name: `Sample Mix ${String(i).padStart(2, '0')}`, active: true }));
+    mockRows = [...many, { name: 'Sample Mix Z', active: true, default_rate: '2', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED }];
+    expect((await ask('sample mix z')).name).toBe('Sample Mix Z');
+    const result = await ask('Sample Mix');
+    expect(result.candidates).toHaveLength(8);
+    expect(result.more_matches).toBe(23);
   });
 });

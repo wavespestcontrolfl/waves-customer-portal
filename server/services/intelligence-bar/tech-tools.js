@@ -439,6 +439,7 @@ function pickProduct(rows, productName) {
         ambiguous: true,
         message: `Several products match "${productName}". Ask which one before giving any rate or mix.`,
         candidates: active.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+        more_matches: active.length > MAX_PRODUCT_CANDIDATES ? active.length - MAX_PRODUCT_CANDIDATES : undefined,
       },
     };
   }
@@ -483,10 +484,11 @@ function perThousandRate(product, { forTech, hasDefaultRate }) {
 }
 
 async function getProductInfo(productName, { forTech = false } = {}) {
+  // Every match is read: an exact name or a second active match beyond a
+  // row cap would otherwise be missed. Only the candidate list is capped.
   const rows = await db('products_catalog')
     .whereILike('name', `%${productName}%`)
-    .orderBy('name')
-    .limit(20);
+    .orderBy('name');
   const { product, result } = pickProduct(rows || [], productName);
   if (!product) return result;
 
