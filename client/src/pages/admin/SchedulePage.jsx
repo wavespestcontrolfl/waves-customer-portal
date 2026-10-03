@@ -16729,16 +16729,25 @@ export function CompletionPanel({
   // read fills nothing and Generate carries on.
   async function fillLaneFromNotes() {
     const note = groundingNotes();
-    const heard = note
-      ? await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
-        method: "POST",
-        body: JSON.stringify({ note }),
-      }).catch(() => null)
-      : null;
+    let heard = null;
+    if (note) {
+      try {
+        heard = await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
+          method: "POST",
+          body: JSON.stringify({ note }),
+        });
+      } catch {
+        // A request that failed answered nothing, so it clears nothing: the
+        // groups an earlier read left unclear stay asked (specialty groups
+        // are not required at submission, so clearing them would let the
+        // report go out with the field empty and no warning).
+        return;
+      }
+    }
     if (heard?.status !== "read") {
-      // A read that answered nothing usable leaves no group unclear: the asks
-      // always reflect the latest Generate (the typed fill's rule, #5632).
-      // Words beside values still standing stay.
+      // An answer that was not a read (or no note, so no request) leaves no
+      // group unclear: the asks always reflect the latest Generate (the
+      // typed fill's rule, #5632). Words beside values still standing stay.
       setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
       return;
     }

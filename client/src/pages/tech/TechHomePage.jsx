@@ -148,10 +148,12 @@ function isLaneReportEligible(service) {
     && completesOnOwnRecord(service);
 }
 // A visit the report-flow sheet may complete on its own record: open, its
-// profile read, and not completing through a project.
+// profile and linked-project reads answered, and not completing through a
+// project.
 function completesOnOwnRecord(service) {
   const profile = service?.completionProfile;
   return service?.completionProfileLookupFailed !== true
+    && service?.linkedProjectLookupFailed !== true
     && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }

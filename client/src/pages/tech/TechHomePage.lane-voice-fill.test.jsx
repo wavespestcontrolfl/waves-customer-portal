@@ -120,6 +120,7 @@ it.each([
   ['the report flow off', { fastCompleteReportEnabled: false }],
   ['a project-backed profile', { completionProfile: { category: 'specialty', serviceKey: 'fire_ant', projectBacked: true, requiresProject: true } }],
   ['a profile that could not be read', { completionProfileLookupFailed: true }],
+  ['a linked-project lookup that failed (a project may exist)', { linkedProjectLookupFailed: true }],
 ])('%s: the project editor, as before', async (_label, overrides) => {
   rows = [row('svc-old-path', overrides)];
   mount();

@@ -120,11 +120,24 @@ describe('lane voice fill on Generate', () => {
     await openForm(BED_BUG);
     await generate();
     await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0));
-    laneAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    laneAnswer = () => ({ ok: true, json: async () => ({ available: true, status: 'failed', lane: 'bed_bug_treatment', areas: [], findings: [], unclearGroups: [] }) });
     await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
     await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
     await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
     await waitFor(() => expect(screen.queryByText('The notes didn’t make this clear. Pick one.')).toBeNull());
+  });
+
+  it('a request that fails answers nothing: the asks an earlier read left stay asked', async () => {
+    laneAnswer = () => ({ ok: true, json: async () => ({ ...READ, findings: READ.findings.filter((entry) => entry.group !== 'bed_bug_prep'), unclearGroups: ['bed_bug_prep'] }) });
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0));
+    laneAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'generate')).toHaveLength(2));
+    expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0);
   });
 
   it('a value that clashes with a pick is left for a person, with an ask to pick', async () => {

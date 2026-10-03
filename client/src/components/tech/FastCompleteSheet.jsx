@@ -1014,6 +1014,11 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
   // map, so the record must list a place inside (the pest sheet asks the
   // note for Inside; codex local r4 on #5629).
   const interiorUnbacked = draft && shownTrace && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
+  // Any other trace (an outline or a perimeter) draws the outside of the house
+  // and sets the outdoor re-entry wait, so the record must list a place
+  // outside; a broadcast spray picked beside an inside-only record is not
+  // enough.
+  const exteriorUnbacked = draft && shownTrace && traceMode !== 'interior' && !laneAreas.some((area) => AREA_SCOPES.exterior.includes(area));
   return [
     ...ready.report,
     // The record's places are the visit's treated side on the report: with
@@ -1031,6 +1036,7 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
       ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
       : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
     [interiorUnbacked, 'Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.', null, 'remove_trace'],
+    [exteriorUnbacked, 'Your trace would show the outside of the house on the customer’s report, but no place on the record is outside. Add the place outside (Change beside Where), or remove the trace.', null, 'remove_trace'],
   ];
 }
 
