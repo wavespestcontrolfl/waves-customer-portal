@@ -1342,12 +1342,19 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     const validation = validateMarks(req.body?.marks, { serviceKey });
     if (!validation.ok) return res.status(400).json({ error: validation.error });
 
-    const saved = await saveMarksForPhoto({
-      scheduledServiceId: svc.id,
-      s3Key,
-      marks: validation.marks,
-      technicianId: req.technicianId || null,
-    });
+    let saved;
+    try {
+      saved = await saveMarksForPhoto({
+        scheduledServiceId: svc.id,
+        s3Key,
+        marks: validation.marks,
+        technicianId: req.technicianId || null,
+      });
+    } catch (err) {
+      // The photo was removed between the check above and the save's lock.
+      if (err?.code === 'photo_not_found') return res.status(404).json({ error: 'Photo not found on this service' });
+      throw err;
+    }
     logger.info(
       `[tech-track] photo marks saved service=${svc.id} tech=${req.technicianId} count=${saved.length}`
     );

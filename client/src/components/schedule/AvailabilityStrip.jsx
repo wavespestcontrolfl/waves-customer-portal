@@ -59,7 +59,8 @@ function closestHours(days, pickedDate, count) {
   const picked = parseYmd(pickedDate);
   const distance = (day) => Math.abs(parseYmd(day.date) - picked);
   return days
-    .filter((day) => day.date !== pickedDate && day.hours.length)
+    // A closed day (blackout, weekly day off, Sunday) is never the suggestion.
+    .filter((day) => day.date !== pickedDate && day.hours.length && !day.closed)
     .sort((a, b) => distance(a) - distance(b) || b.date.localeCompare(a.date))
     .flatMap((day) => [...day.hours].sort(byDrive))
     .slice(0, count);
@@ -71,8 +72,20 @@ function closestHours(days, pickedDate, count) {
  * tone a consumer may relabel its save button on), 'warn' (could not check,
  * or already booked). Exported for tests and for consumers' save labels.
  */
-export function availabilityVerdict(availability, { currentDate, currentStart }) {
+export function availabilityVerdict(availability, current) {
   if (!availability) return null;
+  // A re-check is in flight: the previous answer is for another pick. Hold
+  // the strip (and the route warning it replaces) rather than flash the old
+  // advisories back for the length of one request.
+  if (availability.stale) return { tone: 'ok', text: 'Checking…', detail: null, lead: null, offers: [], withDay: false };
+  const verdict = verdictFor(availability, current);
+  const dayRow = availability.days.find((day) => day.date === current.currentDate);
+  if (!dayRow?.closed) return verdict;
+  const note = `${fmtDay(current.currentDate)} is a closed day.`;
+  return { ...verdict, detail: verdict.detail ? `${verdict.detail} ${note}` : note };
+}
+
+function verdictFor(availability, { currentDate, currentStart }) {
   const { days, picked } = availability;
   const dayRow = days.find((day) => day.date === currentDate) || { date: currentDate, status: 'full', hours: [] };
   const day = fmtDay(currentDate);
@@ -138,6 +151,9 @@ export function availabilityVerdict(availability, { currentDate, currentStart })
   // No verdict for this hour (unassigned visit, or the answer is for an
   // earlier pick): just say what the day has.
   if (sameDay.length) return { tone: 'ok', text: `Open ${day}:`, detail: null, lead: null, offers: sameDay.slice(0, OFFER_COUNT), withDay: false };
+  if (dayRow.status === 'off') {
+    return { tone: 'warn', text: `The technician is off ${day}.`, detail: null, lead: 'Closest:', offers: nearby(), withDay: true };
+  }
   return {
     tone: dayRow.status === 'overcommitted' ? 'miss' : 'ok',
     text: dayRow.status === 'overcommitted' ? `${day} is already over-booked.` : `Nothing fits ${day}.`,
@@ -148,6 +164,9 @@ export function availabilityVerdict(availability, { currentDate, currentStart })
 /** True when the strip itself states the route problem, so a consumer can
  *  drop the slot-check's route warning instead of saying it twice. */
 export function stripCoversRouteWarning(availability, current) {
+  // Mid re-check the strip is about to answer: keep the warning it replaces
+  // off screen for the length of the request.
+  if (availability?.stale) return true;
   const verdict = availabilityVerdict(availability, current);
   return !!verdict && verdict.tone !== 'ok';
 }
@@ -171,8 +190,18 @@ const pillStyle = {
 };
 
 function pillCount(day) {
+  if (day.closed) return 'closed';
   if (day.hours.length) return `${day.hours.length} open`;
+  if (day.status === 'off') return 'off';
   return day.status === 'unverified' ? 'unchecked' : 'full';
+}
+// Red is for a day with no room; "closed", "off" and "unchecked" are facts
+// about the calendar, not a refusal.
+const pillIsFull = (day) => !day.closed && !day.hours.length && day.status !== 'unverified' && day.status !== 'off';
+function emptyDayLine(day) {
+  if (day.status === 'unverified') return 'route not checked.';
+  if (day.status === 'off') return 'the technician is off.';
+  return 'no hour fits.';
 }
 
 function HourChip({ hour, withDay, current, onPick }) {
@@ -207,6 +236,9 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   // visit does not have (an unassigned visit adopts it on pick) stays tappable.
   const techMatches = (hour) => !hour.technicianId || String(hour.technicianId) === String(currentTechnicianId ?? '');
   const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart) && techMatches(hour);
+  // Mid re-check the listed hours were scored for the previous technician,
+  // duration and pick: show them, but take none until the new answer lands.
+  const pick = availability.stale ? undefined : onPick;
   const today = etDateString();
 
   return (
@@ -220,7 +252,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6, color: '#52525B' }}>
             {verdict.lead ? <span>{verdict.lead}</span> : null}
             {verdict.offers.map((hour) => (
-              <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={onPick} />
+              <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} />
             ))}
           </div>
         )}
@@ -247,7 +279,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
                 {day.date === today ? 'Today' : (d ? DOW[d.getUTCDay()] : '')}
               </span>
               <span style={{ fontSize: 16, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{d ? d.getUTCDate() : ''}</span>
-              <span style={{ fontSize: 14, color: selected ? '#fff' : (day.hours.length || day.status === 'unverified' ? '#52525B' : '#C8312F') }}>
+              <span style={{ fontSize: 14, color: selected ? '#fff' : (pillIsFull(day) ? '#C8312F' : '#52525B') }}>
                 {pillCount(day)}
               </span>
             </button>
@@ -258,11 +290,11 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
           <span style={{ width: '100%', color: '#52525B' }}>
             {viewed.hours.length
-              ? fmtDay(viewed.date)
-              : `${fmtDay(viewed.date)}: ${viewed.status === 'unverified' ? 'route not checked.' : 'no hour fits.'}`}
+              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}`
+              : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
           </span>
           {viewed.hours.map((hour) => (
-            <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={onPick} />
+            <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
           ))}
         </div>
       )}
