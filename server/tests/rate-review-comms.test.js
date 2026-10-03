@@ -784,7 +784,7 @@ describe('customer surfaces', () => {
     const monthly = draft(1, {
       billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
-      metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: ['pest_control:'] },
     });
     const b = book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1, billing_mode: 'monthly_membership' })], notices: [monthly] });
     b.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '60.00' }];
@@ -803,7 +803,7 @@ describe('customer surfaces', () => {
     const mk = (n, eff) => draft(n, {
       customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
-      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: [n === 1 ? 'pest_control:' : 'lawn_care:'] },
     });
     const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_mode: 'monthly_membership' })], notices: [mk(1, '2026-12-15'), mk(2, '2026-12-15')] });
     bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
@@ -816,7 +816,7 @@ describe('customer surfaces', () => {
     const mk = (n) => draft(n, {
       customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
-      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: [n === 1 ? 'pest_control:' : 'lawn_care:'] },
     });
     const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_mode: 'monthly_membership' })], notices: [mk(1), mk(2)] });
     bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
@@ -827,6 +827,31 @@ describe('customer surfaces', () => {
     const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
     expect(out.map((c) => c.service)).toEqual(['Pest control']);
     expect(out[0].chargeCents).toBe(10400); // only its own +$4, not the hidden family's
+  });
+
+  test('portal + preview: a monthly plan replaced at the same price (new accept provenance) is not upcoming and not sendable — the apply\'s plan-identity check', async () => {
+    const monthly = draft(1, {
+      billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
+      current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: ['pest_control:est-1'] },
+    });
+    const b = book({ customers: [customer(1, { monthly_rate: '40.00', billing_mode: 'monthly_membership' })], notices: [monthly] });
+    b.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00', source_estimate_id: 'est-1' }];
+    mockDb.reset(b);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+    // the plan is re-accepted at the same $40: the writer rejects the old notice (plan_replaced)
+    mockDb.store.customer_plan_rates[0].source_estimate_id = 'est-2';
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+    // ...and an unsent monthly letter is held before it is announced
+    mockDb.store.price_change_notices[0].status = 'draft';
+    mockDb.store.price_change_notices[0].sent_at = null;
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].suppressedLines[0].reason).toBe('rate_moved');
+    // a notice that never recorded its plan fails closed too
+    mockDb.store.customer_plan_rates[0].source_estimate_id = 'est-1';
+    const meta = { ...mockDb.store.price_change_notices[0].metadata }; delete meta.slice_estimates;
+    mockDb.store.price_change_notices[0].metadata = meta;
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('rate_moved');
   });
 
   test('portal: a declined prepaid renewal is not upcoming', async () => {
@@ -845,7 +870,7 @@ describe('customer surfaces', () => {
     const mk = (n, eff) => draft(n, {
       customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
-      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice', slice_estimates: [n === 1 ? 'pest_control:' : 'lawn_care:'] },
     });
     const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1, billing_mode: 'monthly_membership' })], notices: [mk(1, '2026-12-10'), mk(2, '2026-12-20')] });
     bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];

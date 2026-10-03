@@ -477,7 +477,7 @@ async function flagSnapshotHold(dbh, row, code) {
 // The series roots of a line's open plan-row visits: the plan identity a
 // notice names (the apply reprices or bills only that series, never a
 // replacement accepted after it — see lockPerApplicationTargets and
-// assertMonthlyPlanUnchanged).
+// monthlyPlanRefusal).
 function seriesRoots(visits) {
   return [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
 }
@@ -814,30 +814,35 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
 // its ledger slices' accept provenance. A same-family plan accepted since —
 // at the same price or not — is a different plan and never takes the old
 // notice (the per-application lane's lockPerApplicationTargets rule). A
-// notice that recorded neither fails closed.
-async function assertMonthlyPlanUnchanged(trx, { notice, customer, metadata, today }) {
+// notice that recorded neither fails closed. Returns { reason, detail } | null.
+async function monthlyPlanRefusal(dbh, { notice, customer, metadata, today }) {
   const noticedSlices = Array.isArray(metadata.slice_estimates) ? metadata.slice_estimates : null;
-  if (!metadata.series_root_id && !noticedSlices) throw hold('notice_series_unrecorded');
+  if (!metadata.series_root_id && !noticedSlices) return { reason: 'notice_series_unrecorded', detail: undefined };
   if (metadata.series_root_id) {
-    const snapshot = await trx('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
-    const roots = seriesRoots(await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, fromDate: today }));
+    const snapshot = await dbh('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
+    const roots = seriesRoots(await loadLineOpenVisits(dbh, { customerId: customer.id, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, fromDate: today }));
     if (roots.length && (roots.length > 1 || roots[0] !== String(metadata.series_root_id))) {
-      throw hold('plan_replaced', { noticedSeries: metadata.series_root_id, liveSeries: roots });
+      return { reason: 'plan_replaced', detail: { noticedSeries: metadata.series_root_id, liveSeries: roots } };
     }
   }
   if (noticedSlices) {
-    const liveSlices = await familySliceEstimates(trx, customer.id, notice.family_key);
-    if (liveSlices.join('|') !== noticedSlices.join('|')) throw hold('plan_replaced', { noticedSlices, liveSlices });
+    const liveSlices = await familySliceEstimates(dbh, customer.id, notice.family_key);
+    if (liveSlices.join('|') !== noticedSlices.join('|')) return { reason: 'plan_replaced', detail: { noticedSlices, liveSlices } };
   }
+  return null;
 }
 
-async function applyMonthly(trx, ctx) {
-  const { notice, customer, today } = ctx;
-  const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
-  const source = ctx.metadata.current_rate_source;
+// Every refusal applyMonthly raises from the rows alone, in its order (the
+// rate on file, the scalar/ledger structure, the plan identity). The apply
+// throws it; the comms lane's send preflight and its upcoming-charge
+// projection ask the same question through this one function.
+// Returns { reason, detail } | null.
+async function monthlyRefusal(dbh, { notice, customer, metadata, today }) {
+  const { all, family } = await loadFamilySlices(dbh, customer.id, notice.family_key);
+  const source = metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
   const currentCents = monthlyCurrentCents(customer, family, source);
-  if (currentCents !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { currentCents, source });
+  if (currentCents !== Number(notice.noticed_current_cents)) return { reason: 'rate_moved_since_notice', detail: { currentCents, source } };
   // A notice ranked from the whole scalar named the account's ONE plan line
   // at that rate. If the ledger has since split the scalar across lines
   // (pest $60 + lawn $40 under an unchanged $100), the family's own slice
@@ -849,19 +854,26 @@ async function applyMonthly(trx, ctx) {
   // replaced by lawn at the same total, or a second line joining with no
   // ledger attribution, is not the plan the letter named).
   if (source !== 'ledger_slice') {
-    const lines = await loadAccountPlanLineCount(trx, { customerId: customer.id, fromDate: today });
-    const own = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
-    if (lines !== 1 || own.length === 0) throw hold('rate_moved_since_notice', { currentCents, source, accountLines: lines });
+    const lines = await loadAccountPlanLineCount(dbh, { customerId: customer.id, fromDate: today });
+    const own = await loadLineOpenVisits(dbh, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
+    if (lines !== 1 || own.length === 0) return { reason: 'rate_moved_since_notice', detail: { currentCents, source, accountLines: lines } };
   }
   if (source !== 'ledger_slice' && all.length > 0) {
     const familyKeys = new Set(family.map((r) => r.family_key));
     const outside = all.filter((r) => !familyKeys.has(r.family_key) && r.family_key !== PlanRateLedger.UNATTRIBUTED);
     const carried = family.length > 0 ? cents(sumSlices(family)) : cents(sumSlices(all));
     if (outside.length > 0 || carried !== currentCents) {
-      throw hold('rate_moved_since_notice', { currentCents, source, ledger: all.map((r) => r.family_key) });
+      return { reason: 'rate_moved_since_notice', detail: { currentCents, source, ledger: all.map((r) => r.family_key) } };
     }
   }
-  await assertMonthlyPlanUnchanged(trx, { notice, customer, metadata: ctx.metadata, today });
+  return monthlyPlanRefusal(dbh, { notice, customer, metadata, today });
+}
+
+async function applyMonthly(trx, ctx) {
+  const { notice, customer, today } = ctx;
+  const source = ctx.metadata.current_rate_source;
+  const refusal = await monthlyRefusal(trx, { notice, customer, metadata: ctx.metadata, today });
+  if (refusal) throw hold(refusal.reason, refusal.detail);
   const deltaMonthly = dollars(Number(notice.noticed_new_cents) - Number(notice.noticed_current_cents));
   const moved = await moveMonthlySlice(trx, { customer, familyKey: notice.family_key, deltaMonthly, requireSlice: source === 'ledger_slice' });
   return { lane: LANE_MONTHLY, before: { monthly_rate: moved.oldScalar }, after: { monthly_rate: moved.newScalar }, deltaMonthly };
@@ -1606,7 +1618,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, monthlyRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };
