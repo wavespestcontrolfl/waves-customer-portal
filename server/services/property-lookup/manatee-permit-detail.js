@@ -227,6 +227,9 @@ async function politeFetch(polite, url, opts) {
     }));
     const location = out.res.status >= 300 && out.res.status < 400 ? out.res.headers.get('location') : null;
     if (!location) return out;
+    // Release the redirect response before the next hop: an unread body can
+    // hold its socket open past the throttle's "one request at a time".
+    await out.res.body?.cancel?.().catch(() => {});
     target = new URL(location, target).toString();
     request = { ...opts, body: undefined, step: `${opts.step} redirect` };
   }
@@ -266,15 +269,24 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
     return Object.values(facts).some((v) => v !== null) ? facts : null;
   };
 
+  // A page with the conditioned square footage is the record we want and
+  // ends the read. A page with only some facts (a revision record can carry
+  // a few) is kept as the best so far while the remaining links are tried.
+  let best = null;
+  const factCount = (facts) => Object.values(facts).filter((v) => v !== null).length;
+  const settle = (facts) => {
+    if (!facts) return false;
+    if (!best || factCount(facts) > factCount(best)) best = facts;
+    return facts.conditioned_sqft !== null;
+  };
+
   // A single hit redirects straight to the record page (no results list).
   const links = detailLinks(results);
-  const direct = judge(results, links.length === 0 && labelValuePairs(results).length > 0);
-  if (direct) return { status: 'ok', facts: direct };
+  if (settle(judge(results, links.length === 0 && labelValuePairs(results).length > 0))) return { status: 'ok', facts: best };
 
   for (const link of links.slice(0, MAX_LINKS_PER_PERMIT)) {
     const { text: page } = await politeFetch(polite, `${CAP_BASE}${link}`, { cookies, timeoutMs: timeout, referer: CAP_HOME_URL, step: 'permit record' });
-    const facts = judge(page, true);
-    if (facts) return { status: 'ok', facts };
+    if (settle(judge(page, true))) return { status: 'ok', facts: best };
     // A linked page that is not a record page at all (maintenance / login
     // reply to the GET) is an outage, not evidence the permit is absent. A
     // real record page for ANOTHER permit (shared number prefix) is fine.
@@ -282,6 +294,7 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
       throw new TransientAcaError('permit record link returned a page that is not a record');
     }
   }
+  if (best) return { status: 'ok', facts: best };
   if (sawRecord) return { status: 'no_fields', facts: null };
   // not_found only on the county's own empty-search notice (live 10-03:
   // "Your search returned no results."). Any other link-less response — a
@@ -396,7 +409,7 @@ async function syncPermitDetails({ sleep, now } = {}) {
   const polite = createThrottle({ gapMs: minGapMs(), sleep: nap, now: clock, deadline: t0 + budget });
 
   const candidates = await selectCandidates(limit, t0);
-  const out = { candidates: candidates.length, attempted: 0, ok: 0, noFields: 0, notFound: 0, errors: 0, stopped: null };
+  const out = { candidates: candidates.length, attempted: 0, ok: 0, noFields: 0, notFound: 0, errors: 0, writeFailures: 0, stopped: null };
   const streaks = { noFields: 0, errors: 0 };
 
   for (const candidate of candidates) {
@@ -418,6 +431,7 @@ async function syncPermitDetails({ sleep, now } = {}) {
       // The code only: a raw database error can echo row values.
       logger.warn('[permit-detail-sync] write failed', { code: err?.code || err?.name || 'db_error' });
       result = { status: 'error' };
+      out.writeFailures += 1;
     }
     out.stopped = countResult(out, streaks, result.status);
     if (out.stopped) break;
@@ -428,6 +442,9 @@ async function syncPermitDetails({ sleep, now } = {}) {
   const stopLog = STOP_LOG[out.stopped];
   if (stopLog) logger.warn(stopLog, out);
   else logger.info('[permit-detail-sync] run complete', out);
+  // Results that could not be stored are a failed run for job health (the
+  // scheduler's lease records the throw); counts only, never row values.
+  if (out.writeFailures) throw new Error(`permit detail sync: ${out.writeFailures} result write(s) failed`);
   return out;
 }
 

@@ -571,15 +571,41 @@ describe('syncPermitDetails', () => {
     expect(b.update.mock.calls[1][0]).toMatchObject({ conditioned_sqft: 2400, bedrooms: 4, under_roof_sqft: null, detail_co_date: '2026-09-11' });
   });
 
-  test('a write failure is counted and never throws out of the run', async () => {
+  test('a write failure never stops the loop, and the run then fails for job health (counts only)', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
     const clock = fakeClock();
-    const b = stubDb([cand('BLD9801-1101')]);
+    const b = stubDb([cand('BLD9801-1101'), cand('BLD9801-1102')]);
     b.update.mockImplementation(() => { throw Object.assign(new Error('boom BLD9801-1101'), { code: '22001' }); });
-    fakeAca({ 'BLD9801-1101': { pages: [okPage('BLD9801-1101')] } }, { clock });
-    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
-    expect(out.errors).toBe(1);
+    const calls = fakeAca({
+      'BLD9801-1101': { pages: [okPage('BLD9801-1101')] },
+      'BLD9801-1102': { pages: [okPage('BLD9801-1102')] },
+    }, { clock });
+    await expect(syncPermitDetails({ now: clock, sleep: clock.sleep })).rejects.toThrow('2 result write(s) failed');
+    // Both permits were still attempted (per-row isolation).
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2);
     expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/BLD98/);
+  });
+
+  test('a revision with only some facts does not end the read: the fuller base record wins', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const pn = 'BLD9801-1103';
+    const b = stubDb([cand(pn)]);
+    fakeAca({ [pn]: { pages: [recordPage(pn, row('Number of Stories:', '2')), okPage(pn)] } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ ok: 1 });
+    expect(b.update.mock.calls[0][0].conditioned_sqft).not.toBeNull();
+  });
+
+  test('only partial pages anywhere: the best partial is stored', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const pn = 'BLD9801-1104';
+    const b = stubDb([cand(pn)]);
+    fakeAca({ [pn]: { pages: [recordPage(pn, row('Number of Stories:', '2')), recordPage(pn, row('Number of Stories:', '2') + row('Number of Bedrooms:', '4'))] } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ ok: 1 });
+    expect(b.update.mock.calls[0][0]).toMatchObject({ conditioned_sqft: null, stories: 2, bedrooms: 4 });
   });
 });
 
