@@ -57,15 +57,6 @@ beforeEach(() => {
   mockResolveProfile.mockImplementation((...args) => jest.requireActual('../services/service-completion-profiles').resolveCompletionProfileForScheduledService(...args));
 });
 
-// GATE_LAWN_MEASURED_COLD (P36): the nightly-low fetch is the only outside call;
-// it answers null (nothing read) for a visit with no usable coordinates, as the
-// real fetcher does.
-const mockFetchNightlyMinsF = jest.fn();
-jest.mock('../services/service-report/application-conditions', () => ({
-  ...jest.requireActual('../services/service-report/application-conditions'),
-  fetchNightlyMinsF: (...args) => mockFetchNightlyMinsF(...args),
-}));
-
 const fs = require('fs');
 const path = require('path');
 const router = require('../routes/admin-dispatch');
@@ -1007,53 +998,82 @@ describe('default-product reads keep the current technician assignment boundary'
 });
 
 describe('GATE_LAWN_MEASURED_COLD on the tip picker (P36)', () => {
+  // The REAL nightly-low fetcher runs; only the weather provider (global fetch) is faked,
+  // and it answers every day in the requested range with the same low.
+  const realFetch = global.fetch;
   const lawn = { ...SERVICE, service_type: 'Lawn Care Treatment', scheduled_date: '2026-10-20' };
-  const nights = (mins) => mins.map((minF, i) => ({ date: `n${i}`, minF }));
   const lawnIds = (res) => res.body.groups.find((group) => group.id === 'lawn').tips.map((tip) => tip.id);
   const FIRST = 'lawn_cooler_nights';
+  const providerAnswers = (low) => jest.fn(async (url) => {
+    const q = new URL(String(url)).searchParams;
+    const times = [];
+    for (let t = Date.parse(`${q.get('start_date')}T00:00:00Z`); t <= Date.parse(`${q.get('end_date')}T00:00:00Z`); t += 86400000) times.push(new Date(t).toISOString().slice(0, 10));
+    return { ok: true, json: async () => ({ daily: { time: times, temperature_2m_min: times.map(() => low) } }) };
+  });
+  let coordSeed = 0;
+  const at = (extra = {}) => { coordSeed += 1; return { ...lawn, latitude: 27 + coordSeed / 100, longitude: -82.5, ...extra }; };
   beforeEach(() => {
     process.env.GATE_TECH_TIPS = 'true';
     mockResolveProfile.mockResolvedValue({ serviceKey: 'lawn_care' });
-    mockFetchNightlyMinsF.mockReset();
-    mockFetchNightlyMinsF.mockImplementation(async ({ latitude, longitude }) => (latitude == null || longitude == null ? null : nights([50, 52, 60, 61, 62, 63, 64])));
+    // today is Nov 20 2026: every night before an Oct 20 visit has elapsed
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-20T15:00:00Z'));
   });
-  afterEach(() => { delete process.env.GATE_LAWN_MEASURED_COLD; });
+  afterEach(() => { delete process.env.GATE_LAWN_MEASURED_COLD; global.fetch = realFetch; jest.useRealTimers(); });
 
   test('gate off: no weather call and the October order is what it was', async () => {
-    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls: [] });
+    global.fetch = providerAnswers(50);
+    mockDbCurrent = scriptedDb({ service: at(), calls: [] });
     const off = await invoke({ serviceId: 'svc-1' });
-    expect(mockFetchNightlyMinsF).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
     expect(lawnIds(off).indexOf(FIRST)).toBeLessThan(10);
   });
 
   test('the lookup uses the APPOINTMENT\'s own coordinates (the same stamped-address guard as the report), never the customer table', async () => {
     process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    global.fetch = providerAnswers(50);
     const calls = [];
-    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls });
+    const svc = at();
+    mockDbCurrent = scriptedDb({ service: svc, calls });
     const res = await invoke({ serviceId: 'svc-1' });
-    expect(mockFetchNightlyMinsF).toHaveBeenCalledTimes(1);
-    expect(mockFetchNightlyMinsF.mock.calls[0][0]).toMatchObject({ latitude: 27.3, longitude: -82.5 });
+    expect(global.fetch).toHaveBeenCalled();
+    const q = new URL(String(global.fetch.mock.calls[0][0])).searchParams;
+    expect(Number(q.get('latitude'))).toBeCloseTo(svc.latitude, 3);
+    expect(Number(q.get('longitude'))).toBeCloseTo(svc.longitude, 3);
+    expect(q.get('end_date')).toBe('2026-10-19');
     expect(calls).not.toContain('customers');
-    // cold: the lift stays
     expect(lawnIds(res).indexOf(FIRST)).toBeLessThan(10);
     expect(source).toMatch(/COALESCE\(scheduled_services\.lat, CASE WHEN NOT \$\{stampedDivergesSql\('scheduled_services', 'customers'\)\} THEN customers\.latitude END\) as latitude/);
     expect(source).toMatch(/COALESCE\(scheduled_services\.lng, CASE WHEN NOT \$\{stampedDivergesSql\('scheduled_services', 'customers'\)\} THEN customers\.longitude END\) as longitude/);
   });
 
-  test('a visit at another property with no coordinates of its own is unknown: no lift, the tip stays', async () => {
+  test('a visit at another property with no coordinates of its own is unknown: no weather call, no lift, the tip stays', async () => {
     process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    global.fetch = providerAnswers(50);
     mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: null, longitude: null }, calls: [] });
-    const res = await invoke({ serviceId: 'svc-1' });
-    expect(mockFetchNightlyMinsF.mock.calls[0][0]).toMatchObject({ latitude: null, longitude: null });
-    const ids = lawnIds(res);
+    const ids = lawnIds(await invoke({ serviceId: 'svc-1' }));
+    expect(global.fetch).not.toHaveBeenCalled();
     expect(ids).toContain(FIRST);
     expect(ids.indexOf(FIRST)).toBeGreaterThanOrEqual(10);
   });
 
   test('warm nights at the visit\'s property: no lift', async () => {
     process.env.GATE_LAWN_MEASURED_COLD = 'true';
-    mockFetchNightlyMinsF.mockResolvedValue(nights([70, 71, 72, 73, 74, 75, 76]));
-    mockDbCurrent = scriptedDb({ service: { ...lawn, latitude: 27.3, longitude: -82.5 }, calls: [] });
+    global.fetch = providerAnswers(72);
+    mockDbCurrent = scriptedDb({ service: at(), calls: [] });
     expect(lawnIds(await invoke({ serviceId: 'svc-1' })).indexOf(FIRST)).toBeGreaterThanOrEqual(10);
+  });
+
+  test('a FUTURE appointment: nights that have not happened are never read, so a forecast low cannot lift the tip', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    global.fetch = providerAnswers(40);
+    jest.setSystemTime(new Date('2026-10-18T15:00:00Z')); // visit Oct 20: Oct 18 and 19 have not elapsed
+    mockDbCurrent = scriptedDb({ service: at(), calls: [] });
+    const ids = lawnIds(await invoke({ serviceId: 'svc-1' }));
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(ids.indexOf(FIRST)).toBeGreaterThanOrEqual(10);
+    // the visit day itself being today is fine: its 7 nights have all elapsed
+    jest.setSystemTime(new Date('2026-10-20T15:00:00Z'));
+    mockDbCurrent = scriptedDb({ service: at(), calls: [] });
+    expect(lawnIds(await invoke({ serviceId: 'svc-1' })).indexOf(FIRST)).toBeLessThan(10);
   });
 });

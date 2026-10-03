@@ -2763,15 +2763,6 @@ async function resolveMeasuredColdVisitDay(service, knex) {
   }
 }
 
-// Whether the measured-cold rule has a say for this render: the visit's own
-// month is in the cooler calendar, OR the month the report's dormancy guard
-// reads (the assessment's date) is - the guard can print the dip from either
-// calendar, so a visit on Sep 30 assessed on Oct 1 is still measured. An
-// unknown visit day is always in (the report then withholds the dip sentence).
-function measuredColdAppliesTo(visitDay, guardDay) {
-  return visitDay === null || measuredColdApplies(visitDay) || measuredColdApplies(guardDay);
-}
-
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
@@ -2858,22 +2849,19 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
     : JSON.stringify(assessment.recommendations || '');
-  // The measured-cold rule (GATE_LAWN_MEASURED_COLD, P36) can change what a
-  // cooler-calendar visit prints (the seasonal-dip sentence), so a PDF cached
-  // before the flip must not be served after it. Only visits the rule can touch
-  // (Mar-Apr, Oct-Feb by the report's own visit day) carry the stamp; summer
-  // visits and gate-off keep their existing key. The verdict itself is frozen
-  // before any render may be stored (an unsettled read is never cached), so
-  // the visit day is enough to identify it.
-  // The day is the VISIT's (resolveMeasuredColdVisitDay), the same value the
-  // report resolves; an unknown day still stamps, because the report then
-  // withholds the dip sentence. The DAY rides the stamp: the verdict is a fact
-  // about the 7 nights before it, so a visit date corrected between cooler-calendar
-  // days can flip the verdict under the same assessment and must re-key the PDF.
+  // The measured-cold rule (GATE_LAWN_MEASURED_COLD, P36) takes the visit's day
+  // as its only input: the dormancy guard reads that day's month, and a cooler
+  // calendar day is measured. So while the gate is on, every lawn key carries the
+  // VISIT's day (resolveMeasuredColdVisitDay, the same value the report resolves;
+  // `none` for an unknown day, where the report withholds the dip sentence). A
+  // PDF cached before the flip is never served after it, a visit date corrected
+  // under the same assessment re-keys, and the verdict itself is frozen before
+  // any render may be stored (an unsettled read is never cached), so the day
+  // identifies it. Gate off adds nothing: the key is what it was.
   let coldStamp = '';
   if (typeof featureGates.lawnMeasuredColdLive === 'function' && featureGates.lawnMeasuredColdLive()) {
     const { day: coldDay } = await resolveMeasuredColdVisitDay(service, knex);
-    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) coldStamp = `|cold=${coldDay || 'none'}`;
+    coldStamp = `|cold=${coldDay || 'none'}`;
   }
   const stamp = crypto.createHash('sha1')
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}${coldStamp}`)
@@ -3712,21 +3700,32 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // callers (measuredColdFetch) make the weather call, every other builder
   // replays a frozen verdict or reads as unknown (no dip sentence).
   if (measuredColdOut && typeof measuredColdOut === 'object') {
-    // The VISIT's day, not the assessment's (see resolveMeasuredColdVisitDay).
+    // The VISIT's day is the only input (see resolveMeasuredColdVisitDay): the
+    // rule's applicability, the dormancy guard's month and the cache key.
     const { day: coldDay, failed: coldDayFailed } = await resolveMeasuredColdVisitDay(service, knex);
-    if (measuredColdAppliesTo(coldDay, ymd(propertyHistoryEnabled ? assessment.visit_date : assessment.service_date))) {
-      // An unknown visit day is an unknown verdict: no fetch, nothing frozen,
-      // no dip sentence. A lookup that threw is transient: never cache it.
+    measuredColdOut.visitMonth = coldDay ? Number(coldDay.slice(5, 7)) : null;
+    measuredColdOut.suppressSeasonal = false;
+    // An unknown day measures as unknown; a cooler-calendar day is measured; a
+    // May-Sep day has no say (the guard reads that month and finds no pressure).
+    if (coldDay === null || measuredColdApplies(coldDay)) {
+      // An unknown visit day is an unknown verdict: no fetch, nothing frozen.
+      // A lookup that threw is transient.
       const cold = coldDay === null
-        ? { met: null, unfrozen: coldDayFailed, pendingReason: null }
+        ? { met: null, frozen: !coldDayFailed, unfrozen: coldDayFailed, pendingReason: null }
         : await resolveVisitMeasuredCold({ service, day: coldDay, knex, allowFetch: measuredColdFetch === true });
-      measuredColdOut.applies = true;
-      measuredColdOut.met = cold.met;
-      // A failed read or freeze is not reproducible: the same flags a failed
-      // week-weather freeze sets (no PDF cache, a pinned email defers).
-      if (cold.unfrozen) { weekWeatherUnfrozen = true; if (readFailures) readFailures.add('measured_cold'); }
-      // Nothing failed but the verdict cannot be read yet (no coordinates).
-      if (cold.pendingReason && !weekWeatherPendingReason) weekWeatherPendingReason = cold.pendingReason;
+      // No seasonal sentence of any kind unless the cold was measured.
+      measuredColdOut.suppressSeasonal = cold.met !== true;
+      // A verdict that is not the one frozen with the visit makes THIS build
+      // degraded, whoever the caller is: the visit-memory and v6-copy first
+      // writes (and anything else that honors readFailures) must not be created
+      // from a rendering that may differ once the verdict lands, and the render
+      // is not cached. A failed read or freeze also defers a pinned email (the
+      // week-weather flags); a verdict that is merely not read yet does not.
+      if (!cold.frozen) {
+        if (readFailures) readFailures.add('measured_cold');
+        if (cold.unfrozen) weekWeatherUnfrozen = true;
+        else if (!weekWeatherPendingReason) weekWeatherPendingReason = cold.pendingReason || 'measured_cold_pending';
+      }
     }
   }
   const lawnScheduleUnconfirmed = reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment });
@@ -5700,8 +5699,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         mowingHeight,
         applications,
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
-        // Measured cold (P36): present only for a visit the rule applies to.
-        ...(measuredColdOut && measuredColdOut.applies ? { measuredCold: measuredColdOut.met } : {}),
+        // Measured cold (P36), gate on only: the visit's month and whether any seasonal sentence is withheld.
+        ...(measuredColdOut && 'visitMonth' in measuredColdOut ? { visitMonth: measuredColdOut.visitMonth, seasonalSuppressed: measuredColdOut.suppressSeasonal } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,
@@ -6058,6 +6057,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             progress: lawnProgress,
             insights: reportV2.insights,
             bannerPresent: Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0,
+            // GATE_LAWN_MEASURED_COLD: "mostly seasonal" is a seasonal sentence.
+            ...(measuredColdOut && measuredColdOut.suppressSeasonal ? { allowSeasonal: false } : {}),
           });
           if (sinceLastCopy) {
             Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });

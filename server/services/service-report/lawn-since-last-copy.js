@@ -133,12 +133,14 @@ function overallLine(progress) {
     : null;
 }
 
-function metricLines(progress) {
+function metricLines(progress, allowSeasonal = true) {
   const byMetric = new Map();
   for (const item of Array.isArray(progress?.items) ? progress.items : []) {
     if (!item || item.kind !== 'applied' || item.approved !== true) continue;
     if (!Object.prototype.hasOwnProperty.call(METRIC_SENTENCE, item.metric)) continue;
     if (!STATE_PRECEDENCE.includes(item.state)) continue;
+    // GATE_LAWN_MEASURED_COLD: no "mostly seasonal" sentence unless the cold was measured.
+    if (item.state === 'seasonal' && !allowSeasonal) continue;
     const held = byMetric.get(item.metric);
     if (held == null || STATE_PRECEDENCE.indexOf(item.state) < STATE_PRECEDENCE.indexOf(held)) byMetric.set(item.metric, item.state);
   }
@@ -171,7 +173,7 @@ function watchLine(sinceLast, insights, bannerPresent) {
  * @param {boolean} [input.bannerPresent] the watering banner carries lines
  * @returns {{ priorDate: string, lines: string[] }|null} null when there is nothing to say
  */
-function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerPresent = false } = {}) {
+function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerPresent = false, allowSeasonal = true } = {}) {
   if (!sinceLast || typeof sinceLast !== 'object') return null;
   const priorDate = /^\d{4}-\d{2}-\d{2}$/.test(String(sinceLast.priorDate || '')) ? sinceLast.priorDate : null;
   if (!priorDate) return null;
@@ -180,7 +182,7 @@ function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerP
   // the engine compared the two visits at all.
   const judged = progress && progress.eligible === true ? progress : null;
   const overall = overallLine(judged);
-  const metrics = metricLines(judged);
+  const metrics = metricLines(judged, allowSeasonal);
   const facts = {
     progress: overall ? overall.direction : 'unknown',
     progressStates: [...(overall ? overall.states : []), ...metrics.map((line) => GUARD_STATE[line.state]).filter(Boolean)],

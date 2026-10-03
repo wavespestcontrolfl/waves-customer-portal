@@ -98,17 +98,19 @@ async function freezeMeasuredCold(serviceRecordId, day, entry, knex) {
  * @param {string} args.day the visit day, YYYY-MM-DD
  * @param {object} args.knex
  * @param {boolean} args.allowFetch false = replay a frozen verdict only (no weather call)
- * @returns {Promise<{met: boolean|null, unfrozen: boolean, pendingReason: string|null}>}
+ * @returns {Promise<{met: boolean|null, frozen: boolean, unfrozen: boolean, pendingReason: string|null}>}
  *   met: true prints the dip sentence; false/null do not.
+ *   frozen: the verdict is the one frozen with the visit (read back or just written). Anything else is
+ *     DEGRADED: cold-dependent first-writer-wins freezes must not be created from it.
  *   unfrozen: a read or the freeze FAILED, so the output is not reproducible (do not cache, defer a pinned send).
  *   pendingReason: nothing failed, the verdict cannot be read YET (no coordinates): do not cache.
  */
 async function resolveVisitMeasuredCold({ service, day, knex, allowFetch = false } = {}) {
   const stored = storedMeasuredColdFor(service?.structured_notes, day);
-  if (stored) return { met: stored.met, unfrozen: false, pendingReason: null };
+  if (stored) return { met: stored.met, frozen: true, unfrozen: false, pendingReason: null };
   // Not opted in (Ask Waves, email, other builders): no weather call. Unknown,
-  // so no dip sentence, and nothing to retry, so no uncacheable flag either.
-  if (!allowFetch) return { met: null, unfrozen: false, pendingReason: null };
+  // so no dip sentence; the caller treats the build as degraded and uncacheable.
+  if (!allowFetch) return { met: null, frozen: false, unfrozen: false, pendingReason: null };
 
   const latitude = service?.customer_latitude ?? service?.latitude ?? service?.lat;
   const longitude = service?.customer_longitude ?? service?.longitude ?? service?.lng;
@@ -117,7 +119,7 @@ async function resolveVisitMeasuredCold({ service, day, knex, allowFetch = false
   if (latN == null || lonN == null || (latN === 0 && lonN === 0)) {
     // The hourly geocoder backstop may still fill the coordinates (same rule
     // as the lawn week weather): pending, not failed.
-    return { met: null, unfrozen: false, pendingReason: 'no_coordinates' };
+    return { met: null, frozen: false, unfrozen: false, pendingReason: 'no_coordinates' };
   }
 
   let read = null;
@@ -127,7 +129,7 @@ async function resolveVisitMeasuredCold({ service, day, knex, allowFetch = false
     logger.warn(`[lawn-measured-cold] read failed: ${err.message}`);
   }
   // A failed or incomplete read is unknown, never "not cold".
-  if (!read || read.met === null) return { met: null, unfrozen: true, pendingReason: null };
+  if (!read || read.met === null) return { met: null, frozen: false, unfrozen: true, pendingReason: null };
 
   const canonical = await freezeMeasuredCold(service.id, day, {
     // The entry names the question it answers.
@@ -138,10 +140,10 @@ async function resolveVisitMeasuredCold({ service, day, knex, allowFetch = false
     source: 'open_meteo',
     frozenAt: new Date().toISOString(),
   }, knex);
-  if (canonical) return { met: canonical.met, unfrozen: false, pendingReason: null };
+  if (canonical) return { met: canonical.met, frozen: true, unfrozen: false, pendingReason: null };
   // Read fine but could not persist: this render is not reproducible. Use our
   // own verdict for the live view, but never cache it.
-  return { met: read.met, unfrozen: true, pendingReason: null };
+  return { met: read.met, frozen: false, unfrozen: true, pendingReason: null };
 }
 
 module.exports = {

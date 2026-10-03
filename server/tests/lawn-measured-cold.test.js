@@ -119,7 +119,7 @@ function makeKnex(fixtures) {
 // every other freeze (week weather, visit memory...) is out of scope here.
 function withRecords(fixtures, records, hooks = {}) {
   const generic = makeKnex(fixtures);
-  const log = { reads: 0, updates: [] };
+  const log = { reads: 0, updates: [], other: [] };
   const knex = (table) => {
     if (table !== 'service_records') return generic(table);
     const ctx = { where: {}, binding: null };
@@ -128,7 +128,11 @@ function withRecords(fixtures, records, hooks = {}) {
       whereRaw(_sql, bindings) { ctx.binding = bindings?.[0] ?? null; return chain; },
       async update(patch) {
         const sql = patch.structured_notes?.__raw || '';
-        if (!sql.includes('lawnMeasuredCold')) return 1;
+        if (!sql.includes('lawnMeasuredCold')) {
+          // other first-writer-wins freezes are out of scope here; note that they were attempted
+          ['lawnVisitMemory', 'lawnCopyV6'].filter((k) => sql.includes(k)).forEach((k) => log.other.push(k));
+          return 1;
+        }
         if (hooks.failUpdate) throw new Error('update failed');
         const rec = records[ctx.where.id];
         if (!rec) return 0;
@@ -194,19 +198,22 @@ describe('the pure rule', () => {
     ['2026-05-01', '2026-07-15', '2026-09-30'].forEach((d) => expect(measuredColdApplies(d)).toBe(false));
     expect(measuredColdApplies('')).toBe(false);
   });
-  test('the cross-season notes drop only the returns clause when the dip claim is not measured', () => {
+  test('cold not measured: the cross-season notes about the cooler months are withheld whole; other notes stay', () => {
     expect(seasonality.crossSeasonNote('2026-07-01', '2026-01-10')).toMatch(NO_DIP_CLAUSE);
-    expect(seasonality.crossSeasonNote('2026-07-01', '2026-01-10', { dipClaim: false })).toBe('Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months.');
-    expect(seasonality.crossSeasonNoteFromSeasons('peak', 'dormant', { dipClaim: false })).toBe('Most of the change across these visits is seasonal — color naturally dips in the cooler months.');
+    expect(seasonality.crossSeasonNote('2026-07-01', '2026-01-10', { seasonal: false })).toBeNull();
+    expect(seasonality.crossSeasonNoteFromSeasons('peak', 'dormant', { seasonal: false })).toBeNull();
+    // not about the cooler months: untouched
+    expect(seasonality.crossSeasonNote('2026-06-01', '2026-07-01', { seasonal: false })).toBeNull();
+    expect(seasonality.crossSeasonNote('2026-03-01', '2026-07-01', { seasonal: false })).toBeNull();
   });
 });
 
 describe('fetchNightlyMinsF (the real fetcher, provider mocked)', () => {
   const real = jest.requireActual('../services/service-report/application-conditions');
-  const dates = seasonality.trailingNightDates('2026-11-08');
+  const dates = seasonality.trailingNightDates('2026-09-20');
   const okJson = (mins) => ({ ok: true, json: async () => ({ daily: { time: dates, temperature_2m_min: mins } }) });
   const realFetch = global.fetch;
-  afterEach(() => { global.fetch = realFetch; });
+  afterEach(() => { global.fetch = realFetch; jest.useRealTimers(); });
 
   test('reads the archive, keeps null as null (never 0), and does not fetch for a failed geocode', async () => {
     global.fetch = jest.fn(async () => okJson([50, 52, 60, 61, 62, 63, 64]));
@@ -228,6 +235,28 @@ describe('fetchNightlyMinsF (the real fetcher, provider mocked)', () => {
     const nights = await real.fetchNightlyMinsF({ latitude: 27.2222, longitude: -82.2222, dates });
     expect(nights.map((n) => n.minF)).toEqual([50, 52, 60, 61, 62, 58, 57]);
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('the request carries the same 3-decimal precision as the cache key', async () => {
+    global.fetch = jest.fn(async () => okJson([50, 52, 60, 61, 62, 63, 64]));
+    await real.fetchNightlyMinsF({ latitude: 27.55549, longitude: -82.66616, dates });
+    const url = new URL(String(global.fetch.mock.calls[0][0]));
+    expect(url.searchParams.get('latitude')).toBe('27.555');
+    expect(url.searchParams.get('longitude')).toBe('-82.666');
+  });
+
+  test('only elapsed ET nights are read: a date that is today or later is refused with no call (no forecast value is ever a reading)', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-10T15:00:00Z'));
+    global.fetch = jest.fn(async () => okJson([]));
+    // a visit today: its 7 nights all elapsed, so it is read
+    const today = seasonality.trailingNightDates('2026-11-10');
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ daily: { time: today, temperature_2m_min: [50, 52, 60, 61, 62, 63, 64] } }) }));
+    expect(await real.fetchNightlyMinsF({ latitude: 27.5, longitude: -82.5, dates: today })).toHaveLength(7);
+    // a visit tomorrow, or any date range reaching today: refused
+    global.fetch = jest.fn();
+    expect(await real.fetchNightlyMinsF({ latitude: 27.6, longitude: -82.6, dates: seasonality.trailingNightDates('2026-11-11') })).toBeNull();
+    expect(await real.fetchNightlyMinsF({ latitude: 27.6, longitude: -82.6, dates: seasonality.trailingNightDates('2026-11-20') })).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('both endpoints down = null; some nights read = those nights, the rest null', async () => {
@@ -253,7 +282,7 @@ describe('resolveVisitMeasuredCold (the freeze)', () => {
   test('a frozen verdict replays with no weather call, even when the opt-in is off', async () => {
     const frozen = { [DAY]: { met: true, serviceDate: DAY } };
     const { result } = await run({}, { service: svc({ lawnMeasuredCold: frozen }), allowFetch: false });
-    expect(result).toEqual({ met: true, unfrozen: false, pendingReason: null });
+    expect(result).toEqual({ met: true, frozen: true, unfrozen: false, pendingReason: null });
     expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
   });
   test('a verdict frozen for another day does not answer this day', async () => {
@@ -262,16 +291,16 @@ describe('resolveVisitMeasuredCold (the freeze)', () => {
     const { result } = await run({ 'svc-1': { structured_notes: notes } }, { service: svc(notes), allowFetch: true });
     expect(result.met).toBe(true);
   });
-  test('no opt-in and nothing frozen = unknown with no weather call and no uncacheable flag (Ask Waves)', async () => {
+  test('no opt-in and nothing frozen = unknown, not frozen, with no weather call (Ask Waves, email)', async () => {
     const { result, log } = await run({ 'svc-1': { structured_notes: {} } }, { service: svc(), allowFetch: false });
-    expect(result).toEqual({ met: null, unfrozen: false, pendingReason: null });
+    expect(result).toEqual({ met: null, frozen: false, unfrozen: false, pendingReason: null });
     expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
     expect(log.updates).toHaveLength(0);
   });
   test('no coordinates = pending (the geocoder may fill them), nothing fetched or frozen; 0,0 counts as none', async () => {
     for (const extra of [{ customer_latitude: null, customer_longitude: null }, { customer_latitude: 0, customer_longitude: 0 }, { customer_latitude: '', customer_longitude: '' }]) {
       const { result, log } = await run({ 'svc-1': { structured_notes: {} } }, { service: svc({}, extra), allowFetch: true });
-      expect(result).toEqual({ met: null, unfrozen: false, pendingReason: 'no_coordinates' });
+      expect(result).toEqual({ met: null, frozen: false, unfrozen: false, pendingReason: 'no_coordinates' });
       expect(log.updates).toHaveLength(0);
     }
     expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
@@ -280,30 +309,32 @@ describe('resolveVisitMeasuredCold (the freeze)', () => {
     conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
     const recs = { 'svc-1': { structured_notes: {} } };
     const { result, log } = await run(recs, { service: svc(), allowFetch: true });
-    expect(result).toEqual({ met: true, unfrozen: false, pendingReason: null });
+    expect(result).toEqual({ met: true, frozen: true, unfrozen: false, pendingReason: null });
     expect(log.updates).toHaveLength(1);
     const entry = storedMeasuredColdFor(recs['svc-1'].structured_notes, DAY);
     expect(entry).toMatchObject({ met: true, coldNights: 2, serviceDate: DAY, source: 'open_meteo' });
     expect(entry.nights).toHaveLength(7);
     // the question asked is the 7 nights before the visit day
     expect(conditions.fetchNightlyMinsF.mock.calls[0][0].dates).toEqual(seasonality.trailingNightDates(DAY));
+    // a completed visit only ever asks for nights strictly before its own day, so none can be a forecast
+    expect(conditions.fetchNightlyMinsF.mock.calls[0][0].dates.every((d) => d < DAY)).toBe(true);
   });
   test('warm with all 7 nights read is a settled false, frozen', async () => {
     conditions.fetchNightlyMinsF.mockResolvedValue(WARM);
     const recs = { 'svc-1': { structured_notes: {} } };
     const { result } = await run(recs, { service: svc(), allowFetch: true });
-    expect(result).toEqual({ met: false, unfrozen: false, pendingReason: null });
+    expect(result).toEqual({ met: false, frozen: true, unfrozen: false, pendingReason: null });
     expect(storedMeasuredColdFor(recs['svc-1'].structured_notes, DAY).met).toBe(false);
   });
   test('a failed or incomplete read is unknown, NOT frozen, and flagged unfrozen so nothing caches it', async () => {
     const recs = { 'svc-1': { structured_notes: {} } };
     conditions.fetchNightlyMinsF.mockResolvedValue(null);
-    expect((await run(recs, { service: svc(), allowFetch: true })).result).toEqual({ met: null, unfrozen: true, pendingReason: null });
+    expect((await run(recs, { service: svc(), allowFetch: true })).result).toEqual({ met: null, frozen: false, unfrozen: true, pendingReason: null });
     conditions.fetchNightlyMinsF.mockRejectedValue(new Error('boom'));
     expect((await run(recs, { service: svc(), allowFetch: true })).result.unfrozen).toBe(true);
     conditions.fetchNightlyMinsF.mockResolvedValue([...WARM.slice(0, 6), { date: 'x', minF: null }]);
     const incomplete = await run(recs, { service: svc(), allowFetch: true });
-    expect(incomplete.result).toEqual({ met: null, unfrozen: true, pendingReason: null });
+    expect(incomplete.result).toEqual({ met: null, frozen: false, unfrozen: true, pendingReason: null });
     expect(incomplete.log.updates).toHaveLength(0);
     expect(recs['svc-1'].structured_notes.lawnMeasuredCold).toBeUndefined();
   });
@@ -312,13 +343,13 @@ describe('resolveVisitMeasuredCold (the freeze)', () => {
     const recs = { 'svc-1': { structured_notes: { lawnMeasuredCold: { [DAY]: { met: false, serviceDate: DAY } } } } };
     // this render's own row (read before the winner wrote) shows nothing frozen
     const { result, log } = await run(recs, { service: svc(), allowFetch: true });
-    expect(result).toEqual({ met: false, unfrozen: false, pendingReason: null });
+    expect(result).toEqual({ met: false, frozen: true, unfrozen: false, pendingReason: null });
     expect(log.updates).toHaveLength(0);
   });
   test('a freeze that cannot be written serves the live verdict but marks it unfrozen', async () => {
     conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
     const { result } = await run({ 'svc-1': { structured_notes: {} } }, { service: svc(), allowFetch: true }, { failUpdate: true });
-    expect(result).toEqual({ met: true, unfrozen: true, pendingReason: null });
+    expect(result).toEqual({ met: true, frozen: false, unfrozen: true, pendingReason: null });
   });
   test('the freeze writes through the first-writer-wins predicate with no preceding read and no row lock', () => {
     const src = read('services/service-report/lawn-measured-cold.js');
@@ -540,14 +571,17 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
     expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(false);
   });
 
-  test('a caller that did not opt in (Ask Waves, email) makes no weather call; unfrozen = no dip sentence, no uncacheable flag', async () => {
+  test('a caller that did not opt in (Ask Waves, email) makes no weather call; nothing frozen = no dip sentence and a DEGRADED, uncacheable build', async () => {
     on();
     conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
     const { data, log } = await render(records());
     expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
     expect(log.updates).toHaveLength(0);
     expect(colorCard(data).seasonal).toBeUndefined();
-    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    expect(data.lawnAssessment.weekWeatherPendingReason).toBe('measured_cold_pending');
+    // not a failure: a pinned email is not deferred over it
+    expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(false);
   });
 
   test('a frozen verdict replays for every caller with no weather call, whatever the weather now says', async () => {
@@ -582,7 +616,6 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
 
   describe('the visit day is the visit\'s, never the assessment\'s creation day', () => {
     const cases = [
-      { name: 'visit Sep 30, assessment created Oct 1', visit: '2026-09-30', assessed: '2026-10-01', nightsEnd: '2026-09-29' },
       { name: 'visit Oct 31, assessment created Nov 1', visit: '2026-10-31', assessed: '2026-11-01', nightsEnd: '2026-10-30' },
       { name: 'visit Nov 10, assessment created Nov 14 (same month)', visit: '2026-11-10', assessed: '2026-11-14', nightsEnd: '2026-11-09' },
     ];
@@ -601,34 +634,43 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
       expect(map[visit].serviceDate).toBe(visit);
       expect(colorCard(data).customerExplanation).toBe(DIP);
     });
-    test('the report and the PDF key agree on the day: a peak-month visit assessed in a cooler month is measured and stamped; both peak is neither', async () => {
-      const off = await (async () => { const { knex } = withRecords(fixtures('2026-09-30', '2026-10-01'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-09-30', '2026-10-01')); return (await resolveCanonicalLawnRender(service({}, '2026-09-30'), knex, { propertyHistoryEnabled: false })).signature; })();
+    test('a Sep 30 visit assessed Oct 1: the visit day decides everything. Gate off keeps the old calendar dip; gate on has no dip, no fetch, no seasonal sentence, and a key carrying Sep 30', async () => {
+      const recs0 = records({}, '2026-10-01');
+      const off = await render(recs0, { day: '2026-09-30', assessDay: '2026-10-01' });
+      expect(colorCard(off.data).customerExplanation).toBe(DIP);
       on();
-      const stamped = await (async () => { const { knex } = withRecords(fixtures('2026-09-30', '2026-10-01'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-09-30', '2026-10-01')); return (await resolveCanonicalLawnRender(service({}, '2026-09-30'), knex, { propertyHistoryEnabled: false })).signature; })();
-      expect(stamped).not.toBe(off);
       conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
-      await render(records({}, '2026-10-01'), { opts: { lawnMeasuredCold: true }, day: '2026-09-30', assessDay: '2026-10-01' });
-      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(1);
-      // visit and assessment both in July: no stamp, no fetch
-      conditions.fetchNightlyMinsF.mockClear();
-      const julyOn = await (async () => { const { knex } = withRecords(fixtures('2026-07-14', '2026-07-15'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-07-14', '2026-07-15')); return (await resolveCanonicalLawnRender(service({}, '2026-07-14'), knex, { propertyHistoryEnabled: false })).signature; })();
-      delete process.env.GATE_LAWN_MEASURED_COLD;
-      const julyOff = await (async () => { const { knex } = withRecords(fixtures('2026-07-14', '2026-07-15'), records()); history.installedForVisit.mockResolvedValue(CUR('2026-07-14', '2026-07-15')); return (await resolveCanonicalLawnRender(service({}, '2026-07-14'), knex, { propertyHistoryEnabled: false })).signature; })();
-      expect(julyOn).toBe(julyOff);
-      on();
-      await render(records({}, '2026-07-15'), { opts: { lawnMeasuredCold: true }, day: '2026-07-14', assessDay: '2026-07-15' });
+      const recs = records({}, '2026-10-01');
+      const { data, log } = await render(recs, { opts: { lawnMeasuredCold: true }, day: '2026-09-30', assessDay: '2026-10-01' });
       expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
+      expect(log.updates).toHaveLength(0);
+      expect(colorCard(data).seasonal).toBeUndefined();
+      expect(JSON.stringify(data.reportV2)).not.toContain(DIP);
+      // a May-Sep visit day has no measured verdict to wait for: nothing degraded
+      expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
     });
-    test('an Oct 31 visit assessed Nov 1 is stamped whichever way the dates fall (never skipped by the assessment day)', async () => {
-      const stampOf = async (visit, assessed) => {
+    test('the PDF key carries the VISIT day while the gate is on and nothing else about the dates: the assessment\'s day never reaches it', async () => {
+      const keyOf = async (visit, assessed) => {
         const { knex } = withRecords(fixtures(visit, assessed), records());
         history.installedForVisit.mockResolvedValue(CUR(visit, assessed));
         return (await resolveCanonicalLawnRender(service({}, visit), knex, { propertyHistoryEnabled: false })).signature;
       };
-      const off = await stampOf('2027-04-30', '2027-05-01');
+      const off = await keyOf('2026-09-30', '2026-10-01');
+      expect(await keyOf('2026-09-30', '2026-09-30')).toBe(off);
       on();
-      // visit Apr 30 is in the cooler calendar even though the assessment says May 1
-      expect(await stampOf('2027-04-30', '2027-05-01')).not.toBe(off);
+      const onKey = await keyOf('2026-09-30', '2026-10-01');
+      expect(onKey).not.toBe(off);
+      expect(await keyOf('2026-09-30', '2026-09-30')).toBe(onKey);
+      expect(await keyOf('2026-09-30', '2026-11-20')).toBe(onKey);
+      expect(await keyOf('2026-10-01', '2026-10-01')).not.toBe(onKey);
+    });
+    test('an Apr 30 visit assessed May 1 is measured (visit day in the cooler calendar) and the guard reads April', async () => {
+      on();
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      const recs = records({}, '2026-05-01');
+      const { data } = await render(recs, { opts: { lawnMeasuredCold: true }, day: '2026-04-30', assessDay: '2026-05-01' });
+      expect(conditions.fetchNightlyMinsF.mock.calls[0][0].dates[6]).toBe('2026-04-29');
+      expect(colorCard(data).customerExplanation).toBe(DIP);
     });
     test('the service record\'s own date wins; a date-only Date and an ET timestamp both resolve to the ET day', async () => {
       on();
@@ -726,10 +768,138 @@ describe('GATE_LAWN_MEASURED_COLD on the lawn report payload', () => {
       expect(onSig).not.toBe(off);
       expect(await sig()).toBe(onSig);
     });
-    test('gate on leaves a peak-season visit\'s key alone, and the verdict is not in the key (it is frozen before any store)', async () => {
+    test('gate on: every lawn key carries the visit day (a summer visit re-keys once), and the same day keeps its key', async () => {
       const off = await sig('2026-07-14');
       on();
-      expect(await sig('2026-07-14')).toBe(off);
+      const onKey = await sig('2026-07-14');
+      expect(onKey).not.toBe(off);
+      expect(await sig('2026-07-14')).toBe(onKey);
+    });
+  });
+});
+
+describe('cold not measured: no seasonal sentence of any kind (GATE_LAWN_MEASURED_COLD)', () => {
+  const saved = {};
+  const ENV = ['GATE_LAWN_MEASURED_COLD', 'GATE_LAWN_EXPECTATIONS', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+  const PRIOR = { ...CUR('2026-07-10'), id: 'la-prior', service_record_id: 'svc-prior', season: 'peak', history_record_id: 'svc-prior' };
+  const NOW = { ...CUR(), season: 'shoulder' };
+  const STRINGS = [
+    /transitional stretch/, /naturally slows and can look duller/, /peak heat-and-pest season/,
+    /Most of the color difference here is seasonal/, /Most of the change across these visits is seasonal/,
+    /often returns as nights warm/, /normal for this cooler stretch/, /mostly seasonal/,
+  ];
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    conditions.fetchNightlyMinsF.mockReset();
+    const h = { current: NOW, rows: [PRIOR, NOW], identity: 'h', eligibleVisitIds: [], isBaseline: false };
+    history.installedForVisit.mockResolvedValue(NOW);
+    history.historyForReport.mockResolvedValue(h);
+    history.historyForAssessment.mockResolvedValue(h);
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const run = (opts = { lawnMeasuredCold: true }) => {
+    const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK() } } } };
+    const fx = { ...fixtures(), lawn_assessments: [PRIOR, NOW] };
+    const { knex } = withRecords(fx, recs);
+    return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p36', knex, opts);
+  };
+
+  test('baseline (gate off): the season note, the cross-season trend note and the dip all print', async () => {
+    const { reportV2 } = await run({});
+    const text = JSON.stringify(reportV2);
+    expect(reportV2.snapshot.seasonalNote).toMatch(/transitional stretch/);
+    expect(reportV2.trends.seasonalNote).toMatch(/Most of the change across these visits is seasonal/);
+    expect(text).toContain(DIP);
+  });
+
+  test('gate on, warm nights: every seasonal string is absent from the payload (season note, program line, trend note, dip card)', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    process.env.GATE_LAWN_EXPECTATIONS = 'true';
+    conditions.fetchNightlyMinsF.mockResolvedValue(WARM);
+    const { reportV2 } = await run();
+    expect(reportV2.snapshot.seasonalNote).toBeNull();
+    expect(reportV2.snapshot).not.toHaveProperty('seasonalNoteSource');
+    expect(reportV2.trends.seasonalNote).toBeUndefined();
+    const text = JSON.stringify(reportV2);
+    STRINGS.forEach((re) => expect(text).not.toMatch(re));
+    expect(text).not.toContain(DIP);
+  });
+
+  test('gate on, unknown (failed read): the same - nothing seasonal is claimed', async () => {
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    conditions.fetchNightlyMinsF.mockResolvedValue(null);
+    const { reportV2 } = await run();
+    expect(reportV2.snapshot.seasonalNote).toBeNull();
+    STRINGS.forEach((re) => expect(JSON.stringify(reportV2)).not.toMatch(re));
+  });
+
+  test('gate on, cold measured: the seasonal wording is what the gate-off report prints', async () => {
+    const off = (await run({})).reportV2;
+    process.env.GATE_LAWN_MEASURED_COLD = 'true';
+    conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+    const { reportV2 } = await run();
+    expect(reportV2.snapshot.seasonalNote).toBe(off.snapshot.seasonalNote);
+    expect(reportV2.trends.seasonalNote).toBe(off.trends.seasonalNote);
+    expect(JSON.stringify(reportV2)).toContain(DIP);
+  });
+
+  test('the "since your last visit" copy drops its "mostly seasonal" line unless cold was measured', () => {
+    const { buildSinceLastCopy } = require('../services/service-report/lawn-since-last-copy');
+    const input = {
+      sinceLast: { priorDate: '2026-10-01', applied: [], checks: [] },
+      progress: { eligible: true, overall: { direction: 'unknown' }, items: [{ kind: 'applied', approved: true, metric: 'color_health', state: 'seasonal' }] },
+    };
+    expect(buildSinceLastCopy(input).lines).toContain('The color change since then is mostly seasonal.');
+    expect(buildSinceLastCopy({ ...input, allowSeasonal: false })).toBeNull();
+  });
+
+  describe('a cold-dependent freeze is never created from an unmeasured build (email, then PDF)', () => {
+    const FREEZES = ['lawnVisitMemory', 'lawnCopyV6'];
+    beforeEach(() => {
+      process.env.GATE_LAWN_MEASURED_COLD = 'true';
+      process.env.GATE_LAWN_VISIT_MEMORY = 'true';
+      process.env.GATE_LAWN_REPORT_LEAD = 'true';
+      process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
+    });
+    const runWith = (recs, opts) => {
+      const { knex, log } = withRecords({ ...fixtures(), lawn_assessments: [PRIOR, NOW] }, recs);
+      return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p36', knex, opts).then((data) => ({ data, log }));
+    };
+
+    test('the email build (no opt-in) is degraded and uncacheable and creates no visit-memory or v6-copy freeze; the PDF build then freezes the verdict and both', async () => {
+      conditions.fetchNightlyMinsF.mockResolvedValue(COLD);
+      const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK() } } } };
+      const email = await runWith(recs, {});
+      expect(conditions.fetchNightlyMinsF).not.toHaveBeenCalled();
+      expect(email.log.other).toEqual([]);
+      expect(email.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+      expect(recs['svc-cur'].structured_notes.lawnMeasuredCold).toBeUndefined();
+
+      const pdf = await runWith(recs, { lawnMeasuredCold: true });
+      expect(conditions.fetchNightlyMinsF).toHaveBeenCalledTimes(1);
+      expect(storedMeasuredColdFor(recs['svc-cur'].structured_notes, DAY).met).toBe(true);
+      FREEZES.forEach((k) => expect(pdf.log.other).toContain(k));
+      expect(pdf.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+      expect(JSON.stringify(pdf.data.reportV2)).toContain(DIP);
+    });
+
+    test('once the verdict is frozen, a non-fetching build is healthy again and freezes like any other', async () => {
+      const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK() }, lawnMeasuredCold: { [DAY]: { met: true, serviceDate: DAY } } } } };
+      const email = await runWith(recs, {});
+      expect(email.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+      FREEZES.forEach((k) => expect(email.log.other).toContain(k));
+    });
+
+    test('a failed read in the PDF build is degraded too: no freezes, uncacheable, and a pinned email defers', async () => {
+      conditions.fetchNightlyMinsF.mockResolvedValue(null);
+      const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK() } } } };
+      const { data, log } = await runWith(recs, { lawnMeasuredCold: true });
+      expect(log.other).toEqual([]);
+      expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+      expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(true);
     });
   });
 });

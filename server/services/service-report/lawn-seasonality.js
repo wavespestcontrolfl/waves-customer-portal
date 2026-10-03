@@ -140,24 +140,26 @@ function measuredColdApplies(visitDay) {
 
 // When two compared visits fall in different seasons, surface that the difference is
 // largely seasonal so the before/after wipe + trend never imply decline from dormancy.
-// `dipClaim: false` (measured cold not met, GATE_LAWN_MEASURED_COLD) leaves the
-// "color often returns as nights warm" clause out, the same words the sentence
-// already has while the row is unapproved. Default true = unchanged.
-function crossSeasonNote(dateA, dateB, { dipClaim = true } = {}) {
+// `seasonal: false` (GATE_LAWN_MEASURED_COLD, cold not measured): the note is
+// about the cooler months, which we did not measure, so there is no note.
+// Default true = unchanged.
+function crossSeasonNote(dateA, dateB, { seasonal = true } = {}) {
   const a = seasonOfDate(dateA);
   const b = seasonOfDate(dateB);
   if (!a || !b || a === b) return null;
   if (isCoolSeason(a) || isCoolSeason(b)) {
-    return `Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months${dipClaim && seasonalDipClaimApproved() ? ', and color often returns as nights warm' : ''}.`;
+    if (!seasonal) return null;
+    return `Most of the color difference here is seasonal — St. Augustine slows and colors off in the cooler months${seasonalDipClaimApproved() ? ', and color often returns as nights warm' : ''}.`;
   }
   return 'These visits fall in different parts of the growing season, so some change is expected.';
 }
 
 // Same, from already-resolved season strings (trend rows carry `season`).
-function crossSeasonNoteFromSeasons(seasonA, seasonB, { dipClaim = true } = {}) {
+function crossSeasonNoteFromSeasons(seasonA, seasonB, { seasonal = true } = {}) {
   if (!seasonA || !seasonB || seasonA === seasonB) return null;
   if (isCoolSeason(seasonA) || isCoolSeason(seasonB)) {
-    return `Most of the change across these visits is seasonal — color naturally dips in the cooler months${dipClaim && seasonalDipClaimApproved() ? ' and often returns as nights warm' : ''}.`;
+    if (!seasonal) return null;
+    return `Most of the change across these visits is seasonal — color naturally dips in the cooler months${seasonalDipClaimApproved() ? ' and often returns as nights warm' : ''}.`;
   }
   return null;
 }

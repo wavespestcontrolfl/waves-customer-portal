@@ -931,7 +931,8 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
 // oldest first), for the measured-cold rule on the lawn seasonal-dip sentence.
 // Returns [{ date, minF }] with minF null for a day the provider did not
 // supply (never 0: only a finite number is a reading), or null when nothing
-// could be read (no usable coordinates, bad dates, both endpoints failed).
+// could be read (no usable coordinates, bad dates, a date that has not
+// elapsed, both endpoints failed).
 // Like the service week, a closed range prefers the reanalysis archive and
 // the forecast endpoint fills (or replaces) what the archive lacks. Successful
 // reads are cached 6h in process; the caller freezes the verdict, so a failed
@@ -941,17 +942,27 @@ async function fetchNightlyMinsF({ latitude, longitude, dates } = {}) {
   const lon = toCoordinate(longitude);
   if (lat == null || lon == null || (lat === 0 && lon === 0)) return null;
   if (!Array.isArray(dates) || !dates.length || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(String(d)))) return null;
+  // Elapsed nights only: a date that is today or later has no measured low yet,
+  // and the forecast endpoint would answer it with a MODEL value that the
+  // caller (the report freeze, the tip ranking) would treat as a measurement.
+  // A completed visit only ever asks for the 7 days before its own day.
+  const today = etTodayYmd();
+  if (dates.some((d) => d >= today)) return null;
   const start = dates[0];
   const end = dates[dates.length - 1];
-  const key = `nightmins:${lat.toFixed(3)},${lon.toFixed(3)}:${start}..${end}`;
+  // One precision for the request AND the cache key (3 decimals, ~110 m), so
+  // two properties that share a key also share the request they were read with.
+  const latKey = lat.toFixed(3);
+  const lonKey = lon.toFixed(3);
+  const key = `nightmins:${latKey},${lonKey}:${start}..${end}`;
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value.map((n) => ({ ...n }));
 
   const byDate = new Map();
   for (const base of [OPEN_METEO_ARCHIVE, OPEN_METEO_FORECAST]) {
     const url = new URL(base);
-    url.searchParams.set('latitude', lat.toFixed(4));
-    url.searchParams.set('longitude', lon.toFixed(4));
+    url.searchParams.set('latitude', latKey);
+    url.searchParams.set('longitude', lonKey);
     url.searchParams.set('daily', 'temperature_2m_min');
     url.searchParams.set('start_date', start);
     url.searchParams.set('end_date', end);
