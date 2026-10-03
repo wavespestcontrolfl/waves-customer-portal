@@ -102,6 +102,21 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.queryByText("Marta R")).not.toBeInTheDocument();
   });
 
+  it("a load for the last window that lands after the window changed is not shown", async () => {
+    let finishOld;
+    const fetch = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    vi.stubGlobal("fetch", fetch);
+    render(<ReviewDraftsPanel />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("Time window"), { target: { value: "60" } });
+    finishOld(response({ days: 14, drafts: [{ id: 1, customerName: "Marta R", step: 0, channel: "sms", outcome: "fallback", reason: "no_draft", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T15:00:00Z" }], paymentHolds: [] }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByText("Marta R")).not.toBeInTheDocument();
+  });
+
   it("says when nothing has been drafted yet", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => response({ days: 14, drafts: [], paymentHolds: [] })));
     render(<ReviewDraftsPanel />);

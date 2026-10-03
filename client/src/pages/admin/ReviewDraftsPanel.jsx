@@ -145,23 +145,24 @@ export default function ReviewDraftsPanel() {
     setLoading(true);
     setError(null);
     return adminFetch(`/admin/review-requests/tech-voice-drafts?days=${days}`)
-      .then((d) => { if (mine === gen.current) setData(d); })
+      .then((d) => { if (mine === gen.current) setData({ ...d, window: days }); })
       .catch((e) => { if (mine === gen.current) setError(e.message); })
       .finally(() => { if (mine === gen.current) setLoading(false); });
   }, [days]);
   useEffect(() => { load(); }, [load]);
 
-  const drafts = data?.drafts || [];
-  const holds = data?.paymentHolds || [];
+  // Only what was loaded for the selected window is shown: a load still in
+  // flight for the last window can land after the selection changed.
+  const shown = data?.window === days ? data : null;
+  const drafts = shown?.drafts || [];
+  const holds = shown?.paymentHolds || [];
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-16 font-medium text-zinc-900 mr-auto">Tech-voice review texts</h2>
         <UiSelect
           value={days}
-          // The listed texts belong to the window they were loaded for: clear
-          // them so another window never shows under this selection.
-          onChange={(e) => { setData(null); setDays(e.target.value); }}
+          onChange={(e) => setDays(e.target.value)}
           aria-label="Time window"
           className="w-auto bg-white border-hairline border-zinc-200 rounded-md text-zinc-900 text-ui-body cursor-pointer"
         >
@@ -193,7 +194,7 @@ export default function ReviewDraftsPanel() {
               </li>
             ))}
           </ul>
-          {data?.holdsTruncated && (
+          {shown?.holdsTruncated && (
             <p className="text-ui-body text-zinc-600">
               Showing the newest {holds.length} held for payment. More are held and not listed.
             </p>
@@ -201,7 +202,7 @@ export default function ReviewDraftsPanel() {
         </Card>
       )}
       {drafts.map((d) => <DraftCard key={d.id} d={d} />)}
-      {data?.truncated && (
+      {shown?.truncated && (
         <p className="text-ui-body text-zinc-600">
           Showing the newest {drafts.length} in this window. Older ones are not listed; pick a shorter window to see every text in it.
         </p>
