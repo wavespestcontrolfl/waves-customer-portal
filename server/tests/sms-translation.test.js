@@ -10,14 +10,16 @@ let mockGateOn = true;
 
 const mockPrior = jest.fn(async () => []);
 const mockEarlier = jest.fn(async () => []);
+const mockOutbound = jest.fn(async () => []);
 const mockTrigger = jest.fn(async () => ({ created_at: new Date('2026-10-02T12:00:00Z') }));
 const mockLoopsOpen = jest.fn(() => false);
 const mockEtaExpired = jest.fn(() => false);
 jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
-    where: () => q, whereNot: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
-    select: (...cols) => (cols[0] === 'message_body' ? mockEarlier() : cols[0] === 'created_at' ? q : mockPrior()), first: () => mockTrigger(),
+    where: (w) => { if (w && typeof w === 'object' && w.direction) q.direction = w.direction; return q; }, whereNot: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
+    select: (...cols) => (cols[0] === 'message_body' ? (q.direction === 'outbound' ? mockOutbound() : mockEarlier()) : cols[0] === 'created_at' ? q : mockPrior()),
+    first: () => mockTrigger(),
   };
   return q;
 }));
@@ -557,13 +559,29 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
   });
 
-  test('reactions in any phone language are left out of the history vote', async () => {
+  test('reactions in any phone language (quoting the start of our text) are left out of the history vote', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'Hi Nadia, see you Wednesday between 12 and 2.' }, { message_body: 'Hi Nadia, your visit is done. Report: portal.wavespestcontrol.com/l/x' }]);
     mockEarlier.mockResolvedValueOnce([
-      { message_body: 'Понравилось «Hi Nadia, see you Wed.»' }, { message_body: 'Le gustó “Hi Nadia, see you Wed.”' },
-      { message_body: 'Понравилось «Your visit is done.»' }, { message_body: 'Thanks, see you then' },
+      { message_body: 'Понравилось «Hi Nadia, see you Wednesday between 12 and 2.»' }, { message_body: 'Le gustó “Hi Nadia, see you Wednesday…”' },
+      { message_body: 'Понравилось «Hi Nadia, your visit is done.»' }, { message_body: 'Thanks, see you then' },
     ]);
     scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
+  test('an ordinary reply with a short quote is not a reaction; it still votes', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'Which day works: Thursday or Friday?' }]);
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Dije “jueves”' }, { message_body: 'Vale' }, { message_body: 'Ok thanks' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
+  });
+
+  test('a translated reaction keeping German or Japanese quote marks is still a reaction', async () => {
+    const quoted = 'Hi Nadia, we moved your service to Wednesday.';
+    scriptModels({ inbound: { is_english: false, language: 'German', language_code: 'de', english: `Liked „${quoted}"` } });
+    expect(await runTranslationTrial({ inboundMessage: `Gefällt mir „${quoted}"`, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'skipped', hold_reason: 'reaction' });
+    scriptModels({ inbound: { is_english: false, language: 'Japanese', language_code: 'ja', english: `Liked 「${quoted}」` } });
+    expect(await runTranslationTrial({ inboundMessage: `「${quoted}」にいいねしました`, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'skipped', hold_reason: 'reaction' });
   });
 
   test('a foreign-language iPhone reaction is skipped, as an English one is', async () => {

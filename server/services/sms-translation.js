@@ -736,7 +736,8 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   if (inbound.isEnglish) return { english: true };
   // A foreign-language iPhone reaction ("Понравилось «…»", "Le gustó “…”") reads as one only once it is in
   // English; the webhook's reaction check is English-only. A quiet one is not answered, as an English one is not.
-  const asEnglishReaction = inbound.english.replace(/\u00ab/g, '\u201c').replace(/\u00bb/g, '\u201d');
+  // (every quote pair a translation may keep - «…», „…", 「…」 - read as English curly quotes)
+  const asEnglishReaction = inbound.english.replace(/[\u00ab\u201e\u300c]/g, '\u201c').replace(/[\u00bb\u300d]/g, '\u201d');
   if (require('./sms-intent').isQuietSmsReaction(asEnglishReaction)) {
     return { skip: 'reaction', fields: { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english } };
   }
@@ -856,18 +857,29 @@ async function translateAndCheck({ englishReply, language, languageCode, context
 // gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
 // no trial. A first text, or one from a customer who mostly writes another
 // language, goes on. A read failure goes on too (the trial sends nothing).
-// One to four words, then a quoted text to the end: the shape of a phone's reaction in any language.
-const LOCALIZED_REACTION_RE = /^[^\s\u00ab\u201c\u201e"\u300c]{1,30}(?:\s+[^\s\u00ab\u201c\u201e"\u300c]{1,30}){0,3}\s*[\u00ab\u201c\u201e"\u300c][\s\S]+[\u00bb\u201d\u201c"\u300d]$/u;
+// A phone's reaction in any language: one to four words, then a quote to the end that is the START of one of
+// our own texts to this customer (a reaction quotes the message it reacts to, from its first word). The quote
+// must be at least 20 characters, so "I said “Thursday”" is an ordinary reply, not a reaction.
+const LOCALIZED_REACTION_RE = /^[^\s\u00ab\u201c\u201e"\u300c]{1,30}(?:\s+[^\s\u00ab\u201c\u201e"\u300c]{1,30}){0,3}\s*[\u00ab\u201c\u201e"\u300c]([\s\S]{20,})[\u00bb\u201d\u201c"\u300d]$/u;
+const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim().replace(/(?:\.{3}|\u2026)$/, '').trim();
+function isReactionToOurText(body, outbound) {
+  const m = LOCALIZED_REACTION_RE.exec(String(body || '').trim());
+  if (!m) return false;
+  const quote = squash(m[1]);
+  return outbound.some((o) => squash(o).startsWith(quote));
+}
 
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
     const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
       .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body');
+    const outbound = (await db('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(50).select('message_body')).map((r) => r.message_body);
     const { isSmsReaction } = require('./sms-intent');
     const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
     // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
-    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !LOCALIZED_REACTION_RE.test(b.trim()));
+    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound));
     // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
     const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b)).length;
     return english > bodies.length - english;
