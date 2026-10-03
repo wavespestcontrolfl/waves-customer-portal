@@ -10,6 +10,10 @@ jest.mock('../services/lawn-assessment-history', () => ({
   historyForAssessment: jest.fn(),
   restrictVisitHistory: (query) => query,
 }));
+jest.mock('../services/service-report/lawn-report-v2', () => {
+  const actual = jest.requireActual('../services/service-report/lawn-report-v2');
+  return { ...actual, buildLawnReportV2: jest.fn(actual.buildLawnReportV2) };
+});
 jest.mock('../services/llm/call', () => {
   const actual = jest.requireActual('../services/llm/call');
   return { ...actual, dispatchWithFallback: jest.fn() };
@@ -22,9 +26,11 @@ const { buildLawnPhotoSet, UNTAGGED_LABEL } = require('../services/service-repor
 const shots = require('../services/lawn-photo-shots');
 const featureGates = require('../config/feature-gates');
 
-function makeKnex(fixtures, failTables = []) {
+function makeKnex(fixtures, failTables = [], failFirst = {}) {
+  const remaining = { ...failFirst };
   const knex = (table) => {
-    const failing = failTables.includes(table);
+    // failTables: every read of the table fails; failFirst: only the first N reads fail.
+    const failing = failTables.includes(table) || (remaining[table] > 0 && (remaining[table] -= 1, true));
     let rows = failing ? [] : [...(fixtures[table] || [])];
     const sortKeys = [];
     const q = {};
@@ -148,7 +154,7 @@ describe('GATE_LAWN_REPORT_PHOTO_SET on the lawn report payload', () => {
     }
   });
 
-  const render = async (failTables = []) => buildReportV1Data(service(), 'token-p23', makeKnex(fixtures(cur), failTables), {});
+  const render = async (failTables = [], failFirst = {}) => buildReportV1Data(service(), 'token-p23', makeKnex(fixtures(cur), failTables, failFirst), {});
   const snapshotOf = (data) => JSON.stringify({ lawnAssessment: data.lawnAssessment, reportV2: data.reportV2, photos: data.photos });
 
   test('the gate reader is strict: only the exact string true', () => {
@@ -213,6 +219,41 @@ describe('GATE_LAWN_REPORT_PHOTO_SET on the lawn report payload', () => {
     const data = await render(['lawn_assessment_photos']);
     expect(Object.prototype.hasOwnProperty.call(data.lawnAssessment, 'photoSet')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'photoSet')).toBe(false);
+  });
+
+  test('only the initial photo read fails: no set, and the view is counted uncacheable (the gallery read still works)', async () => {
+    const baseline = await render();
+    process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+    const data = await render([], { lawn_assessment_photos: 1 });
+    expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'photoSet')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(data.lawnAssessment, 'photoSet')).toBe(false);
+    // The scenario: the gallery copies loaded fine, so only the new count can tell.
+    expect(data.photos.some((p) => String(p.id).startsWith('lawn-'))).toBe(true);
+    expect(data.imageResolutionFailures).toBeGreaterThan(baseline.imageResolutionFailures);
+    // After recovery the set is back and nothing is counted.
+    const recovered = await render();
+    expect(recovered.reportV2.photoSet).toHaveLength(CAPTURE.length);
+    expect(recovered.imageResolutionFailures).toBe(baseline.imageResolutionFailures);
+  });
+
+  test('a failed photo read on a visit that is not eligible counts nothing (gate off, or no marker)', async () => {
+    const baseline = await render();
+    const gateOff = await render([], { lawn_assessment_photos: 1 });
+    expect(gateOff.imageResolutionFailures).toBe(baseline.imageResolutionFailures);
+    process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+    cur = curRow(LEGACY_META);
+    const unmarked = await render([], { lawn_assessment_photos: 1 });
+    expect(unmarked.imageResolutionFailures).toBe(baseline.imageResolutionFailures);
+  });
+
+  test('a set built for the visit that does not reach the report (the V2 build fails soft) is counted uncacheable', async () => {
+    const baseline = await render();
+    process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
+    require('../services/service-report/lawn-report-v2').buildLawnReportV2.mockImplementationOnce(() => { throw new Error('v2 build failed'); });
+    const data = await render();
+    expect(data.reportV2).toBeNull();
+    expect(data.lawnAssessment.photoSet.length).toBe(CAPTURE.length);
+    expect(data.imageResolutionFailures).toBeGreaterThan(baseline.imageResolutionFailures);
   });
 
   test('one photo that will not sign withholds the whole set and counts as an image failure (all or nothing)', async () => {

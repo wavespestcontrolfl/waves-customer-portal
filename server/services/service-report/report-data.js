@@ -3343,6 +3343,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // (GATE_LAWN_SHOT_LIST) is off or was rolled back. Any other visit keeps the
   // limit it always had.
   const photoSetEligible = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos);
+  // A failed photo READ is not an empty photo set: it is counted below (for an
+  // eligible visit only) so no PDF is cached from a view that lost its set.
+  let photoReadFailed = false;
   const latestPhotos = await knex('lawn_assessment_photos')
     .where({ assessment_id: assessment.id, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
@@ -3350,7 +3353,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .orderBy('photo_order', 'asc')
     .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
-    .catch(() => []);
+    .catch(() => { photoReadFailed = true; return []; });
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
@@ -3383,7 +3386,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   const photoSetRows = photoSetEligible
     ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
     : [];
-  const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length;
+  const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
   const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
@@ -7395,6 +7398,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // moments load long before this return. Videos are excluded — the
     // document never renders them.
     imageResolutionFailures: imageResolutionFailures
+      // The photo set was built for this visit but did not reach the report
+      // (the V2 build failed soft, or any later step dropped the key): the
+      // document would print the fallback gallery under the set's cache key.
+      + (Array.isArray(lawnAssessment?.photoSet) && lawnAssessment.photoSet.length
+        && !(Array.isArray(reportV2?.photoSet) && reportV2.photoSet.length) ? 1 : 0)
       + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
         .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {

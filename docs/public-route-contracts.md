@@ -2383,8 +2383,9 @@ key or `null`. Each `url` is a signed link built on every view (the same
 24-hour link as `photos`); nothing stores it. The set is all or nothing: the
 key is absent when the photo read fails or when any one photo of the visit will
 not sign (the old strip and gallery rules then apply, as with the gate off), and
-an unsigned photo counts into `imageResolutionFailures` so the PDF of that view
-is not cached. The set is read with the eight-photo
+an unsigned photo, a failed photo read on an eligible visit, or a built set that
+never reaches `reportV2` counts into `imageResolutionFailures` so the PDF of that
+view is not cached. The set is read with the eight-photo
 cap whenever the gate is live and the visit carries the marker, even if
 `GATE_LAWN_SHOT_LIST` is off. Two components draw it. The live web report and the
 static build (`LawnReportV2Section`, `LawnPhotoStrip`) show the set as a labeled
