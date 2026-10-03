@@ -537,6 +537,12 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
     };
   }
   if (!state.verified || !state.bookable.includes(line)) return RESERVICE_HAND_OFF;
+  return bookableReserviceResult(customerId, line, actions);
+}
+
+// A lane the plan covers with no open re-service: the booking button, once
+// the page's own catalog has the lane and the customer's token is link-safe.
+async function bookableReserviceResult(customerId, line, actions) {
   // The page drops a lane whose catalog row is missing (a partial seed) and
   // renders not_eligible, so the lane must be in the page's own catalog read.
   const catalog = await require('../../routes/reservice-public')._internals.loadLaneCatalog().catch((err) => {
