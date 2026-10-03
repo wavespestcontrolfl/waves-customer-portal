@@ -243,6 +243,69 @@ describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
     expect(data.lawnAssessment.priorVisit).toBeUndefined();
   });
 
+  describe('P19b: the paired-photo recheck hook and payload', () => {
+    const pairedRecheck = require('../services/lawn-paired-recheck');
+    let hook;
+    beforeEach(() => { hook = jest.spyOn(pairedRecheck, 'scheduleAfterFreeze').mockImplementation(() => null); delete process.env.GATE_LAWN_PAIRED_RECHECK; });
+    afterEach(() => { hook.mockRestore(); delete process.env.GATE_LAWN_PAIRED_RECHECK; });
+
+    test('gate off (the memory gate alone): the hook is never offered and the render is what it was', async () => {
+      live();
+      setHistory([PRIOR, CUR]);
+      const recs = records();
+      const { data } = await render(recs);
+      expect(hook).not.toHaveBeenCalled();
+      expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+    });
+
+    test('gate on: the render that CREATES the entry hands it to the hook once; a replay and a degraded render never do', async () => {
+      live();
+      process.env.GATE_LAWN_PAIRED_RECHECK = 'true';
+      setHistory([PRIOR, CUR]);
+      const recs = records();
+      const { data } = await render(recs);
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(hook.mock.calls[0][0]).toMatchObject({
+        serviceRecordId: 'svc-cur', assessmentId: 'la-cur', customerId: CUSTOMER, entry: { assessmentId: 'la-cur', sinceLast: { priorAssessmentId: 'la-prior' } },
+      });
+      // payload is the same as without the gate: nothing about a recheck, nothing new
+      expect(JSON.stringify(data)).not.toMatch(/recheck|photoPairs|photo_pair/);
+      hook.mockClear();
+      await render(recs, undefined, service(recs['svc-cur'].structured_notes)); // replay
+      expect(hook).not.toHaveBeenCalled();
+    });
+
+    test('a stored recheck reaches the progress engine but never the public payload', async () => {
+      live();
+      process.env.GATE_LAWN_PAIRED_RECHECK = 'true';
+      setHistory([PRIOR, CUR]);
+      const photos = ['la-cur', 'la-prior'].flatMap((assessmentId) => [1, 2, 3].map((n) => ({
+        id: `${assessmentId}-${n}`, assessment_id: assessmentId, customer_visible: true, is_best_photo: n === 1, quality_score: 80, photo_order: n, zone: 'front',
+      })));
+      const recs = records();
+      const first = await render(recs);
+      // the job lands its verdict on the frozen entry
+      const entry = storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur');
+      const stamped = {
+        ...entry,
+        sinceLast: {
+          ...entry.sinceLast,
+          checks: entry.sinceLast.checks.map((c) => ({ ...c, recheck: { verdict: 'better', source: 'photo_pair', whatChanged: ['color'], pairs: ['front'], promptVersion: 'p' } })),
+          photoPairs: [{ zone: 'front', verdict: 'better', whatChanged: ['color'] }],
+        },
+      };
+      recs['svc-cur'].structured_notes = { ...recs['svc-cur'].structured_notes, lawnVisitMemory: { 'la-cur': stamped } };
+      const f = fixtures();
+      f.lawn_assessment_photos = photos;
+      const { knex } = withRecords(f, recs);
+      const again = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p12', knex, {});
+      expect(JSON.stringify(again)).not.toMatch(/recheck|photoPairs|photo_pair/);
+      expect(again.reportV2.sinceLast).toEqual(first.data.reportV2.sinceLast);
+      const check = again.reportV2.progress.items.find((i) => i.kind === 'check' && i.key === 'weeds');
+      expect(check).toMatchObject({ state: 'improving', source: 'photo_pair', recheck: 'checked_better' });
+    });
+  });
+
   test('a later render replays byte for byte: a newer visit, an edited prior memory and different inputs change nothing', async () => {
     live();
     setHistory([PRIOR, CUR]);

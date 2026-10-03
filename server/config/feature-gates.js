@@ -4025,6 +4025,14 @@ const gates = {
   // lawnVisitMemoryLive().
   lawnVisitMemory: gateEnvValue('GATE_LAWN_VISIT_MEMORY'),
 
+  // Lawn paired-photo recheck (lawn report rebuild P19b, owner ruling 2026-09-29
+  // round 3b): one model read of last visit's and today's SAME-SPOT overview
+  // photos as pairs, written once onto the frozen visit memory's watched topics
+  // (check.recheck, source 'photo_pair'). Ships DARK. This entry is for
+  // logGateStatus only: the job reads GATE_LAWN_PAIRED_RECHECK at call time via
+  // lawnPairedRecheckLive().
+  lawnPairedRecheck: gateEnvValue('GATE_LAWN_PAIRED_RECHECK'),
+
   // Lawn report v6 copy (lawn report rebuild P14): fixed sentences from the
   // visit's facts plus approved expectation sentences, no model, frozen per
   // assessment in structured_notes.lawnCopyV6. Ships DARK; needs
@@ -4754,6 +4762,15 @@ function lawnVisitMemoryLive() {
   return gateEnvValue('GATE_LAWN_VISIT_MEMORY');
 }
 
+// GATE_LAWN_PAIRED_RECHECK read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the paired-photo recheck
+// (services/lawn-paired-recheck.js). It writes onto the visit memory's frozen
+// entry, so it is false unless GATE_LAWN_VISIT_MEMORY is live too. Off = no
+// extra model call, no photo read, no stored field, byte-identical payload.
+function lawnPairedRecheckLive() {
+  return gateEnvValue('GATE_LAWN_PAIRED_RECHECK') && lawnVisitMemoryLive();
+}
+
 // GATE_LAWN_REPORT_COPY_V6 read at CALL time (same 1/true/on convention as
 // gateEnvValue). The one canonical reader for the lawn v6 copy. It is
 // effective only while GATE_LAWN_REPORT_LEAD is live too: its fields reach a
@@ -5338,6 +5355,8 @@ module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;
+// Own line (P19b) so concurrent gate PRs appending to the shared list never conflict.
+module.exports.lawnPairedRecheckLive = lawnPairedRecheckLive;
 module.exports.lawnReportCopyV6Live = lawnReportCopyV6Live;
 module.exports.lawnDiagnosticEvidenceLive = lawnDiagnosticEvidenceLive;
 module.exports.lawnSinceLastLive = lawnSinceLastLive;

@@ -52,6 +52,8 @@
  *     A photo_pair recheck is a photo read, so low confidence makes it
  *     unclear like any other photo verdict; an office_review is a person's
  *     decision and stands.
+ *     Precedence: office_review (check.recheckOverride) > photo_pair
+ *     (check.recheck); see effectiveRecheck.
  *
  * Thresholds: the band (8 points per category, 4 for the overall) is W5's
  * proposal; tune it with the calibration replay (server/scripts/
@@ -306,8 +308,25 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
   };
 }
 
+const hasRecheckVerdict = (record) => Boolean(record) && typeof record === 'object'
+  && Object.prototype.hasOwnProperty.call(RECHECK_STATE, record.verdict);
+
+/**
+ * The recheck record that speaks for a check. Precedence (owner 09-29, SCOPE
+ * round 3b): an office_review override (`check.recheckOverride`, the lawn
+ * review queue's own field) always beats the paired-photo read (`check.recheck`,
+ * source 'photo_pair'), whichever was written first; the model's record stays
+ * beside it untouched. An override that is not a well-formed office_review
+ * verdict is ignored, not trusted. Pure.
+ */
+function effectiveRecheck(check) {
+  const override = check?.recheckOverride;
+  if (hasRecheckVerdict(override) && override.source === 'office_review') return override;
+  return check?.recheck;
+}
+
 function itemForCheck(check, comparable) {
-  const recheck = check?.recheck;
+  const recheck = effectiveRecheck(check);
   const verdict = recheck && typeof recheck === 'object' ? recheck.verdict : null;
   const valid = Boolean(recheck) && RECHECK_SOURCES.includes(recheck.source) && Object.prototype.hasOwnProperty.call(RECHECK_STATE, verdict);
   // A paired-photo read is still a photo read: low confidence = unclear.
@@ -469,9 +488,17 @@ function buildLawnProgress({
   };
 }
 
+/** A photo row's own readability: adequate or limited counts, poor or unrated does not. */
+function photoIsUsable(row) {
+  const bucket = qualityBucket(photoQualityForConfidence(row));
+  return bucket === 'adequate' || bucket === 'limited';
+}
+
 module.exports = {
   divergentMetricsFrom,
   photoQualityForConfidence,
+  photoIsUsable,
+  effectiveRecheck,
   ENGINE_VERSION,
   PROGRESS_VERSION,
   STATES,

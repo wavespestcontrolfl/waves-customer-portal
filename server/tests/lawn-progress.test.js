@@ -413,6 +413,34 @@ describe('rule 4: a recheck verdict comes only from a technician chip', () => {
     }
   });
 
+  it('P19b precedence: an office_review override beats the stored paired-photo read, in either direction and at any confidence', () => {
+    const photo = (verdict) => ({ verdict, source: 'photo_pair', whatChanged: ['color'], pairs: ['front'] });
+    const office = (verdict) => ({ verdict, source: 'office_review' });
+    const expected = { better: 'improving', same: 'holding_steady', worse: 'behind' };
+    for (const confidence of ['high', 'low']) {
+      for (const [photoVerdict, officeVerdict] of [['better', 'worse'], ['worse', 'better'], ['same', 'worse']]) {
+        const progress = run({
+          days: 30, confidence, checks: [{ key: 'weeds', status: 'watch', recheck: photo(photoVerdict), recheckOverride: office(officeVerdict) }],
+        });
+        expect(progress.items[0]).toMatchObject({ state: expected[officeVerdict], source: 'office_review', gate: null });
+      }
+    }
+    // The photo read still speaks for a check nobody overrode.
+    const alone = run({ days: 30, checks: [{ key: 'weeds', status: 'watch', recheck: photo('worse') }] });
+    expect(alone.items[0]).toMatchObject({ state: 'behind', source: 'photo_pair' });
+  });
+
+  it('P19b precedence: an override that is not a well-formed office_review verdict is ignored, not trusted', () => {
+    const recheck = { verdict: 'better', source: 'photo_pair' };
+    for (const recheckOverride of [{ verdict: 'worse', source: 'photo_pair' }, { verdict: 'worse', source: 'tech_chip' }, { verdict: 'terrible', source: 'office_review' }, { source: 'office_review' }, 'worse', [], null]) {
+      const progress = run({ days: 30, checks: [{ key: 'weeds', status: 'watch', recheck, recheckOverride }] });
+      expect(progress.items[0]).toMatchObject({ state: 'improving', source: 'photo_pair' });
+    }
+    // An override alone, with no photo read at all, is still a recheck.
+    const lone = run({ days: 30, checks: [{ key: 'weeds', status: 'watch', recheckOverride: { verdict: 'worse', source: 'office_review' } }] });
+    expect(lone.items[0]).toMatchObject({ state: 'behind', source: 'office_review' });
+  });
+
   it('a recheck never changes an applied item, and photo score deltas never change a check', () => {
     const withChip = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch', recheck: { verdict: 'worse', source: 'photo_pair' } }] });
     const without = run({ days: 30, applied: [PRODUCT.celsius], cur: { weed_suppression: 85 }, checks: [{ key: 'weeds', status: 'watch' }] });
@@ -702,6 +730,9 @@ describe('ships dark', () => {
     walk(root);
     expect(hits.sort()).toEqual([
       'scripts/replay-lawn-progress.js',
+      // P19b: the paired-photo recheck reads ONLY photoIsUsable (the engine's own
+      // adequate / limited photo cut points), so "usable" cannot drift from it.
+      'services/lawn-paired-recheck.js',
       'services/service-report/report-data.js',
     ]);
   });

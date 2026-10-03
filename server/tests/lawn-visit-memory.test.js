@@ -17,7 +17,7 @@ const featureGates = require('../config/feature-gates');
 const { classifyProduct, buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 const {
   VISIT_MEMORY_VERSION, TAG_BY_KIND, buildVisitMemory, selectPriorVisit, storedVisitMemoryFor,
-  buildSinceLast, freezeLawnVisitMemory, resolveVisitMemoryForRender,
+  buildSinceLast, freezeLawnVisitMemory, resolveVisitMemoryForRender, publicSinceLast,
 } = require('../services/service-report/lawn-visit-memory');
 
 const product = (over = {}) => ({
@@ -558,3 +558,86 @@ describe('named issues ride the frozen memory (codex r4 on #5566)', () => {
   });
 });
 
+describe('P19b: onCreated hears only about the render that created the entry', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const priorMemory = ENTRY('as-P', { serviceDate: '2026-08-01', checks: [{ key: 'water', status: 'watch' }] });
+  const records = () => ({
+    'svc-cur': { customer_id: 'cust-1', structured_notes: {} },
+    'svc-prior': { customer_id: 'cust-1', structured_notes: { lawnVisitMemory: { 'as-P': priorMemory } } },
+  });
+  const args = (recs, over = {}) => ({
+    serviceRecordId: 'svc-cur', customerId: 'cust-1', reportV2: REPORT(), assessmentId: 'as-C', serviceDate: '2026-09-02',
+    priorVisit: { assessmentId: 'as-P', serviceRecordId: 'svc-prior', date: '2026-08-01' },
+    structuredNotes: recs['svc-cur'].structured_notes, ...over,
+  });
+
+  test('first render: called once with the frozen entry; the result is unchanged', async () => {
+    const recs = records();
+    const onCreated = jest.fn();
+    const withHook = await resolveVisitMemoryForRender({ ...args(recs), knex: makeStore(recs).knex, onCreated });
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0][0]).toMatchObject({
+      serviceRecordId: 'svc-cur', customerId: 'cust-1', assessmentId: 'as-C', entry: { assessmentId: 'as-C', sinceLast: { priorAssessmentId: 'as-P' } },
+    });
+    const recs2 = records();
+    const without = await resolveVisitMemoryForRender({ ...args(recs2), knex: makeStore(recs2).knex });
+    expect(withHook).toEqual(without);
+  });
+
+  test('never on a replay, a degraded read, a lost race or a failed freeze', async () => {
+    const onCreated = jest.fn();
+    const recs = records();
+    await resolveVisitMemoryForRender({ ...args(recs), knex: makeStore(recs).knex });
+    // replay
+    await resolveVisitMemoryForRender({ ...args(recs, { structuredNotes: recs['svc-cur'].structured_notes }), knex: makeStore(recs).knex, onCreated });
+    // degraded, nothing frozen yet
+    const fresh = records();
+    await resolveVisitMemoryForRender({ ...args(fresh), knex: makeStore(fresh).knex, degraded: true, onCreated });
+    expect(fresh['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    // lost race: a concurrent writer lands the entry between the render and its write
+    const raced = records();
+    const store = makeStore(raced);
+    store.state.beforeUpdate = () => { raced['svc-cur'].structured_notes = { lawnVisitMemory: { 'as-C': ENTRY('as-C') } }; };
+    await resolveVisitMemoryForRender({ ...args(raced), knex: store.knex, onCreated });
+    // failed freeze
+    const failing = records();
+    const f = makeStore(failing);
+    f.state.failUpdate = true;
+    await resolveVisitMemoryForRender({ ...args(failing), knex: f.knex, onCreated });
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  test('a hook that throws never breaks the render', async () => {
+    const recs = records();
+    const out = await resolveVisitMemoryForRender({ ...args(recs), knex: makeStore(recs).knex, onCreated: () => { throw new Error('boom'); } });
+    expect(out.unfrozen).toBe(false);
+    expect(out.sinceLast).toMatchObject({ priorAssessmentId: 'as-P' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('onCreated failed'));
+  });
+});
+
+describe('P19b: publicSinceLast keeps the recheck off the payload', () => {
+  const block = { v: 1, priorAssessmentId: 'as-P', priorDate: '2026-08-01', applied: [], checks: [{ key: 'weeds', status: 'watch' }] };
+
+  test('a block with no recheck is returned as is (same object), so existing entries and gate-off renders are byte-identical', () => {
+    expect(publicSinceLast(block)).toBe(block);
+    expect(publicSinceLast(null)).toBeNull();
+    expect(publicSinceLast(undefined)).toBeUndefined();
+  });
+
+  test('check.recheck, check.recheckOverride and photoPairs are dropped; everything else, and the input, stay', () => {
+    const rich = {
+      ...block,
+      photoPairs: [{ zone: 'front', verdict: 'better', whatChanged: ['color'] }],
+      checks: [
+        { key: 'weeds', status: 'watch', recheck: { verdict: 'better', source: 'photo_pair' }, recheckOverride: { verdict: 'worse', source: 'office_review' } },
+        { key: 'water', status: 'needs_attention' },
+      ],
+    };
+    const before = JSON.stringify(rich);
+    const out = publicSinceLast(rich);
+    expect(out).toEqual({ ...block, checks: [{ key: 'weeds', status: 'watch' }, { key: 'water', status: 'needs_attention' }] });
+    expect(JSON.stringify(out)).not.toMatch(/recheck|photoPairs|photo_pair|better/);
+    expect(JSON.stringify(rich)).toBe(before);
+  });
+});

@@ -149,6 +149,7 @@ const POLICY_SELECTOR = {
   estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
+  lawnPairedRecheck: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPestV2: { primary: 'GEMINI_PHOTO_ID_PEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
@@ -420,6 +421,7 @@ const LANES = [
   L('typed_decisions_clef', 'Typed decisions, second provider (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecisionClef'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS_CLEF dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
+  L('lawn_paired_recheck', 'Lawn paired-photo recheck (last visit vs today)', 'lawn-paired-recheck.js', 'multimodal', P('lawnPairedRecheck', 'primary'), P('lawnPairedRecheck', 'fallback'), { inbound: true, note: 'GATE_LAWN_PAIRED_RECHECK, dark; one call per visit after the visit memory freezes; verdict is a closed enum (never customer copy) and a miss writes nothing (owner ruling 2026-09-29 round 3b)' }),
   // Tree & Shrub Fast Complete watch-signal read (GATE_TS_WATCH_LIST, dark): one small Gemini read per
   // photo that returns only watch-list keys for the technician's sheet, OpenAI on a Gemini miss.
   L('ts_watch_signals', 'Tree & shrub watch-list signals (Fast Complete)', 'tree-shrub-assessment.js', 'multimodal', P('treeShrubWatchSignals', 'primary'), P('treeShrubWatchSignals', 'fallback'), { inbound: true, note: 'GATE_TS_WATCH_LIST, dark; keys only, tech-facing, never customer copy; a miss shows the sheet no read' }),
@@ -677,6 +679,7 @@ const LANE_AREA = {
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
+  lawn_paired_recheck: 'photos',
   ts_watch_signals: 'photos',
   tree_shrub: 'photos',
   treatment_zone: 'photos',
@@ -841,6 +844,7 @@ const LANE_DESCRIBE = {
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
+  lawn_paired_recheck: "Compares last visit's and today's same-spot lawn photos as pairs: better, same or worse (dark)",
   ts_watch_signals: 'Flags which of this month\'s tree and shrub watch-list items a photo may show, for the technician (dark)',
   tree_shrub: 'Assesses trees and shrubs from a photo',
   treatment_zone: 'Suggests treatment zones on the property map',
