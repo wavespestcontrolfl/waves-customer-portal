@@ -634,7 +634,81 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
   return paged;
 }
 
+/**
+ * A caller recognised only through a customer's secondary contact slot
+ * (spouse, tenant, prior occupant) needs a human follow-up. Owner ruling
+ * 2026-10-03: ring ONE office bell tied to that customer — never a new lead
+ * under the caller's number, and nothing on the customer's record changes
+ * (the caller is recognised, not verified). Returns true only when a bell row
+ * exists, 'superseded' when another socket owns the call now (nothing was
+ * written), false otherwise; never throws.
+ *
+ * ⭐ FENCED LIKE EVERY OTHER RELAY WRITE. The bell is rewritten in place by a
+ * later capture, so a stalled capture from a superseded socket must not land
+ * over the replacement's corrected number or restriction: ownership is
+ * re-proven under the call row's lock in the SAME transaction as the write
+ * (claimOwnedElsewhere — the lead, booking and re-service writers' fence).
+ */
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null }) {
+  if (!customerId || !callSid) return false;
+  try {
+    const db = require('../../models/db');
+    const { raiseAdminAlert, firstSentence } = require('../admin-alert-compose');
+    const { lookupCustomerName, fitAction, redactedWords, whyWithQuote } = require('../admin-alert-names');
+    const name = await lookupCustomerName(db, customerId);
+    let superseded = false;
+    const result = await db.transaction(async (trx) => {
+      if (sessionKey && await require('./relay-context').claimOwnedElsewhere(trx, callSid, sessionKey)) {
+        superseded = true;
+        return null;
+      }
+      return raiseAdminAlert('alert', {
+      area: 'Comms',
+      // ⭐ ONE NEUTRAL ACTION, WHATEVER THEY ASKED. The bell never tells the
+      // office to reach out: the caller may have restricted how (or whether)
+      // to be contacted, on a capture or in words before a hangup, and the
+      // code does not judge that. A person reads the call and decides.
+      action: name
+        ? fitAction('Comms', name, [(n) => `review a contact's call on ${n}'s account`, (n) => `review ${n}'s contact's call`])
+        : "review a contact's call on a customer account",
+      why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'customer', id: String(customerId) },
+      doneWhen: 'contact_call_reviewed',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `sandy-contact-followup:${callSid}`,
+      // One bell per call; a later capture on the same call (a corrected
+      // number, an added email, a do-not-contact request) rewrites it in
+      // place without ringing again.
+      refreshOnDedupe: true,
+      // …unless the office already marked it done: new details from the same
+      // call are new work, so that refresh rings and reopens the row.
+      ringOnRefresh: (existing) => Boolean(existing && existing.done_at),
+      trx,
+      // The number to reach them on, the whole summary, and anything they
+      // asked about HOW to be contacted (a channel, a do-not-contact request)
+      // — read from "Show full text".
+      detail: [`Their number: ${callbackPhone || 'the number this call came from'}.`, String(summary || '').trim(), ...notes]
+        .filter(Boolean).join(' '),
+      metadata: { customerId, callSid, callbackPhone: callbackPhone || null, source: 'voice_relay_contact_followup' },
+      });
+    });
+    if (superseded) {
+      logger.warn(`[voice-relay] contact follow-up bell refused — session superseded callSid=${callSid}`);
+      return 'superseded';
+    }
+    return Boolean(result?.id) && !result.suppressed;
+  } catch (err) {
+    logger.error(`[voice-relay] contact follow-up bell failed callSid=${callSid}: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
+  alertOfficeContactFollowUp,
   alertOwnerHotLead,
   sweepAbandonedHotAlerts,
   alertOwnerReservice,

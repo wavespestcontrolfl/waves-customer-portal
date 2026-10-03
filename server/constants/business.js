@@ -20,6 +20,10 @@ const WAVES_SUPPORT_PHONE_E164 = '+19412975749';
 const WAVES_SUPPORT_PHONE_TEL = `tel:${WAVES_SUPPORT_PHONE_E164}`;
 const WAVES_SUPPORT_SMS_TEL = `sms:${WAVES_SUPPORT_PHONE_E164}`;
 const WAVES_FL_LICENSE_LINE = `FL License #${WAVES_FDACS_LICENSE_NUMBER}`;
+// Ownership line (owner ruling 2026-10-02: say it plainly, once per surface —
+// email fine print + estimate accept card). Keep in sync with
+// client/src/constants/business.js.
+const WAVES_OWNERSHIP_LINE = 'Locally owned. Not private equity.';
 const WAVES_FDACS_SHORT_LINE = `FDACS LIC. ${WAVES_FDACS_LICENSE_NUMBER}`;
 // Marketing-site Products & Safety page — what we apply, re-entry guidance,
 // household/pet notes. Keep in sync with client/src/constants/business.js.
@@ -40,5 +44,6 @@ module.exports = {
   WAVES_SUPPORT_SMS_TEL,
   WAVES_FL_LICENSE_LINE,
   WAVES_FDACS_SHORT_LINE,
+  WAVES_OWNERSHIP_LINE,
   WAVES_PRODUCTS_SAFETY_URL,
 };

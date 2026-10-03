@@ -868,6 +868,10 @@ describe('live-status reschedule override (allowLive)', () => {
       window_start: '09:00:00',
       window_end: '11:00:00',
       technician_id: null,
+      // the occurrence scope pinned for the reschedule_log snapshot (#5669)
+      service_type: null,
+      service_id: null,
+      property_id: null,
     });
     // Full tracker/lifecycle snapshot joined the CAS alongside the
     // scheduling fields (applyTrackLifecycleCas: track_state via where,

@@ -1,0 +1,64 @@
+[
+  {
+    "_comment": "Template only. Addresses and coordinates are synthetic placeholders. To replay a real row, take its address, lat, lng and county_used from the per-row TSV of a DB run (columns address, lat, lng, county_used) into a copy kept OUTSIDE the repo, and run that copy with --cases. Add an optional \"expect\" (a stop point, or its prefix before ':') to make a case assert; any mismatch exits 1.",
+    "name": "plaza storefront, no suite number",
+    "address": "100 EXAMPLE RD, BRADENTON, FL 34202",
+    "lat": 27.4,
+    "lng": -82.4,
+    "county": "Manatee",
+    "snapshot": {
+      "isCommercial": true,
+      "commercialDetectionSource": "satellite_ai_property_use",
+      "commercialSubtype": "office_retail",
+      "unitScopedLookup": false
+    }
+  },
+  {
+    "name": "whole-building commercial tenant",
+    "address": "200 EXAMPLE BLVD, SARASOTA, FL 34231",
+    "lat": 27.3,
+    "lng": -82.5,
+    "county": "Sarasota",
+    "snapshot": {
+      "isCommercial": true,
+      "unitScopedLookup": false
+    }
+  },
+  {
+    "name": "owner-occupied commercial condo",
+    "address": "300 EXAMPLE DR UNIT 5, BRADENTON, FL 34205",
+    "lat": 27.5,
+    "lng": -82.6,
+    "county": "Manatee",
+    "snapshot": {
+      "isCommercial": true,
+      "unitScopedLookup": true
+    }
+  },
+  {
+    "name": "apartment-complex parcel (situs-guard shape)",
+    "address": "400 EXAMPLE AVE, PARRISH, FL 34219",
+    "lat": 27.6,
+    "lng": -82.4,
+    "county": "Manatee",
+    "snapshot": {
+      "isCommercial": false
+    }
+  },
+  {
+    "name": "clean residential",
+    "address": "500 EXAMPLE LN, VENICE, FL 34285",
+    "lat": 27.1,
+    "lng": -82.4,
+    "county": "Sarasota",
+    "storedParcelId": "0000000000"
+  },
+  {
+    "name": "new plat (interpolated point)",
+    "address": "600 EXAMPLE WAY, PARRISH, FL 34219",
+    "lat": 27.6,
+    "lng": -82.45,
+    "county": "Manatee",
+    "locationType": "RANGE_INTERPOLATED"
+  }
+]
