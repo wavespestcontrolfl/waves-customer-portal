@@ -59,13 +59,20 @@ function parseJson(value) {
 // afresh, so the step alone would credit every draft). A fallback is the
 // first fixed-text request of its step sent after it. A held repeat sends
 // nothing.
-function sentAtFor(row, sent) {
+function sentAtFor(row, sent, rows) {
   if (row.outcome === 'held') return null;
-  // Only a request made at or after this outcome: an earlier send of the
-  // same step (even one with the same words) is not this draft going out.
+  const sameTouch = (r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel;
+  // This outcome's own window: from when it was recorded until the next
+  // outcome of the same step and channel. An earlier send (even one with the
+  // same words) is not this draft going out, and a later retry's send
+  // belongs to the retry's own outcome.
+  const from = new Date(row.created_at);
+  const until = rows
+    .filter((o) => o !== row && sameTouch(o) && new Date(o.created_at) > from)
+    .map((o) => new Date(o.created_at))
+    .sort((a, b) => a - b)[0] || null;
   const after = sent
-    .filter((r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel
-      && new Date(r.created_at) >= new Date(row.created_at))
+    .filter((r) => sameTouch(r) && new Date(r.created_at) >= from && (!until || new Date(r.created_at) < until))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const match = row.outcome === 'drafted'
     ? after.find((r) => r.custom_body === row.body)
@@ -125,7 +132,7 @@ async function listRecent({ days = 14, database = db } = {}) {
         serviceType: r.service_type,
         serviceDate: r.service_date ? dateOnly(r.service_date) : null,
         createdAt: r.created_at,
-        sentAt: sentAtFor(r, sent),
+        sentAt: sentAtFor(r, sent, rows),
       };
     }),
     paymentHolds: holds.map((h) => {

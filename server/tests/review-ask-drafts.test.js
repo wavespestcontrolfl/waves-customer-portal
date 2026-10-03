@@ -126,6 +126,13 @@ describe('listRecent: whether THIS outcome went out', () => {
     expect(out.drafts.find((d) => d.id === 3).sentAt).toEqual(new Date('2026-10-02T15:03:00Z'));
     expect(out.drafts.find((d) => d.id === 4).sentAt).toBeNull();
     expect((await listWith([draftRow({ id: 5, outcome: 'fallback', reason: 'x' })], [])).drafts[0].sentAt).toBeNull();
+    // a first fallback whose request never sent is not credited with the retry's send
+    const retried = await listWith([
+      draftRow({ id: 7, outcome: 'fallback', reason: 'out_of_time' }),
+      draftRow({ id: 8, outcome: 'fallback', reason: 'out_of_time', created_at: new Date('2026-10-02T15:30:00Z') }),
+    ], [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: null, template_key: 'soft_reminder', created_at: new Date('2026-10-02T15:31:00Z'), sms_sent_at: new Date('2026-10-02T15:32:00Z') }]);
+    expect(retried.drafts.find((d) => d.id === 7).sentAt).toBeNull();
+    expect(retried.drafts.find((d) => d.id === 8).sentAt).toEqual(new Date('2026-10-02T15:32:00Z'));
   });
 });
 
