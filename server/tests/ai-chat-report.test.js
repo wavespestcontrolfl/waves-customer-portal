@@ -138,6 +138,7 @@ describe('POST /ai/chat/report', () => {
         channel_identifier: 'chat-123',
         customer_id: 'cust-1',
       });
+      expect(sessionQuery.orderBy).toHaveBeenCalledWith('created_at', 'desc');
       expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
         conversation_id: 'conv-1',
         customer_id: 'cust-1',
@@ -155,6 +156,45 @@ describe('POST /ai/chat/report', () => {
         title: 'Customer reported an AI chat reply',
       }));
     });
+  });
+
+  test('a supplied conversation id selects the reported older reply instead of the newer session', async () => {
+    const olderId = '11111111-1111-4111-8111-111111111111';
+    const newerId = '22222222-2222-4222-8222-222222222222';
+    const rows = [
+      { id: olderId, customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123', created_at: '2026-10-01' },
+      { id: newerId, customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123', created_at: '2026-10-02' },
+    ];
+    const { sessionQuery, escalationInsert } = mockReportTables();
+    sessionQuery.first.mockImplementation(async () => {
+      const requestedId = sessionQuery.where.mock.calls.at(-1)[0].id;
+      return requestedId ? rows.find((row) => row.id === requestedId) : rows[1];
+    });
+
+    await withServer(async (baseUrl) => {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` };
+      const selected = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sessionId: 'chat-123', conversationId: olderId, messageContent: 'Older AI reply' }),
+      });
+      expect(selected.status).toBe(200);
+      const legacy = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sessionId: 'chat-123', messageContent: 'Latest AI reply' }),
+      });
+      expect(legacy.status).toBe(200);
+    });
+
+    expect(sessionQuery.where.mock.calls[0][0]).toEqual({
+      id: olderId,
+      channel: 'portal_chat',
+      channel_identifier: 'chat-123',
+      customer_id: 'cust-1',
+    });
+    expect(sessionQuery.orderBy).toHaveBeenCalledTimes(1);
+    expect(escalationInsert.mock.calls.map(([row]) => row.conversation_id)).toEqual([olderId, newerId]);
   });
 
   test('the authenticated property claim scopes the conversation lookup', async () => {
@@ -200,6 +240,42 @@ describe('POST /ai/chat/report', () => {
     }));
   });
 
+  test('a supplied conversation from another authenticated property is not linked', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const conversationId = '33333333-3333-4333-8333-333333333333';
+    const { sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: 'cust-1', account_id: 'account-1', active: true },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+      session: {
+        id: conversationId,
+        customer_id: 'cust-1',
+        channel: 'portal_chat',
+        channel_identifier: 'property:prop-other:shared-session',
+      },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', { accountId: 'account-1', propertyId: 'prop-1' })}`,
+        },
+        body: JSON.stringify({ sessionId: 'shared-session', conversationId, messageContent: 'Bad AI reply' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sessionQuery.where).toHaveBeenCalledWith({
+      id: conversationId,
+      channel: 'portal_chat',
+      channel_identifier: 'property:prop-1:shared-session',
+      customer_id: 'cust-1',
+    });
+    expect(sessionQuery.orderBy).not.toHaveBeenCalled();
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: null }));
+  });
+
   test('rejects unauthenticated reports outright', async () => {
     const { escalationInsert } = mockReportTables();
 
@@ -214,22 +290,43 @@ describe('POST /ai/chat/report', () => {
     });
   });
 
-  test("never links another customer's conversation to the report", async () => {
+  test("a supplied conversation owned by another customer is not linked or replaced with the latest", async () => {
+    const conversationId = '44444444-4444-4444-8444-444444444444';
     const { escalationInsert } = mockReportTables({
-      session: { id: 'conv-other', customer_id: 'someone-else' },
+      session: {
+        id: conversationId,
+        customer_id: 'someone-else',
+        channel: 'portal_chat',
+        channel_identifier: 'chat-guessed',
+      },
     });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/ai/chat/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ sessionId: 'chat-guessed', messageContent: 'Bad AI reply' }),
+        body: JSON.stringify({ sessionId: 'chat-guessed', conversationId, messageContent: 'Bad AI reply' }),
       });
       expect(res.status).toBe(200);
       expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
         conversation_id: null,
         customer_id: 'cust-1',
       }));
+    });
+  });
+
+  test('rejects an invalid supplied conversation id without touching the queue', async () => {
+    const { escalationInsert } = mockReportTables();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({ sessionId: 'chat-123', conversationId: '../newest', messageContent: 'Bad AI reply' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Invalid conversationId' });
+      expect(escalationInsert).not.toHaveBeenCalled();
     });
   });
 

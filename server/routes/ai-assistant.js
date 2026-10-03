@@ -195,22 +195,29 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
     const messageContent = String(req.body?.messageContent || '').trim().slice(0, 4000);
     if (!messageContent) return res.status(400).json({ error: 'messageContent required' });
     const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
+    const conversationId = String(req.body?.conversationId || '').trim();
+    if (conversationId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
+      return res.status(400).json({ error: 'Invalid conversationId' });
+    }
 
     let conversation = null;
     if (sessionId) {
       const channelIdentifier = portalConversationIdentifier(sessionId, req.propertyId);
-      conversation = await db('agent_sessions')
-        .where({
-          channel: 'portal_chat',
-          channel_identifier: channelIdentifier,
-          customer_id: customerId,
-        })
-        .orderBy('created_at', 'desc')
-        .first();
+      const scope = {
+        channel: 'portal_chat',
+        channel_identifier: channelIdentifier,
+        customer_id: customerId,
+        ...(conversationId ? { id: conversationId } : {}),
+      };
+      const query = db('agent_sessions').where(scope);
+      conversation = await (conversationId ? query : query.orderBy('created_at', 'desc')).first();
       // Keep a second check at the trust boundary even though the SQL is
       // scoped; it protects against future query refactors and mock/adapter
       // mistakes returning a row outside the predicate.
-      if (conversation && String(conversation.customer_id) !== String(customerId)) {
+      if (conversation && (String(conversation.customer_id) !== String(customerId)
+        || (conversationId && (String(conversation.id) !== conversationId
+          || conversation.channel !== 'portal_chat'
+          || conversation.channel_identifier !== channelIdentifier)))) {
         conversation = null;
       }
     }

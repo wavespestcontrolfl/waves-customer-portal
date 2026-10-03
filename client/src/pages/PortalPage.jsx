@@ -16314,6 +16314,7 @@ function chatRowsFor(data) {
     role: 'assistant',
     content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.",
     reportable: !!data.reply && data.canReport !== false,
+    conversationId: data.conversationId || null,
     actions: chatActionsOf(data.actions),
     cards: chatCardsOf(data.cards),
   }];
@@ -16371,7 +16372,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 
   // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
   // users must be able to flag AI-generated content for review).
-  const reportMessage = async (idx, content) => {
+  const reportMessage = async (idx, content, conversationId) => {
     if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
@@ -16379,7 +16380,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
       // only the api client can rotate the refresh session on a 401.
       await api.request('/ai/chat/report', {
         method: 'POST',
-        body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
+        body: JSON.stringify({ sessionId: sessionId.current, conversationId, messageContent: content }),
       });
       setReportState(prev => ({ ...prev, [idx]: 'done' }));
     } catch {
@@ -16560,7 +16561,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => reportMessage(i, msg.content)}
+                    onClick={() => reportMessage(i, msg.content, msg.conversationId)}
                     disabled={reportState[i] === 'sending'}
                     aria-label="Report this AI response as inappropriate"
                     style={{
