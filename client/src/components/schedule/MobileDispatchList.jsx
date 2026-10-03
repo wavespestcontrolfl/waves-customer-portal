@@ -446,13 +446,14 @@ function OpenHourRow({ hour, onBook }) {
 }
 
 // Appointments in list order with each open hour placed before the first
-// visit that starts after it.
+// visit that starts after it. Windowless visits sort last, after the whole
+// hourly timeline, so any hours still pending go in ahead of them.
 function withOpenHours(sorted, openHours) {
   const rows = [];
   const pending = [...openHours];
   sorted.forEach((svc) => {
     const start = parseHHMM(svc.windowStart);
-    while (pending.length && start != null && pending[0] * 60 < start) {
+    while (pending.length && (start == null || pending[0] * 60 < start)) {
       rows.push({ hour: pending.shift() });
     }
     rows.push({ svc });
@@ -531,7 +532,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         <span className="u-nums text-ink-tertiary" style={{ fontSize: 11 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
           {openHours.length > 0 && (
-            <span className="text-zinc-900 font-medium"> · {openHours.length} open</span>
+            <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
           )}
         </span>
       </header>

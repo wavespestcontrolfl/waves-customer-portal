@@ -377,3 +377,23 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.getAllByText(/min to next$/)).toHaveLength(1);
   });
 });
+
+describe('MobileDispatchList open hours with a windowless visit', () => {
+  it('keeps the hourly timeline ahead of a visit with no time', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, id: 'svc-anytime', customerName: 'Anytime Customer', windowStart: null, windowEnd: null }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
+    const anytime = screen.getByText('Anytime Customer');
+    expect(rows[rows.length - 1].compareDocumentPosition(anytime) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
