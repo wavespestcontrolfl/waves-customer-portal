@@ -569,8 +569,8 @@ async function chargeAnnualInvoiceAfterInstallation({ estimateId, invoiceId, con
 
   try {
     if (claimed !== 1) return await followExistingOutcome(await readChargeState(conn, estimateId), ctx);
-    // Re-read under our claim: still an unpaid, undecided original term with
-    // a COMPLETED installation. A plan cancelled, or a visit un-completed,
+    // Re-read under our claim: still an unpaid original term with a
+    // COMPLETED installation. A plan cancelled, or a visit un-completed,
     // since the sweep's scan goes back to waiting uncharged.
     const still = await installedAndOwed({ conn, estimateId, invoiceId });
     if (!still) {
@@ -591,7 +591,6 @@ async function installedAndOwed({ conn, estimateId, invoiceId }) {
   const term = await conn('annual_prepay_terms')
     .where({ source_estimate_id: estimateId, prepay_invoice_id: invoiceId, status: 'payment_pending' })
     .whereNull('renewed_from_term_id')
-    .whereNull('renewal_decision')
     .first('id', 'customer_id', 'source_estimate_id', 'term_start', 'created_at');
   if (!term) return false;
   const { earliestCompletedInstallation } = require('./termite-annual-activation');

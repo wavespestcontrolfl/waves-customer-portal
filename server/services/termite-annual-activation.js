@@ -1225,7 +1225,8 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
 // same reason (every completion writer is covered by one reader). The charge
 // is at most a day behind the installation.
 //
-// Only an unpaid, undecided ORIGINAL term with a still-collectable invoice:
+// Only an unpaid ORIGINAL term with a still-collectable invoice (a declined
+// future renewal does not release the first year):
 // a plan cancelled before installation (term cancelled / invoice void) is
 // never a candidate, so it is never charged.
 //
@@ -1239,7 +1240,8 @@ function awaitingInstallationRows(conn) {
     .where('e.annual_plan_activation_status', 'activated')
     .whereRaw("e.annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
     .whereNull('apt.renewed_from_term_id')
-    .whereNull('apt.renewal_decision')
+    // payment_pending whatever the renewal decision: a customer who declined
+    // the NEXT year online still owes this installed first year.
     .where('apt.status', 'payment_pending')
     .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
 }

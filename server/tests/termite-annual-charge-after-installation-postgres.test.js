@@ -388,6 +388,17 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect((await chargeState(db)).status).toBe('awaiting_installation');
   });
 
+  test('a customer who declined the NEXT renewal online still pays the installed first year', async () => {
+    const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+    await atSigning();
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ renewal_decision: 'cancel' });
+    await addInstall(db);
+
+    expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    expect((await chargeState(db)).status).toBe('paid');
+  });
+
   test('the direct entry re-checks the installation under its claim and hands the wait back untouched', async () => {
     const { atSigning, afterInstall, chargeInvoiceWithSavedCard, db } = load();
     await atSigning();
