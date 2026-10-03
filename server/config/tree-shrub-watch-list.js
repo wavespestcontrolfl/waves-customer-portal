@@ -122,16 +122,22 @@ function normalizeWatchSignals(value, month) {
   return watchListForMonth(month).map((entry) => entry.key).filter((key) => found.has(key));
 }
 
-// The photo read's "this month's watch list" block, or '' for a month with no
-// list. The read names an item only as a possible signal, never a diagnosis, and
-// the list must not move any score.
+// The standalone prompt for the watch-signal read, or '' for a month with no
+// list. A separate call from the main photo read: it asks ONLY for the keys, as
+// possible signals, never a confirmed diagnosis, no scores and no prose.
 function watchListPromptBlock(month) {
   const items = watchListForMonth(month);
   if (!items.length) return '';
   const lines = items.map((entry) => `- ${entry.key}: ${entry.signal}`).join('\n');
-  return `This month's watch list (what is most likely on these plants this time of year, most likely first):
+  return `You look at one photo of shrubs, hedges, palms, trees or landscape beds for a professional pest control company in Southwest Florida.
+
+This month's watch list (what is most likely on these plants this time of year, most likely first):
 ${lines}
-Add an OPTIONAL "watch_signals" array to the JSON: the keys above, exactly as written, of any watch-list items these photos show signs of. Name an item only as a possible signal, never a confirmed diagnosis. Use an empty array when none are visible. The list never changes a score: score only what is visible.`;
+
+Name the keys above, exactly as written, of any watch-list items this photo shows signs of. Name an item only as a possible signal, never a confirmed diagnosis. Base this strictly on what is visible, and use an empty array when none are visible.
+
+Return ONLY this JSON object and nothing else, with no scores, no observations, no markdown and no backticks:
+{"watch_signals": ["<watch-list key>"]}`;
 }
 
 module.exports = {

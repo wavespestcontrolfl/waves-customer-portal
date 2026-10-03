@@ -1,6 +1,8 @@
-// GATE_TS_WATCH_LIST on the T&S photo read: the prompt gains this month's watch
-// list and asks for an OPTIONAL watch_signals; parsing is tolerant and never
-// moves a score or fails a valid read; gate off = byte-identical. Synthetic data.
+// GATE_TS_WATCH_LIST on the T&S photo read: the watch list is NEVER in the main
+// read's prompt (that read writes the observations customer copy uses). Watch
+// signals come from a SEPARATE Gemini call that asks only for keys; its failure
+// can never fail or change the main read; gate off = exactly one call, byte-
+// identical. Synthetic data.
 process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-gemini-key';
 process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
 
@@ -11,9 +13,11 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 })));
 
 const gates = require('../config/feature-gates');
+const logger = require('../services/logger');
 const {
   VISION_PROMPT, visionPromptText, analyzePhoto, previewTreeShrubAssessment, isValidTreeShrubScores,
 } = require('../services/tree-shrub-assessment');
+const { ITEMS } = require('../config/tree-shrub-watch-list');
 const { PALM_CROWN_PROMPT_RULE } = require('../services/service-report/tree-shrub-tech-findings');
 const { watchListPromptBlock, MONTHS } = require('../config/tree-shrub-watch-list');
 
@@ -25,9 +29,23 @@ const SCORES = {
 const geminiResponse = (body) => ({
   ok: true,
   status: 200,
-  json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }),
+  json: async () => ({ candidates: [{ content: { parts: [{ text: typeof body === 'string' ? body : JSON.stringify(body) }] } }] }),
 });
-const sentPrompt = () => JSON.parse(global.fetch.mock.calls[0][1].body).contents[0].parts[1].text;
+const bodyOf = (call) => JSON.parse(call[1].body);
+const promptOf = (call) => bodyOf(call).contents[0].parts[1].text;
+const isWatchCall = (call) => promptOf(call).includes("This month's watch list");
+const mainCalls = () => global.fetch.mock.calls.filter((call) => !isWatchCall(call));
+const watchCalls = () => global.fetch.mock.calls.filter(isWatchCall);
+// One fetch mock serving both calls: the main read and the watch-signal read.
+function serve({ main = SCORES, watch = { watch_signals: [] } } = {}) {
+  global.fetch = jest.fn(async (url, init) => {
+    const text = JSON.parse(init.body).contents[0].parts[1].text;
+    const answer = text.includes("This month's watch list") ? watch : main;
+    if (answer instanceof Error) throw answer;
+    if (typeof answer === 'function') return answer();
+    return geminiResponse(answer);
+  });
+}
 
 const saved = {};
 beforeEach(() => {
@@ -63,43 +81,22 @@ describe('tsWatchListLive', () => {
   });
 });
 
-describe('the prompt', () => {
-  test('gate off: byte-identical to today, month or not', () => {
+describe('the MAIN prompt never depends on the watch list', () => {
+  test('gate off or on, any month: visionPromptText() is the same prompt', () => {
+    expect(visionPromptText()).toBe(VISION_PROMPT);
+    process.env.GATE_TS_WATCH_LIST = 'true';
     expect(visionPromptText()).toBe(VISION_PROMPT);
     expect(visionPromptText(3)).toBe(VISION_PROMPT);
     expect(VISION_PROMPT).not.toContain('watch list');
     expect(VISION_PROMPT).not.toContain('watch_signals');
   });
-  test('gate off with the tech-findings gate on: still exactly the tech-findings prompt', () => {
+  test('it depends only on the tech-findings gate, with the watch gate on or off', () => {
     process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
     const marker = 'Return this exact JSON structure';
     const expected = VISION_PROMPT.replace(marker, `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.\n\n${marker}`);
-    expect(visionPromptText(3)).toBe(expected);
-  });
-  test('gate on with no valid month: the same prompt as gate off', () => {
+    expect(visionPromptText()).toBe(expected);
     process.env.GATE_TS_WATCH_LIST = 'true';
-    expect(visionPromptText()).toBe(VISION_PROMPT);
-    expect(visionPromptText(0)).toBe(VISION_PROMPT);
-    expect(visionPromptText(13)).toBe(VISION_PROMPT);
-  });
-  test('gate on: the month block sits before the JSON instruction and the JSON gains watch_signals', () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    const prompt = visionPromptText(10);
-    const block = watchListPromptBlock(10);
-    expect(prompt).toContain(block);
-    expect(prompt.indexOf(block)).toBeLessThan(prompt.indexOf('Return this exact JSON structure'));
-    expect(prompt).toMatch(/"watch_signals": \["<watch-list key>"\]\n\}$/);
-    // everything else is the original prompt
-    expect(prompt.replace(`${block}\n\n`, '').replace(',\n  "watch_signals": ["<watch-list key>"]', '')).toBe(VISION_PROMPT);
-  });
-  test('gate on beside the tech-findings gate: both additions, in order', () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
-    const prompt = visionPromptText(10);
-    expect(prompt).toContain('PHOTO REACH');
-    expect(prompt).toContain("This month's watch list");
-    expect(prompt.indexOf('PHOTO REACH')).toBeLessThan(prompt.indexOf("This month's watch list"));
-    expect(prompt.match(/Return this exact JSON structure/g)).toHaveLength(1);
+    expect(visionPromptText(10)).toBe(expected);
   });
   test('the optional field is not part of the validated schema', () => {
     expect(isValidTreeShrubScores({ ...SCORES })).toBe(true);
@@ -108,73 +105,197 @@ describe('the prompt', () => {
   });
 });
 
-describe('analyzePhoto', () => {
-  test('gate off with a month: the request and the result are exactly what they are with no month', async () => {
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES, watch_signals: ['scale'] }));
+describe('analyzePhoto: gate off or no month = exactly one call, as before', () => {
+  test('gate off with a month: one call, the plain prompt, no watchSignals key', async () => {
+    serve();
     const withMonth = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
-    const promptWithMonth = sentPrompt();
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES, watch_signals: ['scale'] }));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(promptOf(global.fetch.mock.calls[0])).toBe(VISION_PROMPT);
+    serve();
     const noMonth = await analyzePhoto('b64', 'image/jpeg');
-    expect(promptWithMonth).toBe(VISION_PROMPT);
-    expect(sentPrompt()).toBe(VISION_PROMPT);
     expect(withMonth).toEqual(noMonth);
     expect(Object.keys(withMonth).sort()).toEqual(['claude', 'composite', 'divergenceFlags', 'gemini']);
   });
-
-  test('gate on: the prompt carries the block and the result carries known signals in list order', async () => {
+  test('gate on, no or bad month: one call, no watchSignals key (every existing caller unchanged)', async () => {
     process.env.GATE_TS_WATCH_LIST = 'true';
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({
-      ...SCORES, watch_signals: ['whitefly', 'scale', 'scale', 'made_up', 7, 'trunk_conk_base', 'aphids'],
-    }));
-    const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
-    expect(sentPrompt()).toBe(visionPromptText(10));
-    expect(sentPrompt()).toContain(watchListPromptBlock(10));
-    // October list: scale, whitefly, root_rot, bed_weeds, then year-round. aphids is not on it.
-    expect(result.watchSignals).toEqual(['scale', 'whitefly', 'trunk_conk_base']);
-    // the raw field never rides into the composite that gets stored
-    expect(result.composite.watch_signals).toBeUndefined();
-    expect(result.gemini.watch_signals).toBeUndefined();
+    for (const options of [undefined, {}, { month: 0 }, { month: 13 }, { month: 'x' }]) {
+      serve();
+      const result = await analyzePhoto('b64', 'image/jpeg', options);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect('watchSignals' in result).toBe(false);
+    }
+  });
+});
+
+describe('analyzePhoto: gate on with a valid month', () => {
+  beforeEach(() => { process.env.GATE_TS_WATCH_LIST = 'true'; });
+
+  test('two calls per photo: the main read and the watch read', async () => {
+    serve({ watch: { watch_signals: ['scale'] } });
+    await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(mainCalls()).toHaveLength(1);
+    expect(watchCalls()).toHaveLength(1);
   });
 
-  test('gate on: a missing or malformed field is [] and the read still stands, scores unchanged', async () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES }));
+  test('the main call is byte-identical to the gate-off call: same prompt, same request body', async () => {
+    serve({ watch: { watch_signals: ['scale'] } });
+    await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    const gateOnMain = mainCalls()[0];
+    expect(promptOf(gateOnMain)).toBe(visionPromptText());
+    expect(promptOf(gateOnMain)).toBe(VISION_PROMPT);
+    delete process.env.GATE_TS_WATCH_LIST;
+    serve();
+    await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    const gateOffMain = global.fetch.mock.calls[0];
+    expect(gateOnMain[0]).toBe(gateOffMain[0]);
+    expect(gateOnMain[1].body).toBe(gateOffMain[1].body);
+  });
+
+  test('the main prompt carries no watch-list text and no item key from any month', async () => {
+    serve();
+    for (const month of [1, 5, 10, 12]) {
+      global.fetch = undefined;
+      serve();
+      await analyzePhoto('b64', 'image/jpeg', { month });
+      const prompt = promptOf(mainCalls()[0]);
+      expect(prompt).not.toMatch(/watch.?list|watch_signals/i);
+      for (const key of Object.keys(ITEMS)) expect(prompt).not.toContain(`- ${key}:`);
+    }
+  });
+
+  test('the watch call asks only for keys: the month block, no observations, no scores', async () => {
+    serve();
+    await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    const call = watchCalls()[0];
+    const prompt = promptOf(call);
+    expect(prompt).toBe(watchListPromptBlock(10));
+    expect(prompt).toContain('- scale: Possible scale');
+    expect(prompt).toContain('{"watch_signals": ["<watch-list key>"]}');
+    // it never asks for the main read's fields
+    for (const field of ['foliage_fullness', 'leaf_color_vigor', 'pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical', '"observations"']) {
+      expect(prompt).not.toContain(field);
+    }
+    expect(prompt).toMatch(/no scores, no observations/);
+  });
+
+  test('the watch call is Gemini, same key, with a small output ceiling', async () => {
+    serve();
+    await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    const [url, init] = watchCalls()[0];
+    expect(url).toContain('generativelanguage.googleapis.com');
+    expect(url).toContain('key=test-gemini-key');
+    expect(url).toBe(mainCalls()[0][0]);
+    expect(JSON.parse(init.body).generationConfig.maxOutputTokens).toBeLessThanOrEqual(1024);
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
+  test('known signals in list order; unknown, duplicate and other-month keys dropped', async () => {
+    serve({ watch: { watch_signals: ['whitefly', 'scale', 'scale', 'made_up', 7, 'trunk_conk_base', 'aphids'] } });
+    const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    // October: scale, whitefly, root_rot, bed_weeds, then year-round. aphids is not on it.
+    expect(result.watchSignals).toEqual(['scale', 'whitefly', 'trunk_conk_base']);
+  });
+
+  test('a missing or malformed watch field is [] and the main read is unchanged', async () => {
+    serve();
     const clean = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
     expect(clean.watchSignals).toEqual([]);
-    for (const bad of ['scale', 5, { 0: 'scale' }, [null, {}, []], true]) {
-      global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES, watch_signals: bad }));
+    for (const bad of ['scale', 5, { 0: 'scale' }, [null, {}, []], true, null]) {
+      serve({ watch: { watch_signals: bad } });
       const result = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
-      expect(result).not.toBeNull();
       expect(result.watchSignals).toEqual([]);
       expect(result.composite).toEqual(clean.composite);
     }
   });
 
-  test('gate on: signals never change a score', async () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES, watch_signals: ['scale', 'sooty_mold'] }));
-    const flagged = await analyzePhoto('b64', 'image/jpeg', { month: 1 });
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES }));
-    const none = await analyzePhoto('b64', 'image/jpeg', { month: 1 });
-    expect(flagged.composite).toEqual(none.composite);
+  test.each([
+    ['HTTP 500', () => ({ ok: false, status: 500, statusText: 'Internal Server Error' })],
+    ['garbage JSON', () => geminiResponse('this is not json')],
+    ['empty answer', () => ({ ok: true, status: 200, json: async () => ({ candidates: [] }) })],
+    ['a thrown fetch', new Error('network down')],
+  ])('watch call failure (%s): watchSignals [] and the main read unchanged, warned', async (_name, watch) => {
+    serve();
+    const reference = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    serve({ watch });
+    const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    expect(result).not.toBeNull();
+    expect(result.watchSignals).toEqual([]);
+    expect(result.composite).toEqual(reference.composite);
+    expect(result.gemini).toEqual(reference.gemini);
+    expect(result.claude).toBeNull();
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    if (_name !== 'empty answer') expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('gate on: an invalid read still fails over to Claude exactly as before, and the fallback is read for signals too', async () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES, foliage_fullness: 250, watch_signals: ['scale'] }));
-    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify({ ...SCORES, watch_signals: ['whitefly'] }) }] });
+  test('no Gemini key: the watch read is [] without a call (the main read is unaffected)', async () => {
+    jest.resetModules();
+    const key = process.env.GEMINI_API_KEY;
+    const googleKey = process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    try {
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      const fresh = require('../services/tree-shrub-assessment');
+      global.fetch = jest.fn();
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(SCORES) }] });
+      const result = await fresh.analyzePhoto('b64', 'image/jpeg', { month: 10 });
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(result.watchSignals).toEqual([]);
+      expect(result.composite.observations).toBe(SCORES.observations);
+    } finally {
+      process.env.GEMINI_API_KEY = key;
+      if (googleKey !== undefined) process.env.GOOGLE_API_KEY = googleKey;
+    }
+  });
+
+  test('a main read that is invalid still fails over to Claude, which is never given the watch list', async () => {
+    serve({
+      main: { ...SCORES, foliage_fullness: 250 },
+      watch: { watch_signals: ['scale'] },
+    });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(SCORES) }] });
     const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
-    expect(mockAnthropicCreate.mock.calls[0][0].messages[0].content[1].text).toContain(watchListPromptBlock(10));
-    expect(result.watchSignals).toEqual(['whitefly']);
+    expect(mockAnthropicCreate.mock.calls[0][0].messages[0].content[1].text).toBe(VISION_PROMPT);
+    expect(result.watchSignals).toEqual(['scale']);
   });
 
-  test('gate on, no month passed: no block, no watchSignals key (every existing caller unchanged)', async () => {
-    process.env.GATE_TS_WATCH_LIST = 'true';
-    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...SCORES }));
-    const result = await analyzePhoto('b64', 'image/jpeg');
-    expect(sentPrompt()).toBe(VISION_PROMPT);
-    expect('watchSignals' in result).toBe(false);
+  test('a main read that cannot be had is null, as today, whatever the watch read says', async () => {
+    serve({ main: { garbage: true }, watch: { watch_signals: ['scale'] } });
+    mockAnthropicCreate.mockResolvedValue(null);
+    expect(await analyzePhoto('b64', 'image/jpeg', { month: 10 })).toBeNull();
+  });
+
+  test('a stray watch_signals field in the MAIN reply changes nothing and is not the source of signals', async () => {
+    serve({ main: { ...SCORES, watch_signals: ['scale', 'sooty_mold'] }, watch: { watch_signals: ['whitefly'] } });
+    const stray = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    delete process.env.GATE_TS_WATCH_LIST;
+    serve({ main: { ...SCORES, watch_signals: ['scale', 'sooty_mold'] } });
+    const off = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    expect(stray.watchSignals).toEqual(['whitefly']);
+    expect(stray.composite).toEqual(off.composite);
+    expect(isValidTreeShrubScores(stray.gemini)).toBe(true);
+  });
+
+  test('a watch-list item the watch call names never reaches the observations', async () => {
+    const watch = { watch_signals: ['root_rot', 'trunk_conk_base', 'scale'], observations: 'Root rot and trunk conk everywhere.', note: 'root rot' };
+    serve({ watch });
+    const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
+    expect(result.watchSignals).toEqual(['scale', 'root_rot', 'trunk_conk_base']);
+    expect(result.composite.observations).toBe(SCORES.observations);
+    expect(result.composite.observations).not.toMatch(/root rot|trunk conk/i);
+    expect(JSON.stringify(result.composite)).not.toMatch(/root_rot|trunk_conk_base/);
+    // and the watch reply's own prose is never read
+    expect(JSON.stringify(result)).not.toContain('everywhere');
+  });
+
+  test('scores are the same with or without signals', async () => {
+    serve({ watch: { watch_signals: ['scale', 'sooty_mold'] } });
+    const flagged = await analyzePhoto('b64', 'image/jpeg', { month: 1 });
+    serve({ watch: { watch_signals: [] } });
+    const none = await analyzePhoto('b64', 'image/jpeg', { month: 1 });
+    expect(flagged.composite).toEqual(none.composite);
   });
 });
 

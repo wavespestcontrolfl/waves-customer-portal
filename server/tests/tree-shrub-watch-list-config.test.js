@@ -144,14 +144,15 @@ describe('watchListForMonth / normalizeWatchKey / normalizeWatchSignals', () => 
     for (const bad of [undefined, null, 'scale', 5, {}, { 0: 'scale' }]) expect(normalizeWatchSignals(bad, 1)).toEqual([]);
     expect(normalizeWatchSignals(['scale'], 13)).toEqual([]);
   });
-  test('the prompt block lists the month in order, asks for optional watch_signals as signals only, and is empty for a bad month', () => {
+  test('the prompt block lists the month in order, is a standalone prompt asking only for watch_signals as possible signals, and is empty for a bad month', () => {
     const block = watchListPromptBlock(3);
     expect(block).toContain("This month's watch list");
     expect(MONTHS[3].every((key) => block.includes(`- ${key}: ${ITEMS[key].signal}`))).toBe(true);
     expect(block.indexOf('- whitefly:')).toBeLessThan(block.indexOf('- scale:'));
-    expect(block).toMatch(/OPTIONAL "watch_signals"/);
+    expect(block).toContain('{"watch_signals": ["<watch-list key>"]}');
+    expect(block).toMatch(/Return ONLY this JSON object/);
+    expect(block).toMatch(/no scores, no observations/);
     expect(block).toMatch(/possible signal, never a confirmed diagnosis/);
-    expect(block).toMatch(/never changes a score/);
     expect(watchListPromptBlock(0)).toBe('');
   });
   test('no em dashes in any tech-facing string', () => {
