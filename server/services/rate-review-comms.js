@@ -1840,7 +1840,7 @@ async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, 
       await trx('rate_review_sms_failures').where('created_at', '<', new Date(Date.now() - SMS_FAILURE_TTL_MS)).del();
       const keep = () => trx('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
         .onConflict('twilio_sid').ignore();
-      const log = await trx('sms_log').where({ twilio_sid: sid }).first();
+      const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');
       // Not logged yet: the callback beat the sender's own sms_log insert, so it cannot
       // be proven unrelated. Kept by sid for the delivery stamp and the nightly apply
       // (the stamp deletes it when it consumes it; reconciliation below deletes it).

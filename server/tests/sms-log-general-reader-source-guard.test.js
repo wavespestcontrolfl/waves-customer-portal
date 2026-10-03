@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/rate-review-comms.js',
+    snippet: "const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');",
+    reason: 'handleSmsDeliveryFailure: keyed by twilio_sid (the failed text Twilio is reporting) and reads only the customer id — a send reservation never has a sid until it is promoted to a real send, so no placeholder can be read as a message.',
+  },
+  {
     file: 'services/visit-completion-packets.js',
     snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
     reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
