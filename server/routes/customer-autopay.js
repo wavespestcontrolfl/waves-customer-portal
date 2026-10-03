@@ -250,7 +250,8 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
-      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer, monthlyBilling: !nonMonthlyBilling })),
+      // A cancelled account's read-only session: no upcoming rate (its service has ended).
+      ...(cancelledRead ? {} : await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer, monthlyBilling: !nonMonthlyBilling })),
     });
   } catch (err) { next(err); }
 });

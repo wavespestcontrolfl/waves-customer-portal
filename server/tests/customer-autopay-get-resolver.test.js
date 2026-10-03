@@ -146,8 +146,11 @@ test('a cancelled (C4) session gets status scalars only — no saved-method deta
   // session through this payload (codex GH r5 P2 — the same details the
   // /billing/cards exclusion keeps unreadable).
   mockCancelledSession = true;
+  mockUpcomingRateChanges.mockClear();
   const { status, body } = await getAutopay();
   expect(status).toBe(200);
+  expect(body.rate_changes).toBeUndefined(); // no upcoming rate for an ended service
+  expect(mockUpcomingRateChanges).not.toHaveBeenCalled();
   expect(body.payment_methods).toEqual([]);
   expect(body.autopay_selected_method_ids).toEqual([]);
   expect(body.autopay_payment_method_id).toBeNull();

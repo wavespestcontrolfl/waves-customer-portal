@@ -1026,6 +1026,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // The cost block the owner's digest covered must still be the saved one: an edit from
     // any session during the fan-out stops the letters not yet handed to a provider.
     if ((await loadCostBlock(conn)) !== costBlock) return { ok: false, reason: 'cost_block_changed' };
+    // ...and so must the letter template: the email leg refuses a changed template on its
+    // own (expectedContentHash); this stops the text too, so neither provider proceeds.
+    if ((await letterTemplateHash()) !== templateHash) return { ok: false, reason: 'template_changed' };
     const at = clock();
     return revalidateClaimed(conn, entry, claimed, { today: etDateString(at), now: at });
   };

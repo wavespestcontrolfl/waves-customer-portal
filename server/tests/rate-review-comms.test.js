@@ -475,6 +475,20 @@ describe('sendBatch', () => {
     expect(marks[0]).toEqual([true, true]);
   });
 
+  test('the letter template edited after the preview stops the text too: neither provider proceeds', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    const lib = require('../services/email-template-library');
+    const realHash = lib.templateContentHash;
+    emailLeg.mockImplementation(async () => { lib.templateContentHash = () => 'edited'; return { sent: false, attempted: true, definiteNonSend: true }; });
+    let refusal = null;
+    smsLeg.mockImplementation(async (args) => { refusal = await args.sendOptions.withSmsHandoff(async () => ({ ok: true })); return { sent: false, attempted: false, blockedCode: refusal.code }; });
+    try { await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW }); } finally { lib.templateContentHash = realHash; }
+    expect(refusal).toMatchObject({ ok: false, code: 'ELIGIBILITY:template_changed' });
+    expect(notices()[0].status).toBe('draft');
+    expect(notices()[0].sent_at).toBeNull();
+  });
+
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
