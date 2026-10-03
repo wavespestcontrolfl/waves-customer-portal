@@ -190,6 +190,29 @@ describe('classifyHouseholdCandidates: exactly ONE live residential customer at 
   });
 
   test.each([
+    ['office', { property_type: 'office' }],
+    ['warehouse', { property_type: 'warehouse' }],
+    ['apartment', { property_type: 'apartment' }],
+    ['multi_family', { property_type: 'Multi_Family' }],
+    ['hoa_common_area', { property_type: 'hoa_common_area' }],
+  ])('the canonical property-type normalizer judges the stored customer type: %s is commercial, no hold', (_label, over) => {
+    expect(classifyHouseholdCandidates(set([[cust('a', over), [src()]]]), call)).toEqual({ customer: null, reason: 'commercial_account' });
+  });
+
+  test('the same normalizer judges the MATCHING address source (property_type or occupancy_type) and only that source', () => {
+    const row = (over) => ({ ...set([[cust('a'), [src()]]])[0], ...over });
+    for (const over of [{ source_property_type: 'office' }, { source_property_type: 'warehouse' }, { source_occupancy_type: 'commercial' }, { source_property_type: 'hoa_common_area' }]) {
+      expect(classifyHouseholdCandidates([row(over)], call).reason).toBe('commercial_account');
+    }
+    // an ordinary residential type, an unknown one, and a commercial source on ANOTHER address do not refuse
+    for (const over of [{ source_property_type: 'single_family' }, { source_property_type: 'condo' }, { source_occupancy_type: 'rental_investment' }, { source_property_type: null }]) {
+      expect(classifyHouseholdCandidates([row(over)], call).reason).toBe('address_match');
+    }
+    const elsewhere = row({ address_line1: '7 Elsewhere Way', source_property_type: 'office' });
+    expect(classifyHouseholdCandidates([row({}), elsewhere], call).reason).toBe('address_match');
+  });
+
+  test.each([
     ['a commercial customer row', { property_type: 'commercial' }, [src()]],
     ['a business customer row', { property_type: 'Business' }, [src()]],
     ['a Commercial-tier customer', { waveguard_tier: 'Commercial' }, [src()]],

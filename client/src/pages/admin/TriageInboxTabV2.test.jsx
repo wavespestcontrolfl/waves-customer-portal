@@ -338,6 +338,8 @@ describe('household hold card (GATE_CALL_HOUSEHOLD_HOLD)', () => {
     expect(within(el).getByText('Caller dialed from:').parentElement).toHaveTextContent('+19415550123');
     expect(within(el).getByText('Stated address:').parentElement).toHaveTextContent('100 Example Loop, Sarasota, 34240');
     expect(within(el).getByText('Requested:').parentElement).toHaveTextContent('Pest Control · Tuesday at 10 AM');
+    expect(within(el).getByText('Resolve:').parentElement).toHaveTextContent('handled on the existing customer');
+    expect(within(el).getByText('Dismiss:').parentElement).toHaveTextContent('a different person — process as a new customer');
     const links = within(el).getAllByRole('link', { name: 'Open customer' });
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAttribute('href', `/admin/customers?customerId=${SUGGESTED}`);

@@ -878,7 +878,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
   for (const call of calls) {
     try {
       const decided = await stageOne(conn, call, now, boundary);
-      if (decided === 'pending') staged += 1; else ineligible += 1;
+      if (decided === 'pending') staged += 1; else if (decided !== 'deferred') ineligible += 1;
     } catch (err) {
       logger.warn(`[call-booking-link-text] stage failed for call ${call.id} (${err.code || err.name || 'error'})`);
     }
@@ -910,12 +910,16 @@ async function stageOne(conn, call, now, boundary = null) {
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call))
-    || ((await householdHoldOpen(conn, call)) ? 'household_hold' : null);
+  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call));
   if (reason) {
     await claimMetadata(conn, call, { status: 'skipped', reason, staged_at });
     return 'skipped';
   }
+  // An OPEN household hold DEFERS the call instead of deciding it: no metadata is written, so the
+  // next sweep looks again. A dismissal ("really someone new") before the send window then restores
+  // the follow-up for a genuine new lead; a resolved card stages normally; a card still open when
+  // the lookback ends simply ages out. (Contrast the permanent skips above, which are final.)
+  if (await householdHoldOpen(conn, call)) return 'deferred';
   const callEnd = callEndFor(call);
   if (!callEnd) {
     await claimMetadata(conn, call, { status: 'skipped', reason: 'no_call_end_time', staged_at });

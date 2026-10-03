@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
+jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(async () => ({ success: true })) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technician = { id: 'tech-1', role: 'admin' };
@@ -510,6 +511,76 @@ describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operat
       expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
     });
     expect(g.tables.triage_items[0].status).toBe('resolved');
+  });
+
+  describe('Dismiss means "really someone new": the call is reprocessed after the dismissal commits (Resolve starts nothing)', () => {
+    const processor = () => require('../services/call-recording-processor');
+    const settle = async (cond) => { for (let i = 0; i < 40 && !cond(); i += 1) await new Promise((r) => setTimeout(r, 5)); };
+    const idle = () => new Promise((r) => setTimeout(r, 40)); // lets a (wrongly) started background pass show itself
+    const seedCall = (f, over = {}) => { Object.assign(f.tables.call_log[0], { twilio_call_sid: 'CAhousehold1', customer_id: null, ...over }); return f; };
+    beforeEach(() => processor().processRecording.mockReset().mockResolvedValue({ success: true }));
+
+    test('Dismiss answers at once, then force-reprocesses the call through the existing entry point; the card stays dismissed; a double Dismiss starts nothing more', async () => {
+      const f = seedCall(seed());
+      wireDb(db, { conn: f.conn });
+      let release; const gate = new Promise((r) => { release = r; });
+      processor().processRecording.mockImplementation(async () => { await gate; return { success: true }; });
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION }); // returns while the pass is still pending
+        expect(res.status).toBe(200);
+        await settle(() => processor().processRecording.mock.calls.length > 0);
+        expect(processor().processRecording).toHaveBeenCalledWith('CAhousehold1', { force: true, operator: true });
+        // the card is committed dismissed BEFORE the pass starts (the waiver the processor reads)
+        expect(f.tables.triage_items[0].status).toBe('dismissed');
+        const again = await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION });
+        expect(again.status).toBe(409);
+        release();
+      });
+      await idle();
+      expect(processor().processRecording).toHaveBeenCalledTimes(1);
+      expect(f.tables.triage_items.filter((c) => c.reason_code === 'auto_booking_skipped_after_approval')).toHaveLength(0);
+    });
+
+    test('Resolve ("handled on the existing customer") starts nothing', async () => {
+      const f = seedCall(seed());
+      wireDb(db, { conn: f.conn });
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+      });
+      await idle();
+      expect(processor().processRecording).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the pass is already running', async () => ({ success: false, skipped: true, reason: 'already_processing' })],
+      ['the pass lost its claim', async () => ({ success: false, skipped: true, reason: 'terminal_write_ownership_lost' })],
+      ['the pass throws', async () => { throw Object.assign(new Error('boom'), { code: 'EBOOM' }); }],
+    ])('when %s the office still gets an actionable task (skipped-booking card, household_hold_dismissed)', async (_label, impl) => {
+      const f = seedCall(seed());
+      f.tables.triage_items[0].payload = { ...f.tables.triage_items[0].payload, preferred_date_time: 'Tuesday at 10 AM', service: 'Pest Control' };
+      wireDb(db, { conn: f.conn });
+      processor().processRecording.mockImplementation(impl);
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+      });
+      await settle(() => f.tables.triage_items.length > 1);
+      const task = f.tables.triage_items.find((c) => c.reason_code === 'auto_booking_skipped_after_approval');
+      expect(task).toBeTruthy();
+      expect(JSON.parse(task.payload)).toMatchObject({ skipped_reason: 'household_hold_dismissed', preferred_date_time: 'Tuesday at 10 AM', service: 'Pest Control' });
+      expect(f.tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('dismissed');
+      expect(f.tables.call_log[0].review_status).toBe('open');
+    });
+
+    test('a call the office linked to a customer meanwhile is left alone', async () => {
+      const f = seedCall(seed(), { customer_id: '77777777-7777-4777-8777-777777777777' });
+      wireDb(db, { conn: f.conn });
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+      });
+      await idle();
+      expect(processor().processRecording).not.toHaveBeenCalled();
+      expect(f.tables.triage_items).toHaveLength(1);
+    });
   });
 
   test('a technician cannot reach the card through /verdict either (403), and an admin gets the plain 400', async () => {

@@ -31,6 +31,7 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { findCustomersAtAddress, whereLiveCustomer, isLiveCustomerRow } = require('./customer-address-match');
 const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
 const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
@@ -3956,8 +3957,10 @@ async function householdPhoneOnFile(conn, key) {
   return !!hit;
 }
 
-const HOUSEHOLD_COMMERCIAL_KINDS = ['commercial', 'business'];
-const isCommercialKind = (v) => HOUSEHOLD_COMMERCIAL_KINDS.includes(String(v || '').trim().toLowerCase());
+// A stored property type is commercial by the repo's canonical normalizer (commercial, business,
+// office, warehouse, apartment, multi_family, hoa_common_area ...), the same one the property-role
+// proposals and the call property lookup use. occupancy_type 'commercial' normalizes the same way.
+const isCommercialKind = (v) => normalizePropertyType(v) === 'commercial';
 // The call's stored address as the verdict-input shape addressesExactlyMatch compares against.
 const householdCallAddress = (a = {}) => ({
   street_line_1: a.address_line1, street_line_2: a.address_line2, city: a.city, postal_code: a.zip,

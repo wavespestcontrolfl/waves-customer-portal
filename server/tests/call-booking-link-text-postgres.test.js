@@ -281,7 +281,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.metadata.call_booking_link_text).toMatchObject({ status: 'skipped', reason: 'ambiguous_lead_linkage' });
   });
 
-  test('a call HELD at an existing customer\'s address (open or claimed household_address_match card) is never staged or re-checked for the link text; a resolved or dismissed card is no hold', async () => {
+  test('a call HELD at an existing customer\'s address (open or claimed household_address_match card) is deferred (not permanently skipped) at staging and stopped at dispatch; a resolved or dismissed card is no hold', async () => {
     await mockPg('system_settings').insert({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: new Date('2020-01-01').toISOString(), category: 'call_booking_link_text' });
     const card = (callId, status) => mockPg('triage_items').insert({
       call_log_id: callId, category: 'customer_field_conflict', severity: 'blocking', reason_code: 'household_address_match', status, summary: 's',
@@ -302,12 +302,24 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const dismissed = await mk('dismissed');
     const plain = await mk(null);
 
+    // an OPEN or claimed hold DEFERS the call (nothing recorded, so the next sweep looks again); it is
+    // never a permanent skip. Resolved, dismissed and no card stage normally.
     const result = await callBookingLinkText.stage(mockPg, { now: NOW });
-    expect(result).toEqual({ staged: 3, ineligible: 2 });
+    expect(result).toEqual({ staged: 3, ineligible: 0 });
     const state = async (id) => (await mockPg('call_log').where({ id }).first('metadata')).metadata.call_booking_link_text;
-    expect(await state(held)).toMatchObject({ status: 'skipped', reason: 'household_hold' });
-    expect(await state(claimed)).toMatchObject({ status: 'skipped', reason: 'household_hold' });
+    expect(await state(held)).toBeUndefined();
+    expect(await state(claimed)).toBeUndefined();
     for (const id of [resolved, dismissed, plain]) expect(await state(id)).toMatchObject({ status: 'pending' });
+    // still held on the next sweep: still deferred
+    expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 0, ineligible: 0 });
+    expect(await state(held)).toBeUndefined();
+    // the office dismisses it ("really someone new") before the window: the next sweep stages the follow-up
+    await mockPg('triage_items').where({ call_log_id: held }).update({ status: 'dismissed' });
+    expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
+    expect(await state(held)).toMatchObject({ status: 'pending' });
+    // …and one the office resolves after the claimed card closes
+    await mockPg('triage_items').where({ call_log_id: claimed }).update({ status: 'resolved' });
+    expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
 
     // the dispatch-time recheck, on the locked handoff's own connection: a card filed AFTER staging still stops the send
     const lateLead = await insertLead(mockPg);

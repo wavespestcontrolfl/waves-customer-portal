@@ -787,6 +787,68 @@ function sendTransitionResult(res, result, id, nextStatus) {
   }
 }
 
+// A DISMISS of a household_address_match card means "really someone new": the call is processed
+// normally. The card is already dismissed and committed (the waiver the processor's `waived` branch
+// reads); this runs AFTER that transaction, never under the triage lock, and is started in the
+// background so the response does not wait on a full processing pass. It reuses the one existing
+// force-reprocess entry point (the admin "Reprocess" action's processRecording call, with its own
+// claim and ownership rules). If it cannot start or does not complete, the office still gets an
+// actionable task: the existing skipped-booking card (auto_booking_skipped_after_approval,
+// skipped_reason 'household_hold_dismissed'). Logs code/name only.
+async function fileHouseholdDismissedTask(item, call, payload) {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+  await db.transaction(async (trx) => {
+    await lockTriageCall(trx, call.id);
+    await trx('triage_items')
+      .insert(buildTriageItem({
+        callLogId: call.id,
+        flag: 'auto_booking_skipped_after_approval',
+        extraPayload: {
+          skipped_reason: 'household_hold_dismissed',
+          preferred_date_time: payload?.preferred_date_time || null,
+          service: payload?.service || null,
+          dispute_customer_id: null,
+          retained_service_id: null,
+          retained_scheduled_date: null,
+        },
+      }))
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .merge({
+        payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+        summary: trx.raw('EXCLUDED.summary'),
+        updated_at: new Date(),
+      });
+    await trx('call_log').where({ id: call.id }).update({ review_status: 'open', updated_at: new Date() });
+  });
+}
+
+async function continueDismissedHouseholdCall(item) {
+  let payload = item.payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+  let call = null;
+  try {
+    call = await db('call_log').where({ id: item.call_log_id }).first('id', 'twilio_call_sid', 'customer_id');
+    // Gone, or the office linked the call to a customer meanwhile: nothing to continue.
+    if (!call || call.customer_id) return 'nothing_to_do';
+    const result = call.twilio_call_sid
+      ? await require('../services/call-recording-processor').processRecording(call.twilio_call_sid, { force: true, operator: true })
+      : null;
+    if (result && result.success !== false && !result.skipped) return 'reprocessed';
+    // Already processing, ownership lost, no call sid ...: the pass did not run to completion here.
+    throw Object.assign(new Error('reprocess did not run'), { code: result?.reason || 'not_started' });
+  } catch (err) {
+    logger.warn(`[admin-triage] dismissed household hold: reprocess did not complete for card ${item.id} (${err.code || err.name || 'error'}) — filing an office task`);
+    if (!call) return 'failed';
+    try {
+      await fileHouseholdDismissedTask(item, call, payload);
+      return 'task_filed';
+    } catch (taskErr) {
+      logger.error(`[admin-triage] dismissed household hold: office task not filed for card ${item.id} (${taskErr.code || taskErr.name || 'error'})`);
+      return 'failed';
+    }
+  }
+}
+
 async function transition(req, res, nextStatus) {
   const { id } = req.params;
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
@@ -815,7 +877,15 @@ async function transition(req, res, nextStatus) {
     id, nextStatus, note, assignedTo: req.technicianId,
     expectedUpdatedAt: req.body?.expected_updated_at || null,
   });
-  return sendTransitionResult(res, result, id, nextStatus);
+  const sent = sendTransitionResult(res, result, id, nextStatus);
+  // Only the request that actually closed the card continues the call (a double Dismiss gets
+  // 'already' and starts nothing). The card is committed; the response is already out.
+  if (result.outcome === 'ok' && nextStatus === 'dismissed' && result.item?.reason_code === 'household_address_match' && result.item.call_log_id) {
+    setImmediate(() => {
+      continueDismissedHouseholdCall(result.item).catch((err) => logger.error(`[admin-triage] household continuation crashed (${err.code || err.name || 'error'})`));
+    });
+  }
+  return sent;
 }
 
 // PUT /api/admin/triage/:id/resolve   { note? }
@@ -2484,6 +2554,7 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 
 module.exports = router;
 module.exports.transitionCore = transitionCore;
+module.exports.continueDismissedHouseholdCall = continueDismissedHouseholdCall;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
   clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };

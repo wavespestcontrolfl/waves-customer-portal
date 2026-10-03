@@ -152,6 +152,8 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     isHousehold && heardName && { label: "Heard name", value: heardName },
     isHousehold && typeof p.address === "string" && p.address && { label: "Stated address", value: p.address },
     isHousehold && householdRequested && { label: "Requested", value: householdRequested },
+    isHousehold && { label: "Resolve", value: "handled on the existing customer" },
+    isHousehold && { label: "Dismiss", value: "a different person — process as a new customer" },
     firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
