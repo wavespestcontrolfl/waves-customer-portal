@@ -282,10 +282,11 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .whereIn('f.category', ['field_drift', 'spam_false_positive'])
     .whereIn('f.field', FIELDS)
     .where('f.created_at', '>=', since)
-    // A nightly rotation, not oldest-first: findings whose second reading
-    // keeps failing store nothing and are retried, and must never hold the
-    // batch against newer ones until they age out.
-    .orderByRaw('md5((f.id)::text || ?)', [now.toISOString().slice(0, 10)])
+    // Newest first: a finding whose second reading keeps failing stores
+    // nothing and is retried, so oldest-first would let a few such rows hold
+    // the batch against every newer one. At ~3 findings a day against a batch
+    // of 20, the older retries still run every night after the new ones.
+    .orderBy('f.created_at', 'desc')
     .limit(batchLimit)
     .select(
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',

@@ -144,9 +144,10 @@ describe('the two-model rule for a call finding', () => {
   test('a disagreeing second reader leaves a lead; an unreachable one stores nothing and is retried', async () => {
     const a = await finding(await call());
     const b = await finding(await call());
-    const reader = jest.fn()
-      .mockResolvedValueOnce({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, field_excerpt: 'We can be there Thursday between 2 and 4.' } })
-      .mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+    // Answers chosen by finding, not by call order: the batch order rotates.
+    const reader = jest.fn(async (row) => (row.finding_id === a
+      ? { ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, field_excerpt: 'We can be there Thursday between 2 and 4.' } }
+      : { ok: false, reason: 'all_providers_failed' }));
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader })).toMatchObject({ adjudicated: 1, byDisposition: { lead: 1 } });
     expect((await database('ai_incidents').select('evidence_id')).map((r) => r.evidence_id.split(':')[0])).toEqual([a]);
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ adjudicated: 1 });
@@ -226,16 +227,19 @@ describe('the two-model rule for a call finding', () => {
     expect(agreeing).toHaveBeenCalledTimes(1);
   });
 
-  test('findings whose reading keeps failing never starve newer ones: the batch rotates nightly', async () => {
-    const ids = [];
-    for (let i = 0; i < 6; i++) ids.push(await finding(await call(), { created_at: new Date(Date.UTC(2026, 9, 1, 7, i)) }));
-    const seen = new Set();
-    const failing = jest.fn(async (row) => { seen.add(row.finding_id); return { ok: false, reason: 'all_providers_failed' }; });
-    for (let day = 3; day <= 12; day++) {
-      await calls.adjudicateCallFindings({ dbi: database, now: new Date(Date.UTC(2026, 9, day, 8, 10)), reader: failing, batchLimit: 2 });
-    }
-    // Ten nights at two a night reach every finding, not the same two each time.
-    expect(seen.size).toBe(6);
+  test('findings whose reading keeps failing never starve newer ones: newest first', async () => {
+    const old = [];
+    for (let i = 0; i < 3; i++) old.push(await finding(await call(), { created_at: new Date(Date.UTC(2026, 9, 1, 7, i)) }));
+    const fresh = await finding(await call(), { created_at: new Date('2026-10-03T07:40:00Z') });
+    const reader = jest.fn(async (row) => (old.includes(row.finding_id) ? { ok: false, reason: 'validator_rejected' } : agreeing(row)));
+    // A batch of two: the new finding is read first, whatever the old ones do.
+    const out = await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader, batchLimit: 2 });
+    expect(reader.mock.calls[0][0].finding_id).toBe(fresh);
+    expect(out).toMatchObject({ adjudicated: 1, byDisposition: { confirmed_mistake: 1 } });
+    // With room in the batch, the failing ones are still retried.
+    reader.mockClear();
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader, batchLimit: 20 });
+    expect(reader.mock.calls.map(([row]) => row.finding_id).sort()).toEqual([...old].sort());
   });
 
   test('old findings, other audit sources and unknown fields are not read', async () => {
