@@ -1129,8 +1129,14 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
       throw stuck;
     }
   }
-  const parked = prior?.status === 'scheduled' && !prior.scheduled_send_at
-    && (String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
+  // The packet path parks only the stale-send recovery's row (scheduled, no send time, that text or a `:park`
+  // stamp). The visit-linked path (markQueued) parks EVERY scheduled row with no send time, whatever its
+  // marker (a summary-planned or delivery-review error included): the automatic sender excludes such rows
+  // until an operator reviews them, so a release must put them back exactly as they were.
+  const nullTimeScheduled = prior?.status === 'scheduled' && !prior.scheduled_send_at;
+  const parked = nullTimeScheduled
+    && (markQueued
+      || String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
   // `queued` (non-packet callers only): the invoice was waiting in the send queue, so a
   // release puts it back there instead of leaving it a draft.
   const queued = markQueued && !parked && prior?.status === 'scheduled';
@@ -1139,7 +1145,10 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
   // carries the marker verbatim as the stamp's tail (`:m=<marker>`) and the release writes it back;
   // without it the requeue would text the pay link a second time. (The packet release rebuilds its
   // marker from sms_sent_at and the summary record instead, so it never needed the tail.)
-  const priorMarker = markQueued ? retryMarkerOf(prior?.scheduled_send_error) : null;
+  // A parked row's marker is its WHOLE original error, restored verbatim.
+  const priorMarker = markQueued
+    ? (parked ? (String(prior?.scheduled_send_error || '') || null) : retryMarkerOf(prior?.scheduled_send_error))
+    : null;
   // The operator-chosen send time rides the stamp too (`:at=<iso>`), so a release puts the invoice
   // back at that time, not at "now".
   const priorSendAt = queued && prior?.scheduled_send_at ? new Date(prior.scheduled_send_at).toISOString() : null;

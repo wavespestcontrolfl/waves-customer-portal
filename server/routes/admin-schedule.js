@@ -14406,6 +14406,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // drives the packet pipeline AND the visit-linked one - not which fields were submitted. It covers
         // a cleared visit payer that reveals the customer default as much as an assignment.
         let movedToPayer = false;
+        let movedVisitIds = [];
         if (seriesBillToTouched) {
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
           try {
@@ -14421,9 +14422,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
             },
           };
-          movedToPayer = (await require('../services/visit-linked-invoice-withdrawal')
+          // The visits (the parent and the pinned children, no others) whose effective owner moves TO a payer.
+          movedVisitIds = (await require('../services/visit-linked-invoice-withdrawal')
             .visitOwnerTransitions(trx, [req.params.id, ...rewrittenChildIds], { pending: ownerPending, lock: true }))
-            .some((move) => move.moved && move.afterOwner);
+            .filter((move) => move.moved && move.afterOwner).map((move) => move.visitId);
+          movedToPayer = movedVisitIds.length > 0;
           // (The combined advisory lock for this customer was taken above, before any ownership row,
           // and the visit and its children were locked just before this - both Bill-To writers share that order.)
           if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
@@ -14441,15 +14444,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
         if (movedToPayer) {
-          const fencedVisitIds = [req.params.id, ...rewrittenChildIds];
-          // Combined pay-page sessions are fenced on every child, rewritten or not.
-          try {
-            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
-            for (const childId of childIds) if (!fencedVisitIds.includes(childId)) fencedVisitIds.push(childId);
-          } catch { /* no children / column absent */ }
+          // Only the visits whose owner moves: a completed or cancelled child that is not rewritten, or a
+          // pinned child whose owner is unchanged, is neither cancelled nor a reason to refuse.
           const visitRelease = await require('../services/pay-combined')
-            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds, {
-              invalidateVisitIds: [req.params.id, ...rewrittenChildIds],
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, movedVisitIds, {
+              invalidateVisitIds: movedVisitIds,
               pending: ownerPending,
             });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,

@@ -211,6 +211,10 @@ test('a PO-only series edit propagates the PO and runs no Bill-To pipeline for t
 });
 
 test('the series propagation, fence, checkout release and withdrawal all use ONE locked, pinned child set', async () => {
+  Linked.visitOwnerTransitions.mockResolvedValueOnce([
+    { visitId: 'svc-1', beforeOwner: null, afterOwner: '7', moved: true },
+    { visitId: 'child-pending', beforeOwner: null, afterOwner: '7', moved: true },
+  ]);
   const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
   });
@@ -228,8 +232,24 @@ test('the series propagation, fence, checkout release and withdrawal all use ONE
   const pinned = ['child-pending'];
   expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: pinned }, expect.anything());
   expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).toHaveBeenCalledWith(
-    expect.anything(), expect.anything(), expect.objectContaining({ invalidateVisitIds: ['svc-1', ...pinned] }),
+    expect.anything(), ['svc-1', ...pinned], expect.objectContaining({ invalidateVisitIds: ['svc-1', ...pinned] }),
   );
   expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: pinned });
   expect(JSON.stringify(Linked.withdrawLinkedInvoicesForOwner.mock.calls)).not.toContain('child-late');
+});
+
+test('the combined-session release gets only the visits whose owner moves: a completed child (not rewritten) and an unmoved pinned child are neither cancelled nor a reason to refuse', async () => {
+  // child-completed is not pinned; child-pending is pinned but its owner does not move (it names its own payer).
+  Linked.visitOwnerTransitions.mockResolvedValueOnce([
+    { visitId: 'svc-1', beforeOwner: null, afterOwner: '7', moved: true },
+    { visitId: 'child-pending', beforeOwner: '5', afterOwner: '5', moved: false },
+  ]);
+  const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
+  });
+  expect(res.status).toBe(200);
+  const [, visitIds, options] = PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mock.calls[0];
+  expect(visitIds).toEqual(['svc-1']);
+  expect(options.invalidateVisitIds).toEqual(['svc-1']);
+  expect(JSON.stringify(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices.mock.calls)).not.toContain('child-completed');
 });

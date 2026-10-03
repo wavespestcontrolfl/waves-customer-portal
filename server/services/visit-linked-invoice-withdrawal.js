@@ -100,7 +100,9 @@ function ownerOf(state, activePayerIds) {
 function withPending(state, { visitId, customerId }, pending) {
   const next = { ...state };
   const visitPatch = pending?.visitPatch;
-  if (visitPatch && (visitPatch.visitIds || []).map(String).includes(String(visitId))) {
+  // Only a visit the resolver actually reads for this invoice (one of the invoice's own customer) takes the
+  // overlay: a stale or mismatched visit link is ignored by the resolver, so a payer written to that visit moves nothing.
+  if (visitPatch && state.visitOwned && (visitPatch.visitIds || []).map(String).includes(String(visitId))) {
     if ('payer_id' in visitPatch) next.visitPayerId = idOrNull(visitPatch.payer_id);
     if ('self_pay_override' in visitPatch) next.selfPay = visitPatch.self_pay_override === true;
   }
@@ -142,7 +144,7 @@ async function readOwnerState(database, invoice, visitId, { lock, pending }) {
     else if (pending.payerPatch.active === true) activeAfter.add(patched);
   }
   return {
-    state: { visitPayerId: visit?.payer_id ?? null, selfPay: visit?.self_pay_override === true, customerPayerId: customer?.payer_id ?? null },
+    state: { visitOwned: Boolean(visit), visitPayerId: visit?.payer_id ?? null, selfPay: visit?.self_pay_override === true, customerPayerId: customer?.payer_id ?? null },
     activeBefore,
     activeAfter,
   };
@@ -265,7 +267,6 @@ async function withdrawLinkedInvoicesForOwner(trx, scope = {}) {
 // whose payer changed follows the payer that owns the visit now. Returns the released count.
 async function reconcileLinkedInvoices(trx, scope = {}, { requeue: mayRequeue = true } = {}) {
   const { resumeDunningPausedByWithdrawal } = require('./visit-completion-packets');
-  const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
   let released = 0;
   for (const t of await ownerTransitions(trx, scope, { mode: 'post', lock: true, stamped: 'stamped', stampedForPayer: scope.payerId })) {
     // `payer_billed:<id>[:park][:queued][:at=<iso send time>][:m=<marker>]` - the marker is the
@@ -288,11 +289,11 @@ async function reconcileLinkedInvoices(trx, scope = {}, { requeue: mayRequeue = 
       }
       continue;
     }
-    const parked = flags.includes('park');
     // `mayRequeue` false (unvoid): a restored invoice is a DRAFT by design; its old send queue is never revived.
     const requeue = mayRequeue && flags.includes('queued') && t.status === 'draft';
     // The marker goes back exactly as it was, so a requeued invoice stays email-only.
-    const restored = parked ? STALE_SEND_PARK_ERROR : priorMarker;
+    // (A parked row - scheduled with no send time - returns exactly as it was: same marker, status, null time, attempts untouched.)
+    const restored = priorMarker;
     const moved = await trx('invoices')
       .where({ id: t.invoiceId, status: t.status, scheduled_send_error: stamp }).whereNull('payer_id')
       .update(requeue

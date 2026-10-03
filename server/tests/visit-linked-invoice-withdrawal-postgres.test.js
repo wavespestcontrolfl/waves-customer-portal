@@ -385,6 +385,41 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { customerId: loser.customerId }, { pending: move(inactiveLoserPayer) })).toBe(false);
   });
 
+  test('an invoice whose visit link belongs to ANOTHER customer is not moved by a payer written to that visit: no checkout cancelled, no stamp', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const payerId = await payer();
+    const mine = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_mismatched' } });
+    const theirs = await fixture({ link: 'record' });
+    // A stale link: the invoice of one customer points at the other customer's visit.
+    await mockPg('invoices').where({ id: mine.invoiceId }).update({ service_record_id: null, scheduled_service_id: theirs.visitId });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const pending = { visitPatch: { visitIds: [theirs.visitId], payer_id: payerId } };
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [theirs.visitId], { invalidateVisitIds: [theirs.visitId], pending }))
+      .toEqual({ released: 0, inFlight: 0 });
+    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: theirs.visitId }, mockPg, { pending })).toBe(false);
+    // Only the visit's OWN invoice moves; the other customer's mismatched one does not.
+    expect(await assignJobPayer(theirs.visitId, payerId)).toEqual([theirs.invoiceId]);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(await invoiceRow(mine.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_mismatched', scheduled_send_error: null });
+  });
+
+  test('a scheduled invoice with NO send time is parked whatever its marker: assign then clear returns it exactly as it was, no send', async () => {
+    const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../services/invoice-helpers');
+    const payerId = await payer();
+    for (const marker of [STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR, `${SUMMARY_TEXT_PLANNED_ERROR}: mailbox full: later`, 'Twilio 30007: carrier filtered: needs review', null]) {
+      const f = await fixture({ link: 'record', status: 'scheduled', invoice: { scheduled_send_at: null, scheduled_send_error: marker, scheduled_send_attempts: 2 } });
+      await assignJobPayer(f.visitId, payerId);
+      const withdrawn = await invoiceRow(f.invoiceId);
+      expect(withdrawn).toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_attempts: 2 });
+      expect(withdrawn.scheduled_send_error).toMatch(new RegExp(`^payer_billed:${payerId}:park`));
+      await clearJobPayer(f.visitId);
+      const back = await invoiceRow(f.invoiceId);
+      expect(back).toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: marker, scheduled_send_attempts: 2 });
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
     const payerId = await payer();
     const future = new Date(Date.now() + 3 * 86400e3);
