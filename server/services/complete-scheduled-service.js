@@ -4449,6 +4449,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           svc,
           lawnAssessmentId,
           isIncompleteVisit,
+          expectedVisit,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(

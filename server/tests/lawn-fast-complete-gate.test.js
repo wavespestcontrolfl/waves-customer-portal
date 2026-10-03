@@ -86,6 +86,11 @@ describe('/complete wiring', () => {
     expect(block).toMatch(/return \(\{ status: lawnFastBlock\.status, body: lawnFastBlock\.payload \}\)/);
   });
 
+  test('the preflight gets the expectedVisit the main flow then compares on the locked row', () => {
+    expect(src).toMatch(/preflightLawnFastCompletion\(\{[^}]*expectedVisit,[^}]*\}\)/s);
+    expect(src).toMatch(/recapVisitIdentityChanged\(expectedVisit, lockedSvcRow, snapshotCustomerRow\)/);
+  });
+
   test('only a body that carries the block is judged', () => {
     expect(src).toMatch(/^\s+lawnFast = null,$/m);
     expect(src).toMatch(/if \(lawnFast !== null && lawnFast !== undefined\)/);

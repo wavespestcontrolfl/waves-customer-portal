@@ -539,6 +539,8 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
+  // The assigned technician, sent only by the lawn Fast Complete sheet.
+  if ('technicianId' in expected && !sameIdentityKey(expected.technicianId, locked.technician_id)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
   // Whether it is a free callback decides the pay link and the review ask
   // the client sends, so a change to it is a changed visit.

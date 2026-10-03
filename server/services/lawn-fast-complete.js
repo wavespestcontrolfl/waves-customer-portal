@@ -65,9 +65,11 @@ function lawnFastVisitType(profile, billingMode) {
  * cannot complete correctly, or one with its own lane, is refused. Pure.
  *
  * @param {{ svc: object, profile: object|null, visitGroupStatus?: string|null,
- *           hasVisitGroup?: boolean, skipTerminal?: boolean }} facts
+ *           hasVisitGroup?: boolean, allowStatuses?: string[] }} facts
+ * `allowStatuses` lists visit statuses NOT treated as terminal (the submit
+ * preflight passes ['completed'], see preflightLawnFastCompletion).
  */
-function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, skipTerminal = false }) {
+function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
   if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
   if (profile.serviceKey === RESERVICE_KEY) return 'lawn_re_service';
@@ -78,7 +80,8 @@ function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGr
   // dissolution NULLs child visit_id, so a missing visit row means something is
   // mid-flight (same rule as /completion-status and the sibling sheets).
   if (hasVisitGroup && String(visitGroupStatus || '') !== 'dissolved') return 'grouped_visit';
-  if (!skipTerminal && TERMINAL_STATUSES.has(String(svc?.status || ''))) return 'terminal_status';
+  const status = String(svc?.status || '');
+  if (TERMINAL_STATUSES.has(status) && !allowStatuses.includes(status)) return 'terminal_status';
   return null;
 }
 
@@ -99,7 +102,7 @@ async function loadBillingMode(svc, knex) {
  * for a missing visit; otherwise `{ ok, svc, profile, reason, visitType }` with
  * `reason` null when eligible.
  */
-async function resolveLawnFastEligibility(serviceId, knex = db, { skipTerminal = false } = {}) {
+async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [] } = {}) {
   const base = await resolveEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile } = base;
@@ -108,7 +111,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { skipTerminal =
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
-  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, skipTerminal });
+  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
   const billingMode = reason === 'not_lawn' || reason === 'profile_unavailable' ? null : await loadBillingMode(svc, knex);
   return { ok: true, svc, profile, reason, visitType: profile ? lawnFastVisitType(profile, billingMode) : null };
 }
@@ -395,7 +398,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile, reason, visitType } = base;
-  const service = recapServiceIdentity(svc, profile);
+  // The technician rides the identity so a reassignment since the sheet opened is
+  // caught at submit (recapVisitIdentityChanged compares it when sent).
+  const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
   if (reason) return { ok: true, eligible: false, reason, visitType, service };
 
   const assessmentRow = await loadLatestAssessment(svc, knex).catch((err) => {
@@ -434,21 +439,49 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
 
 // ── completion preflight ────────────────────────────────────────────────────
 
+// The visit identity a lawn Fast Complete submit must echo back (the `service`
+// object of the context): /complete compares it to the locked row
+// (recapVisitIdentityChanged) and refuses 409 visit_identity_changed when the
+// customer, property, catalog service, type, date, address, callback flag or
+// technician changed since the sheet opened. The comparison only checks keys the
+// client sent, so the lawn-fast submit must send the identity keys at all.
+const REQUIRED_IDENTITY_KEYS = ['customerId', 'propertyId', 'scheduledDate', 'technicianId'];
+const expectedVisitIncomplete = (expectedVisit) => !expectedVisit || typeof expectedVisit !== 'object'
+  || REQUIRED_IDENTITY_KEYS.some((key) => !(key in expectedVisit));
+
 /**
  * Preflight for a /complete body carrying a `lawnFast` block. Returns
  * `{ status, payload }` (the shape preflightLawnAssessmentCompletion returns) to
- * refuse, or null to proceed. Order: gate, eligible visit, confirmed assessment.
- * The photo floor is never checked here (advisory; see evaluatePhotoFloor).
+ * refuse, or null to proceed. Order: gate, visit identity echoed, eligible visit,
+ * confirmed assessment. The photo floor is never checked here (advisory; see
+ * evaluatePhotoFloor).
+ *
+ * It runs only on a FRESH completion attempt (the caller's claim.action ===
+ * 'proceed'); a replay of a stored result and a resume of a committed completion
+ * return before it, so a retry of an already-completed submit under its own
+ * idempotency key never reaches it. A visit whose status is already 'completed'
+ * is still let through (a fresh key on a completed visit is the main flow's
+ * to answer: service_already_completed), the only status allowed.
+ *
+ * Outcome of every reason lawnFastIneligibleReason can return at submit:
+ *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
+ *   not_lawn, lawn_re_service, assessment_visit,
+ *   project_backed, has_companions, grouped_visit,
+ *   terminal_status (cancelled, skipped, no_show,
+ *     incomplete, rescheduled)                   409 lawn_fast_not_eligible (terminal)
+ *   terminal_status when status is 'completed'   allowed (see above)
+ * cancelled / skipped / no_show / a future date are also refused earlier by the
+ * main completion flow with their own codes.
  *
  * Status codes are chosen for the shared client hook (completionFailureOutcome):
- * a 409 gate/eligibility refusal is terminal (the tech leaves for the full
- * form); a 400 missing/unconfirmed assessment is correctable (confirm, then
- * resubmit under a fresh key).
+ * a 409 gate/eligibility/identity refusal is terminal (the tech leaves for the
+ * schedule or full form); a 400 missing/unconfirmed assessment is correctable
+ * (confirm, then resubmit under a fresh key).
  *
- * An incomplete visit is not judged (nothing to confirm), like the lawn
- * assessment preflight.
+ * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
+ * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null } = {}) {
   if (isIncompleteVisit) return null;
   if (!featureGates.lawnFastCompleteLive()) {
     return {
@@ -456,11 +489,24 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       payload: { error: 'Lawn Fast Complete is not available. Use the full completion form.', code: 'lawn_fast_disabled' },
     };
   }
-  // The terminal-status check belongs to the main completion flow (a replay or
-  // already-completed visit has its own answers there).
-  const verdict = await resolveLawnFastEligibility(svc.id, knex, { skipTerminal: true });
+  if (expectedVisitIncomplete(expectedVisit)) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Reopen this visit from the schedule so the sheet can confirm it is still the same visit.',
+        code: 'lawn_fast_expected_visit_required',
+      },
+    };
+  }
+  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'] });
   if (!verdict.ok) {
     return { status: 404, payload: { error: 'Service not found', code: 'lawn_fast_not_found' } };
+  }
+  if (verdict.reason === 'profile_unavailable') {
+    return {
+      status: 503,
+      payload: { error: 'Could not verify the completion type for this service. Try again in a moment.', code: 'completion_profile_lookup_failed' },
+    };
   }
   if (verdict.reason) {
     return {

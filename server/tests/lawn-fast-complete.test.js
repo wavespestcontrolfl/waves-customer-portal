@@ -13,6 +13,7 @@ jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jes
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { recapVisitIdentityChanged } = require('../services/pest-recap');
 const {
   lawnFastIneligibleReason,
   lawnFastVisitType,
@@ -98,7 +99,8 @@ describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
 
   test.each(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled'])('status %s is terminal', (status) => {
     expect(lawnFastIneligibleReason({ svc: visit({ status }), profile: PROFILE() })).toBe('terminal_status');
-    expect(lawnFastIneligibleReason({ svc: visit({ status }), profile: PROFILE(), skipTerminal: true })).toBeNull();
+    expect(lawnFastIneligibleReason({ svc: visit({ status }), profile: PROFILE(), allowStatuses: ['completed'] }))
+      .toBe(status === 'completed' ? null : 'terminal_status');
   });
 });
 
@@ -338,10 +340,12 @@ describe('preflightLawnFastCompletion', () => {
     if (savedGate === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedGate;
   });
 
+  const IDENTITY = { customerId: 'cust-1', propertyId: 'prop-1', scheduledDate: '2026-10-05', technicianId: null };
   const run = (tables, args = {}) => preflightLawnFastCompletion({
     knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, ...tables }),
     svc: { id: 'visit-1', customer_id: 'cust-1' },
     lawnAssessmentId: 'as-1',
+    expectedVisit: IDENTITY,
     ...args,
   });
 
@@ -377,8 +381,67 @@ describe('preflightLawnFastCompletion', () => {
     expect(await run({ lawn_assessments: { id: 'as-1', confirmed_by_tech: true }, lawn_assessment_photos: [] })).toBeNull();
   });
 
-  test('an already-completed visit is left to the main completion flow (no terminal refusal here)', async () => {
-    expect(await run({ scheduled_services: visit({ status: 'completed' }), lawn_assessments: { id: 'as-1', confirmed_by_tech: true } })).toBeNull();
+  // Every reason lawnFastIneligibleReason can return has a defined outcome at
+  // submit. Terminal ones are 409 lawn_fast_not_eligible (the tech leaves).
+  describe('reason by reason at submit', () => {
+    const CONFIRMED = { lawn_assessments: { id: 'as-1', confirmed_by_tech: true } };
+
+    test.each([
+      ['not_lawn', PROFILE({ category: 'pest_control', serviceKey: 'pest_general_quarterly' }), {}],
+      ['lawn_re_service', PROFILE({ serviceKey: 'lawn_re_service' }), {}],
+      ['assessment_visit', PROFILE({ serviceKey: 'lawn_inspection' }), {}],
+      ['project_backed', PROFILE({ projectBacked: true }), {}],
+      ['has_companions', PROFILE({ companions: ['tree_shrub'] }), {}],
+      ['grouped_visit', PROFILE(), { scheduled_services: visit({ visit_id: 'grp-1' }), service_visits: { status: 'active' } }],
+    ])('%s is refused 409 lawn_fast_not_eligible', async (reason, profile, tables) => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
+      expect(await run({ ...CONFIRMED, ...tables })).toMatchObject({ status: 409, payload: { code: 'lawn_fast_not_eligible', reason } });
+    });
+
+    test.each(['cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled'])('terminal_status: a %s visit is refused 409 (terminal, not corrected-and-resubmitted)', async (status) => {
+      expect(await run({ ...CONFIRMED, scheduled_services: visit({ status }) }))
+        .toMatchObject({ status: 409, payload: { code: 'lawn_fast_not_eligible', reason: 'terminal_status' } });
+    });
+
+    test('terminal_status: a completed visit passes the preflight (the main flow answers service_already_completed; replays never reach it)', async () => {
+      expect(await run({ ...CONFIRMED, scheduled_services: visit({ status: 'completed' }) })).toBeNull();
+    });
+
+    test('profile_unavailable is a 503 retry, not a terminal refusal', async () => {
+      resolveCompletionProfileForScheduledService.mockRejectedValue(new Error('db down'));
+      expect(await run(CONFIRMED)).toMatchObject({ status: 503, payload: { code: 'completion_profile_lookup_failed' } });
+    });
+
+    test('a dissolved group does not block', async () => {
+      expect(await run({ ...CONFIRMED, scheduled_services: visit({ visit_id: 'grp-1' }), service_visits: { status: 'dissolved' } })).toBeNull();
+    });
+  });
+
+  describe('the visit identity the sheet echoes back', () => {
+    const CONFIRMED = { lawn_assessments: { id: 'as-1', confirmed_by_tech: true } };
+
+    test.each([
+      ['none at all', null],
+      ['an empty object', {}],
+      ['a partial identity', { customerId: 'cust-1' }],
+      ['one missing the technician', { customerId: 'cust-1', propertyId: 'prop-1', scheduledDate: '2026-10-05' }],
+    ])('%s is refused 400 lawn_fast_expected_visit_required', async (_label, expectedVisit) => {
+      expect(await run(CONFIRMED, { expectedVisit })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_expected_visit_required' } });
+    });
+
+    test("the context's service identity carries the keys the submit must echo, and /complete's compare catches a change", async () => {
+      const ctx = await buildLawnFastContext('visit-1', { knex: fakeKnex({ scheduled_services: visit({ technician_id: 'tech-1' }), customers: { billing_mode: null } }) });
+      const expected = ctx.service;
+      expect(expected).toMatchObject({ customerId: 'cust-1', propertyId: 'prop-1', technicianId: 'tech-1' });
+      expect(expected.scheduledDate).toBeTruthy();
+      const locked = { customer_id: 'cust-1', property_id: 'prop-1', service_id: 'cat-1', service_type: 'Lawn Care', technician_id: 'tech-1', scheduled_date: '2026-10-05', is_callback: false };
+      const customerRow = { address_line1: '100 Example Court', city: 'Bradenton', state: 'FL', zip: '34201' };
+      expect(recapVisitIdentityChanged(expected, locked, customerRow)).toBe(false);
+      expect(recapVisitIdentityChanged(expected, { ...locked, scheduled_date: '2026-10-12' }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, customer_id: 'cust-2' }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, technician_id: 'tech-2' }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, property_id: 'prop-2' }, customerRow)).toBe(true);
+    });
   });
 
   test('an incomplete visit is not judged', async () => {
@@ -404,6 +467,10 @@ describe('the preflight reasons are ones the shared client hook classifies', () 
   test.each([
     [{ status: 409, code: 'lawn_fast_disabled' }, 'terminal'],
     [{ status: 409, code: 'lawn_fast_not_eligible' }, 'terminal'],
+    [{ status: 503, code: 'completion_profile_lookup_failed' }, 'retry'],
+    [{ status: 400, code: 'lawn_fast_expected_visit_required' }, 'correctable'],
+    [{ status: 409, code: 'visit_identity_changed' }, 'terminal'],
+    [{ status: 409, code: 'service_reassigned' }, 'terminal'],
     [{ status: 400, code: 'lawn_fast_assessment_required' }, 'correctable'],
     [{ status: 400, code: 'lawn_assessment_unconfirmed' }, 'correctable'],
   ])('%j is %s', (err, expected) => {
