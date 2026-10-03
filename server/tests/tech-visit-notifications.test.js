@@ -393,6 +393,86 @@ describe('notifyTechVisitChange', () => {
   });
 });
 
+describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owner ruling 2026-10-03)', () => {
+  const move = (actorId) => notices.notifyTechVisitChange({
+    visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId,
+    previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
+    prime();
+  });
+  afterAll(() => {
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+  });
+
+  test('a move card carries its ISO days, so the Today page can tell a today/tomorrow change from a far one', async () => {
+    await move(ADAM_ID);
+    expect(mockWriteCard.mock.calls[0][1].payload).toMatchObject({ date: '2026-09-10', previous_date: '2026-09-09' });
+  });
+
+  test('gate on: an auto-dispatch move still writes its card but holds its own push; any other mover still pushes', async () => {
+    await move('auto_dispatch');
+    expect(mockWriteCard).toHaveBeenCalledTimes(1);
+    expect(mockWriteCard.mock.calls[0][1].payload.actor).toBe('by auto-dispatch');
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+
+    await move('customer_self_serve');
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: an auto-dispatch move pushes per visit, as before', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+    await move('auto_dispatch');
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route moved' }));
+  });
+
+  function summaryRows(rows) {
+    const calls = {};
+    db.mockImplementation((table) => {
+      expect(table).toBe('tech_notifications');
+      const c = {};
+      for (const m of ['whereIn', 'where', 'whereRaw', 'groupBy', 'select']) c[m] = jest.fn((...args) => { calls[m] = args; return c; });
+      c.count = jest.fn(async () => rows);
+      return c;
+    });
+    return calls;
+  }
+
+  test('the run sends ONE push per tech, counting that tech\'s auto-dispatch cards, and opens /admin/today', async () => {
+    const calls = summaryRows([{ technician_id: 'tech-1', n: '20' }, { technician_id: 'tech-2', n: 1 }]);
+    const since = new Date('2026-10-03T07:00:00Z');
+    const out = await notices.pushAutoDispatchSummary({ since, runId: 'run-9' });
+    expect(out).toEqual({ pushed: 2 });
+    expect(calls.whereRaw).toEqual(["payload->>'actor' = ?", ['by auto-dispatch']]);
+    // A minute of app/DB clock slack before the run's start.
+    expect(calls.where).toEqual(['created_at', '>=', new Date('2026-10-03T06:59:00Z')]);
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
+      title: 'Auto-dispatch moved 20 visits', body: '', url: '/admin/today', tag: 'auto-dispatch-run-9', priority: 'high',
+    });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit' }));
+  });
+
+  test('either gate off → no summary push, nothing read', async () => {
+    summaryRows([{ technician_id: 'tech-1', n: 3 }]);
+    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+    expect(await notices.pushAutoDispatchSummary({ since: new Date(), runId: 'r' })).toEqual({ pushed: 0 });
+    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    expect(await notices.pushAutoDispatchSummary({ since: new Date(), runId: 'r' })).toEqual({ pushed: 0 });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('a failed count read never throws to the run', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(notices.pushAutoDispatchSummary({ since: new Date(), runId: 'r' })).resolves.toEqual({ pushed: 0 });
+  });
+});
+
 describe('notifyAssignmentChange (both sides of a tech change)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

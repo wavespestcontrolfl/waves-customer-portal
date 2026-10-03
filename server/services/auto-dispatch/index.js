@@ -901,6 +901,11 @@ async function runAutoDispatch(opts = {}) {
     logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
+  // One push per tech for the whole run (GATE_AUTO_DISPATCH_PUSH_SUMMARY),
+  // after the per-visit cards it summarizes. Best-effort; never throws.
+  if (config.mode !== 'dry_run' && totals.changed > 0) {
+    await require('../tech-visit-notifications').pushAutoDispatchSummary({ since: nowDate, runId });
+  }
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }

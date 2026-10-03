@@ -23,7 +23,10 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   flagUnplacedVisits: jest.fn(async () => 0),
 }));
 
+jest.mock('../services/tech-visit-notifications', () => ({ pushAutoDispatchSummary: jest.fn(async () => ({ pushed: 1 })) }));
+
 const db = require('../models/db');
+const techNotices = require('../services/tech-visit-notifications');
 const eligibility = require('../services/auto-dispatch/eligibility');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
@@ -89,6 +92,25 @@ test('apply mode moves the visit and logs a changed decision', async () => {
     expect(res).toMatchObject({ changed: 1 });
     expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
     expect(lastDecision('changed').reason_code).toBe('CHANGE_APPLIED');
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
+test('a run that moved visits sends the one summary push after the run is recorded; a dry run never does', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'apply' });
+    expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledTimes(1);
+    expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledWith({ since: expect.any(Date), runId: 'run1' });
+    expect(audit.completeRun.mock.invocationCallOrder[0])
+      .toBeLessThan(techNotices.pushAutoDispatchSummary.mock.invocationCallOrder[0]);
+
+    techNotices.pushAutoDispatchSummary.mockClear();
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(techNotices.pushAutoDispatchSummary).not.toHaveBeenCalled();
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }

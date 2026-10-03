@@ -293,6 +293,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/notifications/:id/dismiss` | tech-notifications |
 | POST | `/api/tech/notifications/:id/read` | tech-notifications |
 | POST | `/api/tech/notifications/:id/undo-stop` | tech-notifications |
+| POST | `/api/tech/notifications/dismiss-batch` | tech-notifications |
+| GET | `/api/tech/notifications/schedule-changes` | tech-notifications |
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |

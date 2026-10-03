@@ -99,6 +99,58 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Schedule-change cards (tech-visit-notifications.js) for the Today page,
+// which shows every open one: a change that touches today or tomorrow as its
+// own card (`soon`), the rest folded into one summary (owner ruling
+// 2026-10-03). The main feed above returns 20 rows, too few for a nightly
+// auto-dispatch run, so these have their own read.
+const SCHEDULE_CHANGE_TYPES = ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled'];
+const SCHEDULE_CHANGE_LIMIT = 300;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// GET /schedule-changes
+router.get('/schedule-changes', async (req, res, next) => {
+  try {
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    const now = new Date();
+    const soonDays = new Set([etDateString(now), etDateString(addETDays(now, 1))]);
+    const rows = await db('tech_notifications as n')
+      .leftJoin('scheduled_services as s', db.raw("s.id::text = n.payload->>'visit_id'"))
+      .where('n.technician_id', req.technicianId)
+      .whereNull('n.dismissed_at')
+      .whereIn('n.type', SCHEDULE_CHANGE_TYPES)
+      .orderBy('n.created_at', 'desc')
+      .limit(SCHEDULE_CHANGE_LIMIT)
+      .select('n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at',
+        db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as visit_date"));
+    const changes = rows.map(({ visit_date: visitDate, ...row }) => {
+      const parsed = parseRow(row);
+      // Cards written before the ISO days were added carry only the display
+      // text; the visit's current day stands in for them.
+      const days = [parsed.payload.date || visitDate, parsed.payload.previous_date].filter(Boolean);
+      return { ...parsed, soon: days.some((day) => soonDays.has(day)) };
+    });
+    res.json({ changes });
+  } catch (err) { next(err); }
+});
+
+// POST /dismiss-batch { ids } — "Got it, clear all" on the summary card.
+// Only this tech's own schedule-change cards are cleared.
+router.post('/dismiss-batch', async (req, res, next) => {
+  try {
+    const raw = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    const ids = raw.filter((id) => UUID_RE.test(id));
+    if (ids.length !== raw.length || !ids.length || ids.length > SCHEDULE_CHANGE_LIMIT) return res.status(400).json({ error: `Send 1–${SCHEDULE_CHANGE_LIMIT} ids` });
+    const dismissed = await db('tech_notifications')
+      .where({ technician_id: req.technicianId })
+      .whereIn('id', ids)
+      .whereIn('type', SCHEDULE_CHANGE_TYPES)
+      .whereNull('dismissed_at')
+      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+    res.json({ success: true, dismissed });
+  } catch (err) { next(err); }
+});
+
 // POST /:id/read — mark read (tech saw it)
 router.post('/:id/read', async (req, res, next) => {
   try {

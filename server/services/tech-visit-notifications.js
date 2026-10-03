@@ -48,6 +48,12 @@ const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetim
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
+// Auto-dispatch moves many visits in one nightly run. With this gate on, its
+// cards are still written one per visit, but their per-visit pushes are held
+// and the run sends ONE push per tech instead (owner ruling 2026-10-03: "yes
+// once is fine"). Read at call time; unset = one push per visit, as before.
+const SUMMARY_GATE = 'GATE_AUTO_DISPATCH_PUSH_SUMMARY';
+const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -171,7 +177,7 @@ async function describeActor(actor, conn) {
   // generic customer branch below would otherwise claim as "online".
   if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms') return 'by the customer by text';
   if (label.startsWith('customer')) return 'by the customer online';
-  if (label === 'auto_dispatch') return 'by auto-dispatch';
+  if (label === 'auto_dispatch') return AUTO_DISPATCH_ACTOR_TEXT;
   if (label.startsWith('rain')) return 'by the rain-out sweep';
   return 'by the office';
 }
@@ -207,6 +213,7 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
   const service = visit.service_type || 'Service';
   const lines = [];
   let headline;
+  let previousDate = null;
   if (kind === 'assigned') {
     headline = 'New visit on your route';
     lines.push(`${service} · ${when}`);
@@ -220,7 +227,10 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
     lines.push(`Reassigned ${actorText}`);
   } else if (kind === 'rescheduled') {
     headline = 'Visit moved';
-    const before = previous ? formatWhen(previous.date, previous.windowStart, previous.windowEnd) : null;
+    // formatWhen / dateOnly read a missing previous slot as null.
+    const prior = previous || {};
+    const before = formatWhen(prior.date, prior.windowStart, prior.windowEnd);
+    previousDate = dateOnly(prior.date);
     lines.push(service);
     if (before) lines.push(`Was ${before}`);
     lines.push(`Now ${when}`);
@@ -239,6 +249,11 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
       customer_name: who,
       service_type: visit.service_type || null,
       when,
+      // ISO days beside the display text: the Today page keeps a change that
+      // touches today or tomorrow as its own card and folds the rest into one
+      // summary (routes/tech-notifications.js /schedule-changes).
+      date: dateOnly(visit.scheduled_date),
+      previous_date: previousDate,
       previous_when: kind === 'rescheduled' && previous
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
@@ -471,7 +486,11 @@ async function deliver(notices) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
-  for (const n of written) await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  for (const n of written) {
+    // An auto-dispatch card's push is held for the run's one summary push.
+    if (n.actorText === AUTO_DISPATCH_ACTOR_TEXT && gateEnvValue(SUMMARY_GATE)) continue;
+    await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  }
   return { written: written.length, dropped };
 }
 
@@ -597,6 +616,53 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
   }, visitId);
 }
 
+/**
+ * After an auto-dispatch run: ONE push per tech that got cards from it —
+ * "Auto-dispatch moved 12 visits" — in place of the per-visit pushes deliver()
+ * held. The cards are written post-commit on the per-visit queues, so those
+ * drain first and the count is the cards the tech will actually see. Counted
+ * from `since` (the run's start, less a minute of app/DB clock slack: runs
+ * are daily and serialized by runExclusive). Best-effort; never throws.
+ */
+async function pushAutoDispatchSummary({ since, runId } = {}) {
+  try {
+    if (!enabled() || !gateEnvValue(SUMMARY_GATE) || !since) return { pushed: 0 };
+    for (let i = 0; i < 5 && visitQueues.size; i += 1) {
+      await Promise.allSettled([...visitQueues.values()]);
+    }
+    const from = new Date(new Date(since).getTime() - 60 * 1000);
+    const rows = await db('tech_notifications')
+      .whereIn('type', Object.values(TYPE_BY_KIND))
+      .where('created_at', '>=', from)
+      .whereRaw("payload->>'actor' = ?", [AUTO_DISPATCH_ACTOR_TEXT])
+      .groupBy('technician_id')
+      .select('technician_id')
+      .count('* as n');
+    const PushService = require('./push-notifications');
+    let pushed = 0;
+    for (const row of rows) {
+      const n = Number(row.n) || 0;
+      if (!n || !row.technician_id) continue;
+      try {
+        await PushService.sendToAdminUser(row.technician_id, {
+          title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
+          body: '',
+          url: '/admin/today',
+          tag: `auto-dispatch-${runId || 'run'}`,
+          priority: 'high',
+        });
+        pushed += 1;
+      } catch (err) {
+        logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${row.technician_id}: ${err.message}`);
+      }
+    }
+    return { pushed };
+  } catch (err) {
+    logger.warn(`[tech-visit-notifications] auto-dispatch summary failed (${errorTag(err)})`);
+    return { pushed: 0 };
+  }
+}
+
 // Follow-through shares the staff notification and push paths. Its live
 // card is rendered by the shared feed, so it needs no separate Got it tap.
 async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeKey, message, payload }) {
@@ -672,5 +738,7 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
+  pushAutoDispatchSummary,
+  SUMMARY_GATE,
   _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };
