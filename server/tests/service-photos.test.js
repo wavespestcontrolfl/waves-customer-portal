@@ -130,6 +130,28 @@ describe('service photo uploads', () => {
     mockS3Send.mockResolvedValue({});
   });
 
+  test('visit snapshots reject meaningful drift but allow the same visit to complete', () => {
+    const {
+      parseExpectedServicePhotoVisit,
+      servicePhotoVisitChanged,
+      servicePhotoVisitSnapshot,
+    } = require('../services/service-photos');
+    const visit = {
+      id: 'visit-1', customer_id: 'customer-1', property_id: 'property-1',
+      technician_id: 'tech-1', scheduled_date: '2026-10-02', status: 'on_site',
+    };
+    const expected = servicePhotoVisitSnapshot(visit);
+    expect(parseExpectedServicePhotoVisit(JSON.stringify(expected))).toEqual(expected);
+    expect(servicePhotoVisitChanged(expected, visit)).toBe(false);
+    expect(servicePhotoVisitChanged(expected, { ...visit, status: 'completed' })).toBe(false);
+    expect(servicePhotoVisitChanged(expected, { ...visit, status: 'cancelled' })).toBe(true);
+    expect(servicePhotoVisitChanged(expected, { ...visit, property_id: 'property-2' })).toBe(true);
+    expect(() => parseExpectedServicePhotoVisit('{"customerId":"partial"}')).toThrow('complete visit snapshot');
+    // Old clients omit expectedVisit entirely and retain the deployed API.
+    expect(parseExpectedServicePhotoVisit(undefined)).toBeNull();
+    expect(servicePhotoVisitChanged(null, { ...visit, property_id: 'property-2' })).toBe(false);
+  });
+
   test('metadata-read fallback retains the object when INSERT returns only its id', async () => {
     const { uploadServicePhotoBuffer } = require('../services/service-photos');
     const photo = await uploadServicePhotoBuffer({ serviceRecordId: 'record-1', buffer: Buffer.from('photo'), knex: makeKnex({ metadataAvailable: false }) });

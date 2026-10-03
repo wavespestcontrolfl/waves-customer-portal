@@ -327,8 +327,8 @@ const {
   sanitizeCustomerFacingPhotoCaption,
   updateStagedServicePhotoCaption,
   deleteStagedServicePhoto,
-  uploadServicePhotoBuffer,
-  uploadStagedServicePhotoBuffer,
+  uploadServicePhotoForVisit,
+  servicePhotoVisitSnapshot,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
 const {
@@ -782,66 +782,20 @@ router.post('/:id/photos', (req, res, next) => {
         error: `Invalid photoType — must be one of: ${[...VALID_PHOTO_TYPES].join(', ')}`,
       });
     }
+    // Fast refusal for the common unauthorized case. The service repeats this
+    // check on the locked row; this read is never the commit authority.
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
-
+      .first('id', 'customer_id', 'property_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-
-    // Techs can only attach photos to their own assigned services.
-    // Admin dispatch can attach completion-panel photos for any route row.
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
-
-    // Find the service_record for this scheduled_service via the
-    // direct FK (migration 20260427000007). The completion route
-    // (POST /:serviceId/complete, PR #330) populates
-    // scheduled_service_id on the new row so this lookup is
-    // unambiguous — no collisions when a single tech has two
-    // visits for the same customer on the same day.
-    const serviceRecord = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first('id');
-
-    if (!serviceRecord) {
-      const row = await uploadStagedServicePhotoBuffer({
-        scheduledServiceId: svc.id,
-        technicianId: req.technicianId,
-        buffer: req.file.buffer,
-        originalName: req.file.originalname,
-        mimeType: req.file.mimetype,
-        photoType,
-        sortOrder: req.body.sortOrder,
-        caption,
-        gpsLat: req.body.gpsLat,
-        gpsLng: req.body.gpsLng,
-        capturedAt: req.body.capturedAt,
-      });
-      logger.info(
-        `[tech-track] photo staged service=${svc.id} tech=${req.technicianId} ` +
-        `type=${photoType} size=${req.file.size}`
-      );
-      // Completion may have committed after the record lookup above. Recover
-      // immediately when visible; GET /photos repeats this recovery so an
-      // upload that raced an uncommitted completion cannot remain stranded.
-      const recovery = await promoteStagedPhotosForCompletedVisit({
-        scheduledServiceId: svc.id,
-      });
-      if (recovery) {
-        const promoted = recovery.photos.find((photo) => photo.s3_key === row.s3_key)
-          || await db('service_photos')
-            .where({ service_record_id: recovery.serviceRecordId, s3_key: row.s3_key })
-            .first();
-        return res.json({ photo: promoted || { ...row, staged: true } });
-      }
-      return res.json({ photo: { ...row, staged: true } });
-    }
-
-    const row = await uploadServicePhotoBuffer({
-      serviceRecordId: serviceRecord.id,
+    const result = await uploadServicePhotoForVisit({
+      scheduledServiceId: req.params.id,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+      expectedVisit: req.body.expectedVisit,
       buffer: req.file.buffer,
       originalName: req.file.originalname,
       mimeType: req.file.mimetype,
@@ -854,9 +808,7 @@ router.post('/:id/photos', (req, res, next) => {
       findingId: req.body.findingId,
       gpsLat: req.body.gpsLat,
       gpsLng: req.body.gpsLng,
-      // Old camera-roll metadata would sort ahead of the existing hash-chain
-      // tail. Post-completion attachments use upload time instead.
-      capturedAt: undefined,
+      capturedAt: req.body.capturedAt,
       device: req.body.device,
       appVersion: req.body.appVersion,
       aiTags: req.body.aiTags,
@@ -864,11 +816,16 @@ router.post('/:id/photos', (req, res, next) => {
     });
 
     logger.info(
-      `[tech-track] photo uploaded service=${svc.id} record=${serviceRecord.id} ` +
-      `tech=${req.technicianId} type=${photoType} size=${req.file.size}`
+      `[tech-track] photo ${result.staged ? 'staged' : 'uploaded'} service=${req.params.id} ` +
+      `record=${result.serviceRecordId || 'pending'} tech=${req.technicianId} ` +
+      `type=${photoType} size=${req.file.size}`
     );
 
-    res.json({ photo: row });
+    res.json({
+      photo: { ...result.photo, ...(result.staged ? { staged: true } : {}) },
+      reconcileRequired: result.reconcileRequired,
+      visit: result.visit,
+    });
   } catch (err) {
     logger.error(`[tech-track] photo upload failed: ${err.message}`);
     next(err);
@@ -1098,7 +1055,7 @@ router.get('/:id/photos', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+      .first('id', 'customer_id', 'property_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
@@ -1122,7 +1079,7 @@ router.get('/:id/photos', async (req, res, next) => {
           Bucket: config.s3.bucket, Key: p.s3_key,
         }), { expiresIn: 3600 }),
       })));
-      return res.json({ photos, staged: true });
+      return res.json({ photos, staged: true, visit: servicePhotoVisitSnapshot(svc) });
     }
 
     // Recovery for the narrow race where completion inserted its record after
@@ -1146,7 +1103,7 @@ router.get('/:id/photos', async (req, res, next) => {
       return { ...p, url };
     }));
 
-    res.json({ photos: enriched });
+    res.json({ photos: enriched, visit: servicePhotoVisitSnapshot(svc) });
   } catch (err) {
     logger.error(`[tech-track] photos list failed: ${err.message}`);
     next(err);
