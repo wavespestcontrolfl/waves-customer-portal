@@ -54,6 +54,15 @@ router.use(labelerPreGuard);
 router.post('/reviews/:id/label', labelerLimiter, express.json({ limit: '16kb' }), labelReview);
 // Terminal: a request with the header never falls through to another router.
 router.use((_req, res) => res.status(404).json({ error: 'Not found' }));
+// The parser's own failures (a valid caller's malformed or oversized body) are
+// answered here: the global error handler would turn them into a 500.
+ 
+router.use((err, req, res, next) => {
+  if (!req.machineLabeler) return next(err);
+  if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'Body too large' });
+  if (err && (err.type === 'entity.parse.failed' || err.status === 400)) return res.status(400).json({ error: 'Invalid JSON body' });
+  return next(err);
+});
 
 module.exports = router;
 module.exports.labelerPreGuard = labelerPreGuard;

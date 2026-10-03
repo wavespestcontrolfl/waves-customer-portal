@@ -764,9 +764,10 @@
     {
       "router": "server/routes/typed-decisions-labeler.js",
       "mount": "/api/admin/typed-decisions",
-      "reason": "Typed-decision labeler token (owner 2026-10-02, \"token is fine\"): the Claude labeling runner writes labels with X-Labeler-Token = TYPED_DECISIONS_LABELER_TOKEN (32+ chars, constant-time compare, unset = off). Requests WITHOUT the header leave this router untouched (next('router')) and meet the admin router's adminAuthenticate + requireAdmin as before. Requests WITH it never leave it: privacy headers, generic 404 for a wrong token / any path or method other than POST /reviews/<uuid>/label / GATE_TYPED_DECISIONS off, then a /64-keyed 120/min limiter, a 16 KB parser and the shared label write narrowed for a machine (no force, unreviewed rows only, labeled_by claude-labeler, audit actor system). Terminal 404. docs/public-route-contracts.md.",
+      "reason": "Typed-decision labeler token (owner 2026-10-02, \"token is fine\"): the Claude labeling runner writes labels with X-Labeler-Token = TYPED_DECISIONS_LABELER_TOKEN (32+ chars, constant-time compare, unset = off). Requests WITHOUT the header leave this router untouched (next('router')) and meet the admin router's adminAuthenticate + requireAdmin as before. Requests WITH it never leave it: privacy headers, generic 404 for a wrong token / any path or method other than POST /reviews/<uuid>/label / GATE_TYPED_DECISIONS off, then a /64-keyed 120/min limiter, a 16 KB parser and the shared label write narrowed for a machine (no force, unreviewed rows only, labeled_by claude-labeler, audit actor system). Terminal 404, then a router-local error handler that answers the parser's 400 / 413 for a verified caller. docs/public-route-contracts.md.",
       "routes": [
         "POST /api/admin/typed-decisions/reviews/:id/label",
+        "USE /api/admin/typed-decisions (inline function#2b447e91)",
         "USE /api/admin/typed-decisions (inline function#e715579e)",
         "USE /api/admin/typed-decisions (labelerPreGuard#a9ef859e)"
       ]

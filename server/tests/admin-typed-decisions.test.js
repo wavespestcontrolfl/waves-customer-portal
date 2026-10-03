@@ -425,3 +425,52 @@ describe('labeler-token router wiring (server/index.js)', () => {
     expect(called(log, 'decision_reviews', 'where')).not.toContainEqual(['label_status', 'unreviewed']);
   });
 });
+
+describe('labeler-token router on its own (production order: no parser in front of it)', () => {
+  const TOKEN = 'synthetic-labeler-token-0123456789abcdef';
+  const savedToken = process.env.TYPED_DECISIONS_LABELER_TOKEN;
+  let bare; let bareUrl;
+  beforeAll(() => {
+    const app = express();
+    app.use('/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
+    app.use((_req, res) => res.status(418).json({ error: 'fell through' }));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    bare = app.listen(0);
+    bareUrl = `http://127.0.0.1:${bare.address().port}/admin/typed-decisions`;
+  });
+  afterAll(() => new Promise((resolve) => {
+    if (savedToken === undefined) delete process.env.TYPED_DECISIONS_LABELER_TOKEN; else process.env.TYPED_DECISIONS_LABELER_TOKEN = savedToken;
+    bare.close(resolve);
+  }));
+  beforeEach(() => { process.env.TYPED_DECISIONS_LABELER_TOKEN = TOKEN; });
+  const raw = (body, headers = {}) => fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN, ...headers }, body });
+
+  test('parses its own body and labels', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const r = await raw(JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN }));
+    expect(r.status).toBe(200);
+    expect(called(log, 'decision_reviews', 'update')[0][0].labeled_by).toBe('claude-labeler');
+  });
+
+  test('malformed JSON is 400 and an oversized body is 413, with privacy headers and no database read', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    const bad = await raw('{"verdict": ');
+    expect(bad.status).toBe(400);
+    expect(bad.headers.get('cache-control')).toBe('no-store');
+    const big = await raw(JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN, note: 'x'.repeat(20 * 1024) }));
+    expect(big.status).toBe(413);
+    expect(log.decision_reviews || []).toHaveLength(0);
+  });
+
+  test('without the header the request leaves the router untouched (falls through to the next mount)', async () => {
+    const r = await fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    expect(r.status).toBe(418);
+    expect(r.headers.get('x-robots-tag')).toBeNull();
+  });
+
+  test('an OPTIONS carrying the header gets the generic 404, not a preflight answer', async () => {
+    const r = await fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'OPTIONS', headers: { 'X-Labeler-Token': TOKEN } });
+    expect(r.status).toBe(404);
+    expect(r.headers.get('cache-control')).toBe('no-store');
+  });
+});
