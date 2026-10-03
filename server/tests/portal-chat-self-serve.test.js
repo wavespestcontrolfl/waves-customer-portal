@@ -226,6 +226,8 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     expect(opts.metadata).toEqual(expect.objectContaining({
       severity: 'needs-you', who: 'person', doneWhen: 'customer_answered', escalationId: 'esc-1',
       subject: { type: 'customer', id: 'cust-1' },
+      // The relevance sweep reads the topic (an add_service bell closes on an estimate).
+      topic: 'billing',
     }));
     expect(result.teamNotified).toBe(true);
     expect(result.reply).toMatch(/I've sent this to our team/);
