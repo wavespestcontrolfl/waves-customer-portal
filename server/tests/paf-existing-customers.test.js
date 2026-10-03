@@ -80,7 +80,8 @@ describe('accept route wiring (source pins)', () => {
       /const expectedPromise = RecurringCards\.resolveCollectionPromise\(\{[\s\S]{0,200}setupFeeDeferred: setupFeeAfterVisitConsentShown,\s*\}\);/,
     );
     expect(src).toMatch(
-      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: \(acceptedCollectionPromise\?\.variant \|\| null\),/,
+      // PR-D: a deferred prepay accept records the after-visit prepay text.
+      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? \(prepayChargeAfterFirstVisit \? 'after_visit_prepay' : 'prepay_card'\)[\s\S]{0,400}: \(acceptedCollectionPromise\?\.variant \|\| null\),/,
     );
     // No second copy of the variant predicate in the route.
     expect(src).not.toMatch(/recurringCardAfterVisitVariant/);

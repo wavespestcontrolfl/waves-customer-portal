@@ -166,7 +166,7 @@ async function writeOutcomeResilient(callLogId, args) {
 }
 
 /** Speak the generic callback voicemail if the 30-day cap allows, else silence. */
-async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, outcome, now = new Date() }) {
+async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, outcome, callerId = null, now = new Date() }) {
   const permitted = await voicemailPermitted(customerId, { now });
   // RESERVE-THEN-SPEAK (gh prb-r2): the 30-day cap marker must persist
   // BEFORE the message plays — an unstampable marker means silence, because
@@ -177,7 +177,7 @@ async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, o
     : false;
   const speak = permitted && stamped;
   if (speak) {
-    twiml.say(script.genericCallbackVoicemail());
+    twiml.say(script.genericCallbackVoicemail(callerId));
   }
   twiml.hangup();
   if (callLogId) {
@@ -250,6 +250,7 @@ router.post('/collections-vestibule', async (req, res) => {
       // voicemail, at most 1/30d, zero balance mention.
       await appendCappedVoicemail(twiml, {
         customerId: call.customer.id,
+        callerId: call.row.from_phone,
         ledgerId: call.meta.ledgerId,
         callLogId: call.row.id,
         outcome: 'voicemail_left',
@@ -317,7 +318,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
       // Unstampable = apologize with the office number, no audio processing.
       const consentStamped = await stampCallMeta(call.row.id, { vestibule_consent_at: new Date().toISOString() });
       if (!consentStamped) {
-        twiml.say(script.callbackNumberOnly());
+        twiml.say(script.callbackNumberOnly(call.row.from_phone));
         twiml.hangup();
         await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_consent_unrecorded' });
         return sendTwiml(res, twiml);
@@ -367,7 +368,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
         }
         twiml.say((optOutCard && optOutCard.id)
           ? 'Understood. A member of our team will make sure automated calls to this number are stopped. Goodbye.'
-          : script.callbackNumberOnly());
+          : script.callbackNumberOnly(call.row.from_phone));
       }
       twiml.hangup();
       await writeOutcomeResilient(call.row.id, {
@@ -403,7 +404,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
       // Promise the callback only if the card persisted (gh prb-r3).
       // A card counts only with a real id (gh prb-r19): notifyAdmin's
       // suppressed sentinel { id: null } is truthy but persists nothing.
-      twiml.say((officeCard && officeCard.id) ? script.callbackPromise() : script.callbackNumberOnly());
+      twiml.say((officeCard && officeCard.id) ? script.callbackPromise(call.row.from_phone) : script.callbackNumberOnly(call.row.from_phone));
       twiml.hangup();
       await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_office' });
       return sendTwiml(res, twiml);
@@ -434,6 +435,7 @@ router.post('/collections-vestibule-noinput', async (req, res) => {
     const twiml = new VoiceResponse();
     await appendCappedVoicemail(twiml, {
       customerId: call.customer.id,
+      callerId: call.row.from_phone,
       ledgerId: call.meta.ledgerId,
       callLogId: call.row.id,
       outcome: 'vestibule_no_input',
@@ -541,7 +543,7 @@ router.post('/collections-transfer-complete', async (req, res) => {
       // gh prb-r2: the office was OPEN — a busy/unanswered line must not
       // announce a false closure. And the callback half of that copy is
       // only spoken when its card persisted (gh prb-r3).
-      twiml.say((missCard && missCard.id) ? script.transferMissedCallback() : script.callbackNumberOnly());
+      twiml.say((missCard && missCard.id) ? script.transferMissedCallback(call.row.from_phone) : script.callbackNumberOnly(call.row.from_phone));
     }
     twiml.hangup();
     return sendTwiml(res, twiml);

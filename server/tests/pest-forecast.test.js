@@ -143,12 +143,16 @@ describe('computeForecast payload', () => {
     expect(out.attribution.url).toContain('utm_source=embed');
     expect(out.attribution.url).toContain('bradenton-fl');
     expect(typeof out.summary).toBe('string');
-    expect(out.disclaimer).toMatch(/not a guarantee/i);
+    expect(out.disclaimer).toMatch(/not a measurement or guarantee/i);
   });
 
-  test('summary names a rising pest on a warm wet week', () => {
+  test('weather adjustment describes the seasonal baseline, never an invented weekly rise', () => {
     const out = computeForecast(bradenton, sig({ tempHighF: 91, precipChance: 70 }), augDate);
-    expect(out.summary.toLowerCase()).toContain('climbing');
+    expect(out.summary).toContain('above the usual August baseline');
+    expect(out.summary).not.toMatch(/climbing|rising|increased|spiking/i);
+    expect(out.evidence.observation_validation).toBe('not_validated');
+    expect(out.pests.every(p => p.week_over_week === null)).toBe(true);
+    expect(out.pests.find(p => p.key === 'mosquitoes')).toMatchObject({ baseline_comparison: 'above', trend_basis: 'seasonal_baseline' });
   });
 
   test('degrades to seasonal outlook when live weather is unavailable', () => {

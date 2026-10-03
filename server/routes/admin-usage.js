@@ -81,9 +81,12 @@ const KNOWN_PAGE_KEYS = new Set([
   'inventory', 'invoices', 'knowledge', 'lawn-assessment', 'lawn-assessments',
   'leads', 'more', 'newsletter', 'payers', 'phone-numbers', 'pipeline',
   'ppc', 'price-change', 'price-match', 'pricing', 'pricing-logic',
-  'pricing-reality-check', 'projects', 'recruiting', 'referrals', 'revenue', 'reviews',
+  'pricing-reality-check', 'projects', 'rate-review', 'recruiting', 'referrals', 'revenue', 'reviews',
   'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
-  'timetracking', 'tool-health', 'turf-height',
+  'timetracking', 'today', 'tool-health', 'turf-height',
+  // Multi-line <Route\n path="…"> tags the old single-line scan skipped;
+  // both are real admin pages that beacon (nesting-aware scan, PR #5573).
+  'kb', 'lawn-protocol',
 ]);
 
 // Deep path segments that are real route structure (the route table's
@@ -97,6 +100,8 @@ const KNOWN_PAGE_KEYS = new Set([
 const KNOWN_SUBPAGE_WORDS = new Set([
   'new', 'import', 'map', 'directory', 'kanban', 'search', 'settings',
   'duplicates', 'pest-pressure', 'proposal', 'flags',
+  // /admin/today field workspace subpages (Codex #5573 r11).
+  'tools', 'more', 'estimate', 'protocols', 'documents', 'pay-growth', 'lawn-diagnostic', 'social-post',
 ]);
 
 /** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.

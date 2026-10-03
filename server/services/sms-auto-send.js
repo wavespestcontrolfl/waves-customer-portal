@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null, unanswered = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -220,6 +220,16 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     // replies. Under the same lock as the prior claim's commit, so they
     // serialize: one autonomous reply in flight per thread at a time.
     if (await hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
+      return null;
+    }
+
+    // Unanswered-text lane (sms-unanswered-reply.js): the suggestion it answers
+    // must still be waiting for a person, and nobody may have called since the
+    // text. Same lock, so a reviewer's send and this claim cannot both win.
+    if (unanswered && await require('./sms-unanswered-reply').claimGuard(trx, {
+      suggestionId: unanswered.suggestionId, draftId, smsLogId, threadLast10, customerId,
+      fromPhone: inbound.from_phone, toPhone: inbound.to_phone,
+    })) {
       return null;
     }
 
@@ -255,18 +265,33 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          // the payment-status sentences the reply copies, re-rendered and rechecked before provider entry (dispatchClaimedSend)
+          ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
           ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
           // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
           ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+          // Pre-push audit P1 (finding 2) — see publishSuggestion's identical
+          // comment (sms-suggest-mode.js): the invoice the drafter's Zelle
+          // fact was built for, for the send-time recheck to re-run
+          // isZelleTransferEligible against its CURRENT state.
+          ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
           // Independent review finding (PR #5334): the same live-ETA
           // send-time snapshot publishSuggestion persists — see its comment.
           ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
           ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+          // PR #5499: the open call_commitments ids the draft's VISIT STATUS & OPEN LOOPS lines named.
+          ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+          ...(visitLoopStatus ? { visit_loop_status: visitLoopStatus } : {}),
+          // Which suggestion this send answered, for the unanswered-text lane's
+          // bookkeeping and for anyone reviewing why the text went out.
+          ...(unanswered ? { unanswered_reply: { suggestion_id: unanswered.suggestionId, wait_open_minutes: unanswered.waitOpenMinutes } } : {}),
         }),
         suggested_message: reply,
-        reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
+        reasoning_summary: unanswered
+          ? 'Suggested house-voice reply sent because no person answered the text in time (unanswered-text lane).'
+          : 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
         prompt_version: promptVersion || null,
         // Scope idempotency to the INBOUND, not the draft: message_drafts are
@@ -309,13 +334,25 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
     return {
-      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot,
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot, paymentStatusSnapshot,
       // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
       inboundMessage,
+      // Pre-push audit P1 (finding 2): threaded to the pre-send Zelle
+      // eligibility recheck in dispatchClaimedSend.
+      zelleInvoiceId,
       // Independent review finding (PR #5334): carried in-memory so
       // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
       // through the row it just inserted.
+      // promptVersion: which prompt family the reply was drafted under (real-answers v12 replies run the payment-status recheck; PR #5334 ETA check reads it too)
       liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
+      visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
+      visitLoopStatus: visitLoopStatus || null,
+      // what the unanswered-text lane's provider-boundary check reads
+      unanswered: unanswered ? {
+        suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId, factsAt: unanswered.factsAt || null,
+        factsStamp: unanswered.factsStamp || null,
+        fromPhone: inbound.from_phone, toPhone: inbound.to_phone,
+      } : null,
     };
   });
 }
@@ -495,8 +532,20 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
-// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
-const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2),
+// and so does the open-loop recheck (PR #5499). Codex round-63 P2: a billing / Zelle change (or an unreadable re-read) at the
+// boundary is retryable too - the retry reruns the full recheck.
+const RETRYABLE_BOUNDARY_CODES = new Set([
+  'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY',
+  'BILLING_CHANGED_AT_BOUNDARY', 'ZELLE_CHANGED_AT_BOUNDARY',
+]);
+const BOUNDARY_RECHECK_SUBSYSTEMS = Object.freeze({
+  LIVE_ETA_CHECK_FAILED_AT_BOUNDARY: { what: 'the live ETA', logName: 'live ETA' },
+  LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY: { what: 'the label timing', logName: 'label facts' },
+  OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY: { what: 'the open promises and visit status', logName: 'open-loop' },
+  BILLING_CHANGED_AT_BOUNDARY: { what: 'the billing state', logName: 'billing', changeable: true },
+  ZELLE_CHANGED_AT_BOUNDARY: { what: 'the Zelle details', logName: 'Zelle', changeable: true },
+});
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
     && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
@@ -556,6 +605,10 @@ async function maybeAutoSend(params = {}) {
       intent: params.intent,
       reply: gratitudeLane ? claim.reply : params.reply,
       customerId: gratitudeLane ? claim.customerId : ready.customerId,
+      // Codex round-9 P1: the customer's original inbound (scopes the payment-status
+      // recheck). A gratitude reply is never a payment
+      // claim and carries none.
+      inboundMessage: gratitudeLane ? null : (params.inboundMessage || null),
     });
   } catch (err) {
     logger.error(`[sms-auto-send] unexpected failure (draft ${params.draftId}): ${err.message}`);
@@ -568,6 +621,65 @@ async function maybeAutoSend(params = {}) {
  * runs for a draft that is already refused. Returns { reason } on refusal,
  * otherwise { customerId } — for gratitude, the reloaded durable customer.
  */
+// (3.7)-(3.8) of autoSendReadiness: the deterministic checks on the reply's own content, { reason } or null. Their own function (Codex
+// round-71 P2) so the readiness ladder keeps one rung per decision.
+function replyContentReadinessBlock(params, gratitudeLane) {
+  const { reply, intent, intendedActions = null } = params;
+  const suggest = require('./sms-suggest-mode');
+  // a v12 reply's verbatim copies of its snapshotted rendered sentences are the records' own figures, not quotes (Codex round-72 P2,
+  // owner 'hold when ambiguous' ruling 2026-10-02: an unambiguous copied payment line auto-sends); they are gated at (3.75) instead
+  const quotable = isV12PaymentLane(params, gratitudeLane)
+    ? require('./payment-status-contract').withoutSnapshotCopies(reply, params.paymentStatusSnapshot || null)
+    : reply;
+  // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
+  //       allows real amounts in texts, and the suggest lane now delivers
+  //       them (a human reviews before send) — but at the autonomy
+  //       boundary a wrong figure sent with nobody looking is the
+  //       worst-case failure, so this lane stays refused until an explicit
+  //       owner call relaxes it. Deterministic, independent of the LLM
+  //       verifier.
+  if (suggest.hasPriceQuote(quotable)) {
+    logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
+    return { reason: 'price_quote' };
+  }
+
+  // (3.75) PAYMENT-SCOPED replies auto-send only as verbatim copies of rendered account sentences plus inert text (greeting, thanks,
+  //        "let us know if you have questions"). The status detector is a net with holes; this makes a miss fail SAFE for the
+  //        autonomous rung: anything else in a reply about payments goes to Agent Review, where a person reads it (owner ruling
+  //        2026-10-01, PR #5331). Real-answers (v12) drafts only; re-checked at dispatch with the claim's own snapshot.
+  const scopeBlock = paymentScopeReadinessBlock(params, gratitudeLane);
+  if (scopeBlock) return scopeBlock;
+
+  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
+  //       the real-answers prompt has the model quote the follow-up SLA
+  //       phrase when the facts can't answer, and the prompt now requires an
+  //       escalate action alongside it — but the prompt is not the boundary.
+  //       Deterministic backstop: an SLA phrase in the reply with no
+  //       escalate action means nobody owns the promise; never auto-send it.
+  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
+  //       prompt, and with the gate off auto-send is unchanged by this PR.
+  const followupSla = require('./sms-followup-sla');
+  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
+      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
+    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
+    return { reason: 'unowned_followup' };
+  }
+  return null;
+}
+
+// (3.75) of autoSendReadiness: { reason } when a v12 payment-scoped reply is not copy-only, else null (Codex round-71 P2: its own
+// function, so the readiness ladder stays one decision per rung).
+const isV12PaymentLane = (params, gratitudeLane) => !gratitudeLane && typeof params.promptVersion === 'string' && params.promptVersion.startsWith('house_voice_v12');
+function paymentScopeReadinessBlock(params, gratitudeLane) {
+  if (!isV12PaymentLane(params, gratitudeLane)) return null;
+  const scopeBlock = require('./payment-status-contract').autoSendScopeBlock({
+    reply: params.reply, inboundText: params.inboundMessage == null ? null : String(params.inboundMessage), snapshot: params.paymentStatusSnapshot || null,
+  });
+  if (!scopeBlock) return null;
+  logger.info(`[sms-auto-send] payment-scoped reply is not copy-only — routing to review (intent=${params.intent})`);
+  return { reason: scopeBlock };
+}
+
 async function autoSendReadiness(params, gratitudeLane) {
   const {
     customer, smsLogId, reply, intent, intendedActions = null,
@@ -610,32 +722,9 @@ async function autoSendReadiness(params, gratitudeLane) {
   const profile = await pinDraftVoiceProfile(params);
   if (profile.reason) return profile;
 
-  // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
-  //       allows real amounts in texts, and the suggest lane now delivers
-  //       them (a human reviews before send) — but at the autonomy
-  //       boundary a wrong figure sent with nobody looking is the
-  //       worst-case failure, so this lane stays refused until an explicit
-  //       owner call relaxes it. Deterministic, independent of the LLM
-  //       verifier.
-  if (suggest.hasPriceQuote(reply)) {
-    logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
-    return { reason: 'price_quote' };
-  }
-
-  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
-  //       the real-answers prompt has the model quote the follow-up SLA
-  //       phrase when the facts can't answer, and the prompt now requires an
-  //       escalate action alongside it — but the prompt is not the boundary.
-  //       Deterministic backstop: an SLA phrase in the reply with no
-  //       escalate action means nobody owns the promise; never auto-send it.
-  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
-  //       prompt, and with the gate off auto-send is unchanged by this PR.
-  const followupSla = require('./sms-followup-sla');
-  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
-      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
-    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
-    return { reason: 'unowned_followup' };
-  }
+  // (3.7)-(3.8) the reply's own content: amounts, payment scope, an owned follow-up (replyContentReadinessBlock)
+  const contentBlock = replyContentReadinessBlock(params, gratitudeLane);
+  if (contentBlock) return contentBlock;
 
   // (4) Server-enforced graduation eligibility — re-checked live every send.
   const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
@@ -769,7 +858,7 @@ function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
 }
 
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
-function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }) {
+function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint = undefined, zelle = null }) {
   const parkedIds = claim.parkedIds || [];
   const laneFields = gratitudeLane ? {
     providerPreSendCheck: checkHandoff,
@@ -802,14 +891,35 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
+    // Open-loop commitments (PR #5499) run next: a promise the reply was grounded on
+    // can be fulfilled or dismissed while the draft is verified and claimed.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
         // executor's own recheck cannot let the previous visit's timing through.
         labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // gratitude carries no draft snapshot: its fixed reply is refused when the
+        // rebuilt facts hold anything that must be answered (PR #5499)
+        gratitudeLane
+          ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
+          : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
+        // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection).
+        // (The unanswered-text lane's own handoff check below covers the account state, so there the billing read runs only once, last.)
+        billingFingerprint !== undefined && !claim.unanswered
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
+          : undefined,
         laneFields.providerPreSendCheck,
+        // unanswered-text lane, the final STATE read before the provider (only the single billing fingerprint query follows it):
+        // the customer texted again, someone called, a visit moved, the phone changed hands
+        claim.unanswered ? checkHandoff : undefined,
+        // Codex round-60 P1: the lane predicate above reads the DB too (the booked re-service reference), so the billing fingerprint is
+        // read ONCE MORE after it - the last read before the provider request is a billing one (a single query on the handoff connection)
+        // Codex round-63 P1: the saved Zelle facts ride this final repeat too (recipient + eligibility re-read after the lane await)
+        billingFingerprint !== undefined
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
+          : undefined,
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
@@ -839,6 +949,197 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
   };
 }
 
+// BILLING rechecks of an auto-send reply (PR #5331): Zelle offer, Zelle denial, payment status. Returns null when the reply may go
+// on, else { reason, note } - the caller marks it not sent and reopens the suggestion with that note.
+async function autoSendBillingRecheck({ claim, reply, customerId, inboundMessage }) {
+  // THE MONEY-SENTENCE CONTRACT (owner 2026-10-01 ~23:58Z): a real-answers reply may state a payment status, a dollar figure or anything
+  // about Zelle only by copying a sentence its snapshot recorded, every copy must still be rendered NOW (a Zelle copy: same recipient,
+  // same live eligibility of its invoice), and an autonomous payment-scoped reply carries nothing but copies and inert text. An older
+  // prompt's reply that names a Zelle contact gets the staff-path check (current recipient, an invoice that still takes Zelle).
+  // A throwing recheck fails closed with its own reason (Codex round-13 P1). Same supersede-via-failClaim mechanism as the rechecks above.
+  const recheck = require('./sms-amount-recheck');
+  const v12 = typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12');
+  try {
+    if (v12) {
+      const verdict = await recheck.paymentStatusVerdict({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage, autoSend: true });
+      if (verdict.reason) {
+        logger.warn(`[sms-auto-send] money content held (decision ${claim.decisionId}): ${verdict.reason}`);
+        return { reason: verdict.reason, note: 'Auto-send held: a payment or price statement is no longer accurate — suggestion reopened.' };
+      }
+      return verdict.zelle ? { zelle: verdict.zelle } : null;
+    }
+    if (/\bzelle\b/i.test(String(reply || ''))) {
+      const verdict = await recheck.outgoingAmountsStale({ customerId, body: reply, promptVersion: claim.promptVersion || null, zelleInvoiceId: claim.zelleInvoiceId || null, inboundMessage, trustOwedAmounts: true });
+      if (verdict.stale) {
+        logger.warn(`[sms-auto-send] Zelle recheck failed (decision ${claim.decisionId}): ${verdict.reason}`);
+        return { reason: verdict.reason, note: 'Auto-send held: the payment instructions are no longer valid — suggestion reopened.' };
+      }
+      return verdict.zelle ? { zelle: verdict.zelle } : null;
+    }
+  } catch (err) {
+    logger.warn(`[sms-auto-send] money recheck threw (decision ${claim.decisionId}): ${err.message}`);
+    return { reason: 'payment_status_recheck_failed', note: 'Auto-send held: a payment or price statement could not be rechecked — suggestion reopened.' };
+  }
+  return null;
+}
+
+/**
+ * Arm before provider entry. A timeout followed by a DB outage still has
+ * durable uncertainty evidence; if this write misses, fail closed before
+ * any customer communication. Returns the settle result (falsy = not armed).
+ */
+async function armProviderOutcomeReservation(claim) {
+  try {
+    return await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true });
+  } catch (err) {
+    logger.warn(`[sms-auto-send] arming the provider-outcome reservation threw (decision ${claim.decisionId}): ${err.message}`);
+    return false;
+  }
+}
+
+// PRE-SEND RECHECKS of a claimed reply. Each phase below returns null when the reply may go on, else a refusal the caller settles:
+//   { reason, note, settleReason? } - mark it not sent (failClaim) and reopen the suggestion with that note;
+//   { release: true, reason }       - the live ETA could not be READ: release the claim (retryable), never a failed auto-send.
+
+// OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
+// threaded from claimAutoSend's own insert — the exact windows a
+// drafted reply quoted plus the lookup inputs (same shape the shared
+// /sms and /schedule-sms choke point in admin-communications.js
+// rechecks). Applies to every claimed auto-send, gratitude included.
+// Only windows still present in the reply that will actually send are
+// rechecked; a gone slot, a fetch error, or a timeout all fail closed —
+// same supersede-via-failClaim mechanism every other refusal in this
+// function already uses, siblings reopened same as any other pre-send
+// refusal so a stale slot never silently swallows the thread.
+async function openTimesRefusal({ claim, reply }) {
+  if (!claim.openTimesSnapshot?.quotedWindows?.length) return null;
+  const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && w?.window && reply.includes(w.window));
+  if (!stillQuoted.length) return null;
+  const { openTimesStillOffered } = require('./sms-shadow-drafter');
+  const lookup = claim.openTimesSnapshot.lookup;
+  const recheck = await openTimesStillOffered({
+    city: lookup?.city || null,
+    customerId: lookup?.customerId || null,
+    estimateId: lookup?.estimateId || null,
+    // Same service identity the draft was priced with (Codex r3 / audit P1)
+    ...(lookup?.serviceType ? { serviceType: lookup.serviceType } : {}),
+    ...(lookup?.scheduledServiceId ? { scheduledServiceId: lookup.scheduledServiceId } : {}),
+    // Which picker minted the offer, and what it needs to be asked again
+    // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+    ...(lookup?.source ? { source: lookup.source } : {}),
+    ...(lookup?.serviceKey ? { serviceKey: lookup.serviceKey } : {}),
+    quotedWindows: stillQuoted,
+  });
+  if (recheck.ok) return null;
+  logger.warn(`[sms-auto-send] open-times stale (decision ${claim.decisionId}): ${recheck.reason}`);
+  return { reason: recheck.reason, note: 'Auto-send held: a quoted appointment time is no longer open — suggestion reopened.' };
+}
+
+// LABEL FACTS send-time recheck: a reply that copies a label sentence
+// must still be backed by the customer's CURRENT latest performed visit
+// (a newer visit, a visit today, a changed label all refuse). Same
+// supersede-via-failClaim refusal as the open-times recheck above.
+// Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
+// answers a label question); older-prompt drafts run it only when they carry a snapshot.
+async function labelFactsRefusal({ claim, reply }) {
+  if (!(claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12')))) return null;
+  const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
+  if (!labelReason) return null;
+  if (require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
+    // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
+    // like the live-ETA case - reservation settled, parked siblings reopened, the draft falls through to a
+    // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
+    logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    return { release: true, reason: labelReason, note: 'Auto-send paused: the label timing could not be rechecked — suggestion reopened.' };
+  }
+  logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
+  return { reason: labelReason, note: 'Auto-send held: the label timing in the draft is no longer current — suggestion reopened.' };
+}
+
+// LIVE ETA send-time recheck (independent review + Codex round-1
+// finding, PR #5334): the SAME shared check the immediate /sms send and
+// the scheduler's queued-send path run (sms-eta-freshness) — claim's
+// liveEtaSnapshot/factsGeneratedAt are the in-memory copies claimAutoSend
+// just inserted, so this needs no round trip through the row. A reply
+// that makes a minutes-away/ETA claim with no backing snapshot, a stale
+// draft, or a visit that is no longer customer-facing en_route fails
+// closed — same supersede-via-failClaim mechanism every other refusal
+// here uses, siblings reopened the same way.
+async function liveEtaRefusal({ claim, reply }) {
+  const { etaClaimBlockReason } = require('./sms-eta-freshness');
+  const etaReason = await etaClaimBlockReason({
+    liveEtaSnapshot: claim.liveEtaSnapshot,
+    factsGeneratedAt: claim.factsGeneratedAt,
+    techNames: claim.techNames,
+    promptVersion: claim.promptVersion,
+    outgoingBody: reply,
+  });
+  if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {
+    // The recheck could not READ the live state (Codex round-44 P2) — nothing is known to
+    // be stale, so the claim is RELEASED instead of failed (releaseClaimForEtaRetry): the freshly inserted claim row
+    // is removed and its reservation settled (nothing was sent), parked siblings reopen, and
+    // the verified draft falls through to a human-visible suggestion that the reviewer-send
+    // seam rechecks again. The decision is never recorded as a failed auto-send.
+    logger.warn(`[sms-auto-send] live ETA recheck unreadable (decision ${claim.decisionId}): ${etaReason}; releasing the claim (retryable)`);
+    return { release: true, reason: etaReason };
+  }
+  if (!etaReason) return null;
+  logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
+  return { reason: etaReason, note: 'Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.' };
+}
+
+// Release a claim whose live ETA could not be rechecked: the claim row is removed (never auto_send_failed), the reservation
+// settled, parked siblings reopened; the verified draft falls through to a human-visible suggestion that the reviewer-send
+// seam rechecks again. Shared by the early executor check and the provider-boundary refusal.
+async function releaseClaimForEtaRetry({ claim, reopenParked, note = 'Auto-send paused: the live ETA could not be rechecked — suggestion reopened.' }) {
+  await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
+  await releaseClaim(claim.decisionId);
+  await reopenParked(note);
+}
+
+// BILLING (Zelle offer / denial, payment status): autoSendBillingRecheck. Codex round-49 P1: the fingerprint of every billing row
+// that recheck reads is taken FIRST, so the provider-boundary check (autoSendMessage) refuses if anything changed after it.
+// (Guarded: partial test doubles of sms-amount-recheck omit the helper.) Returns { refusal } or the verdict's provider-boundary inputs.
+async function autoSendBillingPhase({ claim, reply, customerId, inboundMessage }) {
+  const billingJudged = require('./sms-amount-recheck').bodyNeedsBillingBoundaryCheck;
+  const billingFingerprint = typeof billingJudged === 'function' && billingJudged(reply, { inboundMessage, promptVersion: claim.promptVersion })
+    ? await require('./billing-fingerprint').billingFingerprint(customerId)
+    : undefined;
+  const billingHold = await autoSendBillingRecheck({ claim, reply, customerId, inboundMessage });
+  if (billingHold?.reason) {
+    logger.warn(`[sms-auto-send] billing recheck held (decision ${claim.decisionId}): ${billingHold.reason}`);
+    return { refusal: { reason: billingHold.reason, note: billingHold.note } };
+  }
+  return { billingFingerprint, zelle: billingHold?.zelle || null };
+}
+
+// Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
+// the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
+async function bookedReserviceRefusal({ claim, reply, customerId }) {
+  const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
+  if (booked.ok) return null;
+  logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
+  return { reason: booked.code, settleReason: booked.reason, note: 'Auto-send held: the referenced re-service appointment changed — suggestion reopened.' };
+}
+
+// The recheck sequence before provider entry, in the order that matters: the async live-ETA read comes before billing, and the
+// booked-callback read is LAST (Codex #5334 P2: booking state that changes while the ETA read was in flight is still caught, so the
+// last async read before provider entry is the booked-callback one). Returns { refusal } on the first refusal, else
+// { billingFingerprint, zelle } for the provider-boundary check.
+async function autoSendPreSendRechecks({ claim, gratitudeLane, reply, customerId, inboundMessage }) {
+  for (const phase of [openTimesRefusal, labelFactsRefusal, liveEtaRefusal]) {
+    const refusal = await phase({ claim, reply });
+    if (refusal) return { refusal };
+  }
+  const billing = await autoSendBillingPhase({ claim, reply, customerId, inboundMessage });
+  if (billing.refusal) return billing;
+  if (!gratitudeLane) {
+    const refusal = await bookedReserviceRefusal({ claim, reply, customerId });
+    if (refusal) return { refusal };
+  }
+  return billing;
+}
+
 /**
  * (7) Send a claimed reply via the policy-checked provider path (consent,
  * suppression, identity trust all enforced upstream) and settle the claim.
@@ -847,141 +1148,55 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
  * answered autonomously — they resolve as ignored (drafts return to the
  * judge), exactly like the manual send's post-send sweep.
  */
-async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draftId, intent, reply, customerId }) {
+async function dispatchClaimedSend({
+  claim, gratitudeLane, eligibilityPin, draftId, intent, reply, customerId, inboundMessage = null,
+}) {
   const suggest = require('./sms-suggest-mode');
   const parkedIds = claim.parkedIds || [];
   const reopenParked = async (reason) => {
     if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
   };
   const notSent = async (reason, settleReason = reason) => {
-    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    // Codex round-13 P1: the claim is released on EVERY pre-send error path — a
+    // throwing reservation settle must never leave the decision stuck 'sending'.
+    try {
+      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    } catch (err) {
+      logger.warn(`[sms-auto-send] reservation settle threw while releasing (decision ${claim.decisionId}): ${err.message}`);
+    }
     await failClaim(claim.decisionId, settleReason);
     return { sent: false, reason };
   };
 
-  // Arm before provider entry. A timeout followed by a DB outage still has
-  // durable uncertainty evidence; if this write misses, fail closed before
-  // any customer communication.
-  if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true })) {
+  if (!await armProviderOutcomeReservation(claim)) {
     await failClaim(claim.decisionId, 'could not arm provider-outcome reservation');
     await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
     return { sent: false, reason: 'reservation_failed' };
   }
-  const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
+  const checkHandoff = gratitudeLane
+    ? gratitudeHandoffCheck(claim, eligibilityPin)
+    : (claim.unanswered ? require('./sms-unanswered-reply').handoffCheck(claim) : undefined);
   let result;
   try {
-    // OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
-    // threaded from claimAutoSend's own insert — the exact windows a
-    // drafted reply quoted plus the lookup inputs (same shape the shared
-    // /sms and /schedule-sms choke point in admin-communications.js
-    // rechecks). Applies to every claimed auto-send, gratitude included.
-    // Only windows still present in the reply that will actually send are
-    // rechecked; a gone slot, a fetch error, or a timeout all fail closed —
-    // same supersede-via-failClaim mechanism every other refusal in this
-    // function already uses, siblings reopened same as any other pre-send
-    // refusal so a stale slot never silently swallows the thread.
-    if (claim.openTimesSnapshot?.quotedWindows?.length) {
-      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && w?.window && reply.includes(w.window));
-      if (stillQuoted.length) {
-        const { openTimesStillOffered } = require('./sms-shadow-drafter');
-        const recheck = await openTimesStillOffered({
-          city: claim.openTimesSnapshot.lookup?.city || null,
-          customerId: claim.openTimesSnapshot.lookup?.customerId || null,
-          estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
-          // Same service identity the draft was priced with (Codex r3 / audit P1)
-          ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
-          ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
-          // Which picker minted the offer, and what it needs to be asked again
-          // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
-          ...(claim.openTimesSnapshot.lookup?.source ? { source: claim.openTimesSnapshot.lookup.source } : {}),
-          ...(claim.openTimesSnapshot.lookup?.serviceKey ? { serviceKey: claim.openTimesSnapshot.lookup.serviceKey } : {}),
-          quotedWindows: stillQuoted,
-        });
-        if (!recheck.ok) {
-          logger.warn(`[sms-auto-send] open-times stale (decision ${claim.decisionId}): ${recheck.reason}`);
-          const outcome = await notSent(recheck.reason);
-          await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
-          return outcome;
-        }
-      }
+    const rechecks = await autoSendPreSendRechecks({ claim, gratitudeLane, reply, customerId, inboundMessage });
+    if (rechecks.refusal?.release) {
+      await releaseClaimForEtaRetry({ claim, reopenParked, ...(rechecks.refusal.note ? { note: rechecks.refusal.note } : {}) });
+      return { sent: false, reason: rechecks.refusal.reason, retryable: true };
     }
-    // LABEL FACTS send-time recheck: a reply that copies a label sentence
-    // must still be backed by the customer's CURRENT latest performed visit
-    // (a newer visit, a visit today, a changed label all refuse). Same
-    // supersede-via-failClaim refusal as the open-times recheck above.
-    // Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
-    // answers a label question); older-prompt drafts run it only when they carry a snapshot.
-    if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
-      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
-      if (labelReason && require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
-        // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
-        // like the live-ETA case below - reservation settled, parked siblings reopened, the draft falls through to a
-        // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
-        logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
-        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-        await releaseClaim(claim.decisionId);
-        await reopenParked('Auto-send paused: the label timing could not be rechecked — suggestion reopened.');
-        return { sent: false, reason: labelReason, retryable: true };
-      }
-      if (labelReason) {
-        logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
-        const outcome = await notSent(labelReason);
-        await reopenParked('Auto-send held: the label timing in the draft is no longer current — suggestion reopened.');
-        return outcome;
-      }
-    }
-    // LIVE ETA send-time recheck (independent review + Codex round-1
-    // finding, PR #5334): the SAME shared check the immediate /sms send and
-    // the scheduler's queued-send path run (sms-eta-freshness) — claim's
-    // liveEtaSnapshot/factsGeneratedAt are the in-memory copies claimAutoSend
-    // just inserted, so this needs no round trip through the row. A reply
-    // that makes a minutes-away/ETA claim with no backing snapshot, a stale
-    // draft, or a visit that is no longer customer-facing en_route fails
-    // closed — same supersede-via-failClaim mechanism every other refusal
-    // here uses, siblings reopened the same way.
-    const { etaClaimBlockReason } = require('./sms-eta-freshness');
-    const etaReason = await etaClaimBlockReason({
-      liveEtaSnapshot: claim.liveEtaSnapshot,
-      factsGeneratedAt: claim.factsGeneratedAt,
-      techNames: claim.techNames,
-      promptVersion: claim.promptVersion,
-      outgoingBody: reply,
-    });
-    if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {
-      // The recheck could not READ the live state (Codex round-44 P2) — nothing is known to
-      // be stale, so the claim is RELEASED instead of failed: the freshly inserted claim row
-      // is removed and its reservation settled (nothing was sent), parked siblings reopen, and
-      // the verified draft falls through to a human-visible suggestion that the reviewer-send
-      // seam rechecks again. The decision is never recorded as a failed auto-send.
-      logger.warn(`[sms-auto-send] live ETA recheck unreadable (decision ${claim.decisionId}): ${etaReason}; releasing the claim (retryable)`);
-      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-      await releaseClaim(claim.decisionId);
-      await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
-      return { sent: false, reason: etaReason, retryable: true };
-    }
-    if (etaReason) {
-      logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
-      const outcome = await notSent(etaReason);
-      await reopenParked('Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.');
+    if (rechecks.refusal) {
+      const outcome = await notSent(rechecks.refusal.reason, rechecks.refusal.settleReason);
+      await reopenParked(rechecks.refusal.note);
       return outcome;
     }
-    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
-    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
-    // Codex #5334 P2: it runs AFTER the (async) live-ETA recheck above, so booking state that changes while the ETA read was in flight is
-    // still caught: the last async read before provider entry is the booked-callback one.
-    if (!gratitudeLane) {
-      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
-      if (!booked.ok) {
-        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
-        const outcome = await notSent(booked.code, booked.reason);
-        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
-        return outcome;
-      }
-    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
-    if (!verdict.ok) return await notSent(verdict.reason);
+    if (!verdict.ok) {
+      const outcome = await notSent(verdict.reason);
+      // Gratitude parks no cards (a no-op there); the unanswered-text lane's own suggestion returns to a person.
+      await reopenParked('Auto-send held: the thread moved before the reply went out — suggestion reopened.');
+      return outcome;
+    }
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
-    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }));
+    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint: rechecks.billingFingerprint, zelle: rechecks.zelle }));
   } catch (err) {
     if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
       const outcome = await notSent('send_error', `send threw: ${err.message}`);
@@ -1014,11 +1229,10 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
-    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
-    await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
-    await releaseClaim(claim.decisionId);
-    await reopenParked(`Auto-send paused: ${what} could not be rechecked — suggestion reopened.`);
+    // the subsystem whose read failed (or, for billing / Zelle, changed), named in the log and the reopened card
+    const { what, logName, changeable } = BOUNDARY_RECHECK_SUBSYSTEMS[result.code] || BOUNDARY_RECHECK_SUBSYSTEMS.LIVE_ETA_CHECK_FAILED_AT_BOUNDARY;
+    logger.warn(`[sms-auto-send] ${logName} recheck ${changeable ? 'changed or unreadable' : 'unreadable'} at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} ${changeable ? 'changed or ' : ''}could not be rechecked — suggestion reopened.` });
     return { sent: false, reason: result.code, retryable: true };
   }
 
@@ -1373,6 +1587,8 @@ module.exports = {
   resolveSent,
   failClaim,
   maybeAutoSend,
+  dispatchClaimedSend,
+  pinDraftVoiceProfile,
   processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
   gratitudeCandidatePage,

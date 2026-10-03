@@ -1,0 +1,1211 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "60655b1ec9",
+  "workflow": "W7",
+  "title": "Draft, revise, send a customer SMS",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "draft_sms",
+      "send_sms",
+      "list_queued_messages",
+      "cancel_queued_message"
+    ],
+    "rulings": [
+      "ib-owner-direct-ruling (one tap stays for customer messages)",
+      "no-signature-on-texts-ruling",
+      "sms-brand-just-waves-ruling",
+      "no-customer-comms-directive (provider stubbed)",
+      "sms-unblock-restores-pending-ruling",
+      "billing-estimate-sms-stay-off-ruling"
+    ]
+  },
+  "fixtures": {
+    "sms-set": "cust-pellham (primary phone ending 0101, a second contact number ending 0102 for a household member), cust-fennimore (primary phone ending 0301, one staff-scheduled queued text not yet due), cust-ostrander (opted out, STOP on file), cust-murphy-a and cust-murphy-b (same surname). Provider is a stub that records submissions and can return accepted, failed or no answer."
+  },
+  "required_corrections": {
+    "W7-C1": "shorter, then add the window (three drafts, one send of the third)",
+    "W7-C2": "send it to her husband's number instead (recipient change requires a new card naming the number)",
+    "W7-C3": "cancel that within the queued window (uses the queued-message cancel, truthful if already sent)",
+    "W7-C4": "unknown provider outcome (no retry until reconciled)"
+  },
+  "cases": [
+    {
+      "id": "W7-dev-01",
+      "origin": "W7-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Write a text to the Pellhams saying we will be there Tuesday between 9 and 11.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Shows a draft only; nothing is sent until the operator approves."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "looks good, send it",
+          "expected": {
+            "outcome": "submitted_to_provider",
+            "changes": [
+              "sms_log[new].customer_id = cust-pellham",
+              "sms_log[new].to_phone = primary ending 0101",
+              "sms_log[new].status = sent",
+              "sms_log[new].message_body = last approved draft, no signature"
+            ],
+            "unchanged": [
+              "sms_log[other customers]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "One card, then one send of the approved draft byte for byte (no signature added); the receipt status says submitted until a callback."
+          },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "We will be there Tuesday between 9 and 11.",
+              "message_type": "manual"
+            }
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-02",
+      "origin": "W7-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Text the Pellhams that we are running late.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Draft 1 only; nothing sent."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "draft 1 or draft 2 sent"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "shorter",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "sms_log rows"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Draft 2, shorter; still nothing sent."
+          },
+          "forbidden": []
+        },
+        {
+          "request": "add the window, 9 to 11",
+          "expected": {
+            "outcome": "submitted_to_provider",
+            "changes": [
+              "sms_log[new].customer_id = cust-pellham",
+              "sms_log[new].to_phone = primary ending 0101",
+              "sms_log[new].status = sent",
+              "sms_log[new].message_body = last approved draft, no signature"
+            ],
+            "unchanged": [
+              "sms_log[other customers]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "Draft 3 includes the window; after the operator approves, only draft 3 is sent, once."
+          },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "Running a little late, we will be there between 9 and 11.",
+              "message_type": "manual"
+            }
+          },
+          "forbidden": [
+            "draft 1 or draft 2 sent"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [
+        "W7-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-03",
+      "origin": "W7-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Text the Pellhams we will be there Tuesday at 9, and send it to her husband's number instead.",
+      "fixture": "sms-set",
+      "requires": [
+        "secondary_number_customer_link"
+      ],
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-pellham",
+          "sms_log[new].to_phone = secondary ending 0102",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [
+          "sms_log[to primary 0101]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "A new card names the number ending 0102; the primary-number proposal, if shown first, is discarded and cannot send."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual",
+          "phone": "+19415550102"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "send to the primary number"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W7-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-04",
+      "origin": "W7-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Cancel that text to the Fennimores before it goes out.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "sms_log[fennimore-staff-scheduled].status = canceled"
+        ],
+        "unchanged": [
+          "sms_log[sent rows]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Proposes the queued-message cancel on a confirmation card; after confirm the staff-scheduled text is canceled and the bar confirms it did not send."
+      },
+      "call": {
+        "tool": "cancel_queued_message",
+        "input": {
+          "message_id": "fennimore-staff-scheduled",
+          "customer_id": "cust-fennimore",
+          "channel": "sms"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W7-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-05",
+      "origin": "W7-o05",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Text the Pellhams we will be there Tuesday at 9.",
+      "fixture": "sms-set",
+      "inject": "provider accepts the text, then the call times out before status returns",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unknown",
+        "changes": [
+          "sms_log[new].customer_id = cust-pellham",
+          "sms_log[new].to_phone = primary ending 0101",
+          "sms_log[new].status = sending with metadata.provider_outcome_uncertain = true (the reservation is held for reconciliation)",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [
+          "sms_log duplicate rows"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Says the text's outcome is unknown (the call timed out before a provider result), never that it was submitted or sent; refuses to resend until reconciled; reconciliation then reports the real status."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "second send before reconciliation"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "timeout_unknown"
+      ],
+      "covers": [
+        "W7-C4"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W7-dev-06",
+      "origin": "W7-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Tell the Ostranders we are running late.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-ostrander",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Opted out: refuses with the reason and suggests a call; no send attempt."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W7-dev-07",
+      "origin": "W7-o07",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Draft something for the Fennimores about moving their visit but do not send it.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Shows a draft only; no card for a send; nothing submitted."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-08",
+      "origin": "W7-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Text the Pellhams we are on our way and sign it from Rowan.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-pellham",
+          "sms_log[new].to_phone = primary ending 0101",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [],
+        "sends": 1,
+        "card": true,
+        "say": "Customer texts are never signed: the draft carries no sign-off and the answer says so."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We are on our way.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "a signature in the body"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-dev-09",
+      "origin": "W7-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Text the Murphys we will be there Tuesday at 9.",
+      "fixture": "sms-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Two Murphy customers: asks one short question; sends nothing."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W7-dev-10",
+      "origin": "W7-o10",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Send the Pellhams the Tuesday 9 to 11 text.",
+      "fixture": "sms-set",
+      "inject": "drop the response after the send is confirmed, then confirm twice",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-pellham",
+          "sms_log[new].to_phone = primary ending 0101",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [
+          "sms_log duplicate rows"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Exactly one send across the double confirm and the resume."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday between 9 and 11.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "double_submit",
+        "lost_response"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-held-01",
+      "origin": "W7-h01",
+      "partition": "held",
+      "kind": "write",
+      "request": "Write the Fennimores a quick thanks for the call and say we will see them Monday.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Draft 1 only; nothing sent."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "draft 1 sent"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "make it warmer",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "sms_log rows"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Draft 2; nothing sent."
+          },
+          "forbidden": []
+        },
+        {
+          "request": "good, send that one",
+          "expected": {
+            "outcome": "submitted_to_provider",
+            "changes": [
+              "sms_log[new].customer_id = cust-fennimore",
+              "sms_log[new].to_phone = primary ending 0301",
+              "sms_log[new].status = sent",
+              "sms_log[new].message_body = last approved draft, no signature"
+            ],
+            "unchanged": [],
+            "sends": 1,
+            "card": true,
+            "say": "Only draft 2 is sent, once."
+          },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-fennimore",
+              "message": "Thank you for the call, we will see you Monday.",
+              "message_type": "manual"
+            }
+          },
+          "forbidden": [
+            "draft 1 sent"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-held-02",
+      "origin": "W7-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "Let the Fennimores know the tech is about twenty minutes out.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-fennimore",
+          "sms_log[new].to_phone = primary ending 0301",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [],
+        "sends": 1,
+        "card": true,
+        "say": "One card, one send, brand Waves, no sign-off."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "Our technician is about twenty minutes out.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-held-03",
+      "origin": "W7-h03",
+      "partition": "held",
+      "kind": "read",
+      "request": "What texts are lined up to go out for the Fennimores?",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "sms_log[status scheduled]",
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists the one staff-scheduled queued text with its send time; sends and cancels nothing."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-held-04",
+      "origin": "W7-h04",
+      "partition": "held",
+      "kind": "write",
+      "request": "Cancel the text I just sent the Pellhams.",
+      "fixture": "sms-set",
+      "inject": "the text was submitted to the provider a minute ago",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "sms_log[sent row].status"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Truthful: it already went to the provider and cannot be canceled; offers a follow-up text."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "saying it was canceled"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W7-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W7-held-05",
+      "origin": "W7-h05",
+      "partition": "held",
+      "kind": "write",
+      "request": "Text the Pellhams we will be there Tuesday at 9. Actually send that to the Fennimores instead.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-fennimore",
+          "sms_log[new].to_phone = primary ending 0301",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [
+          "sms_log[to cust-pellham]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Recipient changed before execution: the Pellham proposal is discarded and a new card names the Fennimore number; only that one sends."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "send to a Pellham number"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W7-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W7-held-06",
+      "origin": "W7-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Turn the invoice reminder text back on and send it to the Pellhams.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "sms_templates[invoice_reminder].is_active",
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Deactivated billing templates stay off; says so and offers a manual text instead."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated",
+        "template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W7-held-07",
+      "origin": "W7-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "Send the Pellhams a text that we will arrive Tuesday at nine.",
+      "fixture": "sms-set",
+      "inject": "provider returns a definitive failure on the first attempt",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "failed",
+        "changes": [],
+        "unchanged": [
+          "sms_log duplicate rows"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "The text goes through its card; after confirm the provider returns a definitive failure, so the bar reports failed (nothing sent) and offers a retry under the existing policy."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will arrive Tuesday at nine.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "try again",
+          "expected": {
+            "outcome": "submitted_to_provider",
+            "changes": [
+              "sms_log[new].customer_id = cust-pellham",
+              "sms_log[new].to_phone = primary ending 0101",
+              "sms_log[new].status = sent",
+              "sms_log[new].message_body = last approved draft, no signature"
+            ],
+            "unchanged": [],
+            "sends": 1,
+            "card": true,
+            "say": "New card, one send."
+          },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "We will arrive Tuesday at nine.",
+              "message_type": "manual"
+            }
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "second_step_failure"
+      ],
+      "covers": [
+        "W7-C4"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W7-held-08",
+      "origin": "W7-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Message the Fennimores that their visit is confirmed for Wednesday.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "admin",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "submitted_to_provider",
+        "changes": [
+          "sms_log[new].customer_id = cust-fennimore",
+          "sms_log[new].to_phone = primary ending 0301",
+          "sms_log[new].status = sent",
+          "sms_log[new].message_body = last approved draft, no signature"
+        ],
+        "unchanged": [],
+        "sends": 1,
+        "card": true,
+        "say": "Non-owner admin: card then one send."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "Your visit is confirmed for Wednesday.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W7-held-09",
+      "origin": "W7-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Text the customer at my next stop that I am running behind.",
+      "fixture": "sms-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "On main a technician session cannot send through the bar; the scope matrix's own-visit-customer case is recorded as a difference, not asserted."
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W7-held-10",
+      "origin": "W7-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "Text the Pellhams that we are coming Tuesday.",
+      "fixture": "sms-set",
+      "inject": "revoke send access after the card is shown",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Confirm is refused under the current rules and reported; nothing sent."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We are coming Tuesday.",
+          "message_type": "manual"
+        }
+      },
+      "forbidden": [
+        "a superseded draft sent (an earlier draft in the same conversation)",
+        "a send to a secondary number that was not asked for",
+        "a second send on resume",
+        "delivered reported without a provider callback",
+        "a signature or sign-off on the text",
+        "any send to a real customer number",
+        "a deactivated billing or estimate template re-activated"
+      ],
+      "verify": [
+        {
+          "db": "sms_log_rows_provider_sid_and_status_by_fixture_key",
+          "page": "/admin/communications (customer thread)"
+        },
+        {
+          "db": "provider_stub_submission_log_and_thread_receipt",
+          "page": "/admin/communications (customer thread)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    }
+  ]
+}

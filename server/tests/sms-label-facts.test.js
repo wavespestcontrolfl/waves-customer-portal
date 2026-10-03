@@ -2684,7 +2684,7 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     const { system } = buildSystemPromptWithProfile();
     expect(system).toContain('LABEL FACTS (product timing from the label):');
-    expect(system).toContain('COMPANY FACTS, LABEL FACTS, the thread');
+    expect(system).toContain('COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
     expect(system).toContain('Never name a product or brand');
     expect(system).toContain('COPY the sentence word for word');
     expect(system).toContain('including its visit date');
@@ -2726,14 +2726,15 @@ describe('prompt rules and hand-off narrowing', () => {
     expect(system).not.toContain('is NOT a chemical/medical concern');
   });
 
-  test('prompt version: _cfl, prefix kept, fits the column with all four tags', () => {
+  test('prompt version: cumulative cflvp (LABEL + VISIT STATUS & OPEN LOOPS + PAYMENT FACTS), prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cfl');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cfl');
+    // PR #5331 (payment facts) merged on top of #5499's '3_cflv': the combined identity is 5_cflvp (cumulative 'cflv' + 'p', one glued token)
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers3_cfl+bclm');
+    expect(all).toBe('house_voice_v12_real_answers5_cflvp+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2765,7 +2766,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers3_cfl');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers5_cflvp');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2871,7 +2872,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe(CFL);
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }

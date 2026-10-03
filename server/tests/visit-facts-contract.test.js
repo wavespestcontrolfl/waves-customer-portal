@@ -27,6 +27,7 @@ const {
   UNREGISTERED_INTERNAL_KEYS,
   TYPED_REPORT_BUILDERS,
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
+  FAST_COMPLETE_TYPED_FORMS,
 } = require('../config/visit-facts-contract');
 const { PROJECT_TYPES } = require('../services/project-types');
 const {
@@ -602,5 +603,41 @@ describe('visit facts contract registry', () => {
     expect(end).toBeGreaterThan(start);
     // Regenerate with: node server/scripts/generate-visit-facts-doc.js
     expect(doc.slice(start, end + BLOCK_END.length)).toEqual(renderTypedFactsBlock());
+  });
+});
+
+describe('the typed forms the Fast Complete sheet records (GATE_TYPED_VOICE_FILL)', () => {
+  test('are exactly the forms the typed reader reads whose sheet is built', () => {
+    const { VOICE_TYPES, SHEET_PENDING_TYPES } = require('../services/visit-typed-facts');
+    expect([...FAST_COMPLETE_TYPED_FORMS].sort()).toEqual(Object.keys(VOICE_TYPES).filter((type) => !SHEET_PENDING_TYPES.has(type)).sort());
+  });
+
+  test('a tap-only typed field (the state\'s notice questions) is registered tap-only with a reason and never read from the note', () => {
+    const { VOICE_TYPES, voiceFieldsFor } = require('../services/visit-typed-facts');
+    const { PROJECT_TYPES } = require('../services/project-types');
+    const tapOnly = Object.entries(PROJECT_TYPES).flatMap(([form, cfg]) => (cfg.findingsFields || [])
+      .filter((field) => field.tapOnly).map((field) => [form, field.key]));
+    expect(tapOnly).toEqual([['termite_inspection', 'inspection_notice_affixed'], ['termite_treatment', 'posted_notice']]);
+    const facts = Object.values(VISIT_FACTS_CONTRACT).flatMap((line) => line.facts || []);
+    for (const [form, key] of tapOnly) {
+      for (const fact of facts.filter((f) => f.typedForm === form && f.key === key)) {
+        expect(fact).toMatchObject({ capture: ['tap'], tapOnly: true });
+        expect(fact.reason).toMatch(/always a tap/);
+      }
+      expect(facts.some((f) => f.typedForm === form && f.key === key)).toBe(true);
+      if (VOICE_TYPES[form]) expect(voiceFieldsFor(form).map((field) => field.key)).not.toContain(key);
+    }
+  });
+
+  test('the sheet writes each one\'s card fields, and the activity score only where the tech sets it', () => {
+    const facts = Object.values(VISIT_FACTS_CONTRACT).flatMap((profile) => profile.facts || []);
+    const writtenBySheet = (fact, token) => (fact.writers || []).some((w) => w.file === 'client/src/components/tech/FastCompleteSheet.jsx' && w.writerSymbol === token);
+    const roachSpecies = facts.find((f) => f.typedForm === 'cockroach' && f.key === 'species');
+    const roachWork = facts.find((f) => f.typedForm === 'cockroach' && f.key === 'work_completed');
+    const treeShrub = facts.find((f) => f.typedForm === 'tree_shrub');
+    expect(writtenBySheet(roachSpecies, 'structuredFindings')).toBe(true);
+    // Filled from the products, never on the card.
+    expect(writtenBySheet(roachWork, 'structuredFindings')).toBe(false);
+    expect(writtenBySheet(treeShrub, 'structuredFindings')).toBe(false);
   });
 });

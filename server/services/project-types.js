@@ -111,7 +111,9 @@ const PROJECT_TYPES = {
       { key: 'activity_status', label: 'Activity status', type: 'select', options: ['No activity', 'Old / inactive damage', 'Active infestation'] },
       { key: 'infestation_extent', detail: true, label: 'Infestation extent', type: 'textarea' },
       { key: 'treatment_recommendation', detail: true, label: 'Recommended treatment', type: 'textarea' },
-      { key: 'inspection_notice_affixed', label: 'Inspection notice affixed', type: 'select', options: ['Yes', 'No'] },
+      // tapOnly: the state's notice question is always a tap, never filled
+      // from the technician's notes (owner, Fast Complete mockup v8).
+      { key: 'inspection_notice_affixed', label: 'Inspection notice affixed', type: 'select', options: ['Yes', 'No'], tapOnly: true },
     ],
   },
 
@@ -971,7 +973,9 @@ const PROJECT_TYPES = {
       { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea' },
       // FS 482.2265 posted-notice duty on exterior/perimeter applications —
       // the report asserts field practice was followed (owner Q2 answer).
-      { key: 'posted_notice', label: 'Posted notice placed (exterior / perimeter applications)', type: 'select', options: ['Yes', 'No', 'Not applicable'] },
+      // tapOnly: always a tap, never filled from the technician's notes
+      // (owner, Fast Complete mockup v8).
+      { key: 'posted_notice', label: 'Posted notice placed (exterior / perimeter applications)', type: 'select', options: ['Yes', 'No', 'Not applicable'], tapOnly: true },
       { key: 'followup_plan', label: 'Follow-up / warranty plan', type: 'textarea' },
     ],
   },

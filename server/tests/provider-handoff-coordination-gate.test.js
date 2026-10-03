@@ -17,6 +17,17 @@ const customerSms = { audience: 'customer', channel: 'sms' };
 beforeEach(() => {
   mockGate.enabled = false;
   mockGate.activatedAt = null;
+  delete process.env.GATE_SMS_UNANSWERED_REPLY;
+});
+afterAll(() => { delete process.env.GATE_SMS_UNANSWERED_REPLY; });
+
+test.each(['true', 'false'])('the unanswered-text lane alone (GATE_SMS_UNANSWERED_REPLY=%s) keeps provider reservations', (value) => {
+  // Codex #5609 r5 P1: its claims share the thread lock, and an accepted send
+  // must leave durable evidence even with gratitude never activated.
+  process.env.GATE_SMS_UNANSWERED_REPLY = value;
+  expect(canonicalCoordinationApplies(customerSms)).toBe(true);
+  expect(directCoordinationApplies({ messageType: 'manual' })).toBe(true);
+  expect(directCoordinationApplies({ messageType: 'internal_alert' })).toBe(false);
 });
 
 test('a never-activated dark lane coordinates nothing', () => {

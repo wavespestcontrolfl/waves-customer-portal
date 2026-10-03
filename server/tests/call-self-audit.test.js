@@ -2,18 +2,26 @@
 // every lead-losing terminal disposition counts as drift.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false), typedDecisionsClefLive: jest.fn(() => false) }));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
 jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
-const { typedDecisionsLive } = require('../config/feature-gates');
+const { typedDecisionsLive, typedDecisionsClefLive } = require('../config/feature-gates');
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
-const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock } = require('../services/call-self-audit');
+const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines } = require('../services/call-self-audit');
+
+// Each sampled call is asked call_judge.v2 and call_gate_checks.v1; these
+// read one package's asks, records and tally.
+const asksFor = (id) => askPackage.mock.calls.filter((c) => c[0] === id);
+const recordsFor = (id) => recordDecisions.mock.calls.filter(([a]) => a.pkg.id === id);
+const judgeAsks = () => asksFor('call_judge.v2');
+const judgeRecords = () => recordsFor('call_judge.v2');
+const judgeTally = ({ gateChecks, ...rest }) => rest;
 
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
@@ -21,14 +29,16 @@ const SAMPLE = (over = {}) => ({
   ai_extraction: JSON.stringify({ is_lead: true }), disposition: null, ...over,
 });
 
-function mockDb({ calls, onInsert = () => {}, whereCalls = [] }) {
+function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [], whereInCalls = [] }) {
   db.raw = (sql) => sql;
   db.mockImplementation((table) => {
     const raws = [];
     const isOutbound = (c) => String(c.direction || '').startsWith('outbound');
     const b = {
-      where(...args) { whereCalls.push(args); return b; }, whereIn() { return b; }, whereRaw(sql) { raws.push(sql); return b; }, modify(fn) { fn(b); return b; },
+      where(...args) { whereCalls.push(args); return b; }, whereIn(...args) { whereInCalls.push([table, ...args]); return b; }, whereRaw(sql) { raws.push(sql); return b; }, modify(fn) { fn(b); return b; },
       orderBy() { return b; }, limit() { return b; },
+      // call_commitments: the sampled calls carrying a live Waves promise.
+      distinct: async () => (table === 'call_commitments as cc' ? promiseCallIds.map((id) => ({ call_log_id: id })) : []),
       // Each direction query returns only its own direction's rows.
       select: async () => {
         if (table !== 'call_log') return [];
@@ -182,7 +192,7 @@ describe('Jev shadow', () => {
     const res = await runSelfAudit({ createMessage: async () => VERDICT });
     expect(askPackage).not.toHaveBeenCalled();
     expect(recordDecisions).not.toHaveBeenCalled();
-    expect(res.jev).toEqual({ asked: 0, recorded: 0, failed: 0 });
+    expect(judgeTally(res.jev)).toEqual({ asked: 0, recorded: 0, failed: 0 });
   });
 
   test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the transcript digest', async () => {
@@ -191,16 +201,16 @@ describe('Jev shadow', () => {
     mockDb({ calls: [prodCall] });
     const res = await runSelfAudit({ createMessage: async () => VERDICT });
 
-    expect(askPackage).toHaveBeenCalledTimes(1);
-    const [packageId, state] = askPackage.mock.calls[0];
+    expect(judgeAsks()).toHaveLength(1);
+    const [packageId, state] = judgeAsks()[0];
     expect(packageId).toBe('call_judge.v2');
     expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
     expect(state.transcript).toBe(prodCall.transcription.slice(0, 5000));
 
-    expect(recordDecisions).toHaveBeenCalledTimes(1);
-    const args = recordDecisions.mock.calls[0][0];
+    expect(judgeRecords()).toHaveLength(1);
+    const args = judgeRecords()[0][0];
     expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
     expect(args).not.toHaveProperty('outcomeEvidence');
     expect(args.pkg.id).toBe('call_judge.v2');
@@ -210,25 +220,25 @@ describe('Jev shadow', () => {
     expect(args.baselines.is_spam).toEqual({ production: false, deep_judge: false });
     // complaint has no production field: deep judge only
     expect(args.baselines.complaint).toEqual({ deep_judge: true });
-    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
   });
 
   test('a failed deep audit still asks Jev, recorded against production only', async () => {
     typedDecisionsLive.mockReturnValue(true);
     mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true }) })] });
     const res = await runSelfAudit({ createMessage: async () => { throw new Error('deep judge down'); } });
-    expect(askPackage).toHaveBeenCalledTimes(1);
-    const args = recordDecisions.mock.calls[0][0];
+    expect(judgeAsks()).toHaveLength(1);
+    const args = judgeRecords()[0][0];
     expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: undefined });
     expect(args.baselines.complaint).toEqual({ deep_judge: undefined });
-    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
   });
 
   test('an outbound call gets the outbound direction line and a missing duration is null', async () => {
     typedDecisionsLive.mockReturnValue(true);
     mockDb({ calls: [SAMPLE({ direction: 'outbound-dial', duration_seconds: undefined })] });
     await runSelfAudit({ createMessage: async () => VERDICT });
-    const state = askPackage.mock.calls[0][1];
+    const state = judgeAsks()[0][1];
     expect(state.call_direction).toMatch(/^OUTBOUND/);
     expect(state.duration_seconds).toBeNull();
   });
@@ -249,6 +259,160 @@ describe('Jev shadow', () => {
     expect(res.audited).toBe(1);
     expect(res.dispositionRate).toBeGreaterThan(0);
     expect(findings.map((f) => f.field).sort()).toEqual(['appointment_agreed']);
-    expect(res.jev).toEqual(jev);
+    expect(judgeTally(res.jev)).toEqual(jev);
+  });
+});
+
+describe('Clef shadow leg (second provider)', () => {
+  const OK_DEEP = async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"ok"}' }] });
+  const JEV = { ok: true, provider: 'typesafe', answers: { is_lead: { p: 0.9, yes: true, confident: true }, is_spam: { p: 0.1, yes: false, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+  const CLEF = { ok: true, provider: 'cloudflare', answers: { is_lead: { p: 0.2, yes: false, confident: true }, is_spam: { p: 0.1, yes: false, confident: true } }, packageHash: 'h', servedModel: 'clef-flash' };
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(true);
+    typedDecisionsClefLive.mockReturnValue(true);
+    askPackage.mockReset();
+    recordDecisions.mockReset();
+    recordDecisions.mockResolvedValue({ recorded: 6 });
+  });
+  afterAll(() => { typedDecisionsLive.mockReturnValue(false); typedDecisionsClefLive.mockReturnValue(false); });
+
+  test('both providers are asked the same package and state; each row carries the other\'s answers as siblings', async () => {
+    askPackage.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? CLEF : JEV));
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(judgeAsks()).toHaveLength(2);
+    expect(judgeAsks()[0][0]).toBe('call_judge.v2');
+    expect(judgeAsks()[0][1]).toEqual(judgeAsks()[1][1]); // identical state
+    expect(judgeAsks()[1][2]).toEqual({ provider: 'cloudflare' });
+    expect(judgeRecords()).toHaveLength(2);
+    const byProvider = Object.fromEntries(judgeRecords().map(([a]) => [a.provider, a]));
+    expect(byProvider.typesafe.siblingAnswers).toEqual({ is_lead: [CLEF.answers.is_lead], is_spam: [CLEF.answers.is_spam] });
+    expect(byProvider.cloudflare.siblingAnswers).toEqual({ is_lead: [JEV.answers.is_lead], is_spam: [JEV.answers.is_spam] });
+    expect(byProvider.cloudflare.baselines).toEqual(byProvider.typesafe.baselines);
+    expect(byProvider.cloudflare.subjectHash).toBe(byProvider.typesafe.subjectHash);
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0, clef: { asked: 1, recorded: 1, failed: 0 } });
+  });
+
+  test('the Clef leg failing leaves the Jev row recorded without siblings and is tallied on its own', async () => {
+    askPackage.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? { ok: false, reason: 'cloudflare_timeout' } : JEV));
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(judgeRecords()).toHaveLength(1);
+    expect(judgeRecords()[0][0]).toMatchObject({ provider: 'typesafe', siblingAnswers: {} });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0, clef: { asked: 1, recorded: 0, failed: 1 } });
+  });
+
+  test('Clef gate off: a single Jev leg, no provider option, no clef tally (unchanged shape)', async () => {
+    typedDecisionsClefLive.mockReturnValue(false);
+    askPackage.mockResolvedValue(JEV);
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(judgeAsks()).toHaveLength(1);
+    expect(judgeAsks()[0][2]).toBeUndefined();
+    expect(judgeRecords()[0][0]).toMatchObject({ provider: 'typesafe', siblingAnswers: {} });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+});
+
+
+describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision beside the models)', () => {
+  const { isEnabled } = require('../config/feature-gates');
+  const V2 = (over = {}) => JSON.stringify({ triage_flags: ['ambiguous_pest_or_service'], scheduling: { status: 'reschedule_requested', agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: '2026-10-09T14:00:00Z' }, ...over });
+  const JEV = { ok: true, answers: { service_unclear: { p: 0.8, yes: true, confident: false } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(true);
+    typedDecisionsClefLive.mockReturnValue(false);
+    isEnabled.mockImplementation(() => true);
+    askPackage.mockReset();
+    recordDecisions.mockReset();
+    askPackage.mockResolvedValue(JEV);
+    recordDecisions.mockResolvedValue({ recorded: 3 });
+  });
+  afterAll(() => { typedDecisionsLive.mockReturnValue(false); isEnabled.mockImplementation(() => true); });
+
+  test('gateCheckBaselines reads the exact signals the gates act on', () => {
+    const call = { id: 'c1', v2_extraction_status: 'valid', ai_extraction_enriched: V2() };
+    expect(gateCheckBaselines(call, new Set(['c1']))).toEqual({
+      service_unclear: { production: true }, reschedule_committed: { production: true }, promise_open: { production: true },
+    });
+    // a proposal the agent did not commit to, no unclear flag, no promise: all false
+    const plain = { id: 'c2', v2_extraction_status: 'valid', ai_extraction_enriched: V2({ triage_flags: [], scheduling: { status: 'reschedule_requested', agent_committed_booking: false, confirmed_start_at: null } }) };
+    expect(gateCheckBaselines(plain, new Set(['c1']))).toEqual({
+      service_unclear: { production: false }, reschedule_committed: { production: false }, promise_open: { production: false },
+    });
+  });
+
+  test('a reschedule the caller did not accept is not committed, as the apply path rejects it', () => {
+    const call = { id: 'c3', v2_extraction_status: 'valid', ai_extraction_enriched: V2({ scheduling: { status: 'reschedule_requested', agent_committed_booking: true, caller_accepted_slot: null, confirmed_start_at: '2026-10-09T14:00:00Z' } }) };
+    expect(gateCheckBaselines(call, null).reschedule_committed).toEqual({ production: false });
+  });
+
+  test('the promise read counts only the kinds the chaser acts on', async () => {
+    const whereInCalls = [];
+    mockDb({ calls: [SAMPLE()], whereInCalls });
+    await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    const kinds = whereInCalls.find(([table, col]) => table === 'call_commitments as cc' && col === 'cc.kind');
+    expect(kinds[2]).toEqual(['callback', 'send_estimate', 'schedule_visit']);
+  });
+
+  test('a call longer than the span the models and reviewer see is counted, never asked the gate checks', async () => {
+    const long = SAMPLE({ transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(120) });
+    expect(long.transcription.length).toBeGreaterThan(5000);
+    mockDb({ calls: [long] });
+    const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
+    expect(asksFor('call_judge.v2')).toHaveLength(1); // call_judge unchanged
+    expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
+  });
+
+  test('no reading means no baseline, never a false one: invalid v2 extraction, commitments off', () => {
+    expect(gateCheckBaselines({ id: 'c1', v2_extraction_status: 'failed', ai_extraction_enriched: V2() }, null)).toEqual({});
+    expect(gateCheckBaselines({ id: 'c1', v2_extraction_status: 'valid', ai_extraction_enriched: null }, null)).toEqual({});
+  });
+
+  test('each sampled call is also asked call_gate_checks.v1 with the same state and recorded under its own capability', async () => {
+    const call = SAMPLE({ id: 'call-7', direction: 'inbound', duration_seconds: 61, v2_extraction_status: 'valid', ai_extraction_enriched: V2() });
+    mockDb({ calls: [call], promiseCallIds: ['call-7'] });
+    const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+
+    const [judge] = asksFor('call_judge.v2');
+    const [gates] = asksFor('call_gate_checks.v1');
+    expect(gates[1]).toEqual(judge[1]); // identical call state
+    const [args] = recordsFor('call_gate_checks.v1')[0];
+    expect(args).toMatchObject({ capability: 'call_gate_checks', provider: 'typesafe', subjectType: 'call_log', subjectId: 'call-7', result: JEV });
+    expect(args.baselines).toEqual({ service_unclear: { production: true }, reschedule_committed: { production: true }, promise_open: { production: true } });
+    // tallied apart: call_judge's counts keep their meaning
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, skippedLong: 0 });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+
+  test('commitments off: promise_open has no baseline; the other two still do', async () => {
+    isEnabled.mockImplementation((name) => name !== 'callCommitments');
+    mockDb({ calls: [SAMPLE({ v2_extraction_status: 'valid', ai_extraction_enriched: V2() })], promiseCallIds: ['call-1'] });
+    await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    const [args] = recordsFor('call_gate_checks.v1')[0];
+    expect(Object.keys(args.baselines).sort()).toEqual(['reschedule_committed', 'service_unclear']);
+  });
+
+  test('Clef on: both providers answer the gate checks, each row with the other\'s answers, tallied per leg', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    const CLEF = { ok: true, answers: { service_unclear: { p: 0.1, yes: false, confident: true } }, packageHash: 'h', servedModel: 'clef-flash' };
+    askPackage.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? CLEF : JEV));
+    mockDb({ calls: [SAMPLE({ v2_extraction_status: 'valid', ai_extraction_enriched: V2() })] });
+    const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    const byProvider = Object.fromEntries(recordsFor('call_gate_checks.v1').map(([a]) => [a.provider, a]));
+    expect(byProvider.typesafe.siblingAnswers).toEqual({ service_unclear: [CLEF.answers.service_unclear] });
+    expect(byProvider.cloudflare.siblingAnswers).toEqual({ service_unclear: [JEV.answers.service_unclear] });
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, skippedLong: 0, clef: { asked: 1, recorded: 1, failed: 0 } });
+  });
+
+  test('the gate-check ask failing never touches call_judge or the audit', async () => {
+    askPackage.mockImplementation(async (pkg) => { if (pkg === 'call_gate_checks.v1') throw new Error('boom'); return JEV; });
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 0, failed: 1, skippedLong: 0 });
+    expect(res.audited).toBe(1);
   });
 });

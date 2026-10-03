@@ -156,9 +156,12 @@ router.put('/', async (req, res, next) => {
       // The sold-scope marker survives every customer write — it is set and
       // cleared only by estimate acceptance (server-side), and normalize()
       // would otherwise strip it (codex #3432 r11 P2).
-      const stored = raw && typeof raw === 'object' && raw.commercial_interior_scope
+      const storedBase = raw && typeof raw === 'object' && raw.commercial_interior_scope
         ? { ...next, commercial_interior_scope: raw.commercial_interior_scope }
         : next;
+      // Server-owned keys (booking-confirmation replays, caller demotion,
+      // consent boundary — #5467) survive the customer's toggle write too.
+      const stored = require('../utils/service-preferences-server-keys').withServerOwnedPrefs(raw, storedBase);
       await trx('customers').where({ id: req.customerId }).update({
         service_preferences: JSON.stringify(stored),
         updated_at: new Date(),

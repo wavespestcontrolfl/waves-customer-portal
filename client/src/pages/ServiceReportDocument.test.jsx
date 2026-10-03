@@ -446,6 +446,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Water the front strip by hand.');
   });
 
+  it('prints the lawn lead "What to expect" sentences (GATE_LAWN_REPORT_COPY_V6) and nothing when the key is absent', () => {
+    const expectLine = 'By your next visit, most treated weeds should be browning or fading.';
+    const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
+    const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', whatToExpect: expectLine } } };
+    expect(render(<ServiceReportDocument data={withKey} token="tok123" />).container.textContent).toContain(`What to expect: ${expectLine}`);
+    const without = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy' } } };
+    expect(render(<ServiceReportDocument data={without} token="tok124" />).container.textContent).not.toContain('What to expect');
+  });
+
+  it('prints the lead headline (the frozen v6 one) as Overall, so a later assessment correction cannot make the PDF disagree', () => {
+    const snapshot = { overallScore: 86, statusHeadline: 'Needs attention — weed pressure' };
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Stable — watching weed pressure' } } };
+    const text = render(<ServiceReportDocument data={data} token="tok125" />).container.textContent;
+    expect(text).toContain('Overall: Stable — watching weed pressure');
+    expect(text).not.toContain('Needs attention — weed pressure');
+  });
+
   it('keeps approved visual moments and the turf-height gauge photo', () => {
     const data = {
       ...BASE_DATA,
@@ -1897,5 +1914,62 @@ describe('lawn PDF lead diet', () => {
     expect(out).toContain('Snapshot root cause sentence.');
     expect(out).toContain('Spot-treated the weeds.');
     expect(out).toContain('Catching them early helps.');
+  });
+});
+
+describe('ServiceReportDocument — re-service card (GATE_RESERVICE_REPORT_CARD)', () => {
+  const reservice = {
+    serviceLine: 'pest',
+    outcome: 'treated',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: false,
+    billingLine: null,
+  };
+  const card = {
+    version: 1,
+    youToldUs: { source: 'picker', quoted: true, lead: null, text: 'Ants are back in the kitchen.', pests: ['Ants'] },
+    whatWeDid: {
+      pests: ['ants'], where: 'inside and outside', found: { rating: 2, label: 'Low' },
+      safetyLine: 'Keep kids and pets off treated areas until dry; your technician confirms the timing.',
+    },
+    stillSeeing: 'ants',
+  };
+
+  it('prints "You told us" (quoted verbatim words) and "What we did" when the card is in the payload', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: reservice, reserviceReportCard: card }} token="tok123" />);
+    expect(screen.getByText('You told us')).toBeInTheDocument();
+    expect(screen.getByText('“Ants are back in the kitchen.”')).toBeInTheDocument();
+    expect(screen.getByText('What we did')).toBeInTheDocument();
+    // Treated-for row and the customer's reported pest.
+    expect(screen.getAllByText('Ants')).toHaveLength(2);
+    expect(screen.getByText('Inside and outside')).toBeInTheDocument();
+    expect(screen.getByText(card.whatWeDid.safetyLine)).toBeInTheDocument();
+    // The web button has no print equivalent.
+    expect(screen.queryByText(/Still seeing/)).toBeNull();
+  });
+
+  it('a call paraphrase prints with no quote marks', () => {
+    const call = { ...card, youToldUs: { source: 'call', quoted: false, lead: 'On your call, you mentioned', text: 'ants in the kitchen.', pests: [] } };
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: reservice, reserviceReportCard: call }} token="tok123" />);
+    const line = screen.getByText('On your call, you mentioned ants in the kitchen.');
+    expect(line.textContent).not.toMatch(/["“”]/);
+  });
+
+  it('a not-performed outcome prints "You told us" only', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: { ...reservice, outcome: 'inspection_only' }, reserviceReportCard: { ...card, whatWeDid: null } }} token="tok123" />);
+    expect(screen.getByText('You told us')).toBeInTheDocument();
+    expect(screen.queryByText('What we did')).toBeNull();
+  });
+
+  it('no card in the payload (gate dark): the document is unchanged', () => {
+    const { container: without } = render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: reservice }} token="tok123" />);
+    const html = without.innerHTML;
+    cleanup();
+    const { container: dark } = render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: reservice, reserviceReportCard: undefined }} token="tok123" />);
+    expect(dark.innerHTML).toBe(html);
+    expect(dark.textContent).not.toMatch(/You told us|What we did/);
   });
 });

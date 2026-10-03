@@ -251,6 +251,11 @@ function recapServiceIdentity(svc, profile) {
     // schedule row (the tech Fast Complete sheet) can confirm this is
     // still the visit type it was opened for.
     serviceKey: profile?.serviceKey || null,
+    // A free callback booked under a regular service key: the Fast Complete
+    // report flow treats it as the re-service it is (no pay link, no review
+    // ask), so that flow echoes it back and a visit the office changed to or
+    // from a callback meanwhile is refused (recapVisitIdentityChanged).
+    isCallback: svc.is_callback === true,
   };
 }
 
@@ -297,6 +302,49 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
  * most-used list; only that sheet asks for it, so the recap modal (and the
  * sheet's stock re-read) never pay for the aggregate.
  */
+// Whether a trace saved on a lane or typed visit would show on its report, judged as
+// the report judges it (trace-eligibility.js): with the eligibility gate on,
+// the visit's own line (bed bug's indoor work and bee, wasp and mud dauber
+// nest work carry no map) or, when it carries none, an add-on line that
+// does; with the gate off, the report's legacy indoor-only rule for bed bug.
+// The line is judged from the profile this context already resolved, never
+// a second lookup, and an add-on read that fails counts as shown: the
+// report's render fails closed, but here an unknown must keep the sheet's
+// trace holds (codex local r6 on #5629).
+// The record the Fast Complete sheet reads from a visit's note, each resolved
+// as the completion resolves it: a specialty lane (GATE_LANE_VOICE_FILL,
+// visit-lane-facts.js voiceLaneFor) or a typed form (GATE_TYPED_VOICE_FILL,
+// visit-typed-facts.js sheetTypeFor, the profile's own findingsType when the
+// sheet reads it; never a combined visit, whose companion sections are
+// required at completion and the sheet has none). Neither for a visit that completes through a project,
+// nor when the profile could not be read (whether it does is then unknown).
+function sheetRecordFor(profile, svc) {
+  if (!profile || profile.projectBacked || profile.requiresProject) return { lane: null, typedType: null };
+  const gates = require('../config/feature-gates');
+  return {
+    lane: gates.laneVoiceFillLive() ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type }) : null,
+    typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
+  };
+}
+
+async function visitTraceOnReport(svc, profile, lane, knex) {
+  const traceEligibility = require('./service-report/trace-eligibility');
+  if (!traceEligibility.traceEligibilityGateOn()) return lane !== 'bed_bug_treatment';
+  const satellite = (verdict) => !!verdict?.eligible && verdict.variant !== 'photo';
+  const own = traceEligibility.resolveTraceEligibility({
+    serviceKey: profile?.serviceKey || null,
+    findingsType: profile?.findingsType || null,
+    displayName: svc.service_type || '',
+  });
+  if (satellite(own)) return true;
+  try {
+    const addons = await traceEligibility.resolveAddonVerdicts(svc.id, knex, { renderSide: true });
+    return addons.some(satellite);
+  } catch {
+    return true;
+  }
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -358,9 +406,24 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;
 
+  // The record the Fast Complete sheet reads from the note (null for both:
+  // none). The recap's own `eligible` stays pest control only.
+  const { lane, typedType } = sheetRecordFor(profile, svc);
+  const traceOnReport = lane || typedType ? await visitTraceOnReport(svc, profile, lane, knex) : undefined;
+
   return {
     ok: true,
     eligible,
+    ...(typedType ? { typedType } : {}),
+    // Whether a saved trace would show on a lane or typed visit's report,
+    // so the sheet holds only on a map the customer would see.
+    ...(traceOnReport === undefined ? {} : { traceOnReport }),
+    // Typed voice fill (GATE_TYPED_VOICE_FILL, step 3 "after sending"): the
+    // sheet offers to book the follow-up a completion suggests (bed bug,
+    // flea, cockroach and the knockdowns), as the office's Schedule
+    // follow-up does.
+    followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
+    lane,
     existingRecordLoadFailed,
     service: recapServiceIdentity(svc, profile),
     timeline,
@@ -442,6 +505,9 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
+  // Whether it is a free callback decides the pay link and the review ask
+  // the client sends, so a change to it is a changed visit.
+  if ('isCallback' in expected && (expected.isCallback === true) !== (locked.is_callback === true)) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};
@@ -572,7 +638,10 @@ async function submitRecap({
         'customer_id', 'property_id',
         // Stamped visit address + coords feed the report identity snapshot.
         'service_address_line1', 'service_address_line2', 'service_address_city',
-        'service_address_state', 'service_address_zip', 'lat', 'lng');
+        'service_address_state', 'service_address_zip', 'lat', 'lng',
+        // The customer's booking words freeze onto the record here too
+        // (reservice-report-card.js), same as the /complete path.
+        'customer_request', 'customer_request_source', 'customer_request_pests');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -891,6 +960,15 @@ async function submitRecap({
         // completion-time identity and replaces it (pre-push codex P1).
         if (existing.status !== COMPLETED_STATUS) {
           missing.reportIdentitySnapshot = reportIdentitySnapshot;
+          // The booking words freeze with the completion, fill-if-absent,
+          // and only when THIS recap performs the completion transition
+          // (the locked scheduled row was not already completed): a recap
+          // re-submit on history never freezes today's booking words.
+          const frozenRequest = recapPriorCompleted ? null
+            : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+          if (frozenRequest && !Object.prototype.hasOwnProperty.call(existingData, 'reserviceRequest')) {
+            missing.reserviceRequest = frozenRequest;
+          }
         }
         if (Object.keys(missing).length) {
           mergedServiceData = JSON.stringify({ ...existingData, ...missing });
@@ -985,7 +1063,19 @@ async function submitRecap({
         ...(closeoutSnap && serviceRecordCols.structured_notes
           ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
           : {}),
-        service_data: JSON.stringify({ ...frozenTraceIdentity, reportIdentitySnapshot }),
+        service_data: JSON.stringify({
+          ...frozenTraceIdentity,
+          reportIdentitySnapshot,
+          // The customer's booking words, frozen with the completion like
+          // the /complete path (reservice-report-card.js).
+          // Only when this recap performs the completion: recreating a record
+          // for a visit already completed never freezes today's words.
+          ...(() => {
+            const frozenRequest = recapPriorCompleted ? null
+              : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+            return frozenRequest ? { reserviceRequest: frozenRequest } : {};
+          })(),
+        }),
         ...staffRatingFields,
         ...smsClaim,
         // completion_supplies_owed: this recap performs the completion

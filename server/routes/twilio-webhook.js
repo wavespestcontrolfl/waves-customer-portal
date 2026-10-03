@@ -932,7 +932,7 @@ router.post('/sms', async (req, res) => {
         }
         if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
           try {
-            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+            const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
@@ -1000,9 +1000,44 @@ router.post('/sms', async (req, res) => {
       await updateByTwilioSid(MessageSid, { is_read: true, read_at: new Date() }).catch(() => {});
     }
 
+    // Unknown-sender typed shadow (sms_solicitation.v1, GATE_TYPED_DECISIONS,
+    // dark): evidence for GATE_SMS_SPAM_CLASSIFIER before it is flipped. The
+    // same texts its screen above would see (not complianceEligible: no known
+    // relationship or outbound history and not the AI line; no reaction; no
+    // media), whatever that gate's mode, recorded beside the screen's regex
+    // marker and, when it ran, its own verdict. Registered BEFORE the
+    // enforcement stop below so a text the screen silences (true mode) is
+    // shadowed too: its false positives are what this evidence must show
+    // (pre-push audit P1). After the response; changes nothing.
+    if (Body && !smsReaction && inboundMedia.length === 0 && !complianceEligible && smsLogEntry?.id) {
+      res.once('finish', () => {
+        void Promise.resolve().then(() => require('../services/typed-decisions/sms-shadow').shadowUnknownSenderSms({
+          smsLogId: smsLogEntry.id,
+          body: Body,
+          verdict: solicitation,
+          fromPhone: From,
+          toPhone: To,
+          receivedAt: smsLogEntry.created_at,
+        })).catch((err) => logger.warn(`[typed-decisions] unknown-sender sms shadow failed: ${err.message}`));
+      });
+    }
+
     // Keep both source rows, then stop before lead creation, quoting,
     // notifications or any auto-reply. This also covers tracking/tech lines.
     if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
+
+    // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its own
+    // gate): registered here, right after the source row is kept and before any consuming branch
+    // (reschedule reply, lead intake) returns, so those texts are sampled too; started on response
+    // finish (like the typed-decisions shadow) so it reads the customer's state after that branch
+    // committed. Stored for the owner to read, never sent; nothing waits on it.
+    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location') {
+      const trialInput = { inboundMessage: Body, fromPhone: From, customer, smsLogId: smsLogEntry?.id || null, hasMedia: inboundMedia.length > 0 };
+      res.once('finish', () => {
+        void require('../services/sms-translation').runTranslationTrial(trialInput)
+          .catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
+      });
+    }
 
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.
@@ -1239,7 +1274,7 @@ router.post('/sms', async (req, res) => {
         ? `🌐 Lead from ${numberConfig.domain}: ${From} — "${(Body || '').slice(0, 80)}"`
         : numberConfig.type === 'van_tracking'
           ? `🚛 Lead from van wrap: ${From} — "${(Body || '').slice(0, 80)}"`
-          : `📱 SMS from ${customer ? `${customer.first_name} ${customer.last_name}` : From}: "${(Body || '').slice(0, 80)}"`,
+          : `📱 SMS from ${customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From}: "${(Body || '').slice(0, 80)}"`,
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
@@ -1357,7 +1392,7 @@ router.post('/sms', async (req, res) => {
 
     if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
-        const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+        const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
         const mediaText = inboundMedia.length
           ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
           : '';
@@ -1561,6 +1596,7 @@ router.post('/sms', async (req, res) => {
         }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
+
 
      } catch (sideErr) {
        logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);

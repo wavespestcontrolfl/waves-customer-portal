@@ -193,25 +193,25 @@ const TEMPLATES = [
     id: "day0_ask",
     name: "Day-0 Ask",
     sentiment: "happy",
-    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+    body: "Hi {first}! {sender}. A Google review means a lot: {review_url}",
   },
   {
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
-    body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. A quick Google review would help us a lot:\n\n{review_url}",
   },
   {
     id: "soft_reminder",
     name: "Soft Reminder",
     sentiment: "happy",
-    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time:\n\n{review_url}",
+    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time, for a Google review:\n\n{review_url}",
   },
   {
     id: "final_nudge",
     name: "Final Nudge (email)",
     sentiment: "happy",
-    body: "Hey {first} - last one from us, promise! If you have been happy with Waves, a quick review means a lot:\n\n{review_url}",
+    body: "Hey {first} - last one from us, promise! A quick Google review means a lot:\n\n{review_url}",
   },
   {
     id: "post_service_hot",
@@ -223,13 +223,13 @@ const TEMPLATES = [
     id: "service_specific_pest",
     name: "Service-Specific: Pest Control",
     sentiment: "happy",
-    body: "Hi {first}! Hope the bugs are staying away after your Waves treatment. If we earned it:\n\n{review_url}",
+    body: "Hi {first}! Hope the bugs are staying away after your Waves treatment. A Google review helps:\n\n{review_url}",
   },
   {
     id: "service_specific_lawn",
     name: "Service-Specific: Lawn Care",
     sentiment: "happy",
-    body: "Hey {first}, it's Waves. Hope the yard is looking great. If you love the results, a quick review helps:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. Hope the yard is looking great. A quick Google review helps a lot:\n\n{review_url}",
   },
   {
     id: "resolution_check",
@@ -247,7 +247,7 @@ const TEMPLATES = [
     id: "recovery_review",
     name: "Recovery → Review",
     sentiment: "issue",
-    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience with Waves?\n\n{review_url}\n\nThank you!",
+    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience in a Google review?\n\n{review_url}\n\nThank you!",
   },
   {
     id: "winback_checkin",
@@ -259,13 +259,13 @@ const TEMPLATES = [
     id: "winback_ask",
     name: "Win-Back Review Ask",
     sentiment: "neutral",
-    body: "Hi {first}! We never got to ask - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
+    body: "Hi {first}! We never got to ask - would you leave a quick Google review of your Waves service?\n\n{review_url}",
   },
   {
     id: "qr_followup",
     name: "QR Code Follow-Up",
     sentiment: "happy",
-    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time:\n\n{review_url}",
+    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link again, for a Google review:\n\n{review_url}",
   },
   // first_treatment_ask is deliberately NOT offered here (codex #3235 r12
   // P1, superseding the r3 mirror-parity note): it is a cadence-internal,
@@ -328,7 +328,27 @@ const DECISION_LABELS = {
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
+  // Review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, owner rulings 2026-10-01).
+  payment_hold: "Held: the customer has an overdue bill or a recent payment reminder",
+  ask_dropped_payment_hold: "Ask dropped: payment hold outlasted its 3-day window",
+  ask_held_repeat: "Ask held: the drafted text repeated an earlier one",
 };
+// What a review-ask hold saw (decision.detail), in plain words.
+const HOLD_KIND_TEXT = {
+  overdue_invoice: "overdue bill",
+  payment_reminder_recent: "payment reminder in the last 3 days",
+  payment_lookup_unavailable: "billing could not be read",
+  cleared_after_window: "cleared after the window",
+};
+function holdDetailText(d) {
+  const x = d.detail;
+  if (!x) return null;
+  if (d.reason === "ask_held_repeat") {
+    return `Held text: "${x.heldBody || ""}" — repeats step ${Number(x.earlierStep) + 1}: "${x.earlierQuote || ""}"`;
+  }
+  if (x.hold) return `Hold: ${HOLD_KIND_TEXT[x.hold] || String(x.hold).replace(/_/g, " ")}${x.heldSince ? ` since ${fmtETWhen(x.heldSince)}` : ""}`;
+  return null;
+}
 const fmtETWhen = (d) =>
   new Date(d).toLocaleString("en-US", {
     timeZone: "America/New_York",
@@ -338,7 +358,8 @@ const fmtETWhen = (d) =>
     hour: "numeric",
     minute: "2-digit",
   });
-function decisionLine(seq, sequencesEnabled) {
+// Exported for its unit test.
+export function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
   // A stranded claim (null schedule the worker never re-selects) needs a hand
   // whether or not the gate is on — say so first (codex #4140 r6 P2).
@@ -393,6 +414,7 @@ function decisionLine(seq, sequencesEnabled) {
   return [
     whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null,
     label,
+    holdDetailText(d),
     capturedRequestText(seq, d),
     owner,
   ]
@@ -1643,7 +1665,7 @@ function Pipeline({
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({ to: c.phone }),
+                                  body: JSON.stringify({ to: c.phone, customerIdHint: c.id }),
                                 },
                               );
                               if (!r?.success)
@@ -2122,7 +2144,7 @@ function CustomerDrawer({
                     // client-side GBP number would 400.
                     const r = await adminFetch("/admin/communications/call", {
                       method: "POST",
-                      body: JSON.stringify({ to: c.phone }),
+                      body: JSON.stringify({ to: c.phone, customerIdHint: c.id }),
                     });
                     if (!r?.success) {
                       showToast(

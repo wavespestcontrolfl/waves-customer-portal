@@ -1,3 +1,4 @@
+import { clearStaffDeviceData } from '../lib/adminAuth';
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
@@ -25,6 +26,10 @@ const ADMIN_FONT = "'Roboto', Arial, sans-serif";
 
 // Only honor same-origin relative redirect targets (block //host and schemes).
 const isInternalPath = (p) => typeof p === 'string' && /^\/(?![/\\])/.test(p);
+// The retired /tech entry (with its one trailing slash before ?, # or the end)
+// and the /admin paths a technician may be returned to.
+const TECH_ENTRY = /^\/tech(?:\/(?=[?#]|$))?(?=[/?#]|$)/i;
+const ADMIN_PATH = /^\/admin(?:[/?#]|$)/i;
 
 export default function AdminLoginPage() {
   const navigate = useNavigate();
@@ -51,6 +56,7 @@ export default function AdminLoginPage() {
       if (data.user?.mustChangePassword) {
         localStorage.removeItem('waves_admin_token');
         localStorage.removeItem('waves_admin_user');
+        clearStaffDeviceData();
         try {
           await refetchFlags();
         } catch {
@@ -76,15 +82,19 @@ export default function AdminLoginPage() {
         // Authentication is already committed and stored. Feature flags fail
         // closed independently, so continue to the authenticated destination.
       }
-      // Honor a ?next= return target (e.g. the tech entry point sends
-      // ?next=/tech) so techs land in Field Tools rather than the admin-only
-      // dashboard. Defaults to /admin for the normal admin sign-in.
+      // Honor a ?next= return target. Technicians default to their field
+      // workspace inside Waves Admin (/admin/today): the retired /tech entry
+      // points (?next=/tech/...) are rewritten to their /admin/today
+      // equivalents, and any other target must be an /admin path (the
+      // layout's role guard redirects a technician off an owner-only one, so
+      // an internal /admin target is safe to honor here). Defaults to /admin
+      // for the normal admin sign-in.
       const next = searchParams.get('next');
-      const techNext = isInternalPath(next)
-        && /^\/tech(?:[/?#]|$)/i.test(next);
+      const internalNext = isInternalPath(next) ? next : '';
+      const techNext = internalNext.replace(TECH_ENTRY, '/admin/today');
       const destination = data.user?.role === 'technician'
-        ? (techNext ? next : '/tech')
-        : (isInternalPath(next) ? next : '/admin');
+        ? (ADMIN_PATH.test(techNext) ? techNext : '/admin/today')
+        : (internalNext || '/admin');
       navigate(destination, { replace: true });
     } catch (e) {
       setError(e.message);

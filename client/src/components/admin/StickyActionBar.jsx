@@ -155,7 +155,7 @@ export function CustomerActionBar({ customer, standalone }) {
           key: "call",
           icon: Phone,
           label: "Call",
-          onClick: phone ? () => callViaBridge(phone, fullName) : undefined,
+          onClick: phone ? () => callViaBridge(phone, fullName, undefined, customerId) : undefined,
           disabled: !phone,
         },
         {

@@ -17,7 +17,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled, typedDecisionsLive } = require('../config/feature-gates');
+const { isEnabled, typedDecisionsLive, typedDecisionsClefLive } = require('../config/feature-gates');
+const { CALL_TRANSCRIPT_CHARS } = require('./typed-decisions/packages');
 const { createDeepMessage } = require('./llm/deep');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -66,15 +67,91 @@ function compactDirection(direction) {
 
 // Shadow: put the same call to TypeSafe Jev (call_judge.v2) and record its
 // answers beside production's and the deep judge's in decision_reviews. Dark
-// behind GATE_TYPED_DECISIONS. Never throws and never touches the audit's own
-// findings or counters; it only tallies into `tally` ({ asked, recorded, failed }
-// counts calls, not rows).
+// behind GATE_TYPED_DECISIONS. With GATE_TYPED_DECISIONS_CLEF also on, the
+// same package goes to Cloudflare Clef as a second leg and each provider's
+// rows carry the other's answers (siblingAnswers), so a case where they
+// differ queues both for the reviewer. Never throws and never touches the
+// audit's own findings or counters; it only tallies into `tally`
+// ({ asked, recorded, failed } counts calls, not rows; `tally.clef` holds the
+// second leg's own counts and exists only while that gate is on).
 const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
-async function shadowJevJudge(call, prod, verdict, tally) {
+async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   if (!typedDecisionsLive()) return;
+  const clef = typedDecisionsClefLive();
+  const bool = (v) => (typeof v === 'boolean' ? v : undefined);
+  const judgeBaselines = { complaint: { deep_judge: bool(verdict.complaint) } };
+  for (const f of JEV_SHARED_FIELDS) judgeBaselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
+  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v2', baselines: judgeBaselines }, clef));
+  // The dark call gates' own decisions beside the same providers' answers
+  // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
+  // Asked only when the WHOLE transcript fits the span the models and the
+  // reviewer are shown (94% of calls, measured 10-02): the baselines come from
+  // extractions over the full call, so a cut-off call would show a gate's
+  // reason to neither (Codex #5645 r1). Long calls are counted, not asked.
+  tally.gateChecks = tally.gateChecks || { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
+  if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.gateChecks.skippedLong++; return; }
+  count(tally.gateChecks, clef, await askAndRecord(call, { packageId: 'call_gate_checks.v1', baselines: gateBaselines }, clef));
+}
+
+// Folds one call's { typesafe, cloudflare } outcome into a tally.
+function count(tally, clef, outcome) {
   tally.asked++;
-  const outcome = await askAndRecord(call, prod, verdict);
-  if (outcome === 'recorded') tally.recorded++; else tally.failed++;
+  if (outcome.typesafe === 'recorded') tally.recorded++; else tally.failed++;
+  if (clef) {
+    tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 };
+    tally.clef.asked++;
+    if (outcome.cloudflare === 'recorded') tally.clef.recorded++; else tally.clef.failed++;
+  }
+}
+
+// What each dark call gate decided for this call, as call_gate_checks.v1's
+// `production` baselines. Each is the exact signal the gate acts on:
+//   service_unclear      the v2 extraction's ambiguous_pest_or_service flag
+//                        (call-triage-flags serviceMayForceAssessment)
+//   reschedule_committed the v2 extraction's committed reschedule that the
+//                        caller accepted (call-reschedule-apply
+//                        planRescheduleFromCall + groundRescheduleAgreement's
+//                        caller_accepted_slot check)
+//   promise_open         an AI-extracted Waves commitment of a kind the
+//                        chaser acts on (SLA_KINDS: callback, send_estimate,
+//                        schedule_visit) that a later pass did not drop
+// A gate with no reading for the call (no valid v2 extraction; commitments
+// off) gets no baseline, never a false one.
+function gateCheckBaselines(call, wavesPromiseCallIds) {
+  const out = {};
+  const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : null;
+  if (v2 && Object.keys(v2).length) {
+    out.service_unclear = { production: Array.isArray(v2.triage_flags) && v2.triage_flags.includes('ambiguous_pest_or_service') };
+    const sched = v2.scheduling || {};
+    out.reschedule_committed = {
+      production: sched.status === 'reschedule_requested' && sched.agent_committed_booking === true
+        && sched.caller_accepted_slot === true && Boolean(sched.confirmed_start_at),
+    };
+  }
+  if (wavesPromiseCallIds) out.promise_open = { production: wavesPromiseCallIds.has(String(call.id)) };
+  return out;
+}
+
+// The sampled calls that carry a live AI-extracted Waves promise. null when
+// commitments are off (no reading, so no baseline). Never throws.
+async function loadWavesPromiseCallIds(calls) {
+  if (!typedDecisionsLive() || !isEnabled('callCommitments') || !calls.length) return null;
+  try {
+    const { staleAiRowSql } = require('./call-commitments');
+    // The kinds the promise chaser acts on (Codex #5645 r1): a promise to
+    // send a report or paperwork is real but no gate decision.
+    const { SLA_KINDS } = require('./followup-sla-watcher');
+    const rows = await db('call_commitments as cc')
+      .whereIn('cc.call_log_id', calls.map((c) => c.id))
+      .where({ 'cc.party': 'waves', 'cc.source': 'ai' })
+      .whereIn('cc.kind', SLA_KINDS)
+      .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+      .distinct('cc.call_log_id');
+    return new Set(rows.map((r) => String(r.call_log_id)));
+  } catch (err) {
+    logger.warn(`[self-audit] commitments read failed: ${err.message}`);
+    return null;
+  }
 }
 
 // What the production extraction recorded for the call_judge fields.
@@ -89,29 +166,57 @@ function productionAnswers(call) {
   };
 }
 
-async function askAndRecord(call, prod, verdict) {
+// One call to every live provider, then one record per provider that
+// answered, each handed the others' answers. Returns { typesafe, cloudflare }
+// as 'recorded' | 'failed' (cloudflare only when asked).
+async function askAndRecord(call, { packageId, baselines }, clef = false) {
+  const outcome = { typesafe: 'failed', ...(clef ? { cloudflare: 'failed' } : {}) };
   try {
     const { askPackage } = require('./typed-decisions/jev');
     const { packageFor } = require('./typed-decisions/packages');
     const { recordDecisions } = require('./typed-decisions/shadow-recorder');
     const { callSubjectHash, callTranscriptSpan } = require('./typed-decisions/subject-hash');
-    const result = await askPackage('call_judge.v2', {
+    const state = {
       call_direction: compactDirection(call.direction),
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
-    });
-    if (!result.ok) return 'failed';
-    const bool = (v) => (typeof v === 'boolean' ? v : undefined);
-    const baselines = { complaint: { deep_judge: bool(verdict.complaint) } };
-    for (const f of JEV_SHARED_FIELDS) baselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-    const recorded = await recordDecisions({
-      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines,
-      subjectHash: callSubjectHash(call.transcription),
-    });
-    return recorded.recorded > 0 ? 'recorded' : 'failed';
+    };
+    const providers = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
+    const legs = await Promise.all(providers.map(async (provider) => {
+      try {
+        const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
+        return result && result.ok ? { provider, result } : null;
+      } catch (err) {
+        logger.warn(`[self-audit] ${provider} shadow ask (${packageId}) failed for ${call.id}: ${err.message}`);
+        return null;
+      }
+    }));
+    const answered = legs.filter(Boolean);
+    if (!answered.length) return outcome;
+    const pkg = packageFor(packageId);
+    const subjectHash = callSubjectHash(call.transcription);
+    await Promise.all(answered.map(async ({ provider, result }) => {
+      try {
+        const siblingAnswers = {};
+        for (const other of answered) {
+          if (other.provider === provider) continue;
+          for (const [questionId, answer] of Object.entries(other.result.answers || {})) {
+            (siblingAnswers[questionId] = siblingAnswers[questionId] || []).push(answer);
+          }
+        }
+        const recorded = await recordDecisions({
+          capability: pkg.capability, pkg, provider, subjectType: 'call_log', subjectId: call.id, result, baselines,
+          siblingAnswers, subjectHash,
+        });
+        outcome[provider] = recorded.recorded > 0 ? 'recorded' : 'failed';
+      } catch (err) {
+        logger.warn(`[self-audit] ${provider} shadow record (${packageId}) failed for ${call.id}: ${err.message}`);
+      }
+    }));
+    return outcome;
   } catch (err) {
-    logger.warn(`[self-audit] jev shadow failed for ${call.id}: ${err.message}`);
-    return 'failed';
+    logger.warn(`[self-audit] jev shadow (${packageId}) failed for ${call.id}: ${err.message}`);
+    return outcome;
   }
 }
 
@@ -150,8 +255,9 @@ async function runSelfAudit(depsIn = {}) {
     .orderBy('created_at', 'desc')
     .limit(SAMPLE_SIZE)
     .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition',
-      // Jev shadow: the call's length is part of call_judge's state.
-      'duration_seconds');
+      // Jev shadow: the call's length is part of call_judge's state; the v2
+      // extraction carries two dark call gates' own decisions (gateCheckBaselines).
+      'duration_seconds', 'ai_extraction_enriched', 'v2_extraction_status');
   const [inboundRows, outboundRows] = await Promise.all([
     sampleDirection(INBOUND_DIRECTION_SQL),
     sampleDirection(OUTBOUND_DIRECTION_SQL),
@@ -162,7 +268,9 @@ async function runSelfAudit(depsIn = {}) {
 
   let disagreements = 0; let checkedFields = 0; let spamFalsePositives = 0; let dispositionMismatches = 0; let audited = 0;
   const jev = { asked: 0, recorded: 0, failed: 0 };
+  const wavesPromiseCallIds = await loadWavesPromiseCallIds(calls);
   for (const call of calls) {
+    const gateBaselines = gateCheckBaselines(call, wavesPromiseCallIds);
     let verdict;
     try {
       // Blind audit: the model sees ONLY the transcript. Leaking production's
@@ -178,7 +286,7 @@ async function runSelfAudit(depsIn = {}) {
       logger.warn(`[self-audit] audit call failed for ${call.id}: ${err.message}`);
       // Jev is still asked, against production alone: dropping every call the
       // deep judge fails on would bias the shadow sample toward easy calls.
-      await shadowJevJudge(call, productionAnswers(call), {}, jev);
+      await shadowJevJudge(call, productionAnswers(call), {}, jev, gateBaselines);
       continue;
     }
     audited++;
@@ -217,7 +325,7 @@ async function runSelfAudit(depsIn = {}) {
         .catch((err) => logger.warn(`[self-audit] finding write failed: ${err.message}`));
     }
 
-    await shadowJevJudge(call, prod, verdict, jev);
+    await shadowJevJudge(call, prod, verdict, jev, gateBaselines);
   }
 
   const fieldRate = checkedFields ? disagreements / checkedFields : 0;
@@ -252,4 +360,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines };

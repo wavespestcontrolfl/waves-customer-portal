@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const { installStaffCallRecordingPrivacy } = require('./staff-call-recording-privacy');
+const { enforceTechnicianScope } = require('./technician-scope');
 
 function isStaffAccessToken(decoded) {
   return decoded?.type === 'access'
@@ -57,6 +58,10 @@ async function adminAuthenticate(req, res, next) {
     req.techRole = tech.role;
     req.staffToken = decoded;
     installStaffCallRecordingPrivacy(res);
+    // Technician reach is an allow-list (GATE_STAFF_DEFAULT_DENY, owner
+    // 2026-10-02). Runs here, at the one chokepoint every staff route shares,
+    // so a router that forgot requireAdmin is still closed. Admins pass.
+    if (enforceTechnicianScope(req, res)) return undefined;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });

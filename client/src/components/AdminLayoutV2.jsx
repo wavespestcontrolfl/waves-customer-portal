@@ -1,3 +1,4 @@
+import { clearStaffDeviceData } from "../lib/adminAuth";
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
@@ -28,8 +29,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import useModalFocus from "../hooks/useModalFocus";
-import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
-import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
+import { refetchFlags, useFeatureFlag, useFeatureFlagReady } from "../hooks/useFeatureFlag";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -44,6 +44,9 @@ import { clearEmailDrafts } from "../lib/emailDrafts";
 import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
+import { useTechNavigationLock } from "./tech/TechNavigationLock";
+import useStaffSession from "../hooks/useStaffSession";
+
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -97,24 +100,61 @@ function UnreadSrText({ count }) {
   return <span className="sr-only">, {count} conversation{count === 1 ? "" : "s"} needing a reply</span>;
 }
 
+// Main-area padding by layout (see `layout` in the component): the field
+// workspace supplies its own header and bottom nav, so it is edge to edge.
+const MOBILE_SHELL = 1;
+const MAIN_PADDING = [
+  { top: 24, bottom: 24, x: 28 },
+  { top: "calc(52px + env(safe-area-inset-top) + 16px)", bottom: "calc(56px + env(safe-area-inset-bottom) + 16px)", x: 16 },
+  { top: 0, bottom: 0, x: 0 },
+];
+
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
   const isMobile = useIsMobile();
-  const [user, setUser] = useState(null);
-  const [authStatus, setAuthStatus] = useState("checking");
+  // Field navigation lock (TechNavigationLock, mounted in App outside the
+  // router): while a visit action is in flight on /admin/today, the field
+  // shell disables its own links; the admin shell's sidebar, tab bar, palette
+  // and sign-out must hold too, or they navigate away mid-action (pre-push
+  // Codex P1 on the Today page).
+  const fieldLock = useTechNavigationLock();
+  const fieldBusy = Boolean(fieldLock?.navigationBusy);
+  const holdWhileFieldBusy = (event) => {
+    if (!fieldBusy) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  // The palette's ⌘K / Ctrl+K listener is a window bubble-phase handler; this
+  // capture-phase listener runs first and swallows the shortcut while busy.
+  useEffect(() => {
+    if (!fieldBusy) return undefined;
+    const swallowPaletteShortcut = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "k") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+    window.addEventListener("keydown", swallowPaletteShortcut, true);
+    return () => window.removeEventListener("keydown", swallowPaletteShortcut, true);
+  }, [fieldBusy]);
+  // Staff-session state machine (verify, offline pass, cross-tab sign-in,
+  // 401 handling): see useStaffSession.
+  const { user, userId, authStatus, sessionReady, onField } = useStaffSession();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuTriggerRef = useRef(null);
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
   // focus returns to the "Open menu" button (F0014).
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
-  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
-  const navigationEnabled = useFeatureFlag("admin-navigation", false);
+  // Per verified account, like the field-workspace read below: an account
+  // switch in another tab refetches flags (Codex #5573 r8).
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, userId);
+  const navigationEnabled = useFeatureFlag("admin-navigation", false, userId);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
   // destination is the inbox, never a particular customer.
-  const unreadConversations = useUnreadConversations(authStatus === "ready" && ["admin", "owner"].includes(user?.role));
+  const unreadConversations = useUnreadConversations(sessionReady && ["admin", "owner"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
   // is covered. The layout only owns chrome geometry.
@@ -129,44 +169,6 @@ export default function AdminLayoutV2() {
     // unknown-rule error).
   }, []);
 
-  useEffect(() => {
-    const token = localStorage.getItem("waves_admin_token");
-    if (!token) {
-      navigate(adminLoginUrl(location), { replace: true });
-      return;
-    }
-    adminFetch("/admin/auth/me")
-      .then((profile) => {
-        if (!profile) {
-          setAuthStatus("error");
-          return;
-        }
-        if (profile.mustChangePassword) {
-          localStorage.removeItem("waves_admin_token");
-          localStorage.removeItem("waves_admin_user");
-          refetchFlags().catch(() => {});
-          navigate("/admin/forgot-password", {
-            replace: true,
-            state: { email: profile.email, resetRequired: true },
-          });
-          return;
-        }
-        setUser(profile);
-        setAuthStatus("ready");
-        localStorage.setItem("waves_admin_user", JSON.stringify(profile));
-      })
-      .catch((err) => {
-        if (err?.status === 401) {
-          localStorage.removeItem("waves_admin_token");
-          localStorage.removeItem("waves_admin_user");
-          refetchFlags().catch(() => {});
-          navigate(adminLoginUrl(location), { replace: true });
-          return;
-        }
-        setAuthStatus("error");
-      });
-  }, [navigate]);
-
   // Role scoping on deep links: the sidebar/More page hide adminOnly
   // destinations from non-admin roles, but a typed URL bypasses nav.
   // Redirect off owner-only paths using the SERVER-returned role (`user`
@@ -175,9 +177,10 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     if (!user || user.role === "admin") return;
     if (isPathAdminOnly(location.pathname)) {
-      // Schedule, not dashboard: admin-dashboard.js is requireAdmin, so the
+      // Today, not dashboard: admin-dashboard.js is requireAdmin, so the
       // dashboard would land a technician on a page of 403s (codex P1).
-      navigate("/admin/schedule", { replace: true });
+      // /admin/today is the technician's home inside Waves Admin.
+      navigate("/admin/today", { replace: true });
     }
   }, [user, location.pathname, navigate]);
 
@@ -201,11 +204,12 @@ export default function AdminLayoutV2() {
   // only record of which admin surfaces get used. Waits for auth so an
   // expired session can't spray 401s.
   useEffect(() => {
-    if (authStatus !== "ready") return;
+    if (!sessionReady) return;
     trackAdminPageView({ pathname: location.pathname, search: location.search });
-  }, [authStatus, location.pathname, location.search]);
+  }, [sessionReady, location.pathname, location.search]);
 
   const handleLogout = () => {
+    if (fieldBusy) return;
     // Sign-out navigates by calling navigate() from a plain button — no
     // popstate, no <a href> click — so it reaches neither CustomersPageV2's
     // own guardLink/guardHistory nor any other page's in-app draft guard.
@@ -215,6 +219,7 @@ export default function AdminLayoutV2() {
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
+    clearStaffDeviceData();
     refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };
@@ -226,18 +231,35 @@ export default function AdminLayoutV2() {
   }, [isMobile, sidebarOpen]);
   // The page-data provider takes this opener as a context value, so it has to
   // be stable across renders that change neither the drawer nor the viewport.
-  const openPalette = useCallback(() => { closeSidebarForPalette(); paletteRef.current?.open(); },
-    [closeSidebarForPalette]);
+  const openPalette = useCallback(() => { if (fieldBusy) return; closeSidebarForPalette(); paletteRef.current?.open(); },
+    [closeSidebarForPalette, fieldBusy]);
+  const openPageFinder = useCallback(() => { if (fieldBusy) return; paletteRef.current?.openNavigation(); }, [fieldBusy]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
+  // On a phone the field workspace (/admin/today) supplies its own header and
+  // bottom nav, so the admin shell's mobile top bar and tab bar step aside.
+  // Only while the field workspace actually renders: with the
+  // tech-field-workspace flag off, /admin/today shows the legacy route UI,
+  // which has no navigation of its own, so the admin chrome must stay.
+  // Re-read per verified account: an account switch in another tab refetches
+  // flags, and the chrome must follow the new login's value (pre-push P1).
+  const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false, userId);
+  // 0 desktop, 1 phone, 2 phone on the field workspace; indexes the padding
+  // table and the phone-only chrome.
+  const layout = Number(isMobile) * (1 + Number(fieldWorkspaceFlag.enabled && onField));
+  const mainPadding = MAIN_PADDING[layout];
+  const fieldHold = { onClickCapture: holdWhileFieldBusy, "aria-busy": fieldBusy || undefined };
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
-  const canRenderRoute = authStatus === "ready"
+  // An offline-pass session is ready for the field workspace only: off Today
+  // it is not ready in this very render, before the re-verify effect runs, so
+  // no other admin page mounts on it for a frame (pre-push P1).
+  const canRenderRoute = sessionReady
     && (user?.role === "admin" || !isPathAdminOnly(location.pathname));
 
   return (
     <IntelligenceBarPageDataProvider open={openPalette}>
-    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && authStatus === 'ready'} agentEstimateEnabled={agentEstimateEnabled}>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && sessionReady} agentEstimateEnabled={agentEstimateEnabled}>
     <div
       className="admin-shell-v2"
       style={{
@@ -252,7 +274,7 @@ export default function AdminLayoutV2() {
     >
       <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
-      {isMobile && (
+      {layout === MOBILE_SHELL && (
         <div
           style={{
             position: "fixed",
@@ -295,7 +317,7 @@ export default function AdminLayoutV2() {
           </button>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
           <div style={{ flex: 1 }} />
-          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={() => paletteRef.current?.openNavigation()} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
+          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={openPageFinder} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
           <button
             type="button"
             onClick={openPalette}
@@ -338,6 +360,7 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
+        {...fieldHold}
         ref={drawerRef}
         role={isMobile && sidebarOpen ? "dialog" : undefined}
         aria-modal={isMobile && sidebarOpen ? true : undefined}
@@ -370,7 +393,7 @@ export default function AdminLayoutV2() {
             isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
-        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={() => paletteRef.current?.openNavigation()} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
+        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
         {/* Logo + title + notification bell */}
         <div
           style={{
@@ -664,14 +687,10 @@ export default function AdminLayoutV2() {
           minWidth: 0,
           maxWidth: "100%",
           marginLeft: isMobile ? 0 : navigationEnabled ? 240 : 220,
-          paddingTop: isMobile
-            ? "calc(52px + env(safe-area-inset-top) + 16px)"
-            : 24,
-          paddingBottom: isMobile
-            ? "calc(56px + env(safe-area-inset-bottom) + 16px)"
-            : 24,
-          paddingLeft: isMobile ? 16 : 28,
-          paddingRight: isMobile ? 16 : 28,
+          paddingTop: mainPadding.top,
+          paddingBottom: mainPadding.bottom,
+          paddingLeft: mainPadding.x,
+          paddingRight: mainPadding.x,
           height: "var(--admin-vh, 100vh)",
           minHeight: "var(--admin-vh, 100vh)",
           boxSizing: "border-box",
@@ -694,10 +713,11 @@ export default function AdminLayoutV2() {
       </main>
 
       {/* Mobile bottom tab bar */}
-      {isMobile && (
+      {layout === MOBILE_SHELL && (
         <nav
           aria-label="Primary"
           className="admin-mobile-tabbar"
+          {...fieldHold}
           style={{
             position: "fixed",
             bottom: "var(--keyboard-inset, 0px)",
@@ -711,7 +731,8 @@ export default function AdminLayoutV2() {
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
             {ADMIN_MOBILE_TABS.filter(
-              (item) => !item.adminOnly || user?.role === "admin",
+              (item) => (!item.adminOnly || user?.role === "admin")
+                && (!item.technicianTab || user?.role === "technician"),
             ).map((item) => {
               const { path, icon: Icon, label } = item;
               const active = isAdminNavItemActive(

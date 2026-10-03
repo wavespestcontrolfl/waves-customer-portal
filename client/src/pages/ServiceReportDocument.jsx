@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary } from './ReportViewPage';
+import { cleanVisitSummary, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -580,6 +580,11 @@ export default function ServiceReportDocument({ data, token }) {
   // web hero prints, so the archived document keeps the re-service framing
   // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
   const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  // Re-service report card (GATE_RESERVICE_REPORT_CARD, the same server block
+  // the web report renders): "You told us" and "What we did" print in the
+  // document too, so the permanent PDF agrees with the live page. Null while
+  // the gate is dark — no payload key, nothing printed, cache key unchanged.
+  const reserviceCard = reservice ? reserviceCardView(data.reserviceReportCard) : null;
   // A non-performed callback (inspection_only / customer_declined /
   // incomplete) applied nothing — legacy/typed summary copy written for a
   // performed visit can claim treatment, so it is suppressed below and the
@@ -679,7 +684,11 @@ export default function ServiceReportDocument({ data, token }) {
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
-        value: v2.snapshot.statusHeadline,
+        // The lead's headline when it has one: under GATE_LAWN_REPORT_COPY_V6
+        // that is the FROZEN headline the live report replays, which a later
+        // assessment correction must not make the PDF contradict. Without the
+        // v6 copy the lead headline is this same statusHeadline (or null).
+        value: (v2Lead && v2Lead.headline) || v2.snapshot.statusHeadline,
         // The PDF has no word budget: a lead "why" the web dropped for its
         // budget or watering wording falls back to the score explanation
         // (Fable P2 #5517).
@@ -1042,6 +1051,33 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* Re-service card: the customer's booking words (frozen at completion,
+            scrubbed server-side; quote marks only for verbatim words) and the
+            performed-visit summary. The web page's "Still seeing…" button has
+            no print equivalent. */}
+        {reserviceCard?.showTold && (
+          <div className="doc-keep">
+            <SectionHeader>You told us</SectionHeader>
+            {reserviceCard.toldLine && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.toldLine}</p>
+            )}
+            {reserviceCard.toldPests.length > 0 && (
+              <InfoRow label="Reported">{reserviceCard.toldPests.join(', ')}</InfoRow>
+            )}
+          </div>
+        )}
+        {reserviceCard?.showDid && (
+          <div className="doc-keep">
+            <SectionHeader>What we did</SectionHeader>
+            {reserviceCard.rows.map(([label, value]) => (
+              <InfoRow key={label} label={label}>{value}</InfoRow>
+            ))}
+            {reserviceCard.safetyLine && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.safetyLine}</p>
+            )}
+          </div>
+        )}
+
         {/* The customer's own concern + our acknowledgment — a pest V2 visit
             carries it in pestReportV2.customerConcern, other lines in the
             top-level card. Losing it makes the report read as if the
@@ -1129,6 +1165,14 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
+            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+                lead prints. Its headline is the Overall line above, and its
+                watching line names insights this list already prints in full. */}
+            {v2Lead?.whatToExpect ? (
+              <Bullet>
+                <strong>What to expect:</strong> {v2Lead.whatToExpect}
+              </Bullet>
+            ) : null}
             {v2Diagnosis.map((row) => (
               <Bullet key={row.key || row.label}>
                 <strong>{row.label}{row.score != null ? ` (${row.score})` : ''}:</strong> {row.customerExplanation}

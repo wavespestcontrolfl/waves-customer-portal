@@ -477,6 +477,9 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   }
   next();
 });
+// Re-service photo uploads (GATE_RESERVICE_PHOTOS): same pre-parser 404 as
+// the appointment route's visitPrepPreParserGuard above.
+app.use('/api/public/reservice', require('./routes/reservice-public').reservicePhotosPreParserGuard);
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 
 // Estimate map-image proxy: privacy headers + the dark overlay 404 must land
@@ -741,6 +744,7 @@ app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
+app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
@@ -1045,6 +1049,16 @@ if (config.nodeEnv === 'production') {
   //
   // Add new sections here if a future surface needs its own PWA.
   const SECTIONS = [
+    // The technician field workspace inside the admin shell keeps the field
+    // PWA identity (first, so it wins over the /admin prefix below).
+    {
+      prefix: '/admin/today',
+      manifest: '/tech-manifest.json',
+      title: 'Waves Tech',
+      appleTitle: 'Waves Tech',
+      themeColor: '#111111',
+      htmlClass: 'admin-app',
+    },
     {
       prefix: '/admin',
       manifest: '/admin-manifest.json',

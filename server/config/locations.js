@@ -355,7 +355,9 @@ function resolveReviewLocationId(customer = {}, opts = {}) {
 // ~35mi of an office; beyond this the geocode is treated as unusable.
 const SERVICE_GEOCODE_MAX_MILES = 50;
 
-function resolveServiceLocation(customer = {}) {
+// resolveServiceLocation without the default-office fallback: null when no
+// city, ZIP or nearby geocode identifies an office (a lead with no address).
+function matchServiceLocation(customer = {}) {
   const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
 
   // The customer's own city first, then the ZIP's city. Full value to
@@ -379,7 +381,45 @@ function resolveServiceLocation(customer = {}) {
     if (hit && haversineMiles({ latitude: lat, longitude: lng }, hit) <= SERVICE_GEOCODE_MAX_MILES) return hit;
   }
 
-  return WAVES_LOCATIONS[0];
+  return null;
+}
+
+function resolveServiceLocation(customer = {}) {
+  return matchServiceLocation(customer) || WAVES_LOCATIONS[0];
+}
+
+/**
+ * The customer's HOME line office id (owner ruling 2026-10-02): the stored
+ * customers.home_line_location_id while it was set for the address the row
+ * holds now (home_line_address_key === addressKey of the current address),
+ * else resolveServiceLocation of that address. So a stored line only moves
+ * when the address does, never because the city map or a geocode changed.
+ *
+ * @param {object} customer  a customers row (address_line1/2, city, zip,
+ *   latitude, longitude, home_line_location_id, home_line_address_key)
+ * @returns {string} a WAVES_LOCATIONS id (never null)
+ */
+function homeLineLocationId(customer = {}) {
+  return homeLineOfficeId(customer) || WAVES_LOCATIONS[0].id;
+}
+
+/**
+ * homeLineLocationId without the default-office fallback: null when the
+ * customer has no valid stored line and no address that identifies an office.
+ * homeLineLocationId adds the Bradenton default (owner 2026-10-02: a
+ * customer with no usable address uses Bradenton for everything).
+ */
+function homeLineOfficeId(customer = {}) {
+  const stored = customer.home_line_location_id;
+  const matched = matchServiceLocation(customer);
+  // A staff pick always holds for its address; a derived stamp only while the
+  // address still names an office, so a stamped default never outlives it.
+  const trusted = customer.home_line_source === 'staff' || !!matched;
+  if (trusted && stored && customer.home_line_address_key != null && WAVES_LOCATIONS.some((l) => l.id === stored)) {
+    const { addressKey } = require('../services/customer-property-address-keys');
+    if (customer.home_line_address_key === addressKey(customer)) return stored;
+  }
+  return matched?.id || null;
 }
 
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
@@ -418,6 +458,9 @@ module.exports = {
   isGbpUtmCampaign,
   resolveLocation,
   resolveServiceLocation,
+  homeLineLocationId,
+  homeLineOfficeId,
+  matchServiceLocation,
   resolveLocationFromCandidates,
   isOfficeCity,
   nearestLocation,

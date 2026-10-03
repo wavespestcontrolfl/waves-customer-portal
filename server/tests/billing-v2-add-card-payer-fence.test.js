@@ -99,6 +99,8 @@ beforeEach(() => {
   StripeService.retrieveSetupIntent.mockResolvedValue({
     status: 'succeeded',
     payment_method: { id: 'pm_stripe_1', type: 'card' },
+    // Minted by a tab rendering the current consent text (codex #5434 r1 P1).
+    metadata: { consent_text_version: require('../services/payment-method-consent-text').CONSENT_VERSION },
   });
   // payment_methods lookups: the saved-card row already exists (idempotent
   // lookup-first save); the current-autopay-method probe finds none.

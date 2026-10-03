@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
+import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import {
   glassCtaMicroForKeys,
   glassRowInclusions,
@@ -293,6 +293,36 @@ export default function EstimateProposalDocument({ data, token }) {
       : recurringLineDescriptions.length === 0
         ? NEUTRAL_TERMS
         : glassCtaMicroForKeys(recurringLineDescriptions);
+
+  // Annual rate review disclosure (owner ruling 2026-09-30): appended to the
+  // terms line under the SAME scope rule the money-back guarantee keys on —
+  // every printed line carries the recurring residential plan terms (scope
+  // 'all': pest, lawn, mosquito, tree & shrub) and at least one line recurs
+  // — never beside authored, program or commercial terms. A termite-only
+  // ('none'), rodent or commercial ('satisfaction') or one-time-only
+  // document never prints it (no rate to review).
+  //
+  // Which lines carry the plan terms is the SERVER's call, never a client
+  // reclassification of descriptions (codex #5434 r1 P1: "Weed Control" is
+  // a lawn row to the server and nothing to glassServiceSlug): the
+  // projected proposal.rateReviewTermsEligible — the pdfkit fallback's own
+  // decision (proposalRateReviewTermsEligible), so the two renderers cannot
+  // drift — and, for a payload without it (the dev harness), the stamped
+  // per-line termsScope under the document's scope. The structural checks
+  // mirror estimate-pdf.js termsBlock's cannedTermsAllowed.
+  const recurringLines = buildings
+    .flatMap((b) => (b.lineItems || []))
+    .filter((li) => li.frequency !== 'one_time');
+  const linesCarryPlanTerms = typeof proposal?.rateReviewTermsEligible === 'boolean'
+    ? proposal.rateReviewTermsEligible
+    : recurringLines.every((li) => serviceGuaranteeScope(scope, li.termsScope) === 'all');
+  const rateReviewEligible = scope === 'all'
+    && !isCommercial
+    && !authoredTermsPresent
+    && programList.length === 0
+    && recurringLines.length > 0
+    && linesCarryPlanTerms;
+  const termsLineText = rateReviewEligible ? `${termsLine} · ${RATE_REVIEW_TERMS_LINE}` : termsLine;
 
   // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
   // estimate surfaces (AGENTS.md "Per application price copy"); commercial
@@ -631,7 +661,7 @@ export default function EstimateProposalDocument({ data, token }) {
               <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
             </div>
           ) : null}
-          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLine}</p>
+          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLineText}</p>
         </div>
 
         <div className="doc-keep">

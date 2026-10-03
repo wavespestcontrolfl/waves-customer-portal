@@ -5,9 +5,9 @@
  *   strip      name / program line / phone, plus the access codes the strip
  *              renders tap-to-reveal (raw codes live ONLY here — never in
  *              the paragraph or the model payload)
- *   paragraph  1–3 plain sentences written by a FAST-tier model from
- *              deterministic portal facts, with the deterministic template
- *              as both the grounding and the fallback; cached per visit on
+ *   paragraph  the deterministic template from portal facts. A FAST-tier
+ *              model rewrite over that template sits behind its own dark
+ *              gate (GATE_JOB_CARD_LLM); cached per visit on
  *              scheduled_services.job_card by grounding hash
  *   sprayCheck per-product verdict against NWS hourly at the property
  *   products   the visit's protocol products as cards (verdict, short,
@@ -58,6 +58,15 @@ const MAX_PARAGRAPH_WORDS = 60;
 
 function jobCardEnabled() {
   return gateEnvValue('GATE_JOB_CARD');
+}
+
+// The paragraph's model rewrite is a SEPARATE dark gate from the card
+// (owner decision 2026-10-02, same call as GATE_PREVISIT_BRIEF_LLM): the
+// grounding validator rejected every attempt on both providers, so off
+// means no provider call and the template IS the paragraph. Read at call
+// time, exact 'true'.
+function paragraphLlmEnabled() {
+  return process.env.GATE_JOB_CARD_LLM === 'true';
 }
 
 // ── Facts ───────────────────────────────────────────────────────────────────
@@ -676,6 +685,7 @@ function groundingHash(template) {
 async function writeParagraph(template, codes = [], deps = {}, critical = []) {
   const fallback = { text: template, source: 'template' };
   if (!template) return fallback;
+  if (!paragraphLlmEnabled()) return fallback;
   if (!deps.callModel && !process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback;
   const validate = (result) => validateParagraph(result?.text, template, codes, critical);
   const callModel = deps.callModel
@@ -715,7 +725,14 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
   const template = buildTemplateParagraph(facts.facts, { isLawn: facts.isLawn });
   const hash = groundingHash(template);
   const stored = facts.cache.stored;
-  if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
+  if (!paragraphLlmEnabled()) {
+    // Gate off: the template is the paragraph. A stored template for the
+    // same grounding is a hit (no write per read); anything else — a cached
+    // model paragraph included — is replaced by the template below.
+    if (stored?.grounding_hash === hash && stored.source === 'template' && stored.text === template) {
+      return { text: template, source: 'template', cached: true };
+    }
+  } else if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
     return { text: stored.text, source: 'model', cached: true };
   }
   const written = await writeParagraph(template, facts.knownCodes || facts.access.codes, deps, criticalFacts(facts.facts));
@@ -1898,6 +1915,7 @@ function fieldGuideLineProduct(name, products) {
 
 module.exports = {
   jobCardEnabled,
+  paragraphLlmEnabled,
   buildJobCard,
   mixForProduct,
   loadJobCardFacts,

@@ -89,9 +89,9 @@ describe('lawn expectations config rows', () => {
     ALL_ROWS.forEach((row) => expect(config.ROW_PRIORITY).toContain(row.id));
   });
 
-  it('every row ships unapproved and every window carries a proposed|catalog source', () => {
+  it('every row is owner-approved (2026-10-02) and every window carries a proposed|catalog source', () => {
     for (const row of ALL_ROWS) {
-      expect(row.approved).toBe(false);
+      expect(row.approved).toBe(true);
       for (const win of [row.windows?.first, row.windows?.full, row.contactWindow].filter(Boolean)) {
         expect(['proposed', 'catalog']).toContain(win.source);
         if (win.source === 'catalog') expect(win.catalogRef).toBeTruthy();
@@ -176,12 +176,23 @@ describe('product name map', () => {
     expect(missing).toEqual([]);
   });
 
+  it('"Talstar P" (the office name for Talak) maps exactly like Atticus Talak', () => {
+    expect(classifyLawnProductStatus('Talstar P')).toBe('mapped');
+    expect(classifyLawnProductStatus('  talstar   p ')).toBe('mapped');
+    const base = { serviceDate: '2026-10-01', applications: [] };
+    const talstar = buildLawnExpectations({ ...base, applications: [{ name: 'Talstar P', targets: ['Southern chinch bugs'] }] }, PREVIEW);
+    const talak = buildLawnExpectations({ ...base, applications: [{ name: 'Atticus Talak', targets: ['Southern chinch bugs'] }] }, PREVIEW);
+    expect(talstar.rows.map((r) => r.id)).toEqual(talak.rows.map((r) => r.id));
+    expect(talstar.rows.map((r) => r.id)).toEqual(['insecticide_curative']);
+  });
+
   it('every lawn product in use in the last 90 days is mapped or an explicit null', () => {
     // Fixture: the audit's in-use list (2026-09-29), exact catalog names.
     const inUse = [
       'LESCO K-Flow 0-0-25',
       'LESCO Chelated AM + Micros',
       'Atticus Talak',
+      'Talstar P',
       'Artavia 2 SC',
       'Celsius WG',
       'SedgeHammer Plus',
@@ -210,12 +221,18 @@ describe('product name map', () => {
 describe('buildLawnExpectations', () => {
   const base = { visitDate: '2026-10-01', nextVisitDate: '2026-11-05' };
 
-  it('ships dark: every row is withheld unless the caller asks for a preview', () => {
-    const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
-    expect(out.rows).toEqual([]);
-    expect(out.lines).toEqual([]);
-    expect(out.primaryRowId).toBeNull();
-    expect(out.withheld).toEqual([{ rowId: 'herbicide_broadleaf', reason: 'not_approved' }]);
+  it('an unapproved row is withheld unless the caller asks for a preview', () => {
+    const original = PRODUCT_ROWS.herbicide_broadleaf;
+    PRODUCT_ROWS.herbicide_broadleaf = { ...original, approved: false };
+    try {
+      const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
+      expect(out.rows).toEqual([]);
+      expect(out.lines).toEqual([]);
+      expect(out.primaryRowId).toBeNull();
+      expect(out.withheld).toEqual([{ rowId: 'herbicide_broadleaf', reason: 'not_approved' }]);
+    } finally {
+      PRODUCT_ROWS.herbicide_broadleaf = original;
+    }
   });
 
   it('an approved row is surfaced without the preview flag', () => {
@@ -825,7 +842,7 @@ describe('buildLawnExpectations', () => {
       expect(tiered).toEqual(plain);
     });
 
-    it('ships dark: no runtime file other than its own tests and audit script reads the engine or config', () => {
+    it('ships dark: no runtime file other than its own tests, the audit script, the dark progress engine and the dark v6 copy writer reads the engine or config', () => {
       const root = path.join(__dirname, '..');
       const hits = [];
       const walk = (dir) => {
@@ -841,7 +858,11 @@ describe('buildLawnExpectations', () => {
       walk(root);
       expect(hits.sort()).toEqual([
         'scripts/audit-lawn-expectation-products.js',
+        // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
+        'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
+        // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
+        'services/service-report/lawn-progress.js',
       ]);
     });
   });
@@ -880,5 +901,30 @@ describe('iron by-next-visit wording holds for short and long gaps (terminal rev
     const out = buildLawnExpectations({ applications: [{ name: 'LESCO Chelated Iron Plus' }], issues: [], visitDate: '2026-06-02', nextVisitGapDays: gap }, { includeUnapproved: true });
     const lines = out.byNextVisit.map((b) => b.line).join(' ');
     expect(lines).not.toMatch(/about like today/i);
+  });
+});
+
+describe('keyed sentences (what the P14 writer selects by id)', () => {
+  it('every emitted row exposes its printable lines as keyed sentences, in reading order, with unique keys', () => {
+    const out = buildLawnExpectations({
+      applications: [{ name: 'Celsius WG' }, { name: 'LESCO Chelated Iron Plus' }],
+      visitDate: '2026-09-30',
+      nextVisitGapDays: 28,
+      celsiusYtdCount: 1,
+    }, PREVIEW);
+    expect(out.rows.length).toBeGreaterThan(1);
+    for (const row of out.rows) {
+      expect(row.sentences.map((s) => s.text)).toEqual(row.lines);
+      const keys = row.sentences.map((s) => s.key);
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(keys[0]).toBe('visibleChange');
+    }
+  });
+
+  it('keys name the sentence, so a swapped second-application line keeps its key', () => {
+    const second = (count) => buildLawnExpectations({ applications: [{ name: 'Celsius WG' }], nextVisitGapDays: 28, celsiusYtdCount: count }, PREVIEW)
+      .rows[0].sentences.find((s) => s.key === 'secondApp');
+    expect(second(1).text).toMatch(/second application/);
+    expect(second(3).text).toMatch(/different weed-control product/);
   });
 });

@@ -31,6 +31,11 @@ const ctx = {
 const product = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'not_said', heard: 'Taurus', ...over });
 const visit = (over = {}) => ({ pests: [], otherPest: '', areas: [], method: 'not_said', linearFt: 0, activity: 'not_said', heard: '', ...over });
 const answer = (over = {}) => ({ products: [], visit: visit(), customerNote: '', officeNote: '', unclear: [], ...over });
+// The Checks other than "named but not filled", for tests that feed a partial answer on purpose.
+const checksBesidesOmitted = (out) => out.unclear.filter((u) => u.reason !== 'product_said_not_filled' && u.reason !== 'visit_said_not_filled');
+// The Checks other than "the visit / an office line was left out", for tests that
+// send no visit or notes on purpose.
+const withoutVisitOmission = (out) => out.unclear.filter((u) => u.reason !== 'visit_said_not_filled' && u.reason !== 'office_said_not_filled');
 
 describe('validateFill', () => {
   test('a clean answer passes through in the documented shape', () => {
@@ -54,7 +59,7 @@ describe('validateFill', () => {
       products: [product({ productId: 'p-made-up', amount: 2, unit: 'oz', heard: 'two ounces of the blue stuff' })],
     }), ctx, 'two ounces of the blue stuff on the lanai');
     expect(out.products).toEqual([]);
-    expect(out.unclear).toEqual([{ heard: 'two ounces of the blue stuff', reason: 'not_on_sheet' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'two ounces of the blue stuff', reason: 'not_on_sheet' }]);
   });
 
   test('an off-list pest, area, method and activity never reach the visit', () => {
@@ -66,20 +71,20 @@ describe('validateFill', () => {
     expect(out.visit.method).toBe('');
     expect(out.visit.activity).toBe('');
     // One Check chip per thing heard, however many of its values were off-list.
-    expect(out.unclear).toEqual([{ heard: 'ants inside', reason: 'not_on_sheet' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'ants inside', reason: 'not_on_sheet' }]);
   });
 
   describe('amounts', () => {
     test('a product with no spoken number keeps no amount and needs no flag', () => {
       const out = validateFill(answer({ products: [product({ heard: 'Taurus' })] }), ctx, 'used Taurus around the foundation');
       expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '', sameAsLast: false });
-      expect(out.unclear).toEqual([]);
+      expect(withoutVisitOmission(out)).toEqual([]);
     });
 
     test('an amount the model made up (no number in the words it heard) is dropped and flagged', () => {
       const out = validateFill(answer({ products: [product({ amount: 4, unit: 'fl_oz', heard: 'Taurus' })] }), ctx, 'used Taurus around the foundation');
       expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-      expect(out.unclear).toEqual([{ heard: 'Taurus', reason: 'amount_not_spoken' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: 'Taurus', reason: 'amount_not_spoken' }]);
     });
 
     test('a digit amount must equal a number in what was heard', () => {
@@ -103,14 +108,14 @@ describe('validateFill', () => {
     test.each([-3, Number.NaN, Infinity, 'lots'])('amount %p is dropped (never a non-positive or non-finite number)', (amount) => {
       const out = validateFill(answer({ products: [product({ amount, unit: 'fl_oz', heard: '4 ounces of Taurus' })] }), ctx, '4 ounces of Taurus');
       expect(out.products[0].amount).toBeNull();
-      expect(out.unclear).toEqual([{ heard: '4 ounces of Taurus', reason: 'amount_invalid' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: '4 ounces of Taurus', reason: 'amount_invalid' }]);
     });
 
     test('a spoken number with a unit the sheet does not offer for that product is dropped', () => {
       // gel bait is weighed: fl_oz is not one of its units
       const out = validateFill(answer({ products: [product({ productId: 'p-bait', amount: 5, unit: 'fl_oz', heard: '5 ounces of the ant gel' })] }), ctx, '5 ounces of the ant gel');
       expect(out.products[0]).toMatchObject({ productId: 'p-bait', amount: null, unit: '' });
-      expect(out.unclear).toEqual([{ heard: '5 ounces of the ant gel', reason: 'bad_unit' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: '5 ounces of the ant gel', reason: 'bad_unit' }]);
     });
 
     test('a spoken number with no unit is dropped', () => {
@@ -142,7 +147,7 @@ describe('validateFill', () => {
     test('the flag is dropped when no "same as last time" words were heard', () => {
       const out = validateFill(answer({ products: [product({ sameAsLast: true, heard: 'Taurus' })] }), ctx, 'Taurus along the lanai');
       expect(out.products[0].sameAsLast).toBe(false);
-      expect(out.unclear).toEqual([{ heard: 'Taurus', reason: 'same_as_last_not_heard' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: 'Taurus', reason: 'same_as_last_not_heard' }]);
     });
   });
 
@@ -150,7 +155,7 @@ describe('validateFill', () => {
     test('a product whose snippet is not in the transcript is not applied', () => {
       const out = validateFill(answer({ products: [product({ heard: 'Taurus at the front door' })] }), ctx, 'sprayed the back lanai');
       expect(out.products).toEqual([]);
-      expect(out.unclear).toEqual([{ heard: 'Taurus at the front door', reason: 'not_heard' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: 'Taurus at the front door', reason: 'not_heard' }]);
     });
 
     test('matching ignores case and punctuation', () => {
@@ -161,14 +166,14 @@ describe('validateFill', () => {
     test('visit taps without words that were said are not applied', () => {
       const out = validateFill(answer({ visit: visit({ pests: ['Roaches'], heard: 'roaches in the pantry' }) }), ctx, 'did the garage only');
       expect(out.visit).toEqual({ pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' });
-      expect(out.unclear).toEqual([{ heard: 'roaches in the pantry', reason: 'not_heard' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: 'roaches in the pantry', reason: 'not_heard' }]);
     });
   });
 
   test('one row per product: a second mention of the same product is flagged', () => {
     const out = validateFill(answer({ products: [product({ heard: 'Taurus' }), product({ heard: 'the Taurus again' })] }), ctx, 'Taurus and then the Taurus again');
     expect(out.products).toHaveLength(1);
-    expect(out.unclear).toEqual([{ heard: 'the Taurus again', reason: 'duplicate_product' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'the Taurus again', reason: 'duplicate_product' }]);
   });
 
   test('"Other" needs a pest name; with one it passes, without it moves to unclear', () => {
@@ -176,7 +181,7 @@ describe('validateFill', () => {
     expect(named.visit).toMatchObject({ pests: ['Other'], otherPest: 'palmetto bugs' });
     const bare = validateFill(answer({ visit: visit({ pests: ['Other'], heard: 'some bugs' }) }), ctx, 'some bugs on the porch');
     expect(bare.visit.pests).toEqual([]);
-    expect(bare.unclear).toEqual([{ heard: 'some bugs', reason: 'other_pest_unnamed' }]);
+    expect(withoutVisitOmission(bare)).toEqual([{ heard: 'some bugs', reason: 'other_pest_unnamed' }]);
   });
 
   test('linear feet only as a spoken number', () => {
@@ -185,7 +190,7 @@ describe('validateFill', () => {
     const invented = validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt: 180, heard: 'the perimeter outside' }) }), ctx, 'did the perimeter outside');
     expect(invented.visit.linearFt).toBeNull();
     // linear feet need a number said with a distance word (changed from amount_not_spoken, audit P1 #3)
-    expect(invented.unclear).toEqual([{ heard: 'the perimeter outside', reason: 'linear_ft_not_heard' }]);
+    expect(withoutVisitOmission(invented)).toEqual([{ heard: 'the perimeter outside', reason: 'linear_ft_not_heard' }]);
   });
 
   describe('notes', () => {
@@ -193,7 +198,7 @@ describe('validateFill', () => {
       const out = validateFill(answer({
         customerNote: 'Treated the perimeter for ants.',
         officeNote: 'Gate code changed to 4412. Customer asked about the invoice.',
-      }), ctx, 'Treated the perimeter for ants. Note for the office, gate code changed to 4412.');
+      }), ctx, 'Treated the perimeter for ants. Note for the office, gate code changed to 4412. Customer asked about the invoice.');
       expect(out.customerNote).toBe('Treated the perimeter for ants.');
       expect(out.officeNote).toBe('Gate code changed to 4412. Customer asked about the invoice.');
     });
@@ -220,7 +225,7 @@ describe('validateFill', () => {
 
     test('lists are capped: products, unclear, pests', () => {
       const many = Array.from({ length: 40 }, (_, i) => ({ heard: `thing ${i}`, reason: 'unclear_other' }));
-      const out = validateFill(answer({ unclear: many, visit: visit({ pests: [...ctx.pests, ...ctx.pests], heard: 'ants' }) }), ctx, 'ants');
+      const out = validateFill(answer({ unclear: many, visit: visit({ pests: [...ctx.pests, ...ctx.pests], heard: 'ants' }) }), ctx, `ants. ${many.map((m) => m.heard).join('. ')}.`);
       expect(out.unclear).toHaveLength(CAPS.unclear);
       expect(out.visit.pests.length).toBeLessThanOrEqual(CAPS.pests);
       expect(new Set(out.visit.pests).size).toBe(out.visit.pests.length);
@@ -255,7 +260,7 @@ describe('validateFill', () => {
       { heard: 'the other stuff', reason: 'ambiguous_product' },
       { heard: 'the other stuff', reason: 'ambiguous_product' },
     ] }), ctx, 'the other stuff');
-    expect(out.unclear).toEqual([{ heard: 'the other stuff', reason: 'ambiguous_product' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'the other stuff', reason: 'ambiguous_product' }]);
   });
 });
 
@@ -374,13 +379,13 @@ describe('quantity and unit are checked together against what was said', () => {
     const out = one(product({ amount: 900, unit: 'gal', heard: 'four ounces of Taurus' }), 'four ounces of Taurus');
     expect(out.products).toHaveLength(1);
     expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus', reason: 'amount_not_spoken' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'four ounces of Taurus', reason: 'amount_not_spoken' }]);
   });
 
   test('the right number in the wrong unit is dropped, the product tap stays', () => {
     const out = one(product({ amount: 4, unit: 'gal', heard: 'four ounces of Taurus' }), 'four ounces of Taurus');
     expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus', reason: 'unit_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'four ounces of Taurus', reason: 'unit_not_heard' }]);
   });
 
   test.each([
@@ -392,7 +397,7 @@ describe('quantity and unit are checked together against what was said', () => {
     const productId = /gel/.test(heard) ? 'p-bait' : 'p-surf';
     const out = one(product({ productId, amount, unit, heard }), heard);
     expect(out.products[0].amount).toBeNull();
-    expect(out.unclear).toEqual([{ heard, reason: 'unit_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard, reason: 'unit_not_heard' }]);
   });
 
   test.each([
@@ -412,7 +417,7 @@ describe('quantity and unit are checked together against what was said', () => {
   ])('"%s" authorizes exactly %p fl oz', (heard, amount) => {
     const out = one(product({ amount, unit: 'fl_oz', heard }), heard);
     expect(out.products[0]).toMatchObject({ amount, unit: 'fl_oz' });
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
   });
 
   test('"three or four ounces" authorizes neither number', () => {
@@ -429,13 +434,13 @@ describe('quantity and unit are checked together against what was said', () => {
     expect(ok.products[0]).toMatchObject({ amount: 2, unit: 'each' });
     const many = one(product({ amount: 4, unit: 'fl_oz', heard: 'Taurus, four' }), 'Taurus, four');
     expect(many.products[0].amount).toBeNull();
-    expect(many.unclear).toEqual([{ heard: 'Taurus, four', reason: 'unclear_unit' }]);
+    expect(withoutVisitOmission(many)).toEqual([{ heard: 'Taurus, four', reason: 'unclear_unit' }]);
   });
 
   test('a spoken unit the sheet does not offer is unclear_unit, whatever the model chose', () => {
     const out = one(product({ productId: 'p-surf', amount: 2, unit: 'tsp', heard: 'two tablespoons of surfactant' }), 'two tablespoons of surfactant');
     expect(out.products[0].amount).toBeNull();
-    expect(out.unclear).toEqual([{ heard: 'two tablespoons of surfactant', reason: 'unclear_unit' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'two tablespoons of surfactant', reason: 'unclear_unit' }]);
   });
 
   test('a transcript word like "constructor" is never a number or a unit', () => {
@@ -458,7 +463,7 @@ describe('the selected product must be named in its heard words', () => {
     const heard = 'Taurus, four ounces';
     const out = validateFill(answer({ products: [product({ productId: 'p-talak', amount: 4, unit: 'fl_oz', heard })] }), ctx, heard);
     expect(out.products).toEqual([]);
-    expect(out.unclear).toEqual([{ heard, reason: 'product_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard, reason: 'product_not_heard' }]);
   });
 
   test('a quote that names no product at all (just an amount) does not pick one', () => {
@@ -482,7 +487,7 @@ describe('the selected product must be named in its heard words', () => {
     for (const productId of ['p-alpine-wsg', 'p-alpine-dust']) {
       const out = validateFill(answer({ products: [product({ productId, amount: 3, unit: 'oz', heard })] }), alpine, heard);
       expect(out.products).toEqual([]);
-      expect(out.unclear).toEqual([{ heard, reason: 'ambiguous_product' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard, reason: 'ambiguous_product' }]);
     }
   });
 
@@ -513,28 +518,28 @@ describe('every selected visit value needs words that support it', () => {
   ])('%s with no support is dropped as value_not_heard', (_name, v, transcript, value) => {
     const out = run(v, transcript);
     expect(out.visit).toMatchObject({ pests: [], areas: [], method: '', activity: '' });
-    expect(out.unclear).toEqual([{ heard: value, reason: 'value_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: value, reason: 'value_not_heard' }]);
   });
 
   test('values with support stay; the unsupported one beside them goes', () => {
     const out = run({ pests: ['Ants', 'Spiders'], areas: ['Outside'], heard: 'ants along the foundation' }, 'ants along the foundation');
     expect(out.visit.pests).toEqual(['Ants']);
     expect(out.visit.areas).toEqual(['Outside']);
-    expect(out.unclear).toEqual([{ heard: 'Spiders', reason: 'value_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'Spiders', reason: 'value_not_heard' }]);
   });
 
   test('support may sit anywhere in the transcript, not only in the heard sentence', () => {
     const transcript = 'Ants were the issue in the kitchen. Did the perimeter, light activity. Gate was locked.';
     const out = run({ pests: ['Ants'], areas: ['Inside'], method: 'perimeter_spray', activity: 'light', heard: 'Did the perimeter' }, transcript);
     expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Inside'], method: 'perimeter_spray', activity: 'light' });
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
   });
 
   test('a word never said anywhere in the transcript is dropped (the audit reproduction)', () => {
     const transcript = 'Treated ants outside. Gate was locked.';
     const out = run({ pests: ['Ants', 'Roaches'], areas: ['Outside', 'Inside'], activity: 'heavy', heard: 'Treated ants outside' }, transcript);
     expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], activity: '' });
-    expect(out.unclear).toEqual([
+    expect(withoutVisitOmission(out)).toEqual([
       { heard: 'Roaches', reason: 'value_not_heard' },
       { heard: 'Inside', reason: 'value_not_heard' },
       { heard: 'heavy', reason: 'value_not_heard' },
@@ -547,7 +552,7 @@ describe('every selected visit value needs words that support it', () => {
     const unsupported = run({ pests: ['Other'], otherPest: 'millipedes', heard: 'some bugs in the garage' }, 'some bugs in the garage');
     expect(unsupported.visit.pests).toEqual([]);
     expect(unsupported.visit.otherPest).toBe('');
-    expect(unsupported.unclear).toEqual([{ heard: 'Other', reason: 'value_not_heard' }]);
+    expect(withoutVisitOmission(unsupported)).toEqual([{ heard: 'Other', reason: 'value_not_heard' }]);
   });
 
   test.each([
@@ -559,7 +564,7 @@ describe('every selected visit value needs words that support it', () => {
     const key = field === 'pests' || field === 'areas' ? field : field;
     const v = field === 'pests' || field === 'areas' ? { [key]: [value], heard: words } : { [key]: value, heard: words };
     const out = run(v, words);
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
     expect(out.visit[field]).toEqual(field === 'pests' || field === 'areas' ? [value] : value);
   });
 });
@@ -572,13 +577,13 @@ describe('an amount belongs to the product whose name it sits with', () => {
   test('the correct pairing passes', () => {
     const out = run([row('p-taurus', 4), row('p-talak', 5)]);
     expect(out.products.map((p) => [p.productId, p.amount, p.unit])).toEqual([['p-taurus', 4, 'fl_oz'], ['p-talak', 5, 'fl_oz']]);
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
   });
 
   test('a swap is not authorized: each amount is dropped to amount_not_spoken, both product taps stay', () => {
     const out = run([row('p-taurus', 5), row('p-talak', 4)]);
     expect(out.products.map((p) => [p.productId, p.amount])).toEqual([['p-taurus', null], ['p-talak', null]]);
-    expect(out.unclear).toEqual([{ heard: both, reason: 'amount_not_spoken' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: both, reason: 'amount_not_spoken' }]);
   });
 
   test('"of" joins a number to the name after it, so a number before a name is that name\'s', () => {
@@ -607,7 +612,7 @@ describe('an amount belongs to the product whose name it sits with', () => {
     const out = run([row('p-taurus', 4, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text)], text);
     expect(out.products.find((p) => p.productId === 'p-taurus')).toMatchObject({ amount: 4, unit: 'fl_oz' });
     expect(out.products.find((p) => p.productId === 'p-talak').amount).toBeNull();
-    expect(out.unclear).toEqual([{ heard: text, reason: 'unit_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: text, reason: 'unit_not_heard' }]);
   });
 
   test('a correction inside the product\'s own span is allowed ("four ounces, no wait, five ounces")', () => {
@@ -633,7 +638,7 @@ describe('ownership is read off the transcript, not the model\'s stitched quote 
     const out = run([row('p-taurus', 5, 'Taurus ... five ounces')]);
     expect(out.products).toHaveLength(1);
     expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-    expect(out.unclear).toEqual([{ heard: 'Taurus ... five ounces', reason: 'amount_not_spoken' }]);
+    expect(checksBesidesOmitted(out)).toEqual([{ heard: 'Taurus ... five ounces', reason: 'amount_not_spoken' }]);
   });
 
   test('the same stitched quote with the right number passes', () => {
@@ -671,7 +676,7 @@ describe('a product method needs its word in that product\'s span or sentence', 
     const out = run(withMethod('granular_broadcast', 'Used Taurus'), 'Used Taurus');
     expect(out.products).toHaveLength(1);
     expect(out.products[0]).toMatchObject({ productId: 'p-taurus', method: '' });
-    expect(out.unclear).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
   });
 
   test.each([
@@ -682,13 +687,13 @@ describe('a product method needs its word in that product\'s span or sentence', 
   ])('%s is kept for "%s"', (method, words) => {
     const out = run(withMethod(method, 'Taurus'), words);
     expect(out.products[0].method).toBe(method);
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
   });
 
   test('a method word in a different sentence, before the product, does not count', () => {
     const out = run(withMethod('perimeter_spray', 'Used Taurus'), 'We walked the perimeter. Used Taurus.');
     expect(out.products[0].method).toBe('');
-    expect(out.unclear).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
   });
 
   test('a method word in a LATER sentence does not back the product (Codex #5580 r2): cleared with a Check', () => {
@@ -714,7 +719,7 @@ describe('linear feet need a quantity said with a distance word', () => {
   test('"four ounces of Taurus" never becomes 4 linear feet (the audit reproduction)', () => {
     const out = run(4, 'four ounces of Taurus outside');
     expect(out.visit.linearFt).toBeNull();
-    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus outside', reason: 'linear_ft_not_heard' }]);
+    expect(checksBesidesOmitted(out)).toEqual([{ heard: 'four ounces of Taurus outside', reason: 'linear_ft_not_heard' }]);
   });
 
   test.each([
@@ -723,7 +728,7 @@ describe('linear feet need a quantity said with a distance word', () => {
   ])('"%s" authorizes exactly %p', (words, feet) => {
     const out = run(feet, words);
     expect(out.visit.linearFt).toBe(feet);
-    expect(out.unclear).toEqual([]);
+    expect(withoutVisitOmission(out)).toEqual([]);
   });
 
   test('a different number than the one said with the distance word is dropped', () => {
@@ -743,7 +748,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
       const out = run([row('p-taurus', 1, 'gal', 'a gallon of Taurus solution')], text);
       expect(out.products).toHaveLength(1);
       expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-      expect(out.unclear).toEqual([{ heard: 'a gallon of Taurus solution', reason: 'carrier_volume' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard: 'a gallon of Taurus solution', reason: 'carrier_volume' }]);
     });
 
     test.each([
@@ -784,7 +789,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
     ])('"%s" does not apply %s', (transcript, productId, amount, heard) => {
       const out = run([row(productId, amount, amount ? 'fl_oz' : 'not_said', heard)], transcript);
       expect(out.products).toEqual([]);
-      expect(out.unclear).toEqual([{ heard, reason: 'negated_product' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard, reason: 'negated_product' }]);
     });
 
     test('the product used in the next clause is still applied', () => {
@@ -831,7 +836,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
       const out = visitRun({ pests: ['Ants'], areas: ['Inside'], heard: 'Placed Advion Ant Gel in the kitchen' }, text);
       expect(out.visit.pests).toEqual([]);
       expect(out.visit.areas).toEqual(['Inside']);
-      expect(out.unclear).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
     });
 
     test('the same word used as a pest still counts ("ants in the kitchen" beside the product)', () => {
@@ -842,7 +847,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
     test('"Used some Taurus" is not moderate activity', () => {
       const out = visitRun({ activity: 'moderate', heard: 'Used some Taurus' }, 'Used some Taurus');
       expect(out.visit.activity).toBe('');
-      expect(out.unclear).toEqual([{ heard: 'moderate', reason: 'value_not_heard' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard: 'moderate', reason: 'value_not_heard' }]);
     });
 
     test.each([
@@ -875,7 +880,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
     ])('"%s" is not (%s)', (heard) => {
       const out = run([row('p-taurus', 0, 'not_said', heard, { sameAsLast: true })], heard);
       expect(out.products[0].sameAsLast).toBe(false);
-      expect(out.unclear).toEqual([{ heard, reason: 'same_as_last_not_heard' }]);
+      expect(withoutVisitOmission(out)).toEqual([{ heard, reason: 'same_as_last_not_heard' }]);
     });
   });
 });
@@ -924,4 +929,703 @@ describe('Codex #5580 round 2', () => {
     expect(out.customerNote).toBe('Sprayed the perimeter.');
     expect(out.officeNote).toBe('Tell the office the dog was loose.');
   });
+});
+
+describe('Codex #5580 round 3', () => {
+  const taurus = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus', ...over });
+
+  test('a range ("between three and four", "three to four") is no amount', () => {
+    for (const transcript of ['Between three and four ounces of Taurus.', 'Three to four ounces of Taurus.']) {
+      const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: transcript.replace(/\.$/, '') })] }), ctx, transcript);
+      expect(out.products[0]?.amount ?? null).toBeNull();
+    }
+  });
+
+  test('a product named for another visit is not this visit\'s', () => {
+    const transcript = 'Last time I used four ounces of Taurus; today I used Talstar.';
+    const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: 'four ounces of Taurus' })] }), ctx, transcript);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a product clearly named but left out of the fill becomes a Check', () => {
+    const transcript = 'Used Taurus four ounces and Talstar five ounces.';
+    const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: 'Taurus four ounces' })] }), ctx, transcript);
+    expect(withoutVisitOmission(out)).toEqual([{ heard: 'Talstar', reason: 'product_said_not_filled' }]);
+  });
+
+  test('words that also name another product, or that a Check already quotes, add no second Check', () => {
+    const alpines = { ...ctx, products: [...ctx.products,
+      { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      { id: 'p-alp-dust', name: 'Alpine Dust', fullName: 'Alpine Dust', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const dust = { productId: 'p-alp-dust', amount: 2, unit: 'oz', sameAsLast: false, method: '', heard: 'Alpine dust, two ounces' };
+    const out = validateFill(answer({ products: [dust] }), alpines, 'Alpine dust, two ounces, in the attic.');
+    expect(withoutVisitOmission(out)).toEqual([]);
+  });
+
+  test('an Other pest matches whole words only', () => {
+    const out = validateFill(answer({ visit: visit({ pests: ['Other'], otherPest: 'rat', heard: 'applied at a moderate rate' }) }), ctx, 'Applied at a moderate rate.');
+    expect(out.visit.pests).not.toContain('Other');
+  });
+
+  test('a customer-note sentence the tech never said becomes a Check', () => {
+    const out = validateFill(answer({ customerNote: 'Treated the perimeter. Found a severe interior infestation.' }), ctx, 'Treated the perimeter.');
+    expect(out.customerNote).toBe('Treated the perimeter.');
+    expect(out.unclear.map((u) => u.reason)).toContain('note_not_heard');
+  });
+});
+
+describe('Codex #5580 round 3: lone common-word names', () => {
+  const withSuspend = { ...ctx, products: [...ctx.products, { id: 'p-suspend', name: 'Suspend Polyzone', fullName: 'Suspend Polyzone', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+  const suspend = (over = {}) => ({ productId: 'p-suspend', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'suspend', ...over });
+
+  test('one ordinary word of a longer name, with no application wording, is not the product', () => {
+    const transcript = 'The office asked us to suspend service. Sprayed Taurus around the perimeter.';
+    const out = validateFill(answer({ products: [suspend({ heard: 'suspend' })] }), withSuspend, transcript);
+    expect(out.products).toEqual([]);
+    expect(out.unclear).toContainEqual({ heard: 'suspend', reason: 'product_not_heard' });
+    // and no "named but not filled" Check for it either
+    expect(out.unclear.filter((u) => /suspend/i.test(u.heard) && u.reason === 'product_said_not_filled')).toEqual([]);
+  });
+
+  test('the same word beside an amount or "used" is the product', () => {
+    for (const transcript of ['Used Suspend around the lanai.', 'Two ounces of Suspend on the lanai.']) {
+      const out = validateFill(answer({ products: [suspend({ heard: 'Suspend' })] }), withSuspend, transcript);
+      expect(out.products.map((p) => p.productId)).toEqual(['p-suspend']);
+    }
+  });
+});
+
+describe('Codex #5580 round 3 pre-push audit', () => {
+  const taurus = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus', ...over });
+
+  test('a dose the tech negated or corrected is not the amount; the one they meant is', () => {
+    const negated = 'Used Taurus, not four ounces, just two ounces.';
+    expect(validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: negated })] }), ctx, negated).products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [taurus({ amount: 2, unit: 'fl_oz', heard: negated })] }), ctx, negated).products[0].amount).toBe(2);
+    const corrected = 'Taurus, four ounces, no wait, five ounces.';
+    expect(validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: corrected })] }), ctx, corrected).products[0].amount).toBeNull();
+  });
+
+  test('a sentence said only to the office stays out of the customer note even without its label', () => {
+    const transcript = 'Treated the kitchen for roaches. Note for the office: customer is disputing the invoice.';
+    const out = validateFill(answer({ customerNote: 'Treated the kitchen for roaches. Customer is disputing the invoice.' }), ctx, transcript);
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+    expect(out.officeNote).toBe('Customer is disputing the invoice.');
+  });
+});
+
+describe('customer note = the tech\'s own clauses, word for word', () => {
+  test.each([
+    ['Used four ounces of Taurus.', 'Used forty gallons of Taurus.'],
+    ['Did not treat inside. Treated outside.', 'Treated inside and outside.'],
+    ['Did not treat inside.', 'Treat inside.'],
+  ])('transcript "%s" refuses the note "%s"', (transcript, note) => {
+    const out = validateFill(answer({ customerNote: note }), ctx, transcript);
+    expect(out.customerNote).toBe('');
+    expect(out.unclear).toContainEqual({ heard: note, reason: 'note_not_heard' });
+  });
+
+  test('a whole clause the tech said is kept as said', () => {
+    const out = validateFill(answer({ customerNote: 'Treated the kitchen for roaches.' }), ctx, 'Treated the kitchen for roaches, light activity.');
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+  });
+
+  test.each([
+    'Office, can you check why the invoice went out twice?',
+    'This one is for the office only, the invoice went out twice.',
+  ])('"%s" is office-only even when the model drops the label', (transcript) => {
+    const out = validateFill(answer({ customerNote: 'The invoice went out twice.' }), ctx, `Treated the garage. ${transcript}`);
+    expect(out.customerNote).toBe('');
+  });
+});
+
+describe('internal matters never reach the customer note, labeled or not', () => {
+  test.each([
+    'Customer is disputing the invoice.',
+    'Gate was locked so I could not get in the back.',
+    'Dog was loose in the yard.',
+  ])('"%s" goes to the office note', (said) => {
+    const out = validateFill(answer({ customerNote: `Treated the garage. ${said}` }), ctx, `Treated the garage. ${said}`);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe(said);
+  });
+});
+
+describe('a number said right before a product name', () => {
+  const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+  const fill = (rows, transcript) => validateFill(answer({ products: rows }), ctx, transcript);
+
+  test('"4 ounces Taurus and 5 ounces Talstar": each name keeps its own number, never the next one\'s', () => {
+    const t = 'Used 4 ounces Taurus and 5 ounces Talstar.';
+    expect(fill([row('p-taurus', 5, t)], t).products[0].amount).toBeNull();
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBe(4);
+    expect(fill([row('p-talak', 5, t)], t).products[0].amount).toBe(5);
+    expect(fill([row('p-talak', 4, t)], t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus 4 ounces Talstar": either product could own the 4, so neither does', () => {
+    const t = 'Taurus 4 ounces Talstar.';
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBeNull();
+    expect(fill([row('p-talak', 4, t)], t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus, 4 ounces, Talstar": the pause keeps the 4 with Taurus', () => {
+    const t = 'Taurus, 4 ounces, Talstar.';
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBe(4);
+  });
+});
+
+describe('a contradicted "same as last time" is no flag', () => {
+  test.each(['Used Taurus, not same as last time.', 'Taurus, not the same as last time.', 'Taurus same as last time but a different rate.'])('"%s"', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});
+
+describe('spoken numbers past a hundred', () => {
+  test.each([['one hundred ten', 110], ['a hundred and twelve', 112], ['one hundred nineteen', 119], ['one hundred five', 105]])('"%s" is %p, never its tail', (words, value) => {
+    const t = `Used ${words} ounces of Taurus.`;
+    const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t).products[0].amount;
+    expect(run(value)).toBe(value);
+    expect(run(value - 100)).toBeNull();
+  });
+});
+
+test('"same as last time" does not cross a "but" to another product', () => {
+  const t = 'Taurus same as last time, but Talstar was a new product today.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was a new product today' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});
+
+describe('a negation after the product name', () => {
+  test.each([
+    'Four ounces of Taurus were not used; today I used Talstar.',
+    "Taurus wasn't used today, just Talstar.",
+    'Taurus was never applied, just Talstar.',
+  ])('"%s" does not apply Taurus', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus' }] }), ctx, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('negated_product');
+  });
+
+  test('"Taurus was used, not Talstar" still applies Taurus', () => {
+    const t = 'Taurus was used, not Talstar.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus was used' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+  });
+});
+
+describe('formatted numbers', () => {
+  test('"1,200 linear feet" is 1200, never 200', () => {
+    const t = 'Sprayed 1,200 linear feet outside.';
+    const run = (linearFt) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard: t.replace(/\.$/, '') }) }), ctx, t).visit.linearFt;
+    expect(run(1200)).toBe(1200);
+    expect(run(200)).toBeNull();
+  });
+
+  test('"3-4 ounces" is a range: neither end is the amount', () => {
+    const t = 'Used Taurus, 3-4 ounces.';
+    for (const amount of [3, 4]) {
+      const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+      expect(out.products[0].amount).toBeNull();
+    }
+  });
+});
+
+test('a sentence after an office label is never customer-facing without a Check', () => {
+  const t = 'Treated the kitchen. Office: customer was rude. Please do not send another technician.';
+  const out = validateFill(answer({ customerNote: 'Treated the kitchen. Please do not send another technician.' }), ctx, t);
+  expect(out.customerNote).toBe('Treated the kitchen.');
+  expect(out.unclear).toContainEqual({ heard: 'Please do not send another technician.', reason: 'note_audience_unclear' });
+});
+
+test('a number in the sentence before is not the next sentence\'s product amount', () => {
+  const t = 'The customer had four ounces. Taurus was applied outside.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus was applied outside' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+});
+
+test('an office note the tech never said is a Check, not a note', () => {
+  const out = validateFill(answer({ officeNote: 'Customer refused payment and requested cancellation.' }), ctx, 'Treated the garage.');
+  expect(out.officeNote).toBe('');
+  expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
+});
+
+test('invented internal text offered as customer note is a Check, not an office note', () => {
+  const out = validateFill(answer({ customerNote: 'Customer refused payment and requested cancellation.' }), ctx, 'Treated the garage.');
+  expect(out.customerNote).toBe('');
+  expect(out.officeNote).toBe('');
+  expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
+});
+
+test('"Taurus same as last time but a different rate" with heard "Taurus" is no flag', () => {
+  const t = 'Taurus same as last time but a different rate.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});
+
+test('"two ounces of <a product not on the sheet>" is never the previous product\'s amount', () => {
+  const t = 'Used Taurus, and two ounces of Demand CS.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+  const back = 'Used Taurus, two ounces of it.';
+  const kept = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, back);
+  expect(kept.products[0].amount).toBe(2);
+});
+
+describe('Codex #5580 round 5', () => {
+  const taurus = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus', ...over });
+
+  test('"Last time, I used four ounces of Taurus" (comma) is another visit\'s', () => {
+    const t = 'Last time, I used four ounces of Taurus. Today Talstar.';
+    const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: 'four ounces of Taurus' })] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('"same as last time" is this visit, not another one', () => {
+    const t = 'Same mix as last time, Taurus.';
+    const out = validateFill(answer({ products: [taurus({ sameAsLast: true, heard: 'Same mix as last time, Taurus' })] }), ctx, t);
+    expect(out.products[0]).toMatchObject({ productId: 'p-taurus', sameAsLast: true });
+  });
+
+  test('a visit the model left empty while the tech said its facts is a Check per value', () => {
+    const out = validateFill(answer({ visit: visit() }), ctx, 'Treated ants outside, light activity.');
+    expect(out.unclear).toEqual(expect.arrayContaining([
+      { heard: 'Ants', reason: 'visit_said_not_filled' },
+      { heard: 'Outside', reason: 'visit_said_not_filled' },
+      { heard: 'light', reason: 'visit_said_not_filled' },
+    ]));
+  });
+
+  test('a partly filled visit adds no omission Checks', () => {
+    const out = validateFill(answer({ visit: visit({ pests: ['Ants'], heard: 'Treated ants outside' }) }), ctx, 'Treated ants outside, light activity.');
+    expect(out.unclear.filter((u) => u.reason === 'visit_said_not_filled')).toEqual([]);
+  });
+
+  test('"Paid special attention to the kitchen" stays customer-facing', () => {
+    const out = validateFill(answer({ customerNote: 'Paid special attention to the kitchen.' }), ctx, 'Paid special attention to the kitchen.');
+    expect(out.customerNote).toBe('Paid special attention to the kitchen.');
+    expect(out.officeNote).toBe('');
+  });
+
+  test('a pesticide safety claim never reaches the customer note, even said word for word', () => {
+    const t = 'Treated the kitchen. Taurus is pet-safe for the family.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the kitchen.');
+    expect(out.unclear).toContainEqual({ heard: 'Taurus is pet-safe for the family.', reason: 'note_safety_claim' });
+  });
+
+  test('a model Check quoting words never said is dropped', () => {
+    const out = validateFill(answer({ unclear: [{ heard: 'used an unknown chemical', reason: 'unclear_other' }, { heard: 'the blue stuff', reason: 'unknown_product' }] }), ctx, 'Treated outside with the blue stuff.');
+    expect(out.unclear).not.toContainEqual({ heard: 'used an unknown chemical', reason: 'unclear_other' });
+    expect(out.unclear).toContainEqual({ heard: 'the blue stuff', reason: 'unknown_product' });
+  });
+
+  test('a product\'s own catalog method is offered and kept when its word is said', () => {
+    const withDrench = { ...ctx, products: [...ctx.products, { id: 'p-drench', name: 'Dominion 2L', fullName: 'Dominion 2L', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'], catalogMethod: 'soil_drench' }] };
+    withDrench.productMethods = [...ctx.productMethods, 'soil_drench'];
+    const row = { productId: 'p-drench', amount: 0, unit: 'not_said', sameAsLast: false, method: 'soil_drench', heard: 'drenched the soil with Dominion' };
+    expect(validateFill(answer({ products: [row] }), withDrench, 'Drenched the soil with Dominion.').products[0].method).toBe('soil_drench');
+    // never on a product whose catalog method it is not
+    expect(validateFill(answer({ products: [taurus({ method: 'soil_drench', heard: 'drenched with Taurus' })] }), withDrench, 'Drenched with Taurus.').products[0].method).toBe('');
+  });
+
+  test('a method word inside a product name is not a method ("Talstar XTRA Granular")', () => {
+    const withGran = { ...ctx, products: [...ctx.products, { id: 'p-xtra', name: 'Talstar XTRA Granular', fullName: 'Talstar XTRA Granular', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const row = { productId: 'p-xtra', amount: 0, unit: 'not_said', sameAsLast: false, method: 'granular_broadcast', heard: 'Used Talstar XTRA Granular' };
+    expect(validateFill(answer({ products: [row] }), withGran, 'Used Talstar XTRA Granular.').products[0].method).toBe('');
+  });
+});
+
+test.each([
+  'Mixed Taurus at four ounces per gallon and sprayed two gallons outside.',
+  'Taurus, four ounces a gallon.',
+])('a mixing rate is never the amount used: "%s"', (t) => {
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+  expect(out.unclear.map((u) => u.reason)).toContain('amount_not_spoken');
+});
+
+describe('Codex #5580 round 6', () => {
+  test.each(['On the previous visit, I used four ounces of Taurus. Today Talstar.', 'Prior visit I used four ounces of Taurus. Today Talstar.'])('"%s" is another visit\'s Taurus', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'four ounces of Taurus' }] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a catalog method needs its action word, not its noun ("soil" is not "soil drench")', () => {
+    const withDrench = { ...ctx, products: ctx.products.map((p) => (p.id === 'p-taurus' ? { ...p, catalogMethod: 'soil_drench' } : p)) };
+    withDrench.productMethods = [...ctx.productMethods, 'soil_drench'];
+    const row = (heard) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'soil_drench', heard });
+    expect(validateFill(answer({ products: [row('Applied Taurus to the soil')] }), withDrench, 'Applied Taurus to the soil.').products[0].method).toBe('');
+    expect(validateFill(answer({ products: [row('Drenched the soil with Taurus')] }), withDrench, 'Drenched the soil with Taurus.').products[0].method).toBe('soil_drench');
+  });
+
+  test('a plain customer clause the model put in the office note goes back to the customer note', () => {
+    const t = 'Treated the kitchen for roaches. Note for the office, gate code changed to 4412.';
+    const out = validateFill(answer({ officeNote: 'Treated the kitchen for roaches. Gate code changed to 4412.' }), ctx, t);
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+    expect(out.officeNote).toBe('Gate code changed to 4412.');
+  });
+});
+
+describe('Codex #5580 round 7', () => {
+  const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+
+  test('"Last time ... but today I used Talstar": today ends the other-visit scope', () => {
+    const t = 'Last time, I used four ounces of Taurus, but today I used five ounces of Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 5, 'five ounces of Talstar')] }), ctx, t);
+    expect(out.products[0]).toMatchObject({ productId: 'p-talak', amount: 5 });
+    const old = validateFill(answer({ products: [row('p-taurus', 4, 'four ounces of Taurus')] }), ctx, t);
+    expect(old.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test.each(['Mixed Taurus at four ounces for every gallon.', 'Taurus, four ounces to the gallon.', 'Taurus four ounces for each gallon.'])('a rate form is never the amount: "%s"', (t) => {
+    expect(validateFill(answer({ products: [row('p-taurus', 4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"four ounces, no, five ounces": the five is the amount, the four is not', () => {
+    const t = 'Taurus, four ounces, no, five ounces.';
+    expect(validateFill(answer({ products: [row('p-taurus', 5, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row('p-taurus', 4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus four ounces, no surfactant" keeps the four', () => {
+    const t = 'Taurus four ounces, no surfactant.';
+    expect(validateFill(answer({ products: [row('p-taurus', 4, 'Taurus four ounces')] }), ctx, t).products[0].amount).toBe(4);
+  });
+});
+
+test('"four ounces per gallon and sprayed two gallons": neither number is the Taurus amount', () => {
+  const t = 'Mixed Taurus at four ounces per gallon and sprayed two gallons outside.';
+  const run = (amount, unit) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t).products[0].amount;
+  expect(run(2, 'gal')).toBeNull();
+  expect(run(4, 'fl_oz')).toBeNull();
+});
+
+describe('Codex #5580 round 8', () => {
+  const row = (productId, amount, unit, heard) => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"four ounces every gallon" is a rate', () => {
+    const t = 'Mixed Taurus at four ounces every gallon.';
+    expect(validateFill(answer({ products: [row('p-taurus', 4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"one and three quarters ounces" is 1.75', () => {
+    const t = 'Used one and three quarters ounces of Taurus.';
+    const run = (amount) => validateFill(answer({ products: [row('p-taurus', amount, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount;
+    expect(run(1.75)).toBe(1.75);
+    expect(run(1)).toBeNull();
+  });
+
+  test('an office line said but carried by neither note is a Check', () => {
+    const t = 'Treated outside. Office: gate code 1234.';
+    const out = validateFill(answer({}), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Office: gate code 1234.', reason: 'office_said_not_filled' });
+    const kept = validateFill(answer({ officeNote: 'gate code 1234.' }), ctx, t);
+    expect(kept.unclear.filter((u) => u.reason === 'office_said_not_filled')).toEqual([]);
+  });
+
+  test('a refused row claiming a product id does not hide that product\'s omission Check', () => {
+    const t = 'Used four ounces of Taurus.';
+    const out = validateFill(answer({ products: [row('p-taurus', 4, 'fl_oz', 'Talstar')] }), ctx, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('product_said_not_filled');
+  });
+});
+
+test.each([['one thousand two hundred', 1200], ['two thousand', 2000], ['a thousand and fifty', 1050]])('"%s linear feet" is %p, never its tail', (words, feet) => {
+  const t = `Sprayed ${words} linear feet outside.`;
+  const run = (linearFt) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard: t.replace(/\.$/, '') }) }), ctx, t).visit.linearFt;
+  expect(run(feet)).toBe(feet);
+  if (feet % 1000) expect(run(feet % 1000)).toBeNull();
+});
+
+describe('Codex #5580 round 9', () => {
+  test('the retired company name never reaches the customer note', () => {
+    const t = 'Waves Lawn & Pest treated the exterior. Treated the garage.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.unclear).toContainEqual({ heard: 'Waves Lawn & Pest treated the exterior.', reason: 'note_company_name' });
+  });
+
+  test.each(['Customer did not pay the invoice.', 'The gate was locked.'])('a plain internal line "%s" carried by neither note is a Check', (line) => {
+    const out = validateFill(answer({}), ctx, `Treated outside. ${line}`);
+    expect(out.unclear).toContainEqual({ heard: line, reason: 'office_said_not_filled' });
+  });
+
+  test('a package size inside a product name is never the dose ("Dismiss 64 oz")', () => {
+    const withDismiss = { ...ctx, products: [...ctx.products, { id: 'p-dismiss', name: 'Dismiss 64 oz', fullName: 'Dismiss 64 oz', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+    const row = (amount) => ({ productId: 'p-dismiss', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Dismiss 64 oz outside' });
+    expect(validateFill(answer({ products: [row(64)] }), withDismiss, 'Used Dismiss 64 oz outside.').products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [{ ...row(2), heard: 'two ounces of Dismiss 64 oz' }] }), withDismiss, 'Used two ounces of Dismiss 64 oz outside.').products[0].amount).toBe(2);
+  });
+});
+
+describe('Codex #5580 round 10', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"one eighth ounce" is 0.125', () => {
+    const t = 'Used one eighth ounce of Taurus.';
+    expect(validateFill(answer({ products: [row(0.125, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(0.125);
+  });
+
+  test.each(['Sprayed Taurus, two gallons.', 'Applied Taurus, two gallons.'])('"%s": the gallons are finished mix', (t) => {
+    expect(validateFill(answer({ products: [row(2, 'gal', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('an office line sharing one word with a kept line still gets its Check', () => {
+    const t = 'Treated outside. Gate was locked. Gate code 1234.';
+    const out = validateFill(answer({ officeNote: 'Gate was locked.' }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Gate code 1234.', reason: 'office_said_not_filled' });
+    expect(out.unclear).not.toContainEqual({ heard: 'Gate was locked.', reason: 'office_said_not_filled' });
+  });
+});
+
+describe('Codex #5580 round 11', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('a spray verb in the sentence before does not make this sentence\'s gallons finished mix', () => {
+    const t = 'I sprayed outside. I used Taurus, two gallons.';
+    expect(validateFill(answer({ products: [row(2, 'gal', 'I used Taurus, two gallons')] }), ctx, t).products[0].amount).toBe(2);
+  });
+
+  test('"Treated the dog bed for fleas" stays customer copy; a loose dog goes to the office', () => {
+    const t = 'Treated the dog bed for fleas. Dog was loose in the yard.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the dog bed for fleas.');
+    expect(out.officeNote).toBe('Dog was loose in the yard.');
+  });
+
+  test('an office line is carried only by one kept clause holding all its words', () => {
+    const t = 'Treated outside. Gate was locked. Lockbox code 1234. Gate code 1234.';
+    const out = validateFill(answer({ officeNote: 'Gate was locked. Lockbox code 1234.' }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Gate code 1234.', reason: 'office_said_not_filled' });
+  });
+
+  test('a dose said for the product but left blank by the model is a Check', () => {
+    const t = 'Used four ounces of Taurus.';
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'four ounces of Taurus')] }), ctx, t);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear).toContainEqual({ heard: 'four ounces of Taurus', reason: 'amount_said_not_filled' });
+  });
+});
+
+describe('Codex #5580 round 12', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"no, it was five ounces" corrects the four', () => {
+    const t = 'Taurus four ounces, no, it was five ounces.';
+    expect(validateFill(answer({ products: [row(5, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"three through four ounces" is a range', () => {
+    const t = 'Used Taurus, three through four ounces.';
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"two tablespoons" left blank by the model is an unclear_unit Check', () => {
+    const t = 'Used Taurus, two tablespoons.';
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'Used Taurus, two tablespoons')] }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Used Taurus, two tablespoons', reason: 'unclear_unit' });
+  });
+
+  test('a PIN spoken as words never reaches the customer note', () => {
+    const t = 'Treated the garage. PIN is four four one two.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe('PIN is four four one two.');
+  });
+});
+
+describe('Codex #5580 round 13', () => {
+  test('a correction word in the next sentence does not retract the dose', () => {
+    const t = 'Used Taurus, four ounces. Actually, the customer was home.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus, four ounces' }] }), ctx, t);
+    expect(out.products[0].amount).toBe(4);
+  });
+
+  test('a mixed sentence: the treatment clause stays customer copy, the gate clause goes to the office', () => {
+    const t = 'Treated the exterior for ants, gate was locked.';
+    const out = validateFill(answer({ customerNote: 'Treated the exterior for ants.', officeNote: 'gate was locked.' }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.officeNote).toBe('gate was locked.');
+  });
+
+  test('"Dog is out." left out of both notes is a Check', () => {
+    const out = validateFill(answer({}), ctx, 'Treated outside. Dog is out.');
+    expect(out.unclear).toContainEqual({ heard: 'Dog is out.', reason: 'office_said_not_filled' });
+  });
+
+  test('"Treated pest access points" stays customer copy', () => {
+    const t = 'Treated pest access points around the foundation.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe(t);
+  });
+});
+
+describe('Codex #5580 round 14', () => {
+  test.each(['Password is bluebird.', 'Door password is palm tree.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe(line);
+  });
+
+  test('the model\'s whole comma sentence is routed clause by clause', () => {
+    const t = 'Treated the exterior for ants, gate was locked.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.officeNote).toBe('gate was locked.');
+  });
+
+  test('"four ounces. No, it was five ounces." corrects across the sentence break', () => {
+    const t = 'Used Taurus, four ounces. No, it was five ounces.';
+    const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, t).products[0].amount;
+    expect(run(4)).toBeNull();
+  });
+
+  test('a clause in both note fields appears once', () => {
+    const out = validateFill(answer({ customerNote: 'Treated outside.', officeNote: 'Treated outside.' }), ctx, 'Treated outside.');
+    expect(out.customerNote).toBe('Treated outside.');
+    expect(out.officeNote).toBe('');
+  });
+});
+
+describe('Codex #5580 round 15', () => {
+  const row = (amount, unit, heard, productId = 'p-taurus') => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test.each(['Taurus, four ounces for one gallon.', 'Taurus, four ounces in each gallon.'])('a rate: "%s"', (t) => {
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test.each(['Opener is 1234.', 'Garage opener code is 5512.', 'Remote is four four one two.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+  });
+
+  test('"During the last appointment I used four ounces of Taurus" is another visit\'s', () => {
+    const t = 'During the last appointment I used four ounces of Taurus. Today Talstar.';
+    const out = validateFill(answer({ products: [row(4, 'fl_oz', 'four ounces of Taurus')] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a pest word is a pest, not product evidence ("mosquito" beside Summit Mosquito Dunk)', () => {
+    const withDunk = { ...ctx, products: [...ctx.products, { id: 'p-dunk', name: 'Summit Mosquito Dunk Tablets', fullName: 'Summit Mosquito Dunk Tablets', aliases: [], measure: 'count', units: ['each'] }] };
+    const out = validateFill(answer({ visit: visit({ pests: ['Other'], otherPest: 'mosquito', heard: 'Found mosquito activity outside' }) }), withDunk, 'Found mosquito activity outside.');
+    expect(out.visit.pests).toContain('Other');
+  });
+});
+
+test.each([
+  [{ name: 'K-Flow 0-0-25', category: 'fertilizer', rate_unit: 'fl_oz' }, 'broadcast_spray'],
+  [{ name: 'Some Granules', category: 'fertilizer' }, 'granular_broadcast'],
+  [{ name: 'Old row', application_method: 'granular' }, 'granular_broadcast'],
+  [{ name: 'Advion Ant Gel', category: 'insecticide' }, 'bait_placement'],
+  [{ name: 'Alpine WSG', category: 'insecticide', formulation: 'WSG' }, ''],
+  [{ name: 'Taurus SC', category: 'insecticide' }, ''],
+  [{ name: 'Dominion 2L', application_method: 'Soil Drench' }, 'soil_drench'],
+])('catalog method matches the sheet: %o → %p', (row, method) => {
+  expect(VoiceFill.catalogMethodOf(row)).toBe(method);
+});
+
+describe('Codex #5580 round 16', () => {
+  const row = (amount, unit, heard, productId = 'p-taurus') => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"Applied Taurus around the perimeter, two gallons": the gallons are finished mix', () => {
+    const t = 'Applied Taurus around the perimeter, two gallons.';
+    expect(validateFill(answer({ products: [row(2, 'gal', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('a semicolon sentence is routed clause by clause; the gate code stays out of the report', () => {
+    const t = 'Treated the exterior for ants; gate code is 1234.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.customerNote).not.toContain('1234');
+    expect(out.officeNote).toContain('1234');
+  });
+
+  test('"Sprayed around the gate for ants" stays customer copy; a locked gate does not', () => {
+    const t = 'Sprayed around the gate for ants. Gate was locked.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Sprayed around the gate for ants.');
+    expect(out.officeNote).toBe('Gate was locked.');
+  });
+
+  test('"four ounces, make it five ounces" corrects the four', () => {
+    const t = 'Taurus four ounces, make it five ounces.';
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [row(5, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+  });
+
+  test.each(['Taurus was out of stock, so I used Talstar.', 'Taurus ran out, so I used Talstar.'])('"%s" does not apply Taurus', (t) => {
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'Taurus')] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test.each([['⅜', 0.375], ['⅝', 0.625], ['⅞', 0.875]])('"Used %s ounce of Taurus" is %p', (glyph, value) => {
+    const t = `Used ${glyph} ounce of Taurus.`;
+    expect(validateFill(answer({ products: [row(value, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(value);
+  });
+
+  test('an office clause past the length cap is a Check, never silently cut', () => {
+    const long = Array.from({ length: 12 }, (_, i) => `Gate was locked number ${i} and the dog was loose in the back yard again today`).join('. ');
+    const t = `Treated outside. ${long}.`;
+    const out = validateFill(answer({ officeNote: long }), ctx, t);
+    expect(out.officeNote.length).toBeLessThanOrEqual(CAPS.officeNote);
+    expect(out.unclear.map((u) => u.reason)).toContain('note_over_cap');
+  });
+});
+
+test('a visit heard quoted as several whole sentences (live Sonnet 5 shape) is grounded piece by piece', () => {
+  const t = 'Ants coming in by the kitchen window, customer said. Sprayed the perimeter outside with Taurus, four ounces. Light activity.';
+  const heard = 'Ants coming in by the kitchen window, customer said. Sprayed the perimeter outside with Taurus. Light activity.';
+  const out = validateFill(answer({ visit: visit({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard }) }), ctx, t);
+  expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
+  // a stitched sentence that was never said is still refused
+  const made = validateFill(answer({ visit: visit({ pests: ['Ants'], heard: 'Ants everywhere. Sprayed the perimeter outside with Taurus.' }) }), ctx, t);
+  expect(made.visit.pests).toEqual([]);
+});
+
+describe('Codex #5580 round 17', () => {
+  test.each(['Keypad is bluebird.', 'Alarm code is palm tree.', 'Lockbox is 4412.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    expect(validateFill(answer({ customerNote: t }), ctx, t).customerNote).toBe('Treated the garage.');
+  });
+
+  test('"Four ounces of Taurus, which I did not use" does not apply Taurus', () => {
+    const t = 'Four ounces of Taurus, which I did not use. Talstar outside.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Four ounces of Taurus' }] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('"I used Taurus, which worked well" still applies Taurus', () => {
+    const t = 'I used Taurus, which worked well.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'I used Taurus' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+  });
+});
+
+describe('a code never loses its label on the way to the office', () => {
+  test.each([
+    'Gate code: 1234.',
+    'Treated the exterior for ants, gate code, 1234.',
+    'Treated the exterior for ants; gate code is 1234.',
+    'Treated the exterior for ants, gate code, four four one two.',
+  ])('"%s": no digit of the code reaches the customer note', (t) => {
+    for (const note of [{ customerNote: t }, { officeNote: t }]) {
+      const out = validateFill(answer(note), ctx, t);
+      expect(out.customerNote).not.toMatch(/\d|four four/);
+    }
+  });
+});
+
+test.each([
+  ['Gate code: 1234.', '1234.'],
+  ['Gate code: four four one two.', 'four four one two.'],
+  ['Treated outside, gate code, 1, 2, 3, 4.', '1, 2, 3, 4.'],
+])('transcript "%s": the bare code "%s" as customer note goes to the office', (t, note) => {
+  const out = validateFill(answer({ customerNote: note }), ctx, t);
+  expect(out.customerNote).toBe('');
 });

@@ -14,9 +14,13 @@
  * Exception classes, one pager:
  *  1. UNPRICED RECURRING SERIES — an upcoming recurring visit (within
  *     UPCOMING_WINDOW_DAYS) where neither the row nor its recurring parent
- *     carries a price (estimated_price / primary_line_price). Children
- *     legitimately ride with NULL price and inherit from their parent at
- *     invoice time, so only a series with no price ANYWHERE pages. One bell
+ *     carries a price (estimated_price / primary_line_price). A priced
+ *     parent counts for its children, so only a series with no price
+ *     ANYWHERE pages. Billing never reads the parent's price: children get
+ *     the parent's estimated_price (not primary_line_price) copied onto
+ *     their own row when they spawn (recurring-appointment-seeder), and a
+ *     child whose own row is blank bills by billing-lane's lane rules (the
+ *     per-application fee, the monthly rate, or no charge). One bell
  *     per series (root id), not per visit. A visit covered by a live combined
  *     first-application invoice never pages — judged by billing-lane's
  *     siblingInvoiceCoverageVerdict, the one determination billing itself uses
@@ -122,13 +126,15 @@ function rowHasPrice(row) {
   return toMoney(row?.estimated_price) != null || toMoney(row?.primary_line_price) != null;
 }
 
-// An upcoming visit pages when nothing that will actually bill it carries a
-// price. Recurring children (is_recurring=true under a parent) inherit the
-// parent's price at invoice time, so a priced parent suppresses. A
-// booster/add-on child (is_recurring=false with a recurring_parent_id) bills
-// as its own one-off visit and does NOT inherit — it is judged on its own
-// price only. The query LEFT JOINs the parent and rides its price fields
-// along as parent_estimated_price / parent_primary_line_price.
+// An upcoming visit pages when neither it nor its series carries a price.
+// Recurring children (is_recurring=true under a parent) get the parent's
+// estimated_price copied onto their own row at spawn, so a priced parent
+// suppresses — a priced series is not this alert's gap. Billing itself
+// never falls back to the parent's price (see the header). A booster/add-on
+// child (is_recurring=false with a recurring_parent_id) bills as its own
+// one-off visit and is judged on its own price only. The query LEFT JOINs
+// the parent and rides its price fields along as parent_estimated_price /
+// parent_primary_line_price.
 //
 // PREPAID visits never page — but only through the SAME coverage rules the
 // completion-billing gate applies (admin-dispatch), so the watchdog can't
@@ -517,6 +523,69 @@ async function churnedLiveWorkAlerts(todayET) {
   }
 }
 
+// The long explanation of each prepay-coverage issue: the bell's `detail`.
+const PREPAY_ISSUE_DETAIL = {
+  annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with a missing or conflicting stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
+  manual_series_stamp_missing: 'A recorded manual series allocation or matching family payment stamps indicate coverage for this visit, but it has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+  manual_series_stamp_conflict: 'This visit has a different payment stamp from a manual payment recorded across its recurring family. Reconcile the payments and the original allocation before billing.',
+};
+// The one-sentence why of each issue (docs/admin-notifications.md: 110 characters).
+const PREPAY_ISSUE_WHY = {
+  annual_coverage_unverified: 'The annual-prepay stamp cannot be verified; reconcile it before billing',
+  manual_series_stamp_missing: 'A series payment covers it but the visit has no allocation; reconcile before billing',
+  manual_series_stamp_conflict: 'Its payment stamp differs from the series payment on record; reconcile before billing',
+};
+
+// customer id -> name for the batch of coverage findings. Best effort by design.
+async function prepayCustomerNames(customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean).map(String))];
+  const names = new Map();
+  if (!ids.length) return names;
+  try {
+    const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
+    for (const r of rows || []) names.set(String(r.id), require('./admin-alert-names').fullName(r));
+  } catch (err) {
+    logger.warn(`[schedule-integrity] prepay-coverage customer names unavailable: ${err.message}`);
+  }
+  return names;
+}
+
+// One coverage finding's bell copy under docs/admin-notifications.md: the customer and the
+// visit date in the headline, the issue in the why, the visit itself behind the link. A rule
+// violation (an odd name) never costs the alert: it falls back to the plain wording.
+function prepayCoverageCopy(row, issue, customerName) {
+  const names = require('./admin-alert-names');
+  const compose = require('./admin-alert-compose');
+  const dayWords = names.shortDateET(new Date(`${row.service_date}T12:00:00Z`));
+  const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(row.service_date)}&appointment=${encodeURIComponent(row.id)}`;
+  const detail = PREPAY_ISSUE_DETAIL[issue];
+  const spec = {
+    area: 'Schedule',
+    action: names.fitAction('Schedule', customerName || 'a customer', dayWords
+      ? [(n) => `check ${n}'s prepaid visit on ${dayWords}`, (n) => `check ${n}'s prepaid visit`]
+      : [(n) => `check ${n}'s prepaid visit`]),
+    why: PREPAY_ISSUE_WHY[issue] ? `${PREPAY_ISSUE_WHY[issue]}.` : 'Prepaid coverage for this visit needs a review before billing.',
+    severity: 'needs-you',
+    link,
+    subject: { type: 'visit', id: row.id },
+    doneWhen: 'coverage_reconciled',
+    who: 'person',
+  };
+  try {
+    const composed = compose.composeAdminAlert(spec);
+    return { title: composed.headline, why: composed.why, link: composed.link, detail, metadata: composed.metadata };
+  } catch (err) {
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    // Only the COPY is refused (an emoji or brackets in a customer's name, say): the plain
+    // wording rings, and the valid structured parts stay so needs-me still sorts the row.
+    return {
+      title: `Prepaid coverage needs review for ${customerName || 'a customer'}${dayWords ? ` on ${dayWords}` : ''}`,
+      why: spec.why, link, detail,
+      metadata: { ...compose.validStructuredFields(spec), ruleViolations: err.violations },
+    };
+  }
+}
+
 async function runInner({ now = new Date() } = {}) {
   const todayET = etDateString(now);
 
@@ -646,21 +715,26 @@ async function runInner({ now = new Date() } = {}) {
   }));
 
   // Preserve the morning lawn-email class before adding coverage-review volume.
+  // Owner audit 2026-10-01: the bell names the customer and the visit date and opens that
+  // visit, not the dispatch landing page. The names are read once for the whole batch; a
+  // failed read leaves the bell with a generic customer rather than losing it.
+  const prepayNames = await prepayCustomerNames(prepayGaps.map(({ row }) => row.customer_id));
   alerts.push(...prepayGaps.map(({ row, issue }) => {
     const evidenceKey = createHash('sha256').update(JSON.stringify([
       row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.prepaid_at, row.annual_prepay_term_id,
       row.manual_series_payment_evidence, row.manual_series_allocation_evidence,
       row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
     ])).digest('hex').slice(0, 20);
+    const copy = prepayCoverageCopy(row, issue, prepayNames.get(String(row.customer_id)));
     return [
       `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
-      `Prepaid coverage needs review for ${row.service_date}`,
-      {
-        annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with a missing or conflicting stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
-        manual_series_stamp_missing: 'A recorded manual series allocation or matching family payment stamps indicate coverage for this visit, but it has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
-        manual_series_stamp_conflict: 'This visit has a different payment stamp from a manual payment recorded across its recurring family. Reconcile the payments and the original allocation before billing.',
-      }[issue],
-      { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
+      copy.title,
+      copy.why,
+      { scheduled_service_id: row.id, customer_id: row.customer_id, issue, ...copy.metadata },
+      // Quiet refresh: a standing row (rung before this copy existed) takes the new title, why,
+      // link and metadata without ringing or changing its read state. A reopen after an
+      // auto-clear still rings (raiseAdminAlertWithReopen overrides ringOnRefresh).
+      { link: copy.link, detail: copy.detail, refreshOnDedupe: true, ringOnRefresh: () => false },
     ];
   }));
 
@@ -747,7 +821,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
     return true;
   };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
     // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
     // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
     // site-level tag these money-loss pages would return a suppressed
@@ -758,6 +832,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     // that raced across overlapping ticks and could double-ring.
     const alertOpts = {
       link,
+      ...(detail ? { detail } : {}),
       bell: true,
       dedupeKey,
       ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
@@ -870,8 +945,8 @@ async function completedUnpricedSince(sinceByRoot) {
 
 // Under episodes an authoritative $0 is a price: billing-lane's
 // hasAuthoritativeZeroPrice (GATE_STAMPED_ZERO_FREE) on the visit's own stamp,
-// or, for a child that inherits its parent's price (isUnpricedSeriesVisit's
-// own rule), on the parent's.
+// or, for a recurring child whose priced parent counts for it
+// (isUnpricedSeriesVisit's own rule), on the parent's.
 function authoritativeZeroPrice(row) {
   const { hasAuthoritativeZeroPrice } = require('./billing-lane');
   if (hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) return true;
@@ -1054,6 +1129,7 @@ module.exports = {
   hasOutOfBandPrepaidStamp,
   hasAnnualPrepaidStamp,
   seriesRootId,
+  _prepayCoverageCopy: prepayCoverageCopy,
   _unpricedSeriesBells: unpricedSeriesBells,
   _completedUnpricedSince: completedUnpricedSince,
   _unpricedSeriesAlerts: unpricedSeriesAlerts,

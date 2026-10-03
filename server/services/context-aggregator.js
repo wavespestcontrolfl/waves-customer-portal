@@ -1,8 +1,18 @@
 const db = require('../models/db');
-const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
+const { isUnmodeledInvoice } = require('./payment-status-contract');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
+const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments } = require('./payer-linkage');
+const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
+// the payments display read over-fetches so payer-linked rows can be dropped without starving the window
+const PAYMENT_OVERFETCH = 40;
+const PAYMENT_MAX_PAGES = 5; // at most 200 rows read for the 5-row homeowner window
+// how many open own invoices the SMS context lists (the target list for Zelle / invoice status); flagged when cut
+const OPEN_INVOICES_CAP = 100;
+const {
+  INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, isCollectibleOwnInvoice, hasCollectibleAmountDue,
+  OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS, isUncountedPartialDueInvoice,
+} = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
@@ -18,6 +28,7 @@ const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, c
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
+const { loadVisitLoops, emptyVisitLoops } = require('./visit-loops-facts');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -54,8 +65,24 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
 // masked. Over-redaction is the safe direction for access text; the keyword
 // words themselves stay legible.
-const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
-const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
+// "A combination of ants and roaches" is a pest complaint, not a credential.
+// combo / combination is an access word EXCEPT in that one affirmative form
+// — "of" followed by a pest name (Codex #5542 r13: an allowlist of access
+// points always misses one, e.g. "the combination of my backyard fence").
+// One source for every screen: this module's token passes, the comms scrub
+// (completion-comms-context.js) and the re-service card's location filter.
+// The digit passes above still key on the bare word.
+const COMBINATION_PEST_NAME = '(?:pests?|bugs?|insects?|critters?|(?:fire\\s+)?ants?|roach(?:es)?|cockroach(?:es)?|spiders?|rodents?|rats?|mice|termites?|fleas?|ticks?|mosquito(?:e?s)?|wasps?|bees?|hornets?|fl(?:y|ies)|gnats?|beetles?|silverfish|crickets?|centipedes?|millipedes?|scorpions?|earwigs?|moths?|weevils?|lizards?|frogs?|snakes?|squirrels?|raccoons?)';
+const COMBINATION_NOUN = `(?:combo|combination)s?(?!\\s+of\\s+(?:the\\s+|these\\s+|those\\s+|both\\s+|several\\s+|different\\s+|two\\s+|three\\s+)?${COMBINATION_PEST_NAME}\\b)`;
+const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
+const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
+const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');
+// …but "combination of" next to ANY access point in the same segment ("blue
+// is the combination of the side gate") is a credential again (Codex r11).
+const BARE_COMBINATION_RE = /\b(?:combo|combination)s?\b/i;
+const COMBINATION_ACCESS_POINT_RE = /\b(?:gates?|garage|doors?|locks?|padlocks?|lock\s*box(?:es)?|lockbox(?:es)?|keypads?|sheds?|safe|entry|entrance)\b/i;
+const accessCodeNounIn = (seg) => ACCESS_CODE_NOUN_RE.test(seg)
+  || (BARE_COMBINATION_RE.test(seg) && COMBINATION_ACCESS_POINT_RE.test(seg));
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
 // Lowercase credentials (Codex r7: "gate code blue", "the gate code is
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
@@ -96,7 +123,7 @@ function redactAccessCodes(text) {
   }
   // Alphanumeric credential pass, per sentence-ish segment.
   out = out.split(/([.;\n])/).map((seg) => {
-    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
+    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !accessCodeNounIn(seg)) return seg;
     let masked = seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
       ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
     ));
@@ -1034,6 +1061,166 @@ function _liveEtaMemoSizeForTests() {
   return liveEtaMemo.size;
 }
 
+// ---- Billing helpers for getContextForCustomer (PR #5331) ------------------------------------------------------------------
+// Pure moves out of getContextForCustomer to keep its cyclomatic complexity down: same queries, same fail-closed semantics.
+
+// One page of the Recent payments read (offset = rows already read). Codex round-50 P2: payer-linked rows are dropped in JS AFTER the
+// read, so a page can come back full of AP rows - the read continues page by page (loadOwnPaymentsWindow) until the homeowner window is filled.
+// 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let five future autopay rows empty the history. Only an EXPLICIT
+// 'upcoming' is excluded: a NULL-status row is found-but-unknown evidence (Codex round-15 P1). DETERMINISTIC order (Codex round-27 P1):
+// payment_date is date-only, so same-day attempts tie — created_at then id break the tie, so the same rows are shown (and hidden) on
+// every read, draft and send. A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments
+// sample (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger.
+function paymentsPage(customer, payerLinkage, offset) {
+  return excludeNeverAttemptedDeferrals(excludeLiveOwnedPayerPayments(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), payerLinkage), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').modify((qb) => { if (offset) qb.offset(offset); }).limit(PAYMENT_OVERFETCH);
+}
+
+// The invoice id a payment row's metadata names (null when absent / unparseable).
+function paymentInvoiceId(p) {
+  try {
+    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+    return m && m.invoice_id != null ? String(m.invoice_id) : null;
+  } catch { return null; }
+}
+
+// A packet invoice WITHDRAWN to a third-party payer keeps payer_id NULL and a collectible status — only its stamp says it is the
+// payer's debt, never the homeowner's (Codex round-23 P1).
+const isFaceOwnInvoice = (inv) => !inv.payer_id && !inv.payer_statement_id && !invoiceWithdrawnFromCustomer(inv);
+
+// Codex round-39/40 P1 — ONE live ownership verdict for EVERY invoice-derived fact (services/invoice-payer-ownership, the pay
+// page's own verdict). A payer assigned through the scheduled service / customer default AFTER the invoice was minted leaves
+// payer_id NULL, yet the invoice is the payer's debt: the owed balance, open invoice, Zelle-target list, uncounted-partial flag,
+// payer-billed flag, payment linkage and the invoice-status list all read THIS set, so no path can still call an AP-owned
+// invoice the homeowner's. Codex round-49 P2: the set IS the payer linkage's (loadLivePayerLinkage) - it already judged
+// every unstamped invoice that can resolve to a payer, memoized per candidate payer. UNVERIFIABLE ownership (payerLinkage.failed)
+// already made billing unavailable. Codex round-46 P1: unknown ownership exposes NO invoice-derived money - the same empty picture
+// main gives when the invoice read fails - rather than counting a payer's invoice as the homeowner's.
+function resolveInvoiceOwnership(allInvoices, payerLinkage, billingUnavailable) {
+  const invoiceRows = billingUnavailable ? [] : allInvoices;
+  const liveOwnedIds = billingUnavailable ? new Set() : (payerLinkage.liveOwnedIds || new Set());
+  const liveOwned = (inv) => liveOwnedIds.has(String(inv.id));
+  const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id || liveOwned(r)).map((r) => String(r.id)));
+  return { invoiceRows, liveOwned, payerInvoiceIds };
+}
+
+// The over-fetched Recent payments window. The payments read over-fetches (payer-linked rows are dropped in JS through EVERY linkage
+// billing-v2 knows: metadata invoice_id + aliases, PaymentIntent, charge, the "Invoice <n> —" description and the payer_billed:
+// withdrawal stamp — Codex round-28 P1); the FIRST 5 own rows are the display read, exactly as before. Continues page by page until
+// the homeowner window is filled (or PAYMENT_MAX_PAGES).
+async function loadOwnPaymentsWindow({ customer, payerLinkage, firstPage, payerInvoiceIds }) {
+  const isOwnPayment = (p) => !(payerLinkage.isPayerLinked(p) || (paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p))));
+  let payments = firstPage;
+  let paymentsReadCut = payments.length >= PAYMENT_OVERFETCH; // the last page came back full: older rows may exist
+  for (let page = 1; paymentsReadCut && payments.filter(isOwnPayment).length < 5 && page < PAYMENT_MAX_PAGES; page += 1) {
+    const more = await paymentsPage(customer, payerLinkage, page * PAYMENT_OVERFETCH);
+    payments = payments.concat(more);
+    paymentsReadCut = more.length >= PAYMENT_OVERFETCH;
+  }
+  return { ownPaymentsAll: payments.filter(isOwnPayment), paymentsReadCut };
+}
+
+// Codex round-48 P1: own rows PAST the 3-row window that share a visible day (a same-amount twin can only sit there - rows are
+// newest first), so the payment-status renderer judges ambiguity over them too; complete unless the over-fetch was cut before that
+// day ended. recentPayments is a 3-row DISPLAY window ('upcoming' autopay rows are FUTURE charges, not payments the customer made,
+// Codex r5). recentPaymentsTruncated = the window may hide more history (the 5-row read was full, or own rows exceed 3): the
+// payment-status contract then renders no "no payments" sentence.
+function deriveRecentPayments(ownPaymentsAll, paymentsReadCut) {
+  const { paymentDayKey } = require('./payment-status-contract');
+  const ownPayments = ownPaymentsAll.slice(0, 5);
+  const isHistoryRow = (p) => String(p.status || '').toLowerCase() !== 'upcoming';
+  const recentWindow = ownPayments.filter(isHistoryRow).slice(0, 3);
+  const visibleDays = new Set(recentWindow.map(paymentDayKey).filter((k) => k != null));
+  const past = ownPaymentsAll.filter((p) => isHistoryRow(p) && !recentWindow.includes(p));
+  const rows = past.filter((p) => visibleDays.has(paymentDayKey(p)));
+  const oldestVisible = visibleDays.size ? Math.min(...visibleDays) : null;
+  const lastFetched = ownPaymentsAll.length ? paymentDayKey(ownPaymentsAll[ownPaymentsAll.length - 1]) : null;
+  // a FULL over-fetch whose last row is still on (or undatable at) the oldest visible day may hide more of that day
+  const complete = !(paymentsReadCut && (lastFetched == null || (oldestVisible != null && lastFetched >= oldestVisible)));
+  return {
+    recentWindow,
+    lookahead: { rows, complete },
+    truncated: ownPaymentsAll.length >= 5 || paymentsReadCut || ownPayments.filter(isHistoryRow).length > 3,
+  };
+}
+
+// Own invoices, canonical balance and the list-shaped invoice facts (Codex r5, mirrors billing-v2 /balance).
+// ONE shared predicate (invoice-helpers.isCollectibleOwnInvoice): sent / viewed / overdue (the statuses the portal's
+// /api/billing/balance sums — a partially_paid invoice is NOT counted, Codex round-36 P1; see hasUncountedPartialDue), not
+// payer-billed, and not WITHDRAWN to a payer, so the balance, open invoice, Zelle-target list and settlement checks all mean the
+// same invoices (Codex round-23 P1).
+function deriveOwnInvoiceMoney({ invoiceRows, liveOwned, failedFacts, payerLinkage, payerInvoiceIds, billingUnavailable }) {
+  const ownInvoices = invoiceRows.filter((inv) => isCollectibleOwnInvoice(inv) && !liveOwned(inv));
+  const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+  // Standalone failed attempts: the canonical shared sum over ALL unsuperseded failures (not the display slice). Payer ownership goes
+  // through the same linkage the payments display read uses, plus the invoice-id set. Invoice-linked failed attempts are excluded
+  // (the invoice itself already counts — double-count guard).
+  const failedStandalone = failedFacts && !billingUnavailable
+    ? standaloneFailedTotal(failedFacts, (p) => payerLinkage.isPayerLinked(p) || !!(paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p))))
+    : 0;
+  // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited newest row must not present "$0.00 due" while an older
+  // invoice carries the balance. EVERY own invoice with a positive due (newest first, capped) rides openInvoices — lets a caller tell
+  // WHICH open invoice a customer's message is about (Codex round-19 P1).
+  const collectibleOpen = ownInvoices.filter(hasCollectibleAmountDue);
+  const open = ownInvoices.find(hasCollectibleAmountDue) || null;
+  return {
+    balance: invoiceBalance + failedStandalone,
+    // v10: the newest sent-and-unpaid invoice. The customer's OWN newest collectible invoice (payer-billed rows can never shadow it —
+    // Codex r5); the payer-billed note rides separately so both facts surface. id rides through so a caller can re-fetch the full
+    // row to check pay-page eligibility (e.g. Zelle offer gating) without this trimmed projection growing every column that check
+    // might need. amountDue is net of applied credit (invoice-helpers.invoiceAmountDue) — the gross total over-states what Stripe
+    // will collect (Codex r2).
+    openInvoice: open ? {
+      id: open.id,
+      title: open.title || null,
+      status: open.status,
+      amountDue: invoiceAmountDue(open),
+      dueDate: open.due_date || null,
+    } : null,
+    openInvoices: collectibleOpen.slice(0, OPEN_INVOICES_CAP).map((inv) => ({
+      id: inv.id, invoiceNumber: inv.invoice_number || null, status: inv.status, amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
+    })),
+    openInvoicesTruncated: collectibleOpen.length > OPEN_INVOICES_CAP,
+  };
+}
+
+// The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for "your invoice is paid /
+// processing" statements (Codex round-20 P1). null = billing unavailable (unknown). Codex round-39 P1: a payer-owned row (live-resolved
+// or stamped) is dropped; an UNVERIFIABLE one made all of billing unavailable. The list is CUT at 8: a bare tail ("#0123") cannot be
+// resolved against a cut list (Codex round-37 P2 class).
+function deriveInvoiceStatuses(invoiceRows, liveOwned, billingUnavailable) {
+  const rows = billingUnavailable ? null : invoiceRows
+    .filter((inv) => isFaceOwnInvoice(inv) && String(inv.status) !== 'draft' && !liveOwned(inv));
+  return {
+    invoiceStatusesTruncated: !!rows && rows.length > 8,
+    invoiceStatuses: rows && rows
+      .slice(0, 8)
+      .map((inv) => ({
+        id: inv.id, invoiceNumber: inv.invoice_number || null, status: String(inv.status || ''),
+        total: Number(inv.total), amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
+      })),
+  };
+}
+
+// Every invoice-derived money fact the SMS context carries (all read ONE live ownership verdict — see resolveInvoiceOwnership).
+function deriveInvoiceFacts({ invoiceRows, liveOwned, failedFacts, payerLinkage, payerInvoiceIds, billingUnavailable }) {
+  const VISIBLE_INVOICE_STATUSES = new Set([...OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS]); // payer-billed flag: any open payer debt
+  // Any own, non-draft invoice whose status the payment-status renderer does not positively model as settled / void / counted
+  // (a legacy 'unpaid', ...) is a debt it cannot describe: it suppresses "no balance due" and the "no payments" sentences. Judged
+  // over EVERY fetched row (the status list is cut at 8); a fetch that hit its row cap may hide one, so it reads as unmodeled.
+  const hasUnmodeledInvoice = !billingUnavailable
+    && (invoiceRows.length >= 300 || invoiceRows.some((inv) => isFaceOwnInvoice(inv) && !liveOwned(inv) && isUnmodeledInvoice(inv)));
+  return {
+    ...deriveOwnInvoiceMoney({ invoiceRows, liveOwned, failedFacts, payerLinkage, payerInvoiceIds, billingUnavailable }),
+    ...deriveInvoiceStatuses(invoiceRows, liveOwned, billingUnavailable),
+    hasUnmodeledInvoice,
+    // an own partially_paid invoice with an amount due: owed in fact, but NOT in the portal balance — SMS agrees with the portal's
+    // number and instead FAILS CLOSED on settlement claims ("you're paid up", "$0 balance")
+    hasUncountedPartialDue: invoiceRows.some((inv) => isUncountedPartialDueInvoice(inv) && !liveOwned(inv)),
+    // a WITHDRAWN packet invoice is payer-billed in effect (stamp only), so it flags the same fact
+    hasPayerBilledOpen: invoiceRows.some((inv) => (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv) || liveOwned(inv)) && VISIBLE_INVOICE_STATUSES.has(String(inv.status))),
+  };
+}
+
 class ContextAggregator {
   async getFullCustomerContext(phone, options = {}) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -1064,9 +1251,30 @@ class ContextAggregator {
   // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
   // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
-    // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false } = {}) {
+    // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
+    // never throws — null on failure) starts right after the payer linkage below (it reuses it) and
+    // overlaps the remaining fetches; it is awaited where hasProcessingPayment is derived.
+    const paymentHistoryService = require('./payment-history');
+    // Any estimate deposit beyond a pending one (received, credited, refunded): money the payments table never records. null = unknown.
+    const depositActivityPromise = db('estimate_deposits')
+      .where(function ownDeposit() { this.where({ customer_id: customer.id }).orWhereIn('estimate_id', db('estimates').select('id').where({ customer_id: customer.id })); })
+      .whereNot('status', 'pending').first('id')
+      .then((row) => !!row, () => null);
+    // An ACTIVE payment plan on any of the customer's invoices (payment-plans.js): installments are not reflected in the invoice
+    // balance, so the payment-status contract renders no balance / due / "nothing owed" sentence for such a customer. An unreadable
+    // lookup reads as "on a plan" (fail closed).
+    const activePlanPromise = Promise.resolve(db('payment_plans').where({ customer_id: customer.id, status: 'active' }).first('id'))
+      .then((row) => !!row, (err) => { logger.warn(`[context-aggregator] payment-plan read failed for ${customer.id}: ${err.message}`); return true; });
+    // ONE LIVE payer-linkage verdict (Codex round-42 P1, PR #5331) — the same loadLivePayerLinkage the authoritative payment history and
+    // the in-flight probe use: an invoice that resolves to a payer TODAY (payer_id still NULL) owns its payments through the metadata
+    // invoice, alias, PaymentIntent, charge and "Invoice <n> —" description alike. It is loaded BEFORE the payments read so the
+    // live-owned rows are also dropped IN SQL (before the over-fetch cap), and it gates BOTH the recent-payments window and the
+    // failed-payment total below. A lookup / resolver failure => `failed` => billing unavailable (fail closed).
+    const payerLinkage = await loadLivePayerLinkage(customer.id);
+    // the in-flight probe reuses THIS linkage (Codex round-55 P2): one bounded ownership pass per context read, one snapshot
+    const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id, db, { linkage: payerLinkage });
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, paymentsFirstPage, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, failedFacts] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
       // message Waves definitely sent, nor displace a real row out of this
@@ -1080,11 +1288,13 @@ class ContextAggregator {
       loadUpcomingServices(customer, includeLiveEta),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
-      // five future autopay rows empty the history.
-      // A never-attempted dispute-hold deferral is not a payment the customer
-      // made: out of the recent-payments sample (SQL, so it cannot use up one
-      // of the 5 rows), consistent with failedStandalone below.
-      excludeNeverAttemptedHoldDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming'), 'payments').orderBy('payment_date', 'desc').limit(5),
+      // five future autopay rows empty the history. Only an EXPLICIT 'upcoming' is excluded:
+      // a NULL-status row is found-but-unknown evidence (Codex round-15 P1).
+      // DETERMINISTIC order (Codex round-27 P1): payment_date is date-only, so same-day attempts tie — created_at
+      // then id break the tie, so the same rows are shown (and hidden) on every read, draft and send.
+      // A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments sample
+      // (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger below.
+      paymentsPage(customer, payerLinkage, 0),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -1112,7 +1322,7 @@ class ContextAggregator {
         // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
         .limit(300)
-        .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
+        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'payer_statement_id', 'scheduled_service_id', 'scheduled_send_error', 'created_at')
         // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
         // read as "no invoices" — null marks billing UNAVAILABLE and the
         // facts render a visible unknown instead of "Balance: Current".
@@ -1155,6 +1365,11 @@ class ContextAggregator {
         // hits the same table; an error sentinel here forces the UNKNOWN
         // autopay rendering below.
         .catch(() => 'unavailable'),
+      // (payer linkage: loaded above — the LIVE form, Codex round-42 P1)
+      // EVERY unsuperseded failed / pending / overdue payment (main's status set, over the complete ledger — services/failed-payments.js) — NOT the
+      // 5-row display slice: an older failure behind five newer paid rows is still owed (Codex round-35 P1).
+      // null = the read failed => the money picture is unknowable (billing unavailable).
+      loadFailedPaymentFacts(customer.id, undefined, { statuses: ['failed', 'pending', 'overdue'], strict: true }).catch((err) => { logger.warn(`[context-aggregator] failed-payment read failed for ${customer.id}: ${err.message}`); return null; }),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -1162,46 +1377,17 @@ class ContextAggregator {
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
-    const billingUnavailable = allInvoices === null;
-    const invoiceRows = allInvoices || [];
-    const VISIBLE_INVOICE_STATUSES = new Set(['sent', 'viewed', 'overdue']);
-    const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
-    const draftOwnInvoiceIds = new Set(invoiceRows.filter((r) => !r.payer_id && String(r.status) === 'draft').map((r) => String(r.id)));
-    const paymentInvoiceId = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return m && m.invoice_id != null ? String(m.invoice_id) : null;
-      } catch { return null; }
-    };
-    const ownPayments = payments.filter((p) => {
-      const invId = paymentInvoiceId(p);
-      return !(invId && payerInvoiceIds.has(invId));
+    // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
+    const billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
+    // Codex round-46 P1: unknown ownership exposes NO invoice-derived money (see resolveInvoiceOwnership).
+    const ownership = resolveInvoiceOwnership(allInvoices, payerLinkage, billingUnavailable);
+    const { ownPaymentsAll, paymentsReadCut } = await loadOwnPaymentsWindow({
+      customer, payerLinkage, firstPage: paymentsFirstPage, payerInvoiceIds: ownership.payerInvoiceIds,
     });
-    // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
-    // collectible OWN invoices (net of credit) plus failed standalone
-    // attempts — a customer with a sent-but-unpaid invoice and no failed
-    // attempt is NOT "Current". Invoice-linked failed attempts are excluded
-    // (the invoice itself already counts — double-count guard). Superseded
-    // failed attempts were collected by their retry's own row.
-    const ownInvoices = invoiceRows.filter((inv) => !inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
-    const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
-    const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-    const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p))
-      // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
-      // the invoice lifecycle owns that money — EXCEPT when the linked
-      // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
-      // allow-list never sums drafts, so dropping the failed
-      // completion-autopay row too would show $0 owed on a still-collectible
-      // debt.
-      .filter(p => { const invId = paymentInvoiceId(p); return !invId || draftOwnInvoiceIds.has(invId); })
-      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
-    const balance = invoiceBalance + failedStandalone;
-    // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
-    // newest row must not present "$0.00 due" while an older invoice carries
-    // the balance.
-    const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
-    const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    const inFlightMoney = await inFlightMoneyPromise;
+    const recentPayments = deriveRecentPayments(ownPaymentsAll, paymentsReadCut);
+    const invoiceFacts = deriveInvoiceFacts({ ...ownership, failedFacts, payerLinkage, billingUnavailable });
+    const { balance } = invoiceFacts;
     // The BILLING LANE, resolved once and carried as an explicit FACT. The
     // per-application copy rule lets a monthly amount be spoken only when the
     // account says the lane is monthly membership — but nothing produced that
@@ -1332,7 +1518,7 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
-    return {
+    const context = {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
       // where this is built) — [{ minutes, scheduledServiceIds }], never
@@ -1386,7 +1572,24 @@ class ContextAggregator {
         outstandingBalance: balance,
         // completed/attempted history only (Codex r5): 'upcoming' autopay
         // rows are FUTURE charges, not payments the customer made.
-        recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
+        recentPayments: recentPayments.recentWindow,
+        // Codex round-48 P1: own rows PAST the 3-row window that share a visible day (a same-amount twin can only sit there - rows are
+        // newest first), so the payment-status renderer judges ambiguity over them too; complete unless the over-fetch was cut
+        // before that day ended.
+        recentPaymentsLookahead: recentPayments.lookahead.rows,
+        recentPaymentsLookaheadComplete: recentPayments.lookahead.complete,
+        // recentPayments is a 3-row DISPLAY window. recentPaymentsTruncated = the window may hide more history (the 5-row read
+        // was full, or own rows exceed 3): the payment-status contract then renders no "no payments" sentence.
+        recentPaymentsTruncated: recentPayments.truncated,
+        // Codex round-11 P1: a payment or invoice still PROCESSING is unsettled
+        // (the balance above excludes a processing invoice, so "you're paid up"
+        // would read as true while money is in flight). True when any own payment
+        // is pending/processing/requires_action or any own invoice is processing.
+        // Authoritative EXISTENCE query (payment-history.hasInFlightMoney), independent of
+        // the display window; null (read failed) is read as in flight — fail closed.
+        hasProcessingPayment: inFlightMoney !== false,
+        // the payment-status renderer states no payment absence unless this is false (deposits have no payments row)
+        hasDepositActivity: await depositActivityPromise,
         // v10: real autopay state (canonical eligibility, null = unknown).
         autopay: autopayState,
         // v10: the newest sent-and-unpaid invoice. payerBilled=true means a
@@ -1395,15 +1598,17 @@ class ContextAggregator {
         // The customer's OWN newest collectible invoice (payer-billed rows
         // can never shadow it — Codex r5); the payer-billed note rides
         // separately so both facts surface.
-        openInvoice: openInvoice ? {
-          title: openInvoice.title || null,
-          status: openInvoice.status,
-          // Net of applied credit (invoice-helpers.invoiceAmountDue) — the
-          // gross total over-states what Stripe will collect (Codex r2).
-          amountDue: invoiceAmountDue(openInvoice),
-          dueDate: openInvoice.due_date || null,
-        } : null,
-        payerBilledInvoice: hasPayerBilledOpen,
+        openInvoice: invoiceFacts.openInvoice,
+        openInvoices: invoiceFacts.openInvoices,
+        hasUncountedPartialDue: invoiceFacts.hasUncountedPartialDue,
+        hasUnmodeledInvoice: invoiceFacts.hasUnmodeledInvoice,
+        hasActivePaymentPlan: await activePlanPromise,
+        // the list is complete unless the customer has more than OPEN_INVOICES_CAP open invoices — then a caller must
+        // not conclude "that invoice isn't open" from its absence (Codex round-28 P2)
+        openInvoicesTruncated: invoiceFacts.openInvoicesTruncated,
+        invoiceStatuses: invoiceFacts.invoiceStatuses,
+        invoiceStatusesTruncated: invoiceFacts.invoiceStatusesTruncated,
+        payerBilledInvoice: invoiceFacts.hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand
         // (Codex r2) — label them a bank account, never "card".
@@ -1479,6 +1684,29 @@ class ContextAggregator {
       sourceHealth: { recentCalls: recentCalls === null ? 'unavailable' : 'ok' },
       summary,
     };
+    // Visit status + open loops (live tech position, lateness, missed visit,
+    // promises we owe, asks still waiting): read-only facts the drafter needs.
+    // Non-enumerable, like scheduledServiceId above: this context is serialized
+    // whole into other LLM-visible payloads (managed assistant snapshot, email
+    // reply facts, lead-response tool results), and raw tech notes / open
+    // promise text must only reach the one prompt that renders them (the SMS
+    // drafter reads the property directly). Never throws; a failed field is
+    // null/[].
+    // Read only while GATE_SMS_REAL_ANSWERS is on: the SMS drafter is the one
+    // renderer, and a dark feature must not add queries to every context build.
+    let visitLoops = emptyVisitLoops();
+    // ...and only for the SMS drafting call sites that opt in (includeVisitLoops):
+    // email replies, briefs and assistant snapshots never read it.
+    if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+      try {
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
+      } catch (err) {
+        logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
+        visitLoops = emptyVisitLoops();
+      }
+    }
+    Object.defineProperty(context, 'visitLoops', { value: visitLoops, enumerable: false, writable: true, configurable: true });
+    return context;
   }
 
   // Last few phone calls that produced an AI summary (call-recording-processor
@@ -1490,7 +1718,7 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false } = {}) {
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1500,6 +1728,20 @@ class ContextAggregator {
         // v10: 60-day window, 4 calls — customers reference calls older than
         // a month ("when we talked last month about the ants…").
         .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
+        // Optional upper bound (the review-ask writer scopes calls to a visit)
+        // applied before the limit below, so later calls can't crowd it out.
+        .modify((qb) => { if (before) qb.where('created_at', '<', before); })
+        // Optional caller identity (the review-ask writer: the recipient's own
+        // number only), applied before the limit and the transcript pick, so
+        // another household contact's calls can't crowd theirs out.
+        .modify((qb) => {
+          const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+          if (!phone) return;
+          if (digits.length !== 10) { qb.whereRaw('1 = 0'); return; }
+          qb.where((w) => w
+            .where((x) => x.whereRaw("direction ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]))
+            .orWhere((x) => x.whereRaw("coalesce(direction, '') NOT ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])));
+        })
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is
@@ -1515,7 +1757,7 @@ class ContextAggregator {
         // SQL throws on any malformed row), and a filtered row must not
         // silently shrink the pick below 4 real calls.
         .limit(10)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status');
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status', 'from_phone', 'to_phone');
       const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
       // v10: the NEWEST call also carries its transcript (owner directive:
       // the drafter should see what was actually said, not only the
@@ -1700,6 +1942,7 @@ class ContextAggregator {
 module.exports = new ContextAggregator();
 module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
 module.exports.redactAccessCodes = redactAccessCodes;
+module.exports.COMBINATION_NOUN = COMBINATION_NOUN;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;

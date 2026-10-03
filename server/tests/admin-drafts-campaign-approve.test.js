@@ -147,6 +147,7 @@ beforeEach(() => {
   // Draft finalization may run in a transaction (upsell pitched flip) — the
   // trx handle reuses the same table-keyed queue machinery.
   db.transaction = jest.fn(async (fn) => fn(db));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings })); // the review-provenance stamp (flags.review_verdict)
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_real_sid' });
   mockGates.campaignDrafts = true;
   mockGates.smsGratitudeReplies = false;
@@ -264,6 +265,26 @@ describe('PUT /admin/drafts/:id/approve', () => {
       sourceRef: 'upsell_opportunities:opp-1',
       excludeDraftId: 'draft-1',
     });
+  });
+
+  test('a draft whose body names a call-us line sends FROM that pinned line (seasonal win-back)', async () => {
+    const draft = campaignDraft({ flags: JSON.stringify({ fromNumber: '+19412972817' }) });
+    enqueueApproveHappyPath(draft);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBe('+19412972817');
+  });
+
+  test('a pinned line that is not one of our numbers is ignored', async () => {
+    const draft = campaignDraft({ flags: JSON.stringify({ fromNumber: '+15550000000' }) });
+    enqueueApproveHappyPath(draft);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBeUndefined();
   });
 
   test('gate off is a full kill switch: existing campaign drafts cannot be approve-sent, draft stays pending', async () => {

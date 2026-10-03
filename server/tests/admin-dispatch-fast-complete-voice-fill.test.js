@@ -76,7 +76,8 @@ const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
   const chain = {};
   for (const m of ['where', 'whereIn', 'select', 'leftJoin']) chain[m] = () => chain;
-  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id } : null);
+  // a live visit dated today: technicianVisitRowInScope also checks status and the access window
+  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id, status: 'scheduled', scheduled_date: new Date().toISOString().slice(0, 10) } : null);
   chain.then = (resolve, reject) => Promise.resolve(table === 'product_aliases' ? [{ product_id: 'p-talak', alias_name: 'Talstar P' }] : []).then(resolve, reject);
   return chain;
 };
@@ -92,7 +93,7 @@ const TRANSCRIPT = 'Did the perimeter outside for ants, 4 ounces of Taurus, ligh
 const MODEL_ANSWER = {
   products: [{ productId: 'p-taurus', amount: 4, unit: 'oz', sameAsLast: false, method: 'perimeter_spray', heard: '4 ounces of Taurus' }],
   visit: { pests: ['Ants'], otherPest: '', areas: ['Outside'], method: 'perimeter_spray', linearFt: 0, activity: 'light', heard: 'perimeter outside for ants' },
-  customerNote: 'Treated the perimeter outside for ants.',
+  customerNote: 'Did the perimeter outside for ants.',
   officeNote: 'Gate code is 7731.',
   unclear: [],
 };
@@ -119,8 +120,22 @@ describe('POST fast-complete/voice-fill', () => {
     const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
     expect(authIdx).toBeGreaterThan(-1);
     expect(router.stack.indexOf(layer)).toBeGreaterThan(authIdx);
-    // limiter, then the handler
-    expect(layer.route.stack).toHaveLength(2);
+    // dark gate, limiter, then the handler
+    expect(layer.route.stack).toHaveLength(3);
+  });
+
+  test('with the gate off the FIRST layer answers 404, so the limiter bucket is never spent', () => {
+    delete process.env.GATE_FAST_COMPLETE_VOICE_FILL;
+    const gate = routeLayer('post', PATH).route.stack[0].handle;
+    const res = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    const next = jest.fn();
+    gate({}, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    process.env.GATE_FAST_COMPLETE_VOICE_FILL = 'true';
+    gate({}, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
   test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p answers 404 {enabled:false} and reads and calls nothing', async (value) => {
@@ -193,7 +208,7 @@ describe('POST fast-complete/voice-fill', () => {
       enabled: true,
       products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard: '4 ounces of Taurus' }],
       visit: { pests: ['Ants'], otherPest: '', areas: ['Outside'], method: 'perimeter_spray', linearFt: null, activity: 'light', heard: 'perimeter outside for ants' },
-      customerNote: 'Treated the perimeter outside for ants.',
+      customerNote: 'Did the perimeter outside for ants.',
       officeNote: 'Gate code is 7731.',
       unclear: [],
     });

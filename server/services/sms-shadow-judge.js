@@ -510,6 +510,9 @@ module.exports = {
   // rubric, same deterministic no-reply branches — so exam scores and live
   // judge scores stay directly comparable.
   judgeOne,
+  // Production export: the incident adjudicator shows its readers the SAME
+  // section-aware facts view the judge graded against (sms-pathology-ledger).
+  sanitizeFactsForJudge,
   PROMPT_VERSION,
   VERDICTS,
   _test: {

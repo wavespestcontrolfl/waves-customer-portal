@@ -20,6 +20,8 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   buildLiveEtaSnapshot: jest.fn(() => null),
   // Round-42: the lane also persists the draft's technician first names (none in these fixtures).
   techNamesFromContext: jest.fn(() => []),
+  visitLoopCommitmentIds: jest.fn(() => []),
+  visitLoopStatus: jest.fn(() => null),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's
@@ -301,6 +303,26 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
   });
 
+  // PR #5331 (owner ruling 2026-10-01): the payment-status sentences the reply copied ride the decision's input_snapshot so every
+  // send seam can re-render them from live data (agent-decision-send-checks / the scheduler).
+  test('persists the drafter\'s payment_status_snapshot on the decision, and omits it when the reply copied no sentence', async () => {
+    seedActiveSchedulingThread();
+    const snap = { customer_id: 'cust-1', sentences: ['Your account has no balance due.'] };
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Your account has no balance due.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers5_cflvp', paymentStatusSnapshot: snap,
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Do I owe anything?', smsLogId: 'sms-in-12' });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot).payment_status_snapshot).toEqual(snap);
+
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers5_cflvp', paymentStatusSnapshot: null,
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Hello what happened this morning', smsLogId: 'sms-in-13' });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('payment_status_snapshot');
+  });
+
   test('no estimate resolved: estimateId is null, not undefined or omitted', async () => {
     generateGroundedDraft.mockResolvedValue({
       parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
@@ -340,7 +362,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
     });
 
     // Codex round-16 P2: the opt-in also requires the release gate (gate-off is byte-identical).
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false });
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false, includeVisitLoops: true });
 
     ContextAggregator.getContextForCustomer.mockClear();
     const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
@@ -351,7 +373,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
         body: 'Hello what happened this morning',
         decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
       });
-      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true, includeVisitLoops: true });
     } finally {
       if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
     }

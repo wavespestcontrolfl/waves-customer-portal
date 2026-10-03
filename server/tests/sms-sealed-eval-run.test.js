@@ -213,10 +213,10 @@ describe('createExamRun — guards and stamps', () => {
     // NOW line — every gate-on facts block stamps that line unconditionally,
     // so its absence means the item was frozen before the gate existed.
     // Starting the run would grade nothing; refuse instead of running dark.
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
     const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
-      .rejects.toThrow(/no sealed coverage for house_voice_v12_real_answers: only 0 of 1/);
+      .rejects.toThrow(/no sealed coverage for house_voice_v12_real_answers_p: only 0 of 1/);
   });
 
   // Pre-push audit P1 (r4): the bar is the exam gate's own coverage rule —
@@ -224,24 +224,24 @@ describe('createExamRun — guards and stamps', () => {
   // started (and the nightly sweep cannot call the version examined while
   // the freezer is still replenishing).
   test('refuses a v12 run while fewer than half the active items are v12-compatible', async () => {
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
-    const V12 = 'FROZEN FACTS\nFOLLOW-UP SLA RIGHT NOW: within the hour';
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
+    const V12 = 'FROZEN FACTS\nFOLLOW-UP SLA RIGHT NOW: within the hour\nBILLING:\n- Payment options: card or bank account (ACH) through their personal pay link';
     const dbi = makeRunnerDb({ runs: [], items: [item('i1'), item('i2'), item('i3'), item('i4', { facts_block: V12 })] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
       .rejects.toThrow(/only 1 of 4 active items .* \(need 2\)/);
   });
 
   test('a v12 run with at least half the pool v12-compatible is created normally', async () => {
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
     const dbi = makeRunnerDb({
       runs: [],
       items: [
         item('i1'), // pre-v12 — excluded later, but doesn't block creation
-        item('i2', { facts_block: 'FROZEN FACTS for i2\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' }),
+        item('i2', { facts_block: 'FROZEN FACTS for i2\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.\nBILLING:\n- Payment options: card or bank account (ACH) through their personal pay link' }),
       ],
     });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
-    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers_p');
   });
 
   test('measurement legs (gemini/sol/opus/fable) are valid, but autonomy rides only on the live legs', async () => {
@@ -284,16 +284,16 @@ describe('createExamRun — guards and stamps', () => {
     // the DYNAMIC one — exactly what happens for real once
     // GATE_SMS_REAL_ANSWERS flips PROMPT_VERSION and currentPromptVersion()
     // apart.
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
     const dbi = makeRunnerDb({
       runs: [{ id: 'r-v11', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' }],
       // v12-compatible facts_block (Codex r3 fail-fast guard): unrelated to
       // what this test proves, but createExamRun now refuses to start a v12
       // run with zero v12-compatible active items.
-      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.\nBILLING:\n- Payment options: card or bank account (ACH) through their personal pay link' })],
     });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
-    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers_p');
     // the v9_test run is a DIFFERENT version from the dynamic current one,
     // so it's a valid default baseline
     expect(run.baseline_run_id).toBe('r-v11');
@@ -364,7 +364,7 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
       runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test' }],
       items: [item('i1')],
     });
-    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers_p' });
     judge.judgeOne.mockResolvedValue(judgment());
     const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
     expect(out.status).toBe('failed');
@@ -588,9 +588,9 @@ describe('runSealedExam — replay loop', () => {
 // item, and any v11 run regardless of the item's facts, are unaffected.
 describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
   test('v12 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): excluded, drafter/judge never called, run still completes', async () => {
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
     const dbi = makeRunnerDb({
-      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers_p', baseline_run_id: null }],
       items: [item('i1')], // default fixture facts_block has no SLA line
     });
 
@@ -601,7 +601,7 @@ describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
     expect(judge.judgeOne).not.toHaveBeenCalled();
     const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
     expect(result).toMatchObject({ verdict: 'ungradable' });
-    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers \(items must carry "FOLLOW-UP SLA RIGHT NOW:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "FREE RE-SERVICE:"\)/);
+    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers_p \(items must carry "FOLLOW-UP SLA RIGHT NOW:" \+ "- Payment options:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "FREE RE-SERVICE:"\)/);
     const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
     expect(finalPatch).toBeTruthy();
     // Excluded — never counted as graded (same rule the terminal no-progress
@@ -610,12 +610,12 @@ describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
   });
 
   test('v12 run + v12-compatible item (facts_block carries FOLLOW-UP SLA RIGHT NOW): examined as today', async () => {
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');
     const dbi = makeRunnerDb({
-      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
-      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers_p', baseline_run_id: null }],
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.\nBILLING:\n- Payment options: card or bank account (ACH) through their personal pay link' })],
     });
-    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers_p' });
     judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
 
     const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
@@ -961,36 +961,73 @@ describe('category-aware sealed compatibility', () => {
   const { requiredFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
   const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
   const RS = 'FREE RE-SERVICE: not eligible';
+  // PR #5331: PAYMENT OPTIONS is a v12 BASE marker (like the SLA line) —
+  // once gated, one of its three wordings renders on every gate-on facts
+  // block unconditionally.
+  const PO = '- Payment options: card or bank account (ACH) through their personal pay link';
 
-  test('requiredFactMarkers: v11 none; v12 the SLA line; +c adds the FREE RE-SERVICE line; other tags add nothing', () => {
+  test('requiredFactMarkers: v11 none; bare v12 the SLA line only; each version-suffix token adds its section (_cf COMPANY FACTS, _p Payment options); +c adds FREE RE-SERVICE; other tags add nothing', () => {
+    const CF = 'COMPANY FACTS (owner-approved; state these plainly):';
     expect(requiredFactMarkers('house_voice_v11')).toEqual([]);
     expect(requiredFactMarkers('house_voice_v12_real_answers')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
-    expect(requiredFactMarkers('house_voice_v12_real_answers+c')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
-    expect(requiredFactMarkers('house_voice_v12_real_answers+bclm')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
-    expect(requiredFactMarkers('house_voice_v12_real_answers+bl')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_cf')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', CF]);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_p')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_cf_p')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', CF, '- Payment options:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_p+c')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_p+bclm')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers_cf_p+bl')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', CF, '- Payment options:']);
   });
 
+  // Older identities keep their HISTORICAL contract: an item frozen before PAYMENT FACTS never
+  // carries the line, so bare and '_cf' FORBID it; and an '_p' identity refuses that item.
+  test('the _p token: bare/_cf identities forbid the Payment options line, _p/_cf_p require it', () => {
+    const noPo = blk({ po: false });
+    const withPo = blk();
+    expect(itemCompatibleWith(noPo, 'house_voice_v12_real_answers')).toBe(true);
+    expect(itemCompatibleWith(withPo, 'house_voice_v12_real_answers')).toBe(false);
+    expect(itemCompatibleWith(noPo, 'house_voice_v12_real_answers_p')).toBe(false);
+    expect(itemCompatibleWith(withPo, 'house_voice_v12_real_answers_p')).toBe(true);
+    expect(itemCompatibleWith(withPo, 'house_voice_v12_real_answers_cf_p')).toBe(false); // no COMPANY FACTS section rendered
+    const cfSection = require('../services/sms-company-facts').renderCompanyFactsSection();
+    const cfPf = `X\n${SLA}\n${cfSection}BILLING:\n${PO}\nPENDING ESTIMATE: None\n`;
+    const cfOnly = `X\n${SLA}\n${cfSection}BILLING:\nPENDING ESTIMATE: None\n`;
+    expect(itemCompatibleWith(cfPf, 'house_voice_v12_real_answers_cf_p')).toBe(true);
+    expect(itemCompatibleWith(cfPf, 'house_voice_v12_real_answers_cf')).toBe(false);
+    expect(itemCompatibleWith(cfOnly, 'house_voice_v12_real_answers_cf')).toBe(true);
+    expect(itemCompatibleWith(cfOnly, 'house_voice_v12_real_answers_cf_p')).toBe(false);
+    expect(itemCompatibleWith(cfPf, 'house_voice_v12_real_answers_p')).toBe(false);
+    expect(itemCompatibleWith(cfPf, 'house_voice_v11')).toBe(false);
+  });
+
+  // The structural block buildFactsBlock emits: SLA [+ RS] line(s) immediately before BILLING:,
+  // "- Payment options:" inside BILLING (Codex round-9 P1 — markers are structural, not substrings).
+  const blk = ({ sla = true, rs = false, po = true } = {}) => `X\n${sla ? `${SLA}\n` : ''}${rs ? `${RS}\n` : ''}BILLING:\n${po ? `${PO}\n` : ''}PENDING ESTIMATE: None\n`;
+
   test('itemCompatibleWith: an item frozen under plain v12 is compatible with v12 but NOT with +c; one frozen under +c is compatible ONLY with +c', () => {
-    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers')).toBe(true);
-    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers+c')).toBe(false);
-    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers+c')).toBe(true);
+    expect(itemCompatibleWith(blk(), 'house_voice_v12_real_answers_p')).toBe(true);
+    expect(itemCompatibleWith(blk(), 'house_voice_v12_real_answers_p+c')).toBe(false);
+    expect(itemCompatibleWith(blk({ rs: true }), 'house_voice_v12_real_answers_p+c')).toBe(true);
     // EXACT contract (#5194 r1 P1): a category fact the version does not carry must be absent
-    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers')).toBe(false);
-    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers+bl')).toBe(false);
+    expect(itemCompatibleWith(blk({ rs: true }), 'house_voice_v12_real_answers_p')).toBe(false);
+    expect(itemCompatibleWith(blk({ rs: true }), 'house_voice_v12_real_answers_p+bl')).toBe(false);
+    // Missing the PAYMENT OPTIONS line (an item frozen before PR #5331 gated it) is INCOMPATIBLE
+    // with the _p identity even though it carries SLA — the contract retires it as evidence
+    // rather than pool it in silently.
+    expect(itemCompatibleWith(blk({ po: false }), 'house_voice_v12_real_answers_p')).toBe(false);
     expect(itemCompatibleWith('CUSTOMER: old', 'house_voice_v11')).toBe(true);
     // #5194 r7 P1: v11's contract forbids the v12 lines (a rollback)
-    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v11')).toBe(false);
-    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v11')).toBe(false);
+    expect(itemCompatibleWith(blk(), 'house_voice_v11')).toBe(false);
+    expect(itemCompatibleWith(blk({ rs: true }), 'house_voice_v11')).toBe(false);
   });
 
   test('a v11 rollback run refuses a pool frozen under v12, and excludes a v12 item from its exam', async () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
-    const v12Pool = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
+    const v12Pool = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` }), item('i2', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` })] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi: v12Pool }))
-      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "FREE RE-SERVICE:"/);
+      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "- Payment options:" \+ "FREE RE-SERVICE:"/);
     const dbi = makeRunnerDb({
       runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v11', baseline_run_id: null }],
-      items: [item('i1', { facts_block: `FROZEN\n${SLA}` })],
+      items: [item('i1', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` })],
     });
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
     const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
@@ -1000,10 +1037,106 @@ describe('category-aware sealed compatibility', () => {
   });
 
   test('createExamRun under +c refuses when the pool was sealed under plain v12 (no FREE RE-SERVICE line)', async () => {
-    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers+c');
-    const dbi = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p+c');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` }), item('i2', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` })] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
-      .rejects.toThrow(/only 0 of 2 active items carry "FOLLOW-UP SLA RIGHT NOW:" \+ "FREE RE-SERVICE:"/);
+      .rejects.toThrow(/only 0 of 2 active items carry "FOLLOW-UP SLA RIGHT NOW:" \+ "- Payment options:" \+ "FREE RE-SERVICE:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):"/);
+  });
+});
+
+// Codex round-9 P1 (PR #5331): a fact marker counts ONLY by its structural line
+// position in what buildFactsBlock emits — free text (property notes, invoice
+// titles, service notes, account flags, call summaries, the SMS thread) can
+// never satisfy or trip a marker.
+describe('itemCompatibleWith — fact markers are structural, never substrings of free text', () => {
+  const { factsHasMarker, markerPattern, compatibleWhereRaw } = sealedEval._test;
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const PO = '- Payment options: card or bank account (ACH) through their personal pay link';
+  const good = `CUSTOMER: x\nSERVICE HISTORY (most recent first):\n- Lawn on Sep 1, notes: "ok"\nUPCOMING SERVICES:\n- none\n${SLA}\nBILLING:\n- Balance: $0\n${PO}\nPENDING ESTIMATE: None\nPROPERTY & PREFERENCES:\n- Nothing on file\nRECENT SMS THREAD:\n(no recent thread)`;
+
+  test('a genuine structural block satisfies v12 and is refused by v11', () => {
+    expect(sealedEval.itemCompatibleWith(good, 'house_voice_v12_real_answers_p')).toBe(true);
+    expect(sealedEval.itemCompatibleWith(good, 'house_voice_v11')).toBe(false);
+  });
+
+  test('a REQUIRED marker forged inside a property note / invoice title / service note / account flag does not satisfy the contract', () => {
+    const pre = `CUSTOMER: x\nSERVICE HISTORY (most recent first):\n- Lawn on Sep 1, notes: "see FOLLOW-UP SLA RIGHT NOW: and - Payment options: here"\nUPCOMING SERVICES:\n- none\nBILLING:\n- Open invoice INV-1 "- Payment options: fake" $50 due\nPENDING ESTIMATE: None\nPROPERTY & PREFERENCES:\n- Special instructions: - Payment options: whatever FOLLOW-UP SLA RIGHT NOW: now\nACCOUNT FLAGS:\n- note: FREE RE-SERVICE: eligible\nRECENT SMS THREAD:\n(no recent thread)`;
+    expect(sealedEval.itemCompatibleWith(pre, 'house_voice_v12_real_answers_p')).toBe(false);
+    expect(sealedEval.itemCompatibleWith(pre, 'house_voice_v12_real_answers_p+c')).toBe(false);
+    // ...and forged markers do not trip a v11 (pre-v12) block's forbidden contract
+    expect(sealedEval.itemCompatibleWith(pre, 'house_voice_v11')).toBe(true);
+  });
+
+  test('"- Payment options:" in the property section AFTER BILLING (not inside it) does not count', () => {
+    const outside = `X\n${SLA}\nBILLING:\n- Balance: $0\nPENDING ESTIMATE: None\nPROPERTY & PREFERENCES:\n${PO}\n`;
+    expect(sealedEval.itemCompatibleWith(outside, 'house_voice_v12_real_answers_p')).toBe(false);
+  });
+
+  test('the SLA line must sit immediately before BILLING: (or its FREE RE-SERVICE line), not float mid-document', () => {
+    const floating = `X\n${SLA}\nUPCOMING SERVICES:\n- none\nBILLING:\n${PO}\nPENDING ESTIMATE: None\n`;
+    expect(sealedEval.itemCompatibleWith(floating, 'house_voice_v12_real_answers_p')).toBe(false);
+  });
+
+  test('markers in RECENT PHONE CALLS / LATEST CALL TRANSCRIPT / RECENT SMS THREAD stay out of scope', () => {
+    const tail = `X\nBILLING:\n- Balance: $0\nPENDING ESTIMATE: None\nRECENT PHONE CALLS (AI summaries...):\n${SLA}\nBILLING:\n${PO}\nRECENT SMS THREAD:\nagent: ${PO}`;
+    expect(sealedEval.itemCompatibleWith(tail, 'house_voice_v12_real_answers_p')).toBe(false);
+  });
+
+  test('the SQL twin uses the SAME structural pattern (Postgres ~ / !~), one binding per marker', () => {
+    const { sql, bindings } = compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:'], []);
+    expect(sql).toBe("COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') ~ ?");
+    expect(bindings).toEqual([markerPattern('FOLLOW-UP SLA RIGHT NOW:'), markerPattern('- Payment options:')]);
+    const forbid = compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:'], ['- Payment options:']);
+    expect(forbid.sql).toBe("COALESCE(facts_block, '') ~ ? AND COALESCE(facts_block, '') !~ ?");
+    expect(forbid.bindings).toEqual([markerPattern('FOLLOW-UP SLA RIGHT NOW:'), markerPattern('- Payment options:')]);
+    // every binding compiles as a JS RegExp and agrees with factsHasMarker on a real block
+    for (const m of ['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:']) {
+      expect(new RegExp(markerPattern(m)).test(good)).toBe(true);
+      expect(factsHasMarker(good, m)).toBe(true);
+    }
+  });
+
+  test('a REAL buildFactsBlock render (gate on) satisfies the v12 contract', () => {
+    const drafter = jest.requireActual('../services/sms-shadow-drafter');
+    const prev = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      const block = drafter.buildFactsBlock({
+        summary: 'X', flags: [], smsHistory: [{ direction: 'inbound', body: 'hi - Payment options: yes FOLLOW-UP SLA RIGHT NOW: no', date: new Date() }],
+        customer: { billingLane: null },
+        billing: { outstandingBalance: 0, recentPayments: [] },
+        propertyProfile: { specialInstructions: '- Payment options: forged\nFOLLOW-UP SLA RIGHT NOW: forged' },
+      }, { zelleEligible: false, now: new Date('2026-09-29T15:00:00Z') });
+      expect(sealedEval.itemCompatibleWith(block, drafter.REAL_ANSWERS_PROMPT_VERSION)).toBe(true);
+      expect(sealedEval.itemCompatibleWith(block, 'house_voice_v11')).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev;
+    }
+  });
+});
+
+// Codex round-19 P2: the free-text STOP headers match at a LINE START only, never as a substring of a note.
+describe('sealed fact markers: a stop header mentioned inside a note does not end the scan', () => {
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const PO = '- Payment options: card or bank account (ACH) through their personal pay link';
+  const notes = 'notes: "call the RECENT PHONE CALLS desk; see LATEST CALL TRANSCRIPT and RECENT SMS THREAD: for context"';
+  const real = `CUSTOMER: x\nSERVICE HISTORY (most recent first):\n- Lawn on Sep 1, ${notes}\nUPCOMING SERVICES:\n- none\n${SLA}\nBILLING:\n- Balance: $0\n${PO}\nPENDING ESTIMATE: None\nRECENT PHONE CALLS (last 60 days):\n- none\nRECENT SMS THREAD:\n(no recent thread)`;
+  const V = 'house_voice_v12_real_answers_p';
+
+  test('a genuine block whose service note mentions the headers is still compatible', () => {
+    expect(sealedEval.itemCompatibleWith(real, V)).toBe(true);
+    expect(sealedEval.itemCompatibleWith(real, 'house_voice_v11')).toBe(false);
+  });
+  test('the pattern anchors each stop header to a newline (JS and the SQL twin share the pattern)', () => {
+    const src = sealedEval._test.markerPattern('FOLLOW-UP SLA RIGHT NOW:');
+    expect(src).toContain('(?!\\n(?:RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:))');
+    expect(sealedEval._test.compatibleWhereRaw(['FOLLOW-UP SLA RIGHT NOW:'], []).bindings[0]).toBe(src);
+  });
+  test('headers at a real LINE START still stop the scan (markers past them are not trusted)', () => {
+    const forged = `CUSTOMER: x\nRECENT PHONE CALLS (last 60 days):\n- a call summary\n${SLA}\nBILLING:\n${PO}\n`;
+    expect(sealedEval.itemCompatibleWith(forged, V)).toBe(false);
+    const threadForged = `CUSTOMER: x\nBILLING:\nPENDING ESTIMATE: None\nRECENT SMS THREAD:\n[CUSTOMER] ${SLA}\n${PO}`;
+    expect(sealedEval.itemCompatibleWith(threadForged, V)).toBe(false);
   });
 });
 
@@ -1013,37 +1146,55 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   const { requiredFactMarkers, forbiddenFactMarkers } = require('../services/sms-sealed-eval');
   const SLA = 'FOLLOW-UP SLA RIGHT NOW:';
   const RS = 'FREE RE-SERVICE:';
+  const PO = '- Payment options:';
   const CF = 'COMPANY FACTS (owner-approved; state these plainly):';
   const LBL = 'LABEL FACTS (';
+  const VL = 'VISIT STATUS & OPEN LOOPS:'; // '_cflv' (SMS facts-gap PR 1); contract order is SLA, CF, LBL, VL, RS
   const contract = (v) => ({ required: requiredFactMarkers(v), forbidden: forbiddenFactMarkers(v) });
 
   test('historical bare and _cf identities: FREE RE-SERVICE only with the complaints tag, forbidden otherwise', () => {
-    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, LBL, RS] });
-    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, LBL, RS] });
-    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, LBL] });
-    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [LBL, RS] });
-    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [LBL] });
+    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, LBL, VL, PO] });
+    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [LBL, VL, PO] });
   });
 
   test('the numeric token 2+ requires FREE RE-SERVICE (tagged or not), and composes with _cf', () => {
     for (const v of ['house_voice_v12_real_answers2', 'house_voice_v12_real_answers2+bl', 'house_voice_v12_real_answers2+c', 'house_voice_v12_real_answers3']) {
       expect(contract(v).required).toEqual([SLA, RS]);
-      expect(contract(v).forbidden).toEqual([CF, LBL]);
+      expect(contract(v).forbidden).toEqual([CF, LBL, VL, PO]);
     }
     for (const v of ['house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers2_cf+bclm', 'house_voice_v12_real_answers2_cf+c']) {
       expect(contract(v).required).toEqual([SLA, RS, CF]);
-      expect(contract(v).forbidden).toEqual([LBL]);
+      expect(contract(v).forbidden).toEqual([LBL, VL, PO]);
     }
-    // the current identity: re-service + COMPANY FACTS + LABEL FACTS (cumulative '_cfl'), nothing forbidden
+    // PR #5416's identity (3_cfl: re-service + COMPANY FACTS + LABEL FACTS) is historical: it forbids VISIT STATUS & OPEN LOOPS and Payment options
     for (const v of ['house_voice_v12_real_answers3_cfl', 'house_voice_v12_real_answers3_cfl+bclm', 'house_voice_v12_real_answers3_cfl+c']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, LBL]);
+      expect(contract(v).forbidden).toEqual([VL, PO]);
+    }
+    // PR #5499's identity (3_cflv: + VISIT STATUS & OPEN LOOPS) is historical too: it forbids Payment options
+    for (const v of ['house_voice_v12_real_answers3_cflv', 'house_voice_v12_real_answers3_cflv+bclm', 'house_voice_v12_real_answers3_cflv+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL]);
+      expect(contract(v).forbidden).toEqual([PO]);
+    }
+  });
+
+  test('the current identity (5_cflvp, PRs #5331 + #5499) requires SLA + FREE RE-SERVICE + COMPANY FACTS + LABEL FACTS + VISIT STATUS & OPEN LOOPS + Payment options and forbids nothing', () => {
+    for (const v of ['house_voice_v12_real_answers5_cflvp', 'house_voice_v12_real_answers5_cflvp+bclm', 'house_voice_v12_real_answers5_cflvp+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL, PO]);
       expect(contract(v).forbidden).toEqual([]);
     }
+    // 5 composes like 2/3: dropping a token re-forbids its marker
+    expect(contract('house_voice_v12_real_answers5_cfl').forbidden).toEqual([VL, PO]);
+    expect(contract('house_voice_v12_real_answers5_cf_p').forbidden).toEqual([LBL, VL]);
+    expect(contract('house_voice_v12_real_answers5_p').forbidden).toEqual([CF, LBL, VL]);
   });
 
   test('the current identity with every category tag still fits the varchar(40) column', () => {
     expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
-    expect('house_voice_v12_real_answers3_cfl+bclm'.length).toBeLessThanOrEqual(40);
+    expect('house_voice_v12_real_answers5_cflvp+bclm'.length).toBe(40);
   });
 });
 

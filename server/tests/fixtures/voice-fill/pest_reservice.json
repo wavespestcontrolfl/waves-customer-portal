@@ -1097,7 +1097,12 @@
         "officeNote": {
           "present": false
         },
-        "unclear": [],
+        "unclear": [
+          {
+            "heard": "Taurus",
+            "reason": "product_said_not_filled"
+          }
+        ],
         "allowUnclear": true
       }
     },

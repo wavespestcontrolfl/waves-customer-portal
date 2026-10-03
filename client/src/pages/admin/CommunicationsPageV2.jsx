@@ -126,6 +126,21 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// Home-line PR 3: whether the composer may take the server's sender for a
+// fresh text — no draft in progress (body, attachments, or a loaded draft)
+// and no staff pick since the request: the line is still the one the
+// request was made with, or the one the automatic customer-sender effect set
+// (state.autoLine), which is initialization, not a staff choice.
+// replaceableLines (from the server's answer) bounds it further: a current
+// line that is not an office/main line — recruiting, tech, tracking — stays.
+export function composerAcceptsServerSender(state, requestedLine, replaceableLines = null) {
+  if (!state) return false;
+  const line = state.line || "";
+  if (replaceableLines && line && !replaceableLines.includes(line)) return false;
+  return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
+    && (line === (requestedLine || "") || (!!state.autoLine && line === state.autoLine));
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -573,7 +588,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
               variant="secondary"
               onClick={(e) => {
                 e.stopPropagation();
-                callViaBridge(contactPhone, contactLabel, ourNumber);
+                callViaBridge(contactPhone, contactLabel, ourNumber, m.linkedCustomerId || m.customerId);
               }}
             >
               <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -674,7 +689,7 @@ function ConversationViewV2({
             size="sm"
             variant="secondary"
             className="flex-1 md:flex-none"
-            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber)}
+            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, thread.linkedCustomerId || thread.customerId)}
           >
             <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
             Call back
@@ -1123,6 +1138,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const location = useLocation();
   const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  // Deferred sends are office-only: the server replays a queued text later with
+  // no re-check of the sender's route, so a technician login only sends now.
+  const smsIsTechnicianRole = smsOutletContext?.user?.role === "technician";
   const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -1162,6 +1180,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     initialDraft: customer ? { selectedCustomerId: customer.id } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
   });
   previousSenderRef.current = fromNumber;
+  // A restored draft cannot leave a technician on a hidden deferred timing.
+  useEffect(() => {
+    if (smsIsTechnicianRole && sendTiming !== "now") setSendTiming("now");
+  }, [smsIsTechnicianRole, sendTiming, setSendTiming]);
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -1310,6 +1332,43 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setThreadLock({ contactPhone: customer.phone, ourNumber: customerSenderNumber, label: customerSenderLabel });
     }
   }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel, fromNumber, threadLock?.ourNumber, loadedMessageDraft]);
+
+  // GATE_HOME_LINE (home-line PR 3): for a fresh text the server picks the
+  // line — the one they texted within 30 days, else their home line, else
+  // main. It answers null while the gate is off or the thread is on a
+  // non-customer line (recruiting, tech), leaving the thread-line choice
+  // above untouched. Never overrides a draft in progress.
+  const composerStateRef = useRef(null);
+  composerStateRef.current = {
+    line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft,
+    autoLine: automaticCustomerSenderRef.current?.number || "",
+  };
+  useEffect(() => {
+    const phone = toNumber.trim();
+    const requested = composerStateRef.current;
+    if (phone.replace(/\D/g, "").length < 10 || !composerAcceptsServerSender(requested, requested.line)) return undefined;
+    let cancelled = false;
+    const params = new URLSearchParams({ phone });
+    if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+    if (requested.line) params.set("currentLine", requested.line);
+    adminFetch(`/admin/communications/sender?${params.toString()}`)
+      .then((r) => {
+        // Re-read the composer at response time: a line staff picked, or a
+        // draft started, while the request was in flight must stand.
+        if (cancelled || !r?.fromNumber
+          || !composerAcceptsServerSender(composerStateRef.current, requested.line, Array.isArray(r.replaceableLines) ? r.replaceableLines : [])) return;
+        setFromNumber(r.fromNumber);
+        // Only a live conversation locks the picker ("Replying from … to
+        // continue thread"); a home-line / main default is a preselect staff
+        // can change.
+        setThreadLock(r.reason === "conversation"
+          ? { contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber }
+          : null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Recipient changes only: a later staff pick of a line must stand.
+  }, [toNumber, selectedCustomerId, loadedMessageDraft]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
@@ -1738,6 +1797,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
   const resolveScheduledFor = () => {
     if (sendTiming === "now") return { value: null, error: null };
+    if (smsIsTechnicianRole) return { value: null, error: "Scheduled sends are office-only. Send now instead." };
     if (sendTiming === "tomorrow_8") {
       const [y, m, d] = etDateOnly(new Date()).split("-").map(Number);
       // Build "tomorrow in ET" by adding 1 day at UTC noon (collision-free
@@ -2787,6 +2847,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           ourNumber,
           customerName: m.customerName || null,
           customerId: m.customerId || null,
+          linkedCustomerId: m.linkedCustomerId || null,
           messages: [],
           lastMessage: null,
           lastTimestamp: null,
@@ -2798,6 +2859,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       thread.messages.push(m);
       if (m.customerName) thread.customerName = m.customerName;
       if (m.customerId) thread.customerId = m.customerId;
+      if (m.linkedCustomerId) thread.linkedCustomerId = m.linkedCustomerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
       thread.lastMessage =
         m.body ||
@@ -3589,7 +3651,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             e.target.value = "";
           }}
         />{" "}
-        <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
+        {!smsIsTechnicianRole && <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
         <Select
           aria-label="Send timing"
           value={sendTiming}
@@ -3604,8 +3666,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
         </Select>
-        </Field>
-        {sendTiming === "custom" && (
+        </Field>}
+        {!smsIsTechnicianRole && sendTiming === "custom" && (
           <Input
             type="datetime-local"
             aria-label="Scheduled send time (Eastern)"

@@ -473,3 +473,279 @@ describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
     expect(JSON.stringify(data)).not.toMatch(/lawnVisitMemory|svc-prior/);
   });
 });
+
+// ── P13: the progress engine on the report object ───────────────────────────
+// Server-internal until P14: reportV2.progress exists in process, but is not an
+// enumerable key, so it never reaches the public payload.
+describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN'];
+  const saved = {};
+  beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); jest.clearAllMocks(); });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1, et0Inches: 1, dailyRain: [], rainConfidence: 'high' };
+  const records = (priorEntry = PRIOR_ENTRY) => ({
+    'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } },
+    'svc-prior': { structured_notes: { lawnVisitMemory: { 'la-prior': priorEntry } } },
+  });
+  const live = () => { process.env.GATE_LAWN_VISIT_MEMORY = 'true'; process.env.GATE_LAWN_PROPERTY_HISTORY = 'true'; };
+  const photo = (id, quality, assessmentId = 'la-cur') => ({
+    id, assessment_id: assessmentId, customer_visible: true, is_best_photo: false, quality_score: quality, photo_order: 1, photo_type: 'general',
+  });
+  // The prior read's own photos: its confidence gates the comparison too.
+  const PRIOR_PHOTOS = [photo('pp1', 80, 'la-prior'), photo('pp2', 80, 'la-prior')];
+  const render = (recs, patch = {}) => {
+    const { knex } = withRecords({ ...fixtures(), ...patch }, recs);
+    return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p13', knex, {});
+  };
+
+  test('gate off: no progress, and nothing in the payload names it', async () => {
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    setHistory([PRIOR, CUR]);
+    const { reportV2 } = await render(records());
+    expect(reportV2.progress).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(reportV2, 'progress')).toBeUndefined();
+  });
+
+  test('gate on with a prior: progress is built from the prior\'s frozen memory and both visits\' scores', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
+    const progress = data.reportV2.progress;
+    expect(progress).toMatchObject({ v: 1, eligible: true, daysSincePrior: 60, confidence: { level: 'moderate', comparable: true } });
+    expect(progress.overall.direction).toBe('flat'); // the two visits carry the same scores
+    const weed = progress.items.find((i) => i.rowId === 'herbicide_broadleaf');
+    // 60 days after the herbicide with no gain in weed suppression: the window has closed.
+    expect(weed).toMatchObject({ kind: 'applied', metric: 'weed_suppression', state: 'behind', approved: true });
+    // The prior's "weeds" check was never rechecked by a technician: unclear, not_recorded.
+    expect(progress.items.find((i) => i.kind === 'check')).toMatchObject({ key: 'weeds', state: 'unclear', recheck: 'not_recorded' });
+  });
+
+  test('no photo evidence on this render reads as unclear, never a verdict', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
+    const { reportV2 } = await render(recs); // fixtures() has no lawn_assessment_photos rows
+    expect(reportV2.progress.confidence.level).toBe('insufficient');
+    expect(reportV2.progress.items.find((i) => i.rowId === 'herbicide_broadleaf').state).toBe('unclear');
+    expect(reportV2.progress.overall.direction).toBe('unknown');
+  });
+
+  test('the progress block is NOT part of the public payload: not enumerable, not in JSON, not in a spread', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const data = await render(records(), { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.progress).toBeTruthy();
+    expect(Object.keys(data.reportV2)).not.toContain('progress');
+    expect(JSON.stringify(data)).not.toMatch(/"progress"|lawn_progress|engineVersion/);
+    expect({ ...data.reportV2 }.progress).toBeUndefined();
+  });
+
+  test('the public payload with the gate on differs from gate off by sinceLast alone (the engine adds no key)', async () => {
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    setHistory([PRIOR, CUR]);
+    const patch = { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] };
+    const off = JSON.parse(JSON.stringify(await render(records(), patch)));
+    live();
+    const on = JSON.parse(JSON.stringify(await render(records(), patch)));
+    expect(on.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+    delete on.reportV2.sinceLast;
+    expect(on).toEqual(off);
+  });
+
+  test('a first (baseline) visit has no comparison, and says so only in process', async () => {
+    live();
+    setHistory([CUR]);
+    const data = await render(records());
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, reason: 'baseline', items: [] });
+    expect(JSON.stringify(data)).not.toContain('"baseline"');
+  });
+
+  test('a visit whose only other row is in its future has no prior: no_prior, not a comparison', async () => {
+    live();
+    const FUTURE = assessmentRow('la-future', '2026-11-01', 'svc-future');
+    setHistory([FUTURE, CUR]);
+    const data = await render(records());
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, reason: 'no_prior', items: [] });
+  });
+
+  test('decimal quality scores arrive from pg as strings and still count ("80.00" is adequate)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const data = await render(records(), { lawn_assessment_photos: [photo('p1', '80.00'), photo('p2', '80.00'), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
+  });
+
+  test('legacy photos (health-blend quality_score) count by their binary gate: usable, never adequate', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const legacy = (id, blend) => ({ ...photo(id, blend), turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true });
+    // A low blend no longer reads as a bad photo, and a high blend no longer as a good one.
+    const data = await render(records(), { lawn_assessment_photos: [legacy('p1', '30.00'), legacy('p2', '95.00'), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'low', comparable: false });
+  });
+
+  test('a frozen sinceLast pins the prior: a visit added between them later never supplies the scores', async () => {
+    live();
+    const MID = assessmentRow('la-mid', '2026-09-01', 'svc-mid');
+    setHistory([PRIOR, MID, CUR]);
+    const recs = records();
+    const FROZEN_SINCE = {
+      v: 1, priorAssessmentId: 'la-prior', priorDate: '2026-08-01',
+      applied: PRIOR_ENTRY.applied, checks: PRIOR_ENTRY.checks,
+    };
+    recs['svc-cur'].structured_notes.lawnVisitMemory = {
+      'la-cur': { v: 1, assessmentId: 'la-cur', serviceDate: '2026-09-30', applied: [], checks: [], sinceLast: FROZEN_SINCE },
+    };
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+    // Judged against la-prior (60 days), not the later-added la-mid (29 days).
+    expect(data.reportV2.progress).toMatchObject({ eligible: true, daysSincePrior: 60 });
+  });
+
+  test('a frozen prior that is no longer in history judges nothing', async () => {
+    live();
+    const MID = assessmentRow('la-mid', '2026-09-01', 'svc-mid');
+    setHistory([MID, CUR]);
+    const recs = records();
+    recs['svc-cur'].structured_notes.lawnVisitMemory = {
+      'la-cur': {
+        v: 1, assessmentId: 'la-cur', serviceDate: '2026-09-30', applied: [], checks: [],
+        sinceLast: { v: 1, priorAssessmentId: 'la-gone', priorDate: '2026-08-01', applied: PRIOR_ENTRY.applied, checks: PRIOR_ENTRY.checks },
+      },
+    };
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, items: [] });
+  });
+
+  test('a prior read with no usable photos makes the comparison unclear (fail closed)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: false });
+    expect(data.reportV2.progress.items.find((i) => i.rowId === 'herbicide_broadleaf').state).toBe('unclear');
+    expect(data.reportV2.progress.overall.direction).toBe('unknown');
+  });
+
+  test('a prior that froze no memory pins nothing, so nothing is compared (no live fallback)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    recs['svc-prior'].structured_notes = {};
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
+    expect(data.reportV2.sinceLast).toBeUndefined();
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, reason: 'no_prior', items: [] });
+  });
+});
+
+// ── GATE_LAWN_SINCE_LAST: the customer copy, through the real builder ────────
+// The sentences are selected in buildReportV1Data (the progress block never
+// leaves the process) and reach the payload only as reportV2.lead.sinceLast,
+// after the reconcile tail derives the lead.
+describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
+  const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_SINCE_LAST', 'GATE_LAWN_REPORT_LEAD'];
+  const saved = {};
+  beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); jest.clearAllMocks(); });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1, et0Inches: 1, dailyRain: [], rainConfidence: 'high' };
+  const HERBICIDE_ENTRY = { ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] };
+  const records = (priorEntry = HERBICIDE_ENTRY) => ({
+    'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } },
+    'svc-prior': { structured_notes: { lawnVisitMemory: { 'la-prior': priorEntry } } },
+  });
+  const photo = (id, quality, assessmentId = 'la-cur') => ({
+    id, assessment_id: assessmentId, customer_visible: true, is_best_photo: false, quality_score: quality, photo_order: 1, photo_type: 'general',
+  });
+  const PHOTOS = { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), photo('pp1', 80, 'la-prior'), photo('pp2', 80, 'la-prior')] };
+  const live = (...gates) => {
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    gates.forEach((gate) => { process.env[gate] = 'true'; });
+  };
+  const ALL = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_SINCE_LAST'];
+  // What the public route does with the built payload before it serializes it.
+  const served = async (recs, patch = {}, mode = 'live') => {
+    const { knex } = withRecords({ ...fixtures(), ...patch }, recs);
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-since-last', knex, mode ? { mode } : {});
+    applyLawnReportReconciliation(data, null);
+    return data;
+  };
+
+  test('all three gates on with a prior: the lead carries the block, and no other key appears', async () => {
+    setHistory([PRIOR, CUR]);
+    live('GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD');
+    const without = JSON.parse(JSON.stringify(await served(records(), PHOTOS)));
+    live(...ALL);
+    const data = await served(records(), PHOTOS);
+    expect(data.reportV2.lead.sinceLast.priorDate).toBe('2026-08-01');
+    // Same scores on both visits: overall flat. The herbicide row is owner
+    // approved (2026-10-02), so its 'behind' state is spoken.
+    expect(data.reportV2.lead.sinceLast.lines).toEqual([
+      'Last visit we applied weed control.',
+      'Your overall lawn score is holding steady.',
+      'Weed control is behind where we expected.',
+    ]);
+    const json = JSON.parse(JSON.stringify(data));
+    expect(JSON.stringify(json)).not.toMatch(/sinceLastCopy|"progress"|engineVersion/);
+    delete json.reportV2.lead.sinceLast;
+    expect(json).toEqual(without);
+  });
+
+  test.each([
+    ['the since-last gate off', ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD']],
+    ['the memory gate off', ['GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_SINCE_LAST']],
+    ['the lead gate off', ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_SINCE_LAST']],
+  ])('%s: no block is built and nothing names it', async (_label, gates) => {
+    setHistory([PRIOR, CUR]);
+    live(...gates);
+    const data = await served(records(), PHOTOS);
+    expect(Object.getOwnPropertyDescriptor(data.reportV2, 'sinceLastCopy')).toBeUndefined();
+    expect(JSON.stringify(data)).not.toMatch(/"lines":\["Last visit/);
+    if (data.reportV2.lead) expect(Object.prototype.hasOwnProperty.call(data.reportV2.lead, 'sinceLast')).toBe(false);
+  });
+
+  // The PDF and static renders mount the same lead card, and the PDF cache
+  // key does not vary on this gate or on what the lines depend on.
+  test.each([['pdf', 'pdf'], ['static', 'static'], ['the PDF queue (no mode)', null]])(
+    'a %s build never carries the block: its payload is the live one minus lead.sinceLast',
+    async (_label, mode) => {
+      setHistory([PRIOR, CUR]);
+      live(...ALL);
+      const data = await served(records(), PHOTOS, mode);
+      expect(Object.getOwnPropertyDescriptor(data.reportV2, 'sinceLastCopy')).toBeUndefined();
+      expect(data.reportV2.lead).toBeTruthy();
+      expect(Object.prototype.hasOwnProperty.call(data.reportV2.lead, 'sinceLast')).toBe(false);
+    },
+  );
+
+  test('photos that cannot support a comparison: the applied line only, never a direction or a state', async () => {
+    setHistory([PRIOR, CUR]);
+    live(...ALL);
+    const data = await served(records()); // no lawn_assessment_photos rows
+    expect(data.reportV2.lead.sinceLast.lines).toEqual(['Last visit we applied weed control.']);
+  });
+
+  test('no prior, or a prior that froze no memory: no block', async () => {
+    live(...ALL);
+    setHistory([CUR]);
+    const first = await served(records(), PHOTOS);
+    expect(Object.prototype.hasOwnProperty.call(first.reportV2.lead, 'sinceLast')).toBe(false);
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    recs['svc-prior'].structured_notes = {};
+    const unfrozen = await served(recs, PHOTOS);
+    expect(Object.prototype.hasOwnProperty.call(unfrozen.reportV2.lead, 'sinceLast')).toBe(false);
+  });
+
+  test('a re-render of the same frozen visit serves the same block', async () => {
+    setHistory([PRIOR, CUR]);
+    live(...ALL);
+    const recs = records();
+    const first = await served(recs, PHOTOS);
+    const again = await served(recs, PHOTOS);
+    expect(again.reportV2.lead.sinceLast).toEqual(first.reportV2.lead.sinceLast);
+  });
+});

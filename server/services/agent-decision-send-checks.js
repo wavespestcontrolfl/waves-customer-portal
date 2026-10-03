@@ -21,6 +21,26 @@ function parseInputSnapshot(inputSnapshot) {
 // Real-answers drafts (prompt family house_voice_v12*) are the ones whose facts
 // carry billing amounts and LABEL FACTS; older drafts are left as they were.
 const isRealAnswersDecision = (decision) => typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+// Owner ruling 2026-10-01: a STAFF EDIT is the staff member's own wording, so the payment-status contract does not judge it. Edited =
+// the outgoing body differs (whitespace-normalized) from the AI draft stored on the decision. No stored draft => the body is treated as
+// the AI's: STRICT. Auto-send never carries an edit and never passes this.
+const normalizeBody = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+function bodyIsStaffEdited(storedDraft, outgoingBody) {
+  const stored = normalizeBody(storedDraft);
+  return !!stored && normalizeBody(outgoingBody) !== stored;
+}
+
+// The customer's own inbound wording for this decision - what scopes the
+// payment-status detector and names the invoice a Zelle offer is about.
+// `decision.inbound_message` is the linked
+// sms_log row's body (verifyAgentDecisionForSend's own select, joined at
+// query time); input_snapshot's `sms.body` is the same text stashed at
+// draft time and covers a decision the caller selected without that join.
+function resolveInboundMessage(decision) {
+  if (typeof decision?.inbound_message === 'string' && decision.inbound_message) return decision.inbound_message;
+  const fromSnapshot = parseInputSnapshot(decision?.input_snapshot)?.sms?.body;
+  return typeof fromSnapshot === 'string' ? fromSnapshot : null;
+}
 
 // OPEN TIMES: a draft that offered appointment times persists the exact
 // (date, window) pairs; a reviewer-edited body is matched to them pair by
@@ -65,13 +85,61 @@ function followupBlock({ decision, outgoingBody }) {
   return reason ? `follow-up promise unsendable (${reason})` : null;
 }
 
-// AMOUNTS: a real-answers card may carry exact billing figures and can wait
-// through a payment; re-read billing now, same check the scheduler runs at
-// fire time. Older-prompt decisions are untouched.
+// AMOUNTS + PAYMENT STATUS: a real-answers card may carry exact billing figures and payment-status sentences and can wait
+// through a payment; re-read billing now, same check the scheduler runs at fire time. Older-prompt decisions are untouched for
+// both halves.
+//
+// PAYMENT STATUS (owner ruling 2026-10-01): the FINAL body of every real-answers decision may state a payment / invoice / refund /
+// balance status only by copying, verbatim, a sentence its payment_status_snapshot recorded - and each copied sentence must still
+// be one the records render now. An edited sentence, a status typed in, or a status on a decision that copied none is held.
+//
+// Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
+// invoice-eligibility half must NOT stay gated behind `realAnswers &&
+// customer_id` the way the amount half is — ZELLE_RECIPIENT is a live env
+// var and the invoice it was drafted against can settle or start a saved-
+// card charge at any time, whatever prompt version drafted the body. The
+// scheduler's own fire-time path (scheduler.js) already reruns
+// outgoingAmountsStale — which runs this same Zelle check first, ahead of
+// its own amount rules — for EVERY agent-decision-linked scheduled reply,
+// human-edited or not, regardless of prompt version; this immediate-send
+// seam now matches it. A body with an affirmative Zelle offer but no
+// customer_id on the decision can never be checked against a real invoice —
+// fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
-  if (!isRealAnswersDecision(decision) || !decision.customer_id) return null;
-  const { outgoingAmountsStale } = require('./sms-amount-recheck');
-  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version });
+  const realAnswers = isRealAnswersDecision(decision);
+  const { outgoingAmountsStale, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
+  // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
+  // run the whole recheck.
+  // (any mention of Zelle - the money-sentence contract has no offer / denial grammar)
+  const zelleClaim = /\bzelle\b/i.test(String(outgoingBody || ''));
+  if (!realAnswers && !zelleClaim) return null;
+  // A staff edit's free-text status is theirs: it neither needs the contract's reads nor can the contract fail it. Zelle and amount rules stay.
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision.suggested_message, outgoingBody);
+  if (!decision.customer_id) {
+    // With no customer to re-read billing for, ANY body the recheck would judge (an amount, a Zelle claim, a payment-status
+    // assertion, price grammar) cannot be verified - fail closed. Benign copy ("Your invoice is attached") needs no billing.
+    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version, statusVocabulary: !staffEdited })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+  }
+  // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
+  // built for, so a body carrying a Zelle contact is rechecked against that
+  // SAME invoice's CURRENT eligibility, not just its recipient.
+  const snapshot = parseInputSnapshot(decision.input_snapshot);
+  const amounts = await outgoingAmountsStale({
+    customerId: decision.customer_id,
+    body: outgoingBody,
+    promptVersion: decision.prompt_version,
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+    inboundMessage: resolveInboundMessage(decision),
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    humanEditedBody: staffEdited,
+    // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
+    trustOwedAmounts: !realAnswers,
+  });
+  // the invoice a Zelle offer was checked against: the provider-boundary check inspects its live PaymentIntent (Codex round-50 P1)
+  if (!amounts.stale) {
+    // the live Zelle facts the verdict stood on: the provider-boundary check re-reads them (owner ruling 2026-10-01)
+    decision.zelle_boundary = amounts.zelle || null;
+  }
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
@@ -118,6 +186,8 @@ function isEtaInfrastructureFailure(reason) {
 }
 // Does an agentDecisionSendBlockReason string ('live ETA unsendable (<reason>)') carry an
 // infrastructure failure rather than a verdict about the message?
+// The open-loop recheck's unreadable read (PR #5499) is infrastructure too: the
+// composer keeps the card for a retry instead of superseding it.
 function blockReasonIsEtaInfrastructure(blockReason) {
   const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
@@ -130,8 +200,17 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
-/** Any send-time recheck that could not read its state (live ETA or label facts): refuse, keep the decision retryable. */
-const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason);
+// Codex round-64 P2: a BILLING recheck that could not read the billing / Stripe state says nothing about the message either.
+const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed']);
+function blockReasonIsBillingInfrastructure(blockReason) {
+  const m = /^amount no longer authorized \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && BILLING_RECHECK_INFRASTRUCTURE_REASONS.has(m[1]);
+}
+// OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
+const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops or billing): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason)
+  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -199,6 +278,34 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
     };
   };
   return markRepeatable(check);
+}
+
+// BILLING FACTS at the TRUE provider boundary (Codex round-48 P1): the immediate Agent Review send rechecks amounts, payment status
+// and Zelle in verifyAgentDraftDecision, then the route still awaits link / claim / consent / policy steps - a customer paying in that
+// gap could make an approved "Your account balance is $100.00" false before it reaches Twilio. Codex round-49 P1: repeating the full
+// recheck there needs a second pool connection while the handoff holds one, so the route takes the customer's billing FINGERPRINT
+// before the full recheck (billingFingerprintForSend) and the boundary re-reads it in one query on the handoff connection: any change
+// refuses as retryable (the retry reruns the full recheck). Registered only for a body the recheck judges.
+// A staff edit's own status wording is not judged by the contract (owner ruling 2026-10-01) - nor by the boundary (local review P2).
+const billingBoundaryJudged = (decision, body) => {
+  const realAnswers = typeof decision?.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision?.suggested_message, body);
+  return require('./sms-amount-recheck').bodyNeedsBillingBoundaryCheck(body, {
+    inboundMessage: resolveInboundMessage(decision), promptVersion: decision?.prompt_version, statusVocabulary: !staffEdited,
+  });
+};
+async function billingFingerprintForSend({ decision, outgoingBody }) {
+  if (!decision?.customer_id || !billingBoundaryJudged(decision, String(outgoingBody || ''))) return undefined;
+  return require('./billing-fingerprint').billingFingerprint(decision.customer_id);
+}
+function amountsProviderPreSendCheck({ decision, getBody }) {
+  if (!decision?.id) return undefined;
+  const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
+  if (!billingBoundaryJudged(decision, body)) return undefined;
+  return require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({
+    customerId: decision.customer_id, fingerprint: decision.billing_fingerprint ?? null,
+    zelle: decision.zelle_boundary ?? null,
+  });
 }
 
 // Snapshot-carrying variant for a caller that already holds the decision's live-ETA
@@ -286,6 +393,82 @@ function markRepeatable(check) {
   return check;
 }
 
+// Open-loop commitments at the provider boundary, for a caller holding the ids in
+// memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
+// → refused retryably (nothing is known to be stale). No ids → undefined (no check).
+function openLoopsProviderPreSendCheck({ commitmentIds, customerId = null, status = null, factsGeneratedAt = null }) {
+  const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
+  if (!ids.length && !status) return undefined;
+  const generatedIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime()) ? factsGeneratedAt.toISOString() : factsGeneratedAt;
+  const check = async ({ dbi } = {}) => {
+    const snapshot = {
+      visit_loop_commitment_ids: ids,
+      ...(status ? { visit_loop_status: status } : {}),
+      ...(generatedIso ? { facts_generated_at: generatedIso } : {}),
+    };
+    const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, customerId, dbh: dbi });
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
+// The gratitude lane's fixed thank-you (PR #5499 audit): it sends after a quiet
+// period, so a window can pass, a delay appear, or a promise be recorded
+// while it waits. At the provider boundary the customer's facts are rebuilt (strict,
+// commitments included); anything that must be answered refuses the courtesy
+// reply. An unreadable rebuild refuses retryably. Gate-off: no check.
+function gratitudeOpenLoopsProviderPreSendCheck({ customerId }) {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') || !customerId) return undefined;
+  const check = async ({ dbi } = {}) => {
+    let fresh;
+    try {
+      fresh = await require('./visit-loops-facts').loadVisitLoops({ customerId, conn: dbi || require('../models/db'), strict: true, withCommitments: true });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] gratitude open-loop recheck failed: ${err.message}; blocking send`);
+      return { ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true };
+    }
+    return require('./sms-shadow-drafter').visitLoopsNeedAnswer({ visitLoops: fresh })
+      ? { ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY', reason: 'open-loop facts need an answer (gratitude refused)' }
+      : { ok: true };
+  };
+  return markRepeatable(check);
+}
+
+// The decision-row form (reviewer composer send, scheduled replay): reads the
+// decision through the handoff's connection, then the same verdicts. Like the
+// LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
+// (the earlier send-time check already failed closed on it); a read error refuses
+// retryably.
+function openLoopsDecisionProviderPreSendCheck({ decisionId }) {
+  const check = async ({ dbi } = {}) => {
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'customer_id');
+      reason = await openLoopsBlockReason({ decision: row || {}, dbh: conn });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] open-loop boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
+      reason = 'open_loops_recheck_failed';
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
 // Run several provider-boundary predicates in order; the first refusal wins.
 // undefined entries are skipped; returns undefined when there is nothing to run.
 function composeProviderPreSendChecks(...checks) {
@@ -334,6 +517,104 @@ async function reserviceBlock({ decision, outgoingBody }) {
   return reason ? `re-service promise unsendable (${reason})` : null;
 }
 
+// OPEN LOOPS (PR #5499): a draft grounded on "WE OWE THEM" / "THEY ARE WAITING ON
+// US FOR" lines can sit in review while that promise is fulfilled, dismissed,
+// superseded by a call reprocess, or edited by staff. The draft persisted each
+// rendered call_commitments row as "id:rev" (rev = visit-loops-facts
+// commitmentRevision of what it restated); every one must still be open, live and
+// unedited at send time.
+// VISIT STATUS (visit_loop_status): a draft that showed a delay or a passed window
+// has its facts rebuilt for the customer at send: any change to that
+// signature (a reschedule, a completion, a resolved alert) refuses — one check for
+// every such line, whatever wording the reply used.
+// Fails closed on a read error. Returns null or a reason code.
+// A commitment line's relative wording ("later today") means the ET day the facts
+// were built: past that day the reply is refused rather than sent with a shifted
+// meaning. No stamp = refused.
+function commitmentDayChanged(snapshot, now) {
+  const at = Date.parse(snapshot?.facts_generated_at || '');
+  const { etDateString } = require('../utils/datetime-et');
+  return !Number.isFinite(at) || etDateString(new Date(at)) !== etDateString(now);
+}
+// Each ref must still be in THIS customer's open list from the same canonical
+// readers the facts came from: that one question covers closed, dismissed,
+// superseded-by-reprocess (staleAiRowSql) and relinked-to-another-customer rows;
+// the revision covers a staff edit to a row that stayed open.
+async function commitmentsChanged(conn, refs, customerId) {
+  if (!customerId) return true;
+  const { commitmentRevision, allOpenCallCommitments, allSmsLane } = require('./visit-loops-facts');
+  // each rendered SMS/email lane on its own page, as the facts loader reads them, and
+  // only the channels whose gate is still on: a row from a lane rolled back since the
+  // draft is no longer live, so the reply is refused
+  const { smsCommitmentsEnabled } = require('./sms-operational-actions');
+  const { gateEnvValue } = require('../config/feature-gates');
+  const channels = [smsCommitmentsEnabled() && 'sms', gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS') && 'email'].filter(Boolean);
+  const lane = async (name) => (channels.length
+    ? ((await allSmsLane(conn, { customerId, channels, lane: name })) || []).filter((r) => channels.includes(r.channel === 'email' ? 'email' : 'sms'))
+    : []);
+  const [calls, promises, requests] = await Promise.all([
+    allOpenCallCommitments(conn, { customerId }),
+    lane('promise'),
+    lane('request'),
+  ]);
+  const live = new Map([...(calls || []), ...(promises || []), ...(requests || [])].map((r) => [String(r.id), r]));
+  return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
+}
+// The same question for VISIT STATUS: rebuild the facts for the customer (strict —
+// a failed read throws — and with commitments) and compare their signature with
+// the draft's; an open promise or request the draft did not show (recorded since,
+// or unreadable when it was drafted) refuses too, so it goes to review.
+async function visitStatusReason(conn, signature, customerId, refs) {
+  if (!customerId) return 'visit_status_changed';
+  const facts = require('./visit-loops-facts');
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true });
+  if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
+  // the displayed commitments, from this same rebuild (a second read could miss one
+  // closed between the two): each must still be listed, unedited
+  const listed = new Map([...(fresh.weOwe || []), ...(fresh.customerWaiting || [])]
+    .filter((c) => c && c.id != null).map((c) => [String(c.id), c]));
+  if (refs.some(({ id, rev }) => !listed.has(id) || (rev && listed.get(id).rev && listed.get(id).rev !== rev))) return 'commitment_closed';
+  const shown = new Set(refs.map((r) => r.id));
+  const unseen = [...(fresh.weOwe || []), ...(fresh.customerWaiting || [])].some((c) => c && c.id != null && !shown.has(String(c.id)));
+  return unseen ? 'commitment_appeared' : null;
+}
+const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
+  const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
+  const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
+    .filter((ref) => typeof ref === 'string' && ref)
+    .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
+  // a persisted status is checked even when its signature is null: the section was
+  // rendered with nothing time-sensitive, and a fact that appeared since refuses
+  const status = objectOrNull(snapshot.visit_loop_status);
+  if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
+  if (!refs.length && !status) return null;
+  try {
+    const conn = dbh || require('../models/db');
+    if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
+    return status ? await visitStatusReason(conn, status.signature || null, customerId, refs) : null;
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+async function openLoopsBlock({ decision }) {
+  const reason = await openLoopsBlockReason({ decision });
+  return reason ? `open-loop facts stale (${reason})` : null;
+}
+// The scheduler's queued-send form: reads the decision row itself; fails closed.
+async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
+  try {
+    const conn = dbh || require('../models/db');
+    const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id');
+    if (!row) throw new Error('agent decision row not found');
+    return await openLoopsBlockReason({ decision: row, dbh: conn });
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -344,6 +625,7 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
+    || (await openLoopsBlock({ decision }))
     || (await etaBlock({ decision, outgoingBody }));
 }
 
@@ -376,4 +658,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

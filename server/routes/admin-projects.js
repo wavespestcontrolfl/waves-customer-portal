@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { TECH_DEAD_ASSIGNMENT_STATUSES, techAccessCutoff, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 const {
   PROJECT_TYPES,
   PROJECT_TYPE_KEYS,
@@ -135,6 +136,12 @@ function canAccessProject(req, project) {
   return isAdmin(req) || String(project?.created_by_tech_id || '') === String(req.technicianId || '');
 }
 
+// Technician access: the project's creator, or the technician named on its
+// service record or scheduled visit. A linked VISIT additionally has to sit
+// inside the canonical current/recent window (technicianVisitRowInScope:
+// not a dead status, within the access window) — a cancelled or stale visit
+// grants nothing (codex #5568 r4 P1). Creator and service-record access keep
+// their contract (admin-projects-guards / -routes tests pin it).
 async function hasProjectAccess(req, project) {
   if (canAccessProject(req, project)) return true;
   if (!project || !req.technicianId) return false;
@@ -149,8 +156,13 @@ async function hasProjectAccess(req, project) {
   if (project.scheduled_service_id) {
     const scheduled = await db('scheduled_services')
       .where({ id: project.scheduled_service_id, technician_id: req.technicianId })
-      .first('id');
-    if (scheduled) return true;
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (scheduled) {
+      const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
+      // Rows always carry status + date; evaluate the window when they do.
+      const windowed = scheduled.status != null || scheduled.scheduled_date != null;
+      if (!windowed || technicianVisitRowInScope(req, { ...scheduled, technician_id: req.technicianId })) return true;
+    }
   }
 
   return false;
@@ -772,7 +784,7 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
   if (scheduled_service_id) {
     const scheduled = await db('scheduled_services')
       .where({ id: scheduled_service_id })
-      .first('id', 'customer_id', 'technician_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!scheduled) {
       const err = new Error('Scheduled service not found');
       err.status = 400;
@@ -783,7 +795,11 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
       err.status = 400;
       throw err;
     }
-    if (String(scheduled.technician_id || '') === String(req.technicianId || '')) linkedAssignedToTech = true;
+    // A cancelled, rescheduled or out-of-window visit no longer authorizes a
+    // new project: creation stamps created_by_tech_id, which grants lasting
+    // access (codex #5568 r8 P1). Same predicate as hasProjectAccess.
+    if (String(scheduled.technician_id || '') === String(req.technicianId || '')
+      && technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, scheduled)) linkedAssignedToTech = true;
   }
 
   if (!isAdmin(req) && !linkedAssignedToTech) {
@@ -793,6 +809,47 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
   }
 
   return customer;
+}
+
+// Locked revalidation at the write boundary (codex #5568 r14 P1). The scope
+// check in validateProjectCreateScope runs on unlocked reads well before the
+// insert (profile resolution, duplicate lookup in between), so a reassignment
+// or cancellation landing in that gap would still let the former technician
+// mint a project (and with it created_by_tech_id access). Inside the insert
+// transaction this locks the linked scheduled_services row FOR UPDATE and
+// re-judges the SAME authorization: the visit row in scope for this technician
+// (technicianVisitRowInScope), or the linked service record assigned to them
+// (the other path validateProjectCreateScope accepts, unchanged). Any non-admin
+// role is judged as a technician, as validateProjectCreateScope does.
+async function assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id }) {
+  if (isAdmin(req)) return;
+  const refuse = () => {
+    const err = new Error('Technician projects must be linked to an assigned visit');
+    err.status = 403;
+    throw err;
+  };
+  const actor = { techRole: 'technician', technicianId: req.technicianId };
+  if (scheduled_service_id) {
+    const scheduled = await trx('scheduled_services')
+      .where({ id: scheduled_service_id })
+      .forUpdate()
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+    if (scheduled
+      && String(scheduled.technician_id || '') === String(req.technicianId || '')
+      && technicianVisitRowInScope(actor, scheduled)) return;
+    // A linked visit decides on its own (codex #5568 r16 P1): a record whose
+    // visit was reassigned, cancelled or aged out of the window must not
+    // authorize through the record's technician_id. The record-only fallback
+    // below is for a record with no linked visit at all.
+    refuse();
+  }
+  if (service_record_id) {
+    const service = await trx('service_records')
+      .where({ id: service_record_id })
+      .first('id', 'technician_id');
+    if (service && String(service.technician_id || '') === String(req.technicianId || '')) return;
+  }
+  refuse();
 }
 
 async function resolveProjectDate({ project_date, service_record_id, scheduled_service_id }) {
@@ -1250,9 +1307,13 @@ router.get('/scheduled-service/:id/application-prefill', async (req, res, next) 
   try {
     const scheduled = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type', 'status', 'scheduled_date');
     if (!scheduled) return res.status(404).json({ error: 'Scheduled service not found' });
-    if (!isAdmin(req) && String(scheduled.technician_id || '') !== String(req.technicianId || '')) {
+    // Canonical current-visit predicate (codex #5568 r16 P2): a bare
+    // technician_id compare kept a cancelled or long-past visit readable.
+    // Any non-admin role is judged as a technician.
+    if (!isAdmin(req)
+      && !technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, scheduled)) {
       return res.status(403).json({ error: 'Scheduled service access denied' });
     }
 
@@ -1341,7 +1402,14 @@ router.get('/', async (req, res, next) => {
       q = q.where(function () {
         this.where('p.created_by_tech_id', req.technicianId)
           .orWhere('srp.technician_id', req.technicianId)
-          .orWhere('ssp.technician_id', req.technicianId);
+          // A project-linked visit authorizes only while it is current
+          // (dead statuses and the access window, as in hasProjectAccess;
+          // codex #5568 r7 P1).
+          .orWhere(function () {
+            this.where('ssp.technician_id', req.technicianId)
+              .whereNotIn('ssp.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+              .where('ssp.scheduled_date', '>=', techAccessCutoff());
+          });
       });
     }
     if (status) q = q.where('p.status', status);
@@ -1728,7 +1796,9 @@ router.post('/', async (req, res, next) => {
       : [];
     let row;
     try {
-      [row] = await db('projects').insert({
+      row = await db.transaction(async (trx) => {
+      await assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id: linkedScheduledServiceId });
+      const [inserted] = await trx('projects').insert({
         customer_id,
         project_type,
         project_date: projectDate,
@@ -1753,6 +1823,8 @@ router.post('/', async (req, res, next) => {
         status: 'draft',
         created_by_tech_id: req.technicianId,
       }).returning('*');
+      return inserted;
+      });
     } catch (insertErr) {
       // Unique-violation on the partial index (migration 20260714000010) =
       // we lost a same-visit create race — same 409 contract as the
@@ -5959,6 +6031,7 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
 });
 
 router._private = {
+  assertTechnicianProjectLinkStillAssigned,
   canAccessProject,
   hasProjectAccess,
   detectedImageMime,

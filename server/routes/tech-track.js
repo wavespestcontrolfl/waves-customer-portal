@@ -40,6 +40,20 @@ const config = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const trackTransitions = require('../services/track-transitions');
+const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
+
+// The status-flip / rain-out legs below are the technician's own field taps:
+// they never admitted an admin who is not the row's assigned technician
+// ("admins go through admin-dispatch; don't bypass here"). A technician must
+// hold the CURRENT assignment (canonical predicate: own row, not a dead
+// status, inside the access window); an admin keeps the historical
+// assigned-technician match, unchanged.
+function ownsTrackedVisit(req, row) {
+  if (req.techRole === 'admin') return String(row.technician_id || '') === String(req.technicianId || '');
+  // Judged as a technician for every other role, so a future staff role is
+  // never waved through by the admin-unscoped predicate.
+  return technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, row);
+}
 const { transitionJobStatus } = require('../services/job-status');
 const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
@@ -86,7 +100,7 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       .where({ id: svc.id })
       .forUpdate()
       .first('technician_id', 'status', 'customer_confirmed', 'source_action', 'scheduled_date');
-    if (!fresh || fresh.technician_id !== req.technicianId) {
+    if (!fresh || !ownsTrackedVisit(req, fresh)) {
       const e = new Error('Not assigned to this service');
       e.code = 'TECH_OWNERSHIP_LOST';
       throw e;
@@ -234,8 +248,8 @@ async function guardAdvance(trx, req, svc) {
   const fresh = await trx('scheduled_services')
     .where({ id: svc.id })
     .forUpdate()
-    .first('technician_id', 'scheduled_date', 'source_action', 'customer_confirmed');
-  if (!fresh || fresh.technician_id !== req.technicianId) {
+    .first('technician_id', 'status', 'scheduled_date', 'source_action', 'customer_confirmed');
+  if (!fresh || !ownsTrackedVisit(req, fresh)) {
     const e = new Error('Not assigned to this service');
     e.code = 'TECH_OWNERSHIP_LOST';
     throw e;
@@ -311,6 +325,8 @@ const {
 const {
   promoteStagedPhotosForCompletedVisit,
   sanitizeCustomerFacingPhotoCaption,
+  updateStagedServicePhotoCaption,
+  deleteStagedServicePhoto,
   uploadServicePhotoBuffer,
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
@@ -359,7 +375,7 @@ router.post('/:id/en-route', async (req, res, next) => {
 
     // Tech can only flip their own assigned services. Admins with
     // requireTechOrAdmin go through admin-dispatch; don't bypass here.
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -518,7 +534,7 @@ router.post('/:id/on-site', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -610,9 +626,9 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -648,9 +664,9 @@ router.post('/:id/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -768,13 +784,13 @@ router.post('/:id/photos', (req, res, next) => {
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     // Techs can only attach photos to their own assigned services.
     // Admin dispatch can attach completion-panel photos for any route row.
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
@@ -1042,9 +1058,9 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const record = await db('service_records')
@@ -1082,9 +1098,9 @@ router.get('/:id/photos', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -1134,6 +1150,55 @@ router.get('/:id/photos', async (req, res, next) => {
   } catch (err) {
     logger.error(`[tech-track] photos list failed: ${err.message}`);
     next(err);
+  }
+});
+
+// PATCH / DELETE /api/tech/services/:id/photos/:photoId — the tech sheet's
+// notes box changes a staged photo's description or removes the photo before
+// the visit is completed (GATE_NOTE_BOX_PHOTOS, dark: off answers 404). Same
+// ownership rule as the photo routes above; a completed visit's photos are
+// on its record and are never changed here (409 visit_completed).
+const STAGED_PHOTO_REFUSALS = {
+  photo_not_found: 'Photo not found',
+  service_not_found: 'Service not found',
+  not_assigned: 'Not assigned to this service',
+  visit_completed: 'This visit is completed; its photos are on the report.',
+};
+function refuseStagedPhotoChange(res, { status, code }) {
+  return res.status(status).json({ error: STAGED_PHOTO_REFUSALS[code], code });
+}
+
+router.patch('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await updateStagedServicePhotoCaption({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      caption: req.body?.caption,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    return res.json({ photo: { ...result.photo, staged: true } });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo description failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+router.delete('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await deleteStagedServicePhoto({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    logger.info(`[tech-track] staged photo removed service=${req.params.id} tech=${req.technicianId}`);
+    return res.json({ ok: true, id: result.photo.id });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo removal failed: ${err.message}`);
+    return next(err);
   }
 });
 
@@ -1219,9 +1284,9 @@ router.get('/:id/photo-marks', async (req, res, next) => {
     if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Lane resolution failure is not a 500: the tech simply gets no marking
@@ -1249,9 +1314,9 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const s3Key = typeof req.body?.s3Key === 'string' ? req.body.s3Key.trim() : '';
@@ -1340,9 +1405,9 @@ async function findVisitPhotoByKey(scheduledServiceId, s3Key) {
 const recapMedia = require('../services/service-report/recap-media');
 
 async function loadOwnedServiceOr403(req, res) {
-  const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id');
+  const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id', 'status', 'scheduled_date');
   if (!svc) { res.status(404).json({ error: 'Service not found' }); return null; }
-  if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+  if (!technicianVisitRowInScope(req, svc)) {
     res.status(403).json({ error: 'Not assigned to this service' });
     return null;
   }
@@ -1404,6 +1469,7 @@ router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
 const featureGates = require('../config/feature-gates');
 const {
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
@@ -1422,9 +1488,9 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): a trace
@@ -1437,6 +1503,17 @@ router.post('/:id/treatment-zone', upload.fields([
       payload = JSON.parse(req.body?.payload || '');
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    // A caller that loaded the visit at a property (the Fast Complete report
+    // flow) binds the trace to it: a visit the office has moved to another
+    // property since is refused, so a map of the old home never lands on the
+    // new one. Callers that send nothing are unchanged.
+    if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId')
+      && String(payload.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
+      return res.status(409).json({
+        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
+        code: 'visit_property_changed',
+      });
     }
     {
       // Eligibility AND capture-mode agreement (codex P2 r19) — the
@@ -1467,7 +1544,19 @@ router.post('/:id/treatment-zone', upload.fields([
       snapshotPngBuffer: snapshotFile?.buffer || null,
       maskPngBuffer: maskFile?.buffer || null,
       captureMode: payload.captureMode,
+      // Rechecked under the visit row's lock at the write (the read above is
+      // unlocked): a move that commits in between is refused too.
+      ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
+      // The report flow's trace is judged with the report: refused once the
+      // visit is completed.
+      openVisitOnly: payload.openVisitOnly === true,
+    }).catch((err) => {
+      if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
+      throw err;
     });
+    if (row?.refused) {
+      return res.status(409).json({ error: row.refused.message, code: row.refused.code });
+    }
 
     logger.info(
       `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +
@@ -1491,6 +1580,39 @@ router.post('/:id/treatment-zone', upload.fields([
   }
 });
 
+// DELETE /api/tech/services/:id/treatment-zone — "Remove the trace" on the
+// Fast Complete report flow: a trace that no longer matches the note (it now
+// says spots only, or not inside) comes off before the visit is completed.
+// Same gate as the save; the actor's current assignment is judged on the
+// locked visit row (a technician reassigned meanwhile is refused).
+// `expectedPropertyId` binds it to the property the sheet loaded, as the
+// save does; a completed visit keeps its trace (409).
+const TRACE_REMOVE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, service_not_assigned: 403, not_found: 404 };
+router.delete('/:id/treatment-zone', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const removed = await deleteTreatmentZoneMap({
+      scheduledServiceId: req.params.id,
+      actor: req,
+      ...(Object.prototype.hasOwnProperty.call(req.query, 'expectedPropertyId') ? { expectedPropertyId: req.query.expectedPropertyId || null } : {}),
+    }).catch((err) => {
+      if (TRACE_REMOVE_REFUSALS[err?.code]) return { refused: err };
+      throw err;
+    });
+    if (removed?.refused) {
+      const { code, message } = removed.refused;
+      return res.status(TRACE_REMOVE_REFUSALS[code]).json({ error: message, code });
+    }
+    logger.info(`[tech-track] treatment zone removed service=${req.params.id} tech=${req.technicianId} removed=${!!removed}`);
+    return res.json({ removed: !!removed });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone remove failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 // POST /api/tech/services/:id/treatment-zone/suggest — vision auto-trace
 // (owner 2026-07-21): the client uploads the visit's satellite PNG and gets
 // back a suggested building-perimeter loop (normalized 0-1 coords) that
@@ -1503,9 +1625,9 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Same eligibility gate as the save route — the auto-trace suggestion
@@ -1565,13 +1687,15 @@ router.get('/:id/geocode', async (req, res, next) => {
       .first(
         'scheduled_services.id',
         'scheduled_services.technician_id',
+        'scheduled_services.status',
+        'scheduled_services.scheduled_date',
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as line1'),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip')
       );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const address = [svc.line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');

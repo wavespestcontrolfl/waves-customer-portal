@@ -26,6 +26,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 
 const crypto = require('crypto');
 const db = require('../models/db');
+db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+db.transaction = jest.fn(async (fn) => fn(db));
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const { sendTemplate } = require('../services/email-template-library');
@@ -40,7 +42,9 @@ let activityInserts;
 let customersUpdateCalls;
 let customersWhereNotInCalls;
 let existingNoticeRow;
+let rateReviewNoticeRow;
 let insertConflict;
+let conflictTargets = [];
 let claimRejected;
 
 function customersQuery() {
@@ -65,13 +69,15 @@ function noticesQuery() {
   const q = {
     insert: jest.fn((row) => {
       noticeInserts.push(row);
-      const returned = insertConflict ? [] : [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id }];
+      const returned = insertConflict ? [] : [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id, notice_token: row.notice_token }];
       const returning = jest.fn(async () => returned);
-      return { onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning })) })), returning };
+      return { onConflict: jest.fn((target) => { conflictTargets.push(target); return { ignore: jest.fn(() => ({ returning })) }; }), returning };
     }),
     where: jest.fn(() => q),
+    whereNull: jest.fn(() => q),
+    whereNotNull: jest.fn((col) => { if (col === 'rate_review_row_id') q.rateReviewOnly = true; return q; }),
     orderBy: jest.fn(() => q),
-    first: jest.fn(async () => existingNoticeRow),
+    first: jest.fn(async () => (q.rateReviewOnly ? rateReviewNoticeRow : existingNoticeRow)),
     update: jest.fn(async (patch) => {
       noticeUpdates.push(patch);
       // The draft→sending claim reports affected rows; 0 = claim lost.
@@ -108,6 +114,7 @@ beforeEach(() => {
   customersUpdateCalls = [];
   customersWhereNotInCalls = [];
   existingNoticeRow = null;
+  rateReviewNoticeRow = null;
   insertConflict = false;
   claimRejected = false;
   getActivelyCoveredCustomerIds.mockResolvedValue([]);
@@ -330,6 +337,29 @@ describe('createAndSendBatch delivery', () => {
     expect(sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('leaves an event the annual rate review already owns to that lane — its draft is never claimed or sent here', async () => {
+    customerRows = [CUSTOMER];
+    rateReviewNoticeRow = { id: 'n-rate-review' };
+    existingNoticeRow = { id: 'n-rate-review', status: 'draft', notice_token: '0123456789abcdef0123456789abcdef', rate_review_row_id: 'rr-1' };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 0, texted: 0, alreadyNotified: 0, rateReview: 1, failed: 0 });
+    expect(noticeInserts).toHaveLength(0);
+    expect(noticeUpdates).toHaveLength(0);
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('targets the legacy (partial) event index by its predicate — rate-review notices key per plan line', async () => {
+    customerRows = [CUSTOMER];
+    conflictTargets = [];
+    await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(conflictTargets).toEqual([{ sql: '(customer_id, effective_date, current_amount_cents, new_amount_cents) WHERE rate_review_row_id IS NULL', bindings: undefined }]);
+    // the lookup and insert run in one transaction under the shared notice-event lock
+    const lockCall = db.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
+    expect(lockCall[1]).toEqual([0x5043, `${CUSTOMER.id}|${GOOD_ARGS.effectiveDate}|${noticeInserts[0].current_amount_cents}|${noticeInserts[0].new_amount_cents}`]);
+    expect(db.transaction).toHaveBeenCalled();
   });
 
   it('skips a customer when a concurrent send wins the event-insert race', async () => {

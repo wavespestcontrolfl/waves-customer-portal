@@ -19,7 +19,10 @@
  *
  * HARD RULES (code, not config):
  *   - Escalation intents never become suggestions, whatever the mode row says.
- *   - scheduling_intent=true drafts never become suggestions in Phase D.
+ *   - scheduling_intent=true drafts never become suggestions in Phase D,
+ *     except (GATE_SMS_SCHEDULING_SUGGEST, dark) a draft whose offered times
+ *     came from a booking picker: it becomes a SUGGESTION only, never an
+ *     auto-send, whatever its intent's rung (schedulingOfferSuggestible).
  *   - Fail closed: any lookup error resolves to 'shadow'.
  *
  * Suggested drafts get message_drafts status='suggested'. The nightly judge
@@ -237,10 +240,79 @@ function isEscalationIntent(intent) {
  * because the composer card and the send-handler ownership check both match
  * on them; without either, the card could never surface or be verified.
  */
-function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent }) {
+// The pickers an SMS offer can come from (sms-shadow-drafter *_OFFER_SOURCE)
+// and the id each one's send-time recheck asks it about.
+const PICKER_OFFER_ID_FIELD = Object.freeze({ scheduler: 'scheduledServiceId', estimate: 'estimateId', book: 'serviceKey' });
+
+/**
+ * GATE_SMS_SCHEDULING_SUGGEST (dark), read at call time. Owner 2026-10-02:
+ * scheduling drafts that carry a picker snapshot reach the staff card; staff
+ * still press send.
+ */
+function schedulingSuggestLive() {
+  return require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST');
+}
+
+/**
+ * Pure: does this open_times_snapshot prove the draft's offered times came
+ * from a booking picker? Quoted windows, a picker source, and the id that
+ * picker rechecks with at send time. A legacy zone-finder snapshot (no
+ * source) or one missing its id does not count.
+ */
+function isPickerOfferSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.quotedWindows) || !snapshot.quotedWindows.length) return false;
+  const field = PICKER_OFFER_ID_FIELD[snapshot.lookup?.source];
+  return Boolean(field && snapshot.lookup[field]);
+}
+
+/** A scheduling-intent draft that may take the suggestion card. */
+function schedulingOfferSuggestible({ schedulingIntent, openTimesSnapshot }) {
+  return Boolean(schedulingIntent) && isPickerOfferSnapshot(openTimesSnapshot) && schedulingSuggestLive();
+}
+
+/**
+ * Rollback fails closed: with GATE_SMS_SCHEDULING_SUGGEST off, a scheduling
+ * card already published stops surfacing and can no longer be sent, not just
+ * stops being created. Adds the exclusion to a knex query over
+ * agent_decisions aliased `alias`; a no-op while the gate is on. A suggestion
+ * decision's entity_id is its message_drafts row.
+ */
+function excludeGatedSchedulingSuggestions(query, alias = 'ad') {
+  if (schedulingSuggestLive()) return query;
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error('excludeGatedSchedulingSuggestions: bad alias');
+  return query.whereRaw(
+    `NOT (${alias}.workflow = ? AND EXISTS (SELECT 1 FROM message_drafts gated_md
+      WHERE gated_md.id = ${alias}.entity_id AND gated_md.scheduling_intent = true))`,
+    [SUGGEST_WORKFLOW],
+  );
+}
+
+/**
+ * Fire-time half of the same rollback (Codex #5617 r2): a scheduling card staff
+ * QUEUED while GATE_SMS_SCHEDULING_SUGGEST was on must not fire after it is
+ * unset. True when the gate is off and the decision is a suggestion whose
+ * draft is scheduling-intent. An unreadable row fails closed (true): the
+ * scheduled send is blocked and staff see the card retired with a note.
+ */
+async function decisionIsGatedSchedulingSuggestion({ decisionId, dbh = db }) {
+  if (!decisionId || schedulingSuggestLive()) return false;
+  try {
+    const row = await dbh('agent_decisions as ad')
+      .join('message_drafts as md', 'md.id', 'ad.entity_id')
+      .where('ad.id', decisionId)
+      .where('ad.workflow', SUGGEST_WORKFLOW)
+      .first('md.scheduling_intent');
+    return row?.scheduling_intent === true;
+  } catch (err) {
+    logger.warn(`[sms-suggest] scheduling-gate recheck failed for decision ${decisionId}: ${String(err?.code || err?.name || 'error').slice(0, 40)}; blocking`);
+    return true;
+  }
+}
+
+function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null }) {
   if (!reply || !String(reply).trim()) return false;
   if (!customerId || !smsLogId) return false;
-  if (schedulingIntent) return false;
+  if (schedulingIntent && !schedulingOfferSuggestible({ schedulingIntent, openTimesSnapshot })) return false;
   if (isEscalationIntent(intent)) return false;
   return true;
 }
@@ -286,8 +358,15 @@ async function getIntentMode(intent) {
  * The executor independently re-verifies all of this before sending; this is
  * the drafter-side resolution, not the security boundary.
  */
-async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
-  if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
+// requireReview (PR #5499): a draft that must reach a person whatever its intent's
+// rung — a "thanks" that arrived while something is still owed. Suggest when the
+// suggestion surface is on, never auto-send.
+// openTimesSnapshot (GATE_SMS_SCHEDULING_SUGGEST): a scheduling draft whose
+// times came from a booking picker is a suggestion at most — the card and the
+// staff send's recheck are the whole path; it never rides the auto-send rung.
+async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null, requireReview = false }) {
+  if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot })) return 'shadow';
+  if (requireReview || schedulingIntent) return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
   // Gratitude is always inert shadow storage for the drafter, whatever its
   // rung or gate: never an immediate send (the quiet window forbids it) and
@@ -577,7 +656,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -707,6 +786,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle
+            // fact was built for, so a send-time recheck can re-run
+            // isZelleTransferEligible against that SAME invoice's CURRENT
+            // state — never the customer's open invoice as it stands at
+            // send time, which the fact may no longer describe (paid off,
+            // a saved-card charge or PI started since). null when the
+            // draft was never Zelle-eligible.
+            ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
+            // the payment-status sentences the reply copies (null = none), re-rendered and rechecked at every send seam
+            ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
             // Independent review finding (PR #5334): the visit(s) this
             // draft's LIVE ETA fact was drawn from, carried through so the
             // send-time choke point (verifyAgentDecisionForSend /
@@ -717,6 +806,12 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // Technician first name(s), independent of live entries (round-42 P2): read back at
             // send time so name-subjected status wording is recognized with no live snapshot.
             ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+            // PR #5499 r1: the open call_commitments ids this draft's VISIT STATUS & OPEN
+            // LOOPS lines named — agentDecisionSendBlockReason / the scheduler recheck
+            // they are still open before the reviewed reply goes out.
+            ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+            // ...and the stop count its Tech position line showed (recounted when the reply mentions stops).
+            ...(visitLoopStatus ? { visit_loop_status: visitLoopStatus } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',
@@ -958,7 +1053,8 @@ async function reserveHumanReply({
     // a later kill-switch flip while the activation stamp is set.
     // The same predicate publishes the reservation below, so a claim made by an
     // older instance during a rolling disable always observes this reply.
-    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible();
+    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible()
+      || require('./sms-unanswered-reply').unansweredClaimsPossible();
     if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };
@@ -1319,6 +1415,10 @@ module.exports = {
   suggestionAnchorIsStale,
   supersedeStaleDecision,
   suggestionEligible,
+  isPickerOfferSnapshot,
+  schedulingOfferSuggestible,
+  excludeGatedSchedulingSuggestions,
+  decisionIsGatedSchedulingSuggestion,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
