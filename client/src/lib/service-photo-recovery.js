@@ -131,7 +131,9 @@ function photoVisitChanged(expected, live) {
     || !sameVisitValue(expected.technicianId, live.technicianId)
     || !sameVisitValue(expected.scheduledDate, live.scheduledDate)
     || expected.revision !== live.revision) return true;
-  return !sameVisitValue(expected.status, live.status) && live.status !== 'completed';
+  // Normal check-in progression does not change which visit owns these bytes.
+  // Dead or unrecognized states still require the technician to reconcile.
+  return !['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'].includes(live.status);
 }
 
 async function confirmPhotoDraft(photo, serviceId, deviceScope) {
