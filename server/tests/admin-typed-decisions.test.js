@@ -433,6 +433,7 @@ describe('labeler-token router on its own (production order: no parser in front 
   beforeAll(() => {
     const app = express();
     app.use('/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
+    app.use('/api/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
     app.use((_req, res) => res.status(418).json({ error: 'fell through' }));
     app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
     bare = app.listen(0);
@@ -466,6 +467,24 @@ describe('labeler-token router on its own (production order: no parser in front 
     const r = await fetch(`${bareUrl}/reviews/${ID}/label`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     expect(r.status).toBe(418);
     expect(r.headers.get('x-robots-tag')).toBeNull();
+  });
+
+  test('Staff maintenance mode freezes the labeler too: 503 before any write; a wrong token still reads 404', async () => {
+    const saved = process.env.STAFF_MAINTENANCE_MODE;
+    process.env.STAFF_MAINTENANCE_MODE = 'true';
+    try {
+      const log = installDb({ decision_reviews: { returning: [baseRow()], first: [baseRow()] } });
+      const url = `${bareUrl.replace('/admin/typed-decisions', '/api/admin/typed-decisions')}/reviews/${ID}/label`;
+      const body = JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN });
+      const frozen = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN }, body });
+      expect(frozen.status).toBe(503);
+      expect((await frozen.json()).code).toBe('STAFF_MAINTENANCE');
+      const wrong = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': `${TOKEN}x` }, body });
+      expect(wrong.status).toBe(404);
+      expect(log.decision_reviews || []).toHaveLength(0);
+    } finally {
+      if (saved === undefined) delete process.env.STAFF_MAINTENANCE_MODE; else process.env.STAFF_MAINTENANCE_MODE = saved;
+    }
   });
 
   test('an OPTIONS carrying the header gets the generic 404, not a preflight answer', async () => {

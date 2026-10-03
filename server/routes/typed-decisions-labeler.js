@@ -12,7 +12,8 @@
  * request WITH it never leaves this router: privacy headers, then the generic
  * 404 for a wrong / short / unset token (TYPED_DECISIONS_LABELER_TOKEN, 32+
  * characters, constant-time compare, no DB read), any method or path other
- * than POST /reviews/<uuid>/label, or GATE_TYPED_DECISIONS off; then its own
+ * than POST /reviews/<uuid>/label, or GATE_TYPED_DECISIONS off; then the Staff
+ * maintenance interlock (503 while staff writes are frozen), its own
  * /64-keyed limiter, a small JSON parser, and the SAME label write the admin
  * route uses (labelReview), which narrows a machine caller: no force, only
  * rows still unreviewed, labeled_by 'claude-labeler', audit actor 'system'.
@@ -22,6 +23,7 @@ const rateLimit = require('express-rate-limit');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { safeEqual } = require('../middleware/hermes-auth');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { staffMaintenance } = require('../middleware/staff-maintenance');
 const { labelReview } = require('./admin-typed-decisions');
 
 const router = express.Router();
@@ -51,7 +53,10 @@ function labelerPreGuard(req, res, next) {
 }
 
 router.use(labelerPreGuard);
-router.post('/reviews/:id/label', labelerLimiter, express.json({ limit: '16kb' }), labelReview);
+// This router answers ahead of the app-wide Staff maintenance interlock, so a
+// verified token passes through the same interlock here: while staff writes are
+// frozen for a maintenance migration, so are the labeler's (Codex #5677 r4).
+router.post('/reviews/:id/label', staffMaintenance, labelerLimiter, express.json({ limit: '16kb' }), labelReview);
 // Terminal: a request with the header never falls through to another router.
 router.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 // The parser's own failures (a valid caller's malformed or oversized body) are

@@ -5993,7 +5993,11 @@ limiter is never reached while it is off, so a probe never sees a revealing
 `cors()` (an allowed-origin OPTIONS would otherwise answer 204), the global
 `/api/` limiter and every body parser, so a request carrying the header gets its
 privacy headers and, when anything is wrong, the generic 404 before any global
-middleware can answer. **Rate limit:** 120 requests a minute per /64-collapsed
+middleware can answer. **Maintenance:** because the router answers ahead of the
+app-wide Staff maintenance interlock, a verified token passes through the same
+`staffMaintenance` middleware inside it: while `STAFF_MAINTENANCE_MODE` is on it
+gets the interlock's 503 before the limiter or any write (a wrong token still
+reads 404). **Rate limit:** 120 requests a minute per /64-collapsed
 IP (`labelerLimiter`, `unauthenticatedAuthLimitKey`), applied only after the
 token, path and gate pass; the global limiter never sees these requests.
 **Body:** the router's own `express.json({ limit: '16kb' })`, after the limiter
