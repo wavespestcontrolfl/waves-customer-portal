@@ -161,14 +161,32 @@ const OFFER_RESERVICE_TOOL = {
     additionalProperties: false,
   },
 };
+// GATE_PORTAL_CHAT_RESERVICE_LAWN: the same tool with the lawn line. Whether
+// the customer is reporting a current lawn problem is the model's judgement
+// (owner ruling 2026-10-03: the AI judges and quotes the customer, the code
+// only verifies; no lawn word list). Pest stays on the server's own classifier.
+const OFFER_RESERVICE_LAWN_TOOL = {
+  name: 'offer_reservice',
+  description: 'For a customer reporting household pests, or a lawn problem, back between scheduled visits: checks whether their plan covers a free re-service for that service line and, when it does, shows a button that opens its booking page. If one is already booked, shows a button to move it instead. You are told which case applies.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      service_line: { type: 'string', enum: ['pest', 'lawn'], description: 'pest: household insects and spiders (the server checks the customer\'s own words). lawn: weeds, turf insects, brown, thin or dying grass. Rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' },
+      current_problem: { type: 'boolean', description: 'lawn only. true ONLY when the customer says, in this message, that the lawn problem is happening now. false for a question about lawn care, a what-if, a problem in the past, or one they say is fixed.' },
+      customer_quote: { type: 'string', description: 'lawn only. The customer\'s exact words from this message that describe the lawn problem, copied word for word.' },
+    },
+    required: ['service_line'],
+    additionalProperties: false,
+  },
+};
 // The portal tool set for the gates that are live: the four base tools, the
 // fact and action tools, then escalate last.
-function portalToolsFor({ payments = false, visits = false, reservice = false } = {}) {
+function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false } = {}) {
   return [
     ...PORTAL_TOOLS.slice(0, 4),
     ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
     ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
-    ...(reservice ? [OFFER_RESERVICE_TOOL] : []),
+    ...(reservice ? [reserviceLawn ? OFFER_RESERVICE_LAWN_TOOL : OFFER_RESERVICE_TOOL] : []),
     PORTAL_TOOLS[4],
   ];
 }
@@ -221,7 +239,7 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
       case 'get_recent_visits':
         return await getRecentVisits(contextCustomerId, actions, cards);
       case 'offer_reservice':
-        return await offerReservice(contextCustomerId, input.service_line, actions, context);
+        return await offerReservice(contextCustomerId, input, actions, context);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -470,7 +488,8 @@ async function getRecentVisits(customerId, actions, cards) {
 }
 
 // Pest only for now (owner ruling 2026-10-02); lawn reports hand off.
-const RESERVICE_LINE_WORDS = { pest: 'pest control' };
+const RESERVICE_LINE_WORDS = { pest: 'pest control', lawn: 'lawn care' };
+const RESERVICE_COVERS = { pest: 'general pest control', lawn: 'lawn care' };
 const RESERVICE_SPECIALTY = {
   offered: false,
   instruction: 'What the customer describes includes a separately priced service (such as rodents, termites, mosquitoes or a tree and shrub problem), which a free re-service does not cover. Do not offer or imply a free visit. Acknowledge what they are seeing and use the escalate tool with topic pest_problem so the team follows up.',
@@ -533,18 +552,48 @@ function bookedReserviceFacts(line, booked, movable) {
 // means no free offer, and so does anything short of an active pest report
 // (isActivePestReport, the SMS flow's own predicate) in the pest line:
 // "Do you cover ants?" names a pest but reports nothing.
-function reportRefusal(customerMessage, line) {
+function reportRefusal(customerMessage, line, input) {
   const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport } = require('../reservice-scheduler');
   const text = String(customerMessage || '');
   if (reportedReserviceExcludedSpecialty(text)) return RESERVICE_SPECIALTY;
+  if (line === 'lawn') return lawnReportRefusal(text, input);
   return isActivePestReport(text) && reportedReserviceLanes(text).includes(line) ? null : RESERVICE_HAND_OFF;
 }
 
-async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerMessage = '' } = {}) {
-  const line = Object.prototype.hasOwnProperty.call(RESERVICE_LINE_WORDS, serviceLine) ? serviceLine : null;
+// Lawn (owner ruling 2026-10-03): the model judges whether the customer is
+// reporting a current lawn problem and quotes them; the code only verifies
+// that the quote is word for word in this turn's message and names a lawn
+// subject. No list of lawn-problem wording lives here: do not grow one.
+const RESERVICE_NOT_CURRENT = {
+  offered: false,
+  instruction: 'This was not marked as a lawn problem happening now, so no free re-service applies. Answer the customer\'s question; do not offer or imply a free visit.',
+};
+const RESERVICE_QUOTE_UNVERIFIED = {
+  offered: false,
+  instruction: 'The quote is not the customer\'s own words about their lawn from this message, so no free re-service can be offered on it. Do not offer or imply a free visit. If the customer did report a lawn problem happening now in this message, call again with their exact words; otherwise answer them, or use the escalate tool with topic pest_problem.',
+};
+const LAWN_QUOTE_MIN_CHARS = 8;
+const foldQuoteText = (v) => String(v || '').toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
+function lawnReportRefusal(customerMessage, input) {
+  if (input.current_problem !== true) return RESERVICE_NOT_CURRENT;
+  const quote = foldQuoteText(input.customer_quote);
+  if (quote.length < LAWN_QUOTE_MIN_CHARS || !foldQuoteText(customerMessage).includes(quote)) return RESERVICE_QUOTE_UNVERIFIED;
+  // The lawn copy's own service words (reservice-scheduler) plus the turf itself.
+  const { RESERVICE_LAWN_SERVICE_WORDS } = require('../reservice-scheduler');
+  const lawnSubject = new RegExp(`\\b(?:${RESERVICE_LAWN_SERVICE_WORDS}|grass|yard)\\b`, 'i');
+  return lawnSubject.test(quote) ? null : RESERVICE_QUOTE_UNVERIFIED;
+}
+
+// The service line asked for; the lawn line exists only under its own gate.
+function reserviceLineOf(input, lawn) {
+  return (lawn ? ['pest', 'lawn'] : ['pest']).includes(input.service_line) ? input.service_line : null;
+}
+
+async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}) {
+  const line = reserviceLineOf(input, lawn);
   if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
-  const refusal = reportRefusal(customerMessage, line);
+  const refusal = reportRefusal(customerMessage, line, input);
   if (refusal) return refusal;
   // An open re-service in the line is read on its own, as the page does: a
   // visit booked while the plan covered the line stays on the schedule after
@@ -580,7 +629,7 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
     offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers general pest control only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
   };
 }
 

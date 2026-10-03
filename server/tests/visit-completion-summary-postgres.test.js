@@ -3335,7 +3335,7 @@ postgres('visit summary recipient recovery', () => {
       // any of them must be known before a session belonging to another is
       // cancelled (a Stripe cancel does not roll back with the refusal).
       expect(fence).toHaveBeenCalledTimes(1);
-      expect(fence).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([String(fixture.customerId)]));
+      expect(fence).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([String(fixture.customerId)]), expect.objectContaining({ invalidateLinked: true }));
       expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
       fence.mockResolvedValue({ released: 0, inFlight: 0 });
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { active: true } });
@@ -3385,6 +3385,111 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
       await mockPg('invoices').where({ id: invoiceId }).del();
       await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a packet invoice scheduled with NO send time is parked whatever its marker: assign then clear returns it exactly as it was, nothing sent', async () => {
+    // The release used to turn every such row that was not the stale-send text into a draft and queue it for
+    // now, so an invoice the office was holding (a planned summary text, a delivery review, a bare null time)
+    // could be sent by itself. The automatic sender excludes null-time scheduled rows until an operator reviews them.
+    const Packets = require('../services/visit-completion-packets');
+    const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../services/invoice-helpers');
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    const invoiceIds = [];
+    try {
+      for (const marker of [STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR, `${SUMMARY_TEXT_PLANNED_ERROR}: mailbox full: later`,
+        'Twilio 30007: carrier filtered: needs review', null]) {
+        const invoiceId = randomUUID();
+        invoiceIds.push(invoiceId);
+        await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+          customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+          scheduled_send_at: null, scheduled_send_attempts: 2, scheduled_send_error: marker });
+        await mockPg.transaction(async (trx) => {
+          await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+          return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+        });
+        const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first();
+        expect(withdrawn).toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_attempts: 2 });
+        // The packet-only hold flag sits in the flags, ahead of the marker tail.
+        expect(withdrawn.scheduled_send_error).toMatch(new RegExp(`^payer_billed:${payer.id}:park(:hold)?:m=`));
+        expect(withdrawn.scheduled_send_error.endsWith(`:m=${marker || ''}`)).toBe(true);
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).toMatchObject({ billing_hold: true });
+
+        await mockPg.transaction(async (trx) => {
+          await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+          return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+        });
+        // Back exactly as it was: same status, null time, same marker, attempts untouched; the hold the
+        // withdrawal created is lifted.
+        expect(await mockPg('invoices').where({ id: invoiceId }).first())
+          .toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: marker, scheduled_send_attempts: 2 });
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).toMatchObject({ billing_hold: false });
+        await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+        await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+        // A packet owns one invoice, so each marker gets its own.
+        await mockPg('invoices').where({ id: invoiceId }).del();
+      }
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(sendOne).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').whereIn('id', invoiceIds).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a parked packet stamp written before the marker tail existed still restores the stale-send text, and a payer-to-payer move keeps the tail', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../services/invoice-helpers');
+    const payers = await mockPg('payers').insert([1, 2].map(() => ({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }))).returning('id');
+    const invoiceId = randomUUID();
+    const insertInvoice = (scheduled_send_error) => mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''),
+      invoice_number: `FIX-${invoiceId.slice(0, 8)}`, customer_id: fixture.customerId, status: 'scheduled', total: 120,
+      visit_completion_packet_id: fixture.packetId, scheduled_send_at: null, scheduled_send_attempts: 1, scheduled_send_error });
+    const setPayer = (payerId) => mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payerId });
+      return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+    });
+    try {
+      // A payer-to-payer move: the stamp follows the new payer, marker tail intact, and the release restores it.
+      await insertInvoice(SUMMARY_TEXT_PLANNED_ERROR);
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payers[0].id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      // A replayed withdrawal (a second claim on the same row) writes the same stamp: the marker tail is not
+      // nested and the hold flag the first one recorded is kept, so the release still lifts that hold.
+      const stamped = `payer_billed:${payers[0].id}:park:hold:m=${SUMMARY_TEXT_PLANNED_ERROR}`;
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ scheduled_send_error: stamped });
+      await mockPg.transaction((trx) => Packets.withdrawPacketInvoiceForPayer(trx, {
+        packetId: fixture.packetId, invoiceId, visit: { id: fixture.visitId }, billed: [], payerId: payers[0].id }));
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ scheduled_send_error: stamped });
+      await setPayer(payers[1].id);
+      expect((await mockPg('invoices').where({ id: invoiceId }).first('scheduled_send_error')).scheduled_send_error)
+        .toBe(`payer_billed:${payers[1].id}:park:hold:m=${SUMMARY_TEXT_PLANNED_ERROR}`);
+      await setPayer(null);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first())
+        .toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: SUMMARY_TEXT_PLANNED_ERROR, scheduled_send_attempts: 1 });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).toMatchObject({ billing_hold: false });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+
+      // The legacy row (already stamped, no marker tail, as written before this change) is a `:park` row from the
+      // stale-send recovery: it goes back to that text.
+      await insertInvoice(`payer_billed:${payers[0].id}:park`);
+      await setPayer(null);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first())
+        .toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR, scheduled_send_attempts: 1 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').whereIn('id', payers.map((p) => p.id)).del();
     }
   });
 
@@ -3575,6 +3680,49 @@ postgres('visit summary recipient recovery', () => {
       await InvoiceService.unvoidInvoice(invoiceId);
       const rejudged = await mockPg('invoices').where({ id: invoiceId }).first();
       expect(invoiceWithdrawnFromCustomer(rejudged)).toBe(true);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a packet release puts dunning back at its original next touch, and at now only when that time has passed', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    const invoiceId = randomUUID();
+    try {
+      // A packet owns one invoice, so each next-touch time gets its own.
+      for (const [touch, expectExact] of [[new Date(Date.now() + 5 * 86400e3), true], [new Date(Date.now() - 2 * 86400e3), false]]) {
+        await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+          customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId,
+          due_date: new Date(Date.now() - 30 * 86400000) });
+        await mockPg('invoice_followup_sequences').insert({ invoice_id: invoiceId, customer_id: fixture.customerId, status: 'active', step_index: 1, next_touch_at: touch });
+        await mockPg.transaction(async (trx) => {
+          await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+          return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+        });
+        const paused = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+        expect(paused).toMatchObject({ status: 'paused', paused_reason: 'payer_billed', next_touch_at: null });
+        expect(new Date(paused.paused_until).getTime()).toBe(touch.getTime());
+        const releasedAt = Date.now();
+        await mockPg.transaction(async (trx) => {
+          await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+          return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+        });
+        const resumed = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+        expect(resumed).toMatchObject({ status: 'active', paused_reason: null, paused_until: null, step_index: 1 });
+        if (expectExact) expect(new Date(resumed.next_touch_at).getTime()).toBe(touch.getTime());
+        else expect(new Date(resumed.next_touch_at).getTime()).toBeGreaterThanOrEqual(releasedAt - 5000);
+        await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+        await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+        await mockPg('invoices').where({ id: invoiceId }).del();
+      }
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(sendOne).not.toHaveBeenCalled();
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });

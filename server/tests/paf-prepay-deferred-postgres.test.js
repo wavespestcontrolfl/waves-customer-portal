@@ -439,6 +439,101 @@ postgres('annual prepay charged after the first visit', () => {
     expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
   });
 
+  describe('the first visit\'s completion text (owner ruling 2026-10-03, neutral wording)', () => {
+    async function completeWithText(f, visitId) {
+      const techId = randomUUID();
+      const catalogId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+      await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+      await trx('scheduled_services').where({ id: visitId })
+        .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60, scheduled_date: day(0) });
+      const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
+      send.mockClear();
+      send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      await completeScheduledService({ serviceId: visitId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: techId, technician: null },
+        body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: true, requestReview: false } });
+      return send.mock.calls.map((c) => c[0]?.body || '').join('\n');
+    }
+
+    it('the first held visit of a still-unpaid year gets the neutral text: no amount, no "nothing due"', async () => {
+      const f = await deferredAccept();
+      const text = await completeWithText(f, f.parentId);
+      expect(text).toMatch(/is done and covered by your Waves annual plan\. Your plan payment is processed after this first visit - you'll get a receipt\./);
+      expect(text).not.toMatch(/nothing (is )?due/);
+      expect(text).not.toMatch(/\$\d/);
+    });
+
+    it('a later held visit keeps the regular annual-prepay text', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const text = await completeWithText(f, f.childId);
+      expect(text).not.toMatch(/processed after this first visit/);
+    });
+
+    it('a visit of a year already paid keeps the regular annual-prepay text', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'active' });
+      const Release = require('../services/paf-prepay-release');
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(await trx('scheduled_services').where({ id: f.parentId }).first(), trx)).toBe(false);
+    });
+
+    it('two held visits closing at once: exactly one claims the first-visit text (GitHub Codex #5640 r12)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
+      const Release = require('../services/paf-prepay-release');
+      const parent = await trx('scheduled_services').where({ id: f.parentId }).first();
+      const child = await trx('scheduled_services').where({ id: f.childId }).first();
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(child, trx)).toBe(false);
+      // A retry of the claiming visit keeps the text.
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+    });
+
+    it('the claiming visit keeps the text on a retry after another held visit finished (GitHub Codex #5640 r13)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const Release = require('../services/paf-prepay-release');
+      const parent = await trx('scheduled_services').where({ id: f.parentId }).first();
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+      await perform(f.childId, f.customerId);
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+    });
+
+    it('a year already paid or in process before the first visit keeps the regular text (GitHub Codex #5640 r13)', async () => {
+      const Release = require('../services/paf-prepay-release');
+      for (const status of ['paid', 'prepaid', 'processing']) {
+        const f = await deferredAccept();
+        await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+        await trx('invoices').where({ id: f.invoiceId }).update({ status });
+        const visit = await trx('scheduled_services').where({ id: f.parentId }).first();
+        expect(await Release.isFirstHeldVisitOfUnpaidYear(visit, trx)).toBe(false);
+      }
+    });
+
+    it('an eligibility read failure never sends the "nothing due" text (GitHub Codex #5640 r15)', async () => {
+      const f = await deferredAccept();
+      const Release = require('../services/paf-prepay-release');
+      const spy = jest.spyOn(Release, 'isFirstHeldVisitOfUnpaidYear').mockRejectedValue(new Error('synthetic read failure'));
+      try {
+        const text = await completeWithText(f, f.parentId).catch(() => '');
+        expect(text).not.toMatch(/nothing (is )?due/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('a disabled neutral template falls back to the regular annual-prepay text', async () => {
+      const f = await deferredAccept();
+      await trx('sms_templates').where({ template_key: 'service_complete_annual_prepay_after_first_visit' }).update({ is_active: false });
+      const text = await completeWithText(f, f.parentId);
+      expect(text).not.toMatch(/processed after this first visit/);
+      expect(text.length).toBeGreaterThan(0);
+    });
+  });
+
   describe('releasing the charge after the first performed visit', () => {
     it('leaves the job waiting while no visit is performed, and for an inspection-only visit', async () => {
       const f = await deferredAccept();

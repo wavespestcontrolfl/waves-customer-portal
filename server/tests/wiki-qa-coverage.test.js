@@ -85,3 +85,124 @@ test('a missing coverage line logs no coverage', async () => {
   await WikiQA.query('ants', { source: 'lead_agent' });
   expect(mockInserts[0]).not.toHaveProperty('coverage');
 });
+
+
+test('request JSON context cannot become internal database or model execution hooks', async () => {
+  dispatchWithFallback
+    .mockResolvedValueOnce({ ok: true, json: { paths: ['pests/ants.md'] } })
+    .mockResolvedValueOnce({ ok: true, text: 'Ants answer.\nCOVERAGE: partial' });
+  const result = await WikiQA.query('ants', {
+    source: 'admin_manual', read: true, write: true, remainingMs: true,
+    assertActive: true, signal: { aborted: true },
+  });
+  expect(result.answer).toBe('Ants answer.');
+  expect(mockInserts).toHaveLength(1);
+  expect(dispatchWithFallback.mock.calls[0][1]).not.toHaveProperty('signal');
+});
+
+test.each(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR'])(
+  'routing cancellation %s stops before keyword fallback or logging', async (code) => {
+    const database = require('../models/db');
+    database.mockClear();
+    const cancelled = Object.assign(new Error('cancelled'), { code });
+    dispatchWithFallback.mockRejectedValueOnce(cancelled);
+    await expect(WikiQA.query('ants in the pantry', { source: 'admin_manual' }, {
+      signal: new AbortController().signal,
+    })).rejects.toBe(cancelled);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(mockInserts).toHaveLength(0);
+  },
+);
+
+test('a deadline assertion after routing cannot start a keyword query', async () => {
+  const database = require('../models/db');
+  database.mockClear();
+  const cancelled = Object.assign(new Error('deadline'), { code: 'PORTAL_CHAT_DEADLINE' });
+  dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'provider_failed' });
+  await expect(WikiQA.query('ants in the pantry', {}, {
+    assertActive: (stage) => { if (stage === 'knowledge routing') throw cancelled; },
+  })).rejects.toBe(cancelled);
+  expect(database).toHaveBeenCalledTimes(1);
+  expect(mockInserts).toHaveLength(0);
+});
+
+// Standalone cancellation is supported even without a deadline clock.
+test('forwards a standalone abort signal to both knowledge model requests', async () => {
+  dispatchWithFallback
+    .mockResolvedValueOnce({ ok: true, json: { paths: ['pests/ants.md'] } })
+    .mockResolvedValueOnce({ ok: true, text: 'Ants answer.\nCOVERAGE: full' });
+  const signal = new AbortController().signal;
+  await WikiQA.query('ants', { source: 'lead_agent' }, { signal });
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+  for (const [, options] of dispatchWithFallback.mock.calls) {
+    expect(options.signal).toBe(signal);
+    expect(options).not.toHaveProperty('timeoutMs');
+  }
+});
+
+test.each([{ code: 'PORTAL_CHAT_DEADLINE' }, { code: '57014' }, { name: 'AbortError' }])('a cancelled query-log write cannot return a successful answer: %j', async (identity) => {
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  const failure = Object.assign(new Error('cancelled'), identity);
+  await expect(WikiQA.query('ants', { source: 'lead_agent' }, {
+    write: async () => { throw failure; },
+  })).rejects.toBe(failure);
+});
+
+test('ordinary query logging failure stays best effort for a scoped caller', async () => {
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  await expect(WikiQA.query('ants', { source: 'lead_agent' }, {
+    write: async () => { throw new Error('logging unavailable'); },
+  })).resolves.toHaveProperty('answer');
+});
+
+
+test.each(['query', 'search'])('pre-aborted standalone signal stops %s before database access', async (method) => {
+  const database = require('../models/db');
+  database.mockClear();
+  const controller = new AbortController();
+  controller.abort();
+  const promise = method === 'query'
+    ? WikiQA.query('ants', {}, { signal: controller.signal })
+    : WikiQA.search('a', 5, null, { signal: controller.signal });
+  await expect(promise).rejects.toBe(controller.signal.reason);
+  expect(database).not.toHaveBeenCalled();
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+  expect(mockInserts).toHaveLength(0);
+});
+
+test.each([{ rows: [] }, { rows: [{ path: 'ants.md' }] }])('cancellation during index read stops early fallback and logging: %j', async ({ rows }) => {
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const database = require('../models/db');
+  database.mockClear();
+  const factory = database.getMockImplementation();
+  const controller = new AbortController();
+  database.mockImplementationOnce((table) => {
+    const qb = factory(table);
+    qb.orderBy = async () => { controller.abort(); return rows; };
+    return qb;
+  });
+  await expect(WikiQA.query('ants', { source: 'tech_field' }, { signal: controller.signal }))
+    .rejects.toBe(controller.signal.reason);
+  expect(database).toHaveBeenCalledTimes(1);
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+  expect(mockInserts).toHaveLength(0);
+});
+
+test('standalone cancellation at query logging rejects instead of returning success', async () => {
+  const controller = new AbortController();
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  const database = require('../models/db');
+  const factory = database.getMockImplementation();
+  database.mockImplementation((table) => {
+    const qb = factory(table);
+    if (table === 'knowledge_queries') qb.insert = async () => { controller.abort(); };
+    return qb;
+  });
+  try {
+    await expect(WikiQA.query('ants', {}, { signal: controller.signal })).rejects.toHaveProperty('name', 'AbortError');
+  } finally {
+    database.mockImplementation(factory);
+  }
+});

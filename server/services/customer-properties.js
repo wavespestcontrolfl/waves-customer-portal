@@ -951,13 +951,31 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
 // relationship is checked in its own right before a promotion.
 const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'family_home', 'managed_for_client']);
 
+// Occupancies a saved property may carry and still be where the customer
+// lives (anything else — rental, family-occupied, seasonal, vacant,
+// commercial — is not their residence).
+const RESIDENCE_OCCUPANCIES = ['owner_occupied', 'unknown'];
+
+/**
+ * True when a saved property can be the customer's own residence: not
+ * commercial, occupancy owner-occupied or unclassified, and a relationship that
+ * is not a rental / family member's home / client-managed address. The ONE
+ * residence rule — primary promotion (below) and same-address duplicate
+ * matching both read it. Pure.
+ */
+function isResidenceProperty(target = {}) {
+  return require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) !== 'commercial'
+    && RESIDENCE_OCCUPANCIES.includes(normalizeOccupancy(target.occupancy_type))
+    && !NON_RESIDENCE_RELATIONSHIPS.has(String(target.relationship || '').trim().toLowerCase());
+}
+
 function primaryPropertyUnavailable(target, customer) {
   if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
   if (String(customer?.contact_role || '').trim().toLowerCase() === 'tenant') {
     return { message: 'A tenant account cannot be promoted to an owner-occupied primary residence.', code: 'primary_role_unavailable' };
   }
   if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
-    || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
+    || !RESIDENCE_OCCUPANCIES.includes(normalizeOccupancy(target.occupancy_type))) {
     return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
   }
   if (NON_RESIDENCE_RELATIONSHIPS.has(String(target.relationship || '').trim().toLowerCase())) {
@@ -1138,6 +1156,7 @@ module.exports = {
   defaultOccupancyForContactRole,
   defaultRelationshipForContactRole,
   isNewAddress,
+  isResidenceProperty,
   completePrimaryFromCall,
   syncPrimaryAddress,
   syncPrimaryCoordsFromCustomer,

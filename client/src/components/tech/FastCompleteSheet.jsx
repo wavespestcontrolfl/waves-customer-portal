@@ -955,6 +955,7 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
 // gets a pay link or a review ask.
 function reportCompletionBody({
   form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks, recordFields = null,
+  traceOnReport = true,
 }) {
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
   // A lane or typed visit records its own record, as the report was written
@@ -967,6 +968,10 @@ function reportCompletionBody({
     // gate that hides traces), for the server to re-check under the visit
     // lock and freeze: the report shows only this trace.
     traceSeen: trace.zone?.updated_at ?? null,
+    // A saved trace this visit's report never shows (the live context's
+    // traceOnReport): the server still checks it did not change, but freezes
+    // the record as judged against no trace, so it sets no outdoor wait.
+    ...(trace.zone && traceOnReport === false ? { traceShown: false } : {}),
     products: rows.filter((row) => row.active).map((row) => {
       const application = recordedApplication(row, heard);
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
@@ -1589,6 +1594,7 @@ function ReportFlowForm({
       () => reportCompletionBody({
         form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
         recordFields: recordState.inputs(record, draft?.facts),
+        traceOnReport: ctx.traceOnReport,
       }),
       summary(),
     );

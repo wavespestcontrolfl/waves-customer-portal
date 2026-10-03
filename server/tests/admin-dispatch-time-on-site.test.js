@@ -1173,7 +1173,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // advisory lock and the issued invoice row FIRST — ahead of every lock
     // below, matching the invoice → customer order of the reversal paths.
     expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*if \(issuedInvoiceCloseout\) \{[\s\S]*?\n\s*\}\s*\n)?(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
-    expect(source).toContain('else await db.transaction(persistRecord);');
+    expect(source).toMatch(/else await withTrackedServicePhotoTransaction\(\{\s*knex: db,\s*newlyUploadedObjects,\s*\}, persistRecord\);/);
   });
 
   test('the finalization reconciles with the LOCKED row and preserves a mid-flight correction (codex P2 round 15)', () => {

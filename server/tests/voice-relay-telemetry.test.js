@@ -40,6 +40,11 @@ describe('classifyRelayEvent — tolerant of the undocumented payload', () => {
     [{ type: 'info', name: 'agentSpeaking' }, 'agent_speaking_start'],
     [{ type: 'info', name: 'agentSpeakingStopped' }, 'agent_speaking_end'],
     [{ type: 'info', name: 'clientSpeakingStarted' }, 'caller_speaking_start'],
+    // The live ConversationRelay payload (info:name,type,value), value on/off.
+    [{ type: 'info', name: 'clientSpeaking', value: 'on' }, 'caller_speaking_start'],
+    [{ type: 'info', name: 'clientSpeaking', value: 'off' }, 'caller_speaking_end'],
+    [{ type: 'info', name: 'agentSpeaking', value: 'on' }, 'agent_speaking_start'],
+    [{ type: 'info', name: 'agentSpeaking', value: 'off' }, 'agent_speaking_end'],
     [{ type: 'tokens-played', tokens: 'Waves, this is Sandy.' }, 'tokens_played'],
     [{ type: 'info', name: 'tokensPlayed', playedText: 'How can I help' }, 'tokens_played'],
     [{ type: 'info', name: 'tokensPlayed', value: 'How can I help' }, 'tokens_played'],
@@ -109,6 +114,35 @@ describe('per-turn stats', () => {
     // Consumed: the next turn does not reuse it.
     await convo.handlePrompt('second');
     expect(convo._turnStats[1].callerSpeechStoppedAt).toBeNull();
+  });
+
+  test('the live on/off payload yields a caller-stop endpoint and agent start/end on the turn that spoke', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-tel-onoff', from: '+19415551234', send: jest.fn() });
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'on' });
+    expect(convo._lastCallerSpeechStopAt == null).toBe(true); // "on" is not a stop
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'off' });
+    await convo.handlePrompt('hi there');
+    const stat = convo._turnStats[0];
+    expect(stat.callerSpeechStoppedAt).not.toBeNull();
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', value: 'on' });
+    expect(stat.agentSpeakingStartAt).not.toBeNull();
+    expect(stat.agentSpeakingEndAt).toBeNull(); // "on" never closes playback
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', value: 'off' });
+    expect(stat.agentSpeakingEndAt).toBeGreaterThanOrEqual(stat.agentSpeakingStartAt);
+    expect(convo._eventCounts).toMatchObject({ caller_speaking_start: 1, caller_speaking_end: 1, agent_speaking_start: 1, agent_speaking_end: 1 });
+    // Each state label (never speech) is logged once, with the kind it read as.
+    const states = logger.info.mock.calls.map((c) => c[0]).filter((s) => /relay speaker state seen/.test(s));
+    expect(states.some((s) => / kind=caller_speaking_start value=on$/.test(s))).toBe(true);
+    expect(states.some((s) => / kind=caller_speaking_end value=off$/.test(s))).toBe(true);
+    // An unknown end label reads as a start (a kind already seen) and is still logged.
+    const before = logger.info.mock.calls.length;
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'disabled' });
+    const fresh = logger.info.mock.calls.slice(before).map((c) => c[0]);
+    expect(fresh.some((s) => /relay speaker state seen .* value=disabled$/.test(s))).toBe(true);
+    // A repeat of a label already seen logs nothing.
+    const again = logger.info.mock.calls.length;
+    convo.handleRelayEvent({ type: 'info', name: 'clientSpeaking', value: 'disabled' });
+    expect(logger.info.mock.calls.slice(again).some((c) => /relay speaker state seen/.test(c[0]))).toBe(false);
   });
 
   test('agent speaking start/end land on the turn that spoke; tokens-played rewrites what the caller heard', () => {
