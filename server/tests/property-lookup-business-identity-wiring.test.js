@@ -428,3 +428,54 @@ describe('the admin route body and the coalescing key', () => {
     expect(lookupCoalesceKey(ADDRESS, { prioritizeAccuracy: true })).not.toMatch(/business-identity/);
   });
 });
+
+describe('the pricing boundary refuses an unanswered scope (409 COMMERCIAL_SCOPE_UNRESOLVED)', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const QUESTION = 'Are we treating just your space or the whole building?';
+  const unresolved = (over = {}) => ({
+    isCommercial: true, propertyType: 'Commercial', commercialSubtype: 'salon_spa', homeSqFt: 1200,
+    serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: QUESTION, occupancyAnswer: null, ...over,
+  });
+  const translate = (profile) => translateV2CallToV1Input(profile, ['pest'], {});
+
+  test('an unanswered profile throws a fail-closed 409 carrying the question, even with a typed size', () => {
+    let caught;
+    try { translate(unresolved()); } catch (e) { caught = e; }
+    expect(caught).toBeDefined();
+    expect(caught.statusCode).toBe(409);
+    expect(caught.code).toBe('COMMERCIAL_SCOPE_UNRESOLVED');
+    expect(caught.failClosed).toBe(true);
+    expect(caught.metadata).toEqual({ question: QUESTION });
+    expect(caught.message).toContain(QUESTION);
+  });
+
+  test('an answered profile proceeds: the occupancy answer on the profile, or a decision the lookup re-ran to', () => {
+    expect(() => translate(unresolved({ occupancyAnswer: 'suite' }))).not.toThrow();
+    expect(() => translate(unresolved({ occupancyAnswer: 'building' }))).not.toThrow();
+    expect(() => translate(unresolved({ serviceScopeDecision: 'commercial_suite' }))).not.toThrow();
+    expect(() => translate(unresolved({ serviceScopeDecision: 'entire_commercial_building' }))).not.toThrow();
+  });
+
+  test('a profile with no business verdict (gate off, public quote) is untouched', () => {
+    expect(() => translate({ isCommercial: true, propertyType: 'Commercial', homeSqFt: 1200 })).not.toThrow();
+    expect(() => translateV2CallToV1Input({ homeSqFt: 2000, lotSqFt: 8000, stories: 1 }, ['pest'], {})).not.toThrow();
+  });
+
+  test('the save-time recompute rethrows the refusal instead of falling back to the browser price', async () => {
+    const estimateData = { engineRequest: { profile: unresolved(), selectedServices: ['pest'], options: {} } };
+    await expect(serverRecomputeFromEstimateData(estimateData, {})).rejects.toMatchObject({
+      statusCode: 409, code: 'COMMERCIAL_SCOPE_UNRESOLVED',
+    });
+  });
+
+  test('the lookup profile stamps the CSR answer so the estimate inputs carry it', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    const asked = (await run()).enriched;
+    expect(asked.occupancyAnswer).toBeNull();
+    expect(() => translate({ ...asked, homeSqFt: 1200 })).toThrow(/COMMERCIAL_SCOPE|whole building/);
+    const answered = (await run({ occupancyAnswer: 'suite' })).enriched;
+    expect(answered.occupancyAnswer).toBe('suite');
+    expect(() => translate(answered)).not.toThrow();
+  });
+});

@@ -34,6 +34,7 @@ const {
   buildBusinessScopeContext,
   effectiveSuiteUnitKey,
   normalizeOccupancyAnswer,
+  assertScopeAnswered,
 } = require('../services/property-lookup/business-scope');
 const {
   attachFloodZoneToCachedLookup,
@@ -4791,6 +4792,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // association's common areas, which the shared scope classifier rules
   // whole-property even at an office "Suite" address. Either way a fresh
   // lookup is required (Codex #4840 r13 P1s).
+  // A business-identified lookup whose scope question is still open
+  // (GATE_LOOKUP_BUSINESS_IDENTITY, scope_unresolved with no occupancy
+  // answer) is never priced: 409 COMMERCIAL_SCOPE_UNRESOLVED with the
+  // question. Profiles without a business verdict carry no such field.
+  assertScopeAnswered(p);
   if (p.suiteSize) {
     const associationJob = isAssociationCommercialJob({ commercialRiskType, commercialSubtype });
     if (!commercialSuiteSizingLive() || associationJob) {

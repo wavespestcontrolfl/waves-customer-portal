@@ -179,11 +179,14 @@ function scopeFlags(scope) {
 // The admin-only profile keys; {} unless a business was identified, so a
 // gate-off profile gains none. The business NAME rides here only, never a
 // flag (flag text reaches shared surfaces).
-function adminProfileFields(identity, scope, typedSubpremise) {
+function adminProfileFields(identity, scope, typedSubpremise, occupancyAnswer) {
   if (!businessIdentified(identity)) return {};
   return {
     serviceScopeDecision: scope?.decision || null,
     serviceScopeQuestion: scope?.question || null,
+    // The CSR's answer rides the profile into the estimate inputs, so the
+    // pricing boundary and the save-time recompute both see it.
+    occupancyAnswer: normalizeOccupancyAnswer(occupancyAnswer),
     businessIdentity: {
       name: identity.matched?.name || null,
       type: identity.matched?.type || identity.ambiguousType || null,
@@ -225,7 +228,7 @@ function buildBusinessScopeContext({
     // commercial lookup keeps its own source.
     source: (base) => (classification.flipped ? BUSINESS_DETECTION_SOURCE : base),
     flags: [...classificationFlags(classification), ...scopeFlags(scope)],
-    profileFields: adminProfileFields(identity, scope, scopeSignals.typedSubpremise),
+    profileFields: adminProfileFields(identity, scope, scopeSignals.typedSubpremise, occupancyAnswer),
   };
 }
 
@@ -236,8 +239,34 @@ function effectiveSuiteUnitKey(typedUnitKey, businessScope) {
   return businessScope?.decision === SCOPE.SUITE ? (businessScope.unitKey || null) : null;
 }
 
+// The pricing-boundary refusal for a profile whose scope is still the open
+// question: a 409 the calculation route returns and the save-time recompute
+// rethrows (failClosed). An answered profile (the lookup re-run with the
+// CSR's occupancy answer, or the answer stamped on the profile) passes.
+// Returns the error to throw, or null.
+function unresolvedScopeError(profile) {
+  if (profile?.serviceScopeDecision !== SCOPE.UNRESOLVED) return null;
+  if (normalizeOccupancyAnswer(profile.occupancyAnswer)) return null;
+  const question = profile.serviceScopeQuestion || OCCUPANCY_QUESTION;
+  const err = new Error(`${question} Answer it in Property Lookup before pricing this address.`);
+  err.statusCode = 409;
+  err.code = 'COMMERCIAL_SCOPE_UNRESOLVED';
+  err.metadata = { question };
+  // A rejection, not engine breakage: the save-time recompute rethrows it
+  // rather than falling back to the browser's price.
+  err.failClosed = true;
+  return err;
+}
+
+function assertScopeAnswered(profile) {
+  const err = unresolvedScopeError(profile);
+  if (err) throw err;
+}
+
 module.exports = {
   SCOPE,
+  unresolvedScopeError,
+  assertScopeAnswered,
   OCCUPANCY_QUESTION,
   BUSINESS_DETECTION_SOURCE,
   normalizeOccupancyAnswer,
