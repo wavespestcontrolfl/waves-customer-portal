@@ -181,6 +181,12 @@ export default function useStaffSession() {
     return installStaffSessionGuard({
       getToken: getAdminAuthToken,
       onRejected: () => endSession(adminLoginUrl(locationRef.current)),
+      // GATE_ADMIN_MFA_ENFORCE switched on under an open Today: the token
+      // stays for the setup page, the offline pass and saved route go.
+      onEnrollmentRequired: () => {
+        clearStaffDeviceData();
+        navigate("/admin/two-step", { replace: true });
+      },
     });
   }, [navigate, onField]);
 
