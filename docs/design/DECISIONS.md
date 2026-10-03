@@ -3155,8 +3155,15 @@ the admin one: the admin shell's theme tokens, Roboto, weights 400/500,
 UPPERCASE 11px button and section labels, hairline borders, 4px/6px radii,
 one dark primary button per view. `tech-field.css` carries it; the legacy
 dark forms inside `.tf-existing` keep their palette until their own slice.
-Schedule changes (`visit_*` cards) render inside the Today page instead of
-floating over it: a change touching today or tomorrow keeps its own card,
-the rest fold into one summary with Review and Clear all (owner ruling the
-same day). The time clock moves from More to Today (`TechTimeTrackingCard
-variant="field"`). The flag-off legacy page is unchanged.
+Visual only: same data, same actions. On a computer the Today page splits
+into two columns (up next + route; follow-through). The flag-off legacy page
+is unchanged.
+
+## 2026-10-03 — Schedule changes live inside the Today page; the time clock moves to Today
+
+Owner rulings 2026-10-03: in the field workspace, schedule changes
+(`visit_*` cards) render inside the Today overview instead of floating over
+it: a change touching today or tomorrow keeps its own card, the rest fold
+into one summary with Review and Clear all. Tools, More and an open visit
+keep the floating cards (they do not render the inline feed). The time clock
+moves from More to Today (`TechTimeTrackingCard variant="field"`).
