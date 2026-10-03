@@ -2720,7 +2720,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // against: its updated_at, or null for none — OPTIONAL. Undefined (every
       // other caller) skips the check. Re-checked under the visit row lock.
       traceSeen,
+      // false when the sheet judged a saved trace as one its report never
+      // shows (a typed visit that is not a spray visit, a lane the tracer is
+      // hidden for) — OPTIONAL. traceSeen still carries that trace's stamp
+      // for the changed-during-completion check; the record then freezes
+      // "no trace judged", so the trace neither shows on the report nor
+      // counts as an outside treatment zone (Codex P2 on #5633).
+      traceShown,
     } = completionInput.body;
+    const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
     // The rejection itself is deferred to the fresh-execution block below:
@@ -5755,6 +5763,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // The sheet said the saved trace is one this report never shows
+          // (traceShown false). That verdict was read when the sheet opened
+          // and depends on the visit's add-ons, which can change before Send,
+          // so it is judged again here under the visit lock, with the live
+          // context's own rule. If the report would now show the trace, the
+          // record was written without checking it: refuse, as for a trace
+          // that changed (Codex P1 on #5745). A failed read refuses too.
+          if (traceShown === false && lockedSvcRow) {
+            let shownNow = true;
+            try {
+              shownNow = await trx.transaction((sp) => require('./pest-recap')
+                .traceOnReportForVisit(lockedSvcRow, completionProfile, sp));
+            } catch { shownNow = true; }
+            if (shownNow) {
+              throw Object.assign(new Error('trace visibility changed during completion'), { code: 'trace_changed' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6147,7 +6172,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
-            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6993,7 +7018,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // A report-flow completion counts only the trace it judged
               // (traceSeen): one it never saw drives no exterior timer
               // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
-              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {};
               tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
                 const row = await sp('treatment_zone_maps')
                   .where({ scheduled_service_id: svc.id })

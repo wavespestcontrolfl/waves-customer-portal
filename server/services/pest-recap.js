@@ -364,6 +364,13 @@ async function visitTraceOnReport(svc, profile, lane, knex) {
   }
 }
 
+// The same verdict for a visit row the caller already holds (the completion
+// re-judges it under the visit lock).
+async function traceOnReportForVisit(svc, profile, knex = db) {
+  const { lane } = sheetRecordFor(profile, svc);
+  return visitTraceOnReport(svc, profile, lane, knex);
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -1708,6 +1715,7 @@ module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
   buildRecapContext,
+  traceOnReportForVisit,
   draftRecapMessage,
   submitRecap,
   // Shared with completeScheduledService's expectedVisit guard.

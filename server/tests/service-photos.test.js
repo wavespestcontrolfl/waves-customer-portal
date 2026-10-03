@@ -380,4 +380,62 @@ describe('service photo uploads', () => {
     ]);
     expect(mockS3Send.mock.calls.every((call) => call[0].constructor.name === 'DeleteObjectCommand')).toBe(true);
   });
+
+  // Marks are keyed by the photo's file with no link to its row, so removing a
+  // staged photo must remove them too (Codex P2 on #5624).
+  describe('removing a staged photo', () => {
+    const VISIT = '11111111-1111-4111-8111-111111111111';
+    const PHOTO = '22222222-2222-4222-8222-222222222222';
+    const fakeTrx = (calls, { marksError = null } = {}) => {
+      const trx = (table) => {
+        const chain = {
+          where: (cond) => { chain.cond = cond; return chain; },
+          forUpdate: () => chain,
+          first: async () => {
+            if (table === 'scheduled_services') return { id: VISIT, technician_id: 'tech-1', status: 'confirmed', scheduled_date: '2026-10-02' };
+            if (table === 'service_records') return null;
+            return { id: PHOTO, s3_key: 'service-photos/staged/wall.jpg' };
+          },
+          del: async () => {
+            calls.push({ table, cond: chain.cond });
+            if (table === 'service_photo_marks' && marksError) throw marksError;
+            return 1;
+          },
+        };
+        return chain;
+      };
+      trx.isTransaction = true;
+      trx.transaction = (cb) => Promise.resolve().then(() => cb(trx));
+      return trx;
+    };
+
+    test('deletes the photo\'s treated-point marks with it', async () => {
+      const { deleteStagedServicePhoto } = require('../services/service-photos');
+      const calls = [];
+      const result = await deleteStagedServicePhoto({ scheduledServiceId: VISIT, photoId: PHOTO, actor: { techRole: 'admin' }, knex: fakeTrx(calls) });
+      expect(result.photo.id).toBe(PHOTO);
+      expect(calls).toEqual([
+        { table: 'scheduled_service_photo_staging', cond: { id: PHOTO } },
+        { table: 'service_photo_marks', cond: { scheduled_service_id: VISIT, s3_key: 'service-photos/staged/wall.jpg' } },
+      ]);
+    });
+
+    test('an environment without the marks table still removes the photo', async () => {
+      const { deleteStagedServicePhoto } = require('../services/service-photos');
+      const calls = [];
+      const result = await deleteStagedServicePhoto({
+        scheduledServiceId: VISIT, photoId: PHOTO, actor: { techRole: 'admin' },
+        knex: fakeTrx(calls, { marksError: Object.assign(new Error('no table'), { code: '42P01' }) }),
+      });
+      expect(result.photo.id).toBe(PHOTO);
+    });
+
+    test('any other marks failure fails the removal', async () => {
+      const { deleteStagedServicePhoto } = require('../services/service-photos');
+      await expect(deleteStagedServicePhoto({
+        scheduledServiceId: VISIT, photoId: PHOTO, actor: { techRole: 'admin' },
+        knex: fakeTrx([], { marksError: Object.assign(new Error('deadlock'), { code: '40P01' }) }),
+      })).rejects.toThrow('deadlock');
+    });
+  });
 });
