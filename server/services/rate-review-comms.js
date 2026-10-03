@@ -967,9 +967,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // Twilio's verdict may already be in sms_log (its callback beat this stamp):
       // that is an early failure of the text too.
       if (sms.sent && sms.sid && !early.sms) {
-        const smsLog = await trx('sms_log').where({ twilio_sid: String(sms.sid) }).first('status');
-        const failed = smsLog && ['failed', 'undelivered', 'blocked', 'canceled'].includes(String(smsLog.status).toLowerCase());
-        if (failed) early.sms = { event: String(smsLog.status).toLowerCase(), channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
+        const verdict = await require('./rate-review-apply')._private.smsDeliveryFailure(trx, { email_sent: false, sms_sent: true, metadata: { sms_sid: String(sms.sid) } });
+        if (verdict) early.sms = { event: verdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
       }
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
@@ -1413,7 +1412,14 @@ async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, 
   try {
     if (!sid) return [];
     const log = await dbh('sms_log').where({ twilio_sid: sid }).first();
-    if (!log || !log.customer_id) return [];
+    if (!log || !log.customer_id) {
+      // The callback beat the sender's own sms_log insert (or this is not a text we
+      // logged): keep the failure by sid so the delivery stamp and the nightly apply
+      // still see it. Idempotent; harmless for a sid no rate review notice ever names.
+      await dbh('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
+        .onConflict('twilio_sid').ignore();
+      return [];
+    }
     const alerts = [];
     await dbh.transaction(async (trx) => {
       for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {

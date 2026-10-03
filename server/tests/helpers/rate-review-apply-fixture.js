@@ -273,7 +273,7 @@ function createFakeDb(tables = {}) {
   db.reset = (next = {}) => {
     const base = {
       customers: [], price_change_notices: [], rate_review_snapshots: [], rate_review_batches: [], scheduled_services: [], scheduled_service_addons: [],
-      customer_plan_rates: [], plan_holds: [], annual_prepay_terms: [], audit_log: [], activity_log: [], notifications: [], sms_log: [],
+      customer_plan_rates: [], plan_holds: [], annual_prepay_terms: [], audit_log: [], activity_log: [], notifications: [], sms_log: [], rate_review_sms_failures: [],
     };
     db.store = { ...base, ...structuredClone(next) };
     db.log = [];

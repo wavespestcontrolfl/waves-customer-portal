@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 process.env.SENDGRID_WEBHOOK_PUBLIC_KEY = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
-const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set(), raw: [] };
+const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set(), raw: [], failRaw: false };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -45,7 +45,7 @@ jest.mock('../models/db', () => {
       return b;
     };
     db.isTransaction = inTx;
-    db.raw = jest.fn(async (sql, bindings) => { if (inTx) mockState.raw.push(String(bindings && bindings[0])); return { rows: [] }; });
+    db.raw = jest.fn(async (sql, bindings) => { if (mockState.failRaw && inTx) throw new Error('lock failed'); if (inTx) mockState.raw.push(String(bindings && bindings[0])); return { rows: [] }; });
     db.fn = { now: () => new Date() };
     db.transaction = async (fn) => {
       mockState.txOpen += 1;
@@ -127,6 +127,17 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect((await post([ev])).status).toBe(200);
     expect(mockHandle).toHaveBeenCalledTimes(2);
     expect(mockRaise).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failure ANYWHERE in a rate review letter\'s event transaction (here: the lock) answers non-2xx; another message\'s failure still answers 200', async () => {
+    mockState.failRaw = true;
+    try {
+      expect((await post([event({ sg_event_id: 'evt-lockfail' })])).status).toBe(500);
+      mockState.message = { ...MESSAGE, template_key: 'billing.invoice' };
+      expect((await post([event({ sg_event_id: 'evt-lockfail2' })])).status).toBe(200);
+    } finally {
+      mockState.failRaw = false;
+    }
   });
 
   test('lock order: a rate review event takes customer-comms BEFORE the address key (the sender\'s order); another message takes no customer-comms lock', async () => {

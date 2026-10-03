@@ -893,6 +893,10 @@ describe('applyDueRateChanges — per_application', () => {
     const out = await runApply(book);
     expect(out.holds.map((h) => h.reason)).toEqual(['delivery_revoked']);
     expect(visits()[1].estimated_price).toBe('117.00');
+    // the failure callback beat the send log (kept by sid in rate_review_sms_failures): the same hold
+    const early = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    early.rate_review_sms_failures = [{ twilio_sid: 'SM1', status: 'undelivered' }];
+    expect((await runApply(early)).holds.map((h) => h.reason)).toEqual(['delivery_revoked']);
     // delivered (or no verdict yet): applied as usual
     const ok = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
     ok.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'delivered' }];

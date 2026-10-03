@@ -1077,6 +1077,24 @@ describe('customer surfaces', () => {
       expect(out[0].chargeCents).toBe(10400); // only its own +$4
     });
 
+    test('a failure callback that beats the send log is kept by sid and counted at the stamp and by the apply (nothing acknowledged and forgotten)', async () => {
+      mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      // the callback arrives while the text leg runs: no sms_log row exists yet
+      smsLeg.mockImplementation(async () => {
+        expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30003' }, { dbh: mockDb })).toEqual([]);
+        expect(mockDb.store.rate_review_sms_failures).toEqual([expect.objectContaining({ twilio_sid: 'SM1', status: 'undelivered', error_code: '30003' })]);
+        // a duplicate callback is idempotent
+        await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+        expect(mockDb.store.rate_review_sms_failures).toHaveLength(1);
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(res).toMatchObject({ sent: 0, failed: 1 });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'undelivered' });
+    });
+
     test('a failed text reconciliation is re-thrown in strict mode (the status webhook then answers non-2xx) and swallowed otherwise', async () => {
       mockDb.reset(book());
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];

@@ -760,7 +760,11 @@ async function smsDeliveryFailure(dbh, notice) {
   const sid = parseMetadata(notice.metadata).sms_sid;
   if (!sid) return null;
   const log = await dbh('sms_log').where({ twilio_sid: sid }).first('status');
-  return log && SMS_FAILED_STATUSES.includes(String(log.status).toLowerCase()) ? String(log.status).toLowerCase() : null;
+  if (log && SMS_FAILED_STATUSES.includes(String(log.status).toLowerCase())) return String(log.status).toLowerCase();
+  // A failure callback that beat the send log's insert (rate-review-comms.js
+  // handleSmsDeliveryFailure keeps it, keyed by sid).
+  const early = await dbh('rate_review_sms_failures').where({ twilio_sid: sid }).first('status');
+  return early ? String(early.status).toLowerCase() : null;
 }
 
 async function loadDueNotices(dbh, asOfDay) {
