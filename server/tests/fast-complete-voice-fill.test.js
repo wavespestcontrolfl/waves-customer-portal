@@ -1629,3 +1629,39 @@ test.each([
   const out = validateFill(answer({ customerNote: note }), ctx, t);
   expect(out.customerNote).toBe('');
 });
+
+describe('live run findings (2026-10-03)', () => {
+  const T = 'Alright, this is the re-service at the house. Did the perimeter with Taurus, four ounces, and Talstar, four ounces, and a quarter ounce of surfactant. Ants were the issue, mostly out front by the entry. Activity was light.';
+
+  test('a visit quote longer than the display cap is still grounded: the cut never invents a word', () => {
+    const heard = 'Did the perimeter with Taurus, four ounces, and Talstar, four ounces, and a quarter ounce of surfactant. Ants were the issue, mostly out front by the entry. Activity was light.';
+    expect(heard.length).toBeGreaterThan(CAPS.heard);
+    const out = validateFill(answer({ visit: visit({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard }) }), ctx, T);
+    expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
+    expect(out.visit.heard.length).toBeLessThanOrEqual(CAPS.heard);
+    expect(out.visit.heard.endsWith('…')).toBe(true);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('not_heard');
+  });
+
+  test('a tank mix said with one method: the other rows follow How with no Check', () => {
+    const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard });
+    const out = validateFill(answer({ products: [row('p-taurus', 4, 'Did the perimeter with Taurus, four ounces'), row('p-talak', 4, 'Talstar, four ounces')] }), ctx, T);
+    expect(out.products.map((p) => p.method)).toEqual(['perimeter_spray', '']);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('method_not_heard');
+  });
+
+  test('a method with no word for it in the product\'s sentence is still a Check', () => {
+    const t = 'Used Taurus, four ounces. Then swept the garage.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard: 'Used Taurus, four ounces' }] }), ctx, t);
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});
+
+test('a visit quote that joins two separate phrases with a comma is grounded phrase by phrase', () => {
+  const t = 'Taurus four ounces on the perimeter and a little Termidor along the slab. Spiders outside.';
+  const out = validateFill(answer({ visit: visit({ pests: ['Spiders'], areas: ['Outside'], method: 'perimeter_spray', heard: 'Taurus four ounces on the perimeter, Spiders outside.' }) }), ctx, t);
+  expect(out.visit).toMatchObject({ pests: ['Spiders'], areas: ['Outside'], method: 'perimeter_spray' });
+  // a phrase never said still refuses the visit
+  const made = validateFill(answer({ visit: visit({ pests: ['Spiders'], heard: 'Taurus four ounces on the perimeter, Spiders everywhere.' }) }), ctx, t);
+  expect(made.visit.pests).toEqual([]);
+});

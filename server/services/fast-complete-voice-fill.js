@@ -369,6 +369,17 @@ function buildPrompt(ctx, transcript) {
 
 // ── Validator ────────────────────────────────────────────────────────────
 const cleanText = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+// A heard quote, shortened for display WITHOUT breaking its grounding: a cut
+// lands on a word boundary and ends in an ellipsis, which heardInTranscript reads
+// as a piece break. (A mid-word cut made "…Act" a word the tech never said and
+// refused a whole visit in the live run.)
+function clipHeard(value, max = CAPS.heard) {
+  const text = cleanText(value, 4000);
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const atWord = cut.slice(0, Math.max(cut.lastIndexOf(' '), 0)) || cut;
+  return `${atWord.replace(/[\s.,;:!?]+$/, '')}…`;
+}
 // Free-form notes keep their line breaks (a tech may dictate a list).
 const cleanNote = (value, max) => String(value ?? '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, max);
 const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -377,7 +388,8 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 // quotes with an ellipsis, a bar, or as whole sentences — seen live on Sonnet 5)
 // occurs in the transcript.
 function heardInTranscript(heard, normTranscript) {
-  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;])\s+/).map(norm).filter(Boolean);
+  // (also at commas: the live model joins two separate phrases with one)
+  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;,:])\s+/).map(norm).filter(Boolean);
   return pieces.length > 0 && pieces.every((piece) => ` ${normTranscript} `.includes(` ${piece} `));
 }
 
@@ -916,6 +928,14 @@ const mentionClause = (mention, world) => {
   const prevEnd = Math.max(from, ...world.mentions.filter((m) => m.end <= mention.start).map((m) => m.end));
   return { from: prevEnd, to: afterSpan(mention, world).to };
 };
+// The whole sentence a mention sits in, as a token range.
+const sentenceSpan = (mention, world) => {
+  let from = mention.start;
+  while (from > 0 && !world.stops[from]) from -= 1;
+  let to = mention.end;
+  while (to < world.tokens.length && !world.stops[to]) to += 1;
+  return { from, to };
+};
 // The positive words of a token range: negated and product-name words left out.
 const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
   .filter((_, i) => !world.negated.has(from + i) && !world.masked.has(from + i)).join(' ');
@@ -1049,9 +1069,14 @@ function methodLexicon(method) {
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   const offered = PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
   if (!offered) return '';
-  const text = productMentions(product, heard, world).map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
+  const mentions = productMentions(product, heard, world);
+  const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
   if (methodLexicon(raw.method)?.test(text)) return raw.method;
-  pushUnclear(unclear, heard, 'method_not_heard');
+  // Said in the product's sentence but beside another product ("did the perimeter
+  // with Taurus, Talstar and surfactant"): the row simply follows the visit's How,
+  // no Check. A method with no word for it anywhere near is a Check.
+  const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
+  if (!methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
 
@@ -1071,7 +1096,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
   const out = [];
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
-    const heard = cleanText(raw.heard, CAPS.heard);
+    const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
     const evidence = product ? heardProducts(ctx, heard) : null;
     const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
@@ -1238,7 +1263,7 @@ const EMPTY_VISIT = Object.freeze({ pests: [], otherPest: '', areas: [], method:
 
 function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '', world = transcriptWorld(ctx, transcript)) {
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
-  const heard = cleanText(visit.heard, CAPS.heard);
+  const heard = clipHeard(visit.heard);
   const heardOk = heardInTranscript(heard, normTranscript);
   const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear, heardOk ? visitEvidence(world) : null);
   const feet = linearFeet(visit.linearFt, transcript);
