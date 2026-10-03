@@ -6,7 +6,7 @@ const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys:
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
-const { lowRatingAlertSpec, syncLowRatingReviewAlerts } = require('../services/review-low-rating-alert');
+const { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts } = require('../services/review-low-rating-alert');
 
 const R1 = '11111111-1111-4111-8111-111111111111';
 const R2 = '22222222-2222-4222-8222-222222222222';
@@ -57,6 +57,14 @@ describe('lowRatingAlertSpec', () => {
     expect(composed.link).toBe(`/admin/reviews?responded=all&review=${R1}`);
     expect(composed.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'review_replied_or_dismissed', who: 'person' });
     expect(composeAdminAlert(lowRatingAlertSpec({ ...base, starRating: 1, reviewerName: '' })).why).toBe('A reviewer left 1 star on Google; reply to it or dismiss it on the Reviews page.');
+  });
+
+  test('a display name that breaks the alert rules falls back to "A reviewer"; a plain name is kept', () => {
+    const why = (name) => composeForReview({ id: R1, star_rating: 2, reviewer_name: name, customer_id: null }).why;
+    expect(why('Pat Example')).toMatch(/^Pat Example left 2 stars/);
+    for (const name of ['Pat 😀 Example', 'Great job!', 'pat_example_99', 'J. R. Smith', 'A'.repeat(80), 'Pat [Home]']) {
+      expect({ name, why: why(name) }).toEqual({ name, why: 'A reviewer left 2 stars on Google; reply to it or dismiss it on the Reviews page.' });
+    }
   });
 
   test('a linked review is about its customer; an unlinked one is a check on the review', () => {

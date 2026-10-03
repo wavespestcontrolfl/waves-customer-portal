@@ -38,7 +38,9 @@ const ACTIVATION_SETTINGS_KEY = 'review_low_rating_alert_activated_at';
 
 const keyFor = (reviewId) => `${KEY_PREFIX}${reviewId}`;
 
-// Pure: the alert spec for one review that needs an answer.
+// Pure: the alert spec for one review that needs an answer. `reviewerName`
+// is a Google display name (free text); composeForReview falls back to the
+// generic wording when the name breaks the alert rules.
 function lowRatingAlertSpec({ reviewId, starRating, reviewerName, customerId } = {}) {
   const stars = Number(starRating);
   if (!reviewId || !Number.isInteger(stars) || stars < 1 || stars > MAX_STARS) return null;
@@ -58,6 +60,23 @@ function lowRatingAlertSpec({ reviewId, starRating, reviewerName, customerId } =
     doneWhen: 'review_replied_or_dismissed',
     who: 'person',
   };
+}
+
+// The composed item for one review. A display name with an emoji, an
+// exclamation mark, an underscore, initials that read as a sentence end, or
+// too many characters breaks the alert rules (composeAdminAlert throws), and
+// the same review would then fail every sync and never ring (pre-push audit
+// P1): such a name falls back to "A reviewer". Same key, same metadata.
+function composeForReview(review) {
+  const { composeAdminAlert } = require('./admin-alert-compose');
+  const args = { reviewId: review.id, starRating: review.star_rating, reviewerName: review.reviewer_name, customerId: review.customer_id };
+  const spec = lowRatingAlertSpec(args);
+  if (!spec) return null;
+  try {
+    return composeAdminAlert(spec);
+  } catch {
+    return composeAdminAlert(lowRatingAlertSpec({ ...args, reviewerName: null }));
+  }
 }
 
 // The first instant this lane ran live: read once, written once (the DATABASE
@@ -97,17 +116,15 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   if (!reviewLowRatingAlertLive()) return { ...out, skipped: 'gate_off' };
   try {
     const episodes = require('./admin-alert-episodes');
-    const { composeAdminAlert } = require('./admin-alert-compose');
     const since = await activationBoundary(conn);
     const reviews = await needsAnswerQuery(conn, since);
     const live = new Set();
     for (const review of reviews) {
       const key = keyFor(review.id);
       live.add(key);
-      const spec = lowRatingAlertSpec({ reviewId: review.id, starRating: review.star_rating, reviewerName: review.reviewer_name, customerId: review.customer_id });
-      if (!spec) continue;
       try {
-        const composed = composeAdminAlert(spec);
+        const composed = composeForReview(review);
+        if (!composed) continue;
         const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
           link: composed.link,
           dedupeKey: key,
@@ -134,4 +151,4 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   return out;
 }
 
-module.exports = { lowRatingAlertSpec, syncLowRatingReviewAlerts, activationBoundary, needsAnswerQuery, CATEGORY, KEY_PREFIX, MAX_STARS };
+module.exports = { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts, activationBoundary, needsAnswerQuery, CATEGORY, KEY_PREFIX, MAX_STARS };
