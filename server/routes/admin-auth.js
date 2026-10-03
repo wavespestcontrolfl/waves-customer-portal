@@ -214,6 +214,9 @@ async function login(req, res, next) {
     // Two-step sign-in: the password alone issues no session for an enrolled
     // staff member — only a short-lived challenge for POST /login/mfa.
     if (adminMfaLive() && staffMfa.mfaEnabled(tech)) {
+      // The challenge is a short-lived bearer: same privacy headers as
+      // /login/mfa (gate-off answers keep their headers unchanged).
+      noStore(req, res, () => {});
       return res.json({
         mfaRequired: true,
         challengeToken: jwt.sign({

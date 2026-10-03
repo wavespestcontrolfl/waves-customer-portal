@@ -76,6 +76,7 @@ function response() {
     statusCode: 200,
     body: null,
     cookie: jest.fn(),
+    set: jest.fn(),
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; return this; },
   };
@@ -125,6 +126,7 @@ describe('POST /login', () => {
     expect(claims).toMatchObject({ technicianId: 'tech-1', type: 'staff_mfa_challenge', tokenVersion: 3 });
     expect(claims.exp - claims.iat).toBe(300);
     expect(res.cookie).not.toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith(expect.objectContaining({ 'Cache-Control': expect.stringContaining('no-store') }));
     expect(db).toHaveBeenCalledTimes(1); // no last_login_at write
   });
 
