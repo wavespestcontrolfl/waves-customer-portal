@@ -148,11 +148,17 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
 //                       a job applicant shares the vendor_logged disposition
 //                       but is not a vendor)
 //   needs_attention_today  no baseline: nothing decides urgency today
-// Idempotent over a 7-day lookback (Codex #5655 r1/r2): a voicemail is asked
-// once it is terminal, and each enabled provider only until that provider's
-// answer is recorded, so one still processing at run time, a missed nightly
-// run, or one provider's failed leg is picked up next time and nothing is
-// asked twice. A voicemail longer than the span the models and reviewer see is
+// Two idempotent steps over every terminal, quiet voicemail whose row changed
+// in the last 7 days (Codex #5655 r1-r6):
+//   ASK      each enabled provider until its answer on the CURRENT transcript
+//            is recorded: a missed run, a failed leg or a new transcript is
+//            picked up next time, and nothing is asked twice;
+//   REFRESH  (no model call) every unreviewed answer's production baseline and
+//            review cohort, recomputed from what production shows NOW, so a
+//            baseline is never frozen at the moment a question was asked: a
+//            retry, a reprocess or a late callback claim all show up on the
+//            next pass, and a cohort inherited from an old transcript's row is
+//            replaced. A voicemail longer than the span the models and reviewer see is
 // counted, never asked (as for the gate checks). Never throws; evidence only.
 const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed'];
 const VOICEMAIL_LOOKBACK_DAYS = 7;
@@ -162,37 +168,40 @@ const VOICEMAIL_LOOKBACK_DAYS = 7;
 // holds its processing claim (Codex #5655 r5).
 const VOICEMAIL_QUIET_MINUTES = 30;
 
-// Phase 1: terminal inbound voicemails of the lookback with usable words.
+// Phase 1: terminal, quiet inbound voicemails with usable words. The window
+// follows the row's last change (updated_at), not its creation, so a voicemail
+// that settles late is still read; created_at only bounds how far back.
+const VOICEMAIL_MAX_AGE_DAYS = 30;
 async function loadVoicemailCandidates(now) {
-  const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+  const ago = (ms) => new Date(now.getTime() - ms);
+  const DAY = 24 * 60 * 60 * 1000;
   const rows = await db('call_log')
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
     .whereRaw(INBOUND_DIRECTION_SQL)
     .whereIn('processing_status', VOICEMAIL_STATUSES)
-    .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
+    .where('created_at', '>', ago(VOICEMAIL_MAX_AGE_DAYS * DAY))
+    .where('updated_at', '>', ago(VOICEMAIL_LOOKBACK_DAYS * DAY))
+    .where('updated_at', '<', ago(VOICEMAIL_QUIET_MINUTES * 60 * 1000))
     .whereNull('processing_token')
-    .where('updated_at', '<', new Date(now.getTime() - VOICEMAIL_QUIET_MINUTES * 60 * 1000))
     .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
     // A rejected transcription stores an internal sentinel, not the caller's
     // words (Codex #5655 r4): never evidence.
     .where((q) => q.whereNull('transcription_status').orWhereNot('transcription_status', 'rejected'))
     .orderBy('created_at', 'asc')
-    .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome', 'extraction_attempts',
+    .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome',
       'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
-  return rows.filter((c) => isTerminalVoicemail(c, CALL_EXTRACTION_MAX_ATTEMPTS));
+  return rows.filter(isVoicemailRow);
 }
 
 // A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only the
-// extraction says it was a voicemail. An extraction_failed row is terminal only
-// once its retry budget is spent (a retry can still mint the lead, alert or
-// spam verdict the baselines read), and then the voice webhook's durable
-// channel fields decide (Codex #5655 r3/r4).
-function isTerminalVoicemail(c, maxAttempts) {
-  if (c.processing_status === 'extraction_failed') {
-    if (!(Number(c.extraction_attempts) >= maxAttempts)) return false;
-    return safeParse(c.ai_extraction).is_voicemail === true || c.answered_by === 'voicemail' || c.call_outcome === 'voicemail';
-  }
-  return c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true;
+// extraction says it was a voicemail. A failed extraction has none to say so,
+// so the voice webhook's durable channel fields decide. Whether an
+// extraction_failed row will still be retried is NOT judged here: a retry that
+// changes the outcome is picked up by the next pass's REFRESH (and a new
+// transcript by ASK).
+function isVoicemailRow(c) {
+  if (c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true) return true;
+  return c.processing_status === 'extraction_failed' && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail');
 }
 
 // Phase 2: which enabled providers are done with each voicemail. Done = an
@@ -267,7 +276,7 @@ async function shadowVoicemails({ now = new Date() } = {}) {
     const enabled = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
     const missingFor = (call) => enabled.filter((p) => !(done.get(String(call.id)) || new Set()).has(p));
     const toAsk = candidates.filter((c) => missingFor(c).length > 0);
-    const reached = toAsk.length ? await loadReachedPerson(toAsk) : null;
+    const reached = await loadReachedPerson(candidates);
     for (const call of toAsk) {
       if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
       const only = missingFor(call);
@@ -275,14 +284,9 @@ async function shadowVoicemails({ now = new Date() } = {}) {
         packageId: 'voicemail.v1', baselines: voicemailBaselines(call, reached), only, storedSiblings: storedAnswers.get(String(call.id)) || null,
       }, clef);
       tallyLegs(tally, only, outcome);
-      const recorded = only.filter((p) => outcome[p] === 'recorded');
-      if (recorded.length) done.set(String(call.id), new Set([...(done.get(String(call.id)) || []), ...recorded]));
     }
-    // Idempotent, no model call: every voicemail two providers answered is
-    // reconciled each pass, so a disagreement only visible after a retried leg
-    // queues both rows, and a reconcile that failed once is retried.
     for (const call of candidates) {
-      if ((done.get(String(call.id)) || new Set()).size > 1) await reconcileVoicemailCohorts(call.id, currentHash.get(String(call.id)));
+      await refreshVoicemailEvidence(call, voicemailBaselines(call, reached), currentHash.get(String(call.id)));
     }
   } catch (err) {
     logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
@@ -290,33 +294,33 @@ async function shadowVoicemails({ now = new Date() } = {}) {
   return tally;
 }
 
-// After a retried provider leg is recorded beside an earlier one: every
-// question where the providers' recorded answers now differ goes to the
-// disagreement cohort on rows that have no cohort yet (a random-audit row keeps
-// its audit; a labeled or held-out row is never touched), so both rows reach
-// the reviewer together, as a same-run pair would have.
-async function reconcileVoicemailCohorts(callId, subjectHash) {
+// REFRESH (no model call): for one voicemail's answers on the current
+// transcript, rewrite the production baseline from what production shows now
+// and recompute the review cohort with the recorder's own rule (sampleFor: the
+// subject-keyed audit draw first, then a disagreement with a baseline or with
+// another provider's current answer). Only unreviewed rows that are not held
+// out are written; labeled answers still count as siblings. Idempotent.
+async function refreshVoicemailEvidence(call, baselines, subjectHash) {
   try {
-    const { siblingDisagrees } = require('./typed-decisions/shadow-recorder');
-    // Only answers given on the current transcript are compared.
-    const rows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log', subject_id: callId, subject_hash: subjectHash })
-      .select('question_id', 'provider', 'jev_answer');
-    const byQuestion = new Map();
-    for (const r of rows) {
-      if (!byQuestion.has(r.question_id)) byQuestion.set(r.question_id, []);
-      byQuestion.get(r.question_id).push(safeParse(r.jev_answer));
+    const { sampleFor, stableDraw } = require('./typed-decisions/shadow-recorder');
+    const rows = await db('decision_reviews')
+      .where({ capability: 'voicemail', subject_type: 'call_log', subject_id: call.id, subject_hash: subjectHash })
+      .select('id', 'capability', 'package_id', 'subject_type', 'subject_id', 'question_id', 'provider', 'jev_answer', 'baseline_answers', 'sampled_for', 'label_status');
+    for (const row of rows) {
+      if (row.label_status !== 'unreviewed' || row.sampled_for === 'heldout') continue;
+      const baseline = baselines[row.question_id] || null;
+      const siblings = rows.filter((r) => r.question_id === row.question_id && r.provider !== row.provider).map((r) => safeParse(r.jev_answer));
+      const cohort = sampleFor(safeParse(row.jev_answer), baseline, () => stableDraw(row), siblings);
+      const sameBaseline = JSON.stringify(safeParseOrNull(row.baseline_answers)) === JSON.stringify(baseline);
+      if (sameBaseline && (row.sampled_for || null) === cohort) continue;
+      await db('decision_reviews').where({ id: row.id, label_status: 'unreviewed' }).whereRaw("sampled_for IS DISTINCT FROM 'heldout'")
+        .update({ baseline_answers: baseline ? JSON.stringify(baseline) : null, sampled_for: cohort });
     }
-    const split = [...byQuestion.entries()]
-      .filter(([, answers]) => answers.length > 1 && answers.some((a, i) => siblingDisagrees(a, answers.filter((_, j) => j !== i))))
-      .map(([questionId]) => questionId);
-    if (!split.length) return;
-    await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log', subject_id: callId, subject_hash: subjectHash, label_status: 'unreviewed' })
-      .whereIn('question_id', split).whereNull('sampled_for')
-      .update({ sampled_for: 'disagreement' });
   } catch (err) {
-    logger.warn(`[self-audit] voicemail cohort reconcile failed for ${callId}: ${err.message}`);
+    logger.warn(`[self-audit] voicemail evidence refresh failed for ${call.id}: ${err.message}`);
   }
 }
+const safeParseOrNull = (v) => { if (v == null) return null; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
 
 // The sampled calls that carry a live AI-extracted Waves promise. null when
 // commitments are off (no reading, so no baseline). Never throws.
