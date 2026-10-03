@@ -17,7 +17,8 @@ jest.mock('../routes/booking', () => ({
     // Stand-in for booking's own matcher (covered by its own suites): same
     // street once "Street"/"St" are folded, and no ZIP disagreement.
     addressMatchesCustomer: (customer, address, zip) => {
-      const norm = (v) => String(v || '').toLowerCase().replace(/\bstreet\b/g, 'st').replace(/[^a-z0-9]/g, '');
+      // …and, like the real one, a submitted unit still matches a unitless record.
+      const norm = (v) => String(v || '').toLowerCase().replace(/\s*(apt\s*\w+|#\s*\w+)$/g, '').replace(/\bstreet\b/g, 'st').replace(/[^a-z0-9]/g, '');
       return norm(customer.address_line1) === norm(address) && (!zip || !customer.zip || String(zip) === String(customer.zip));
     },
     MAX_BOOKING_HORIZON_DAYS: 90,
@@ -84,6 +85,8 @@ describe('a known customer\'s open times are for the property on their account',
   test.each([
     [{ address_line1: '9 Rental Road', city: 'Venice', zip: '34285' }],
     [{ address_line1: '9 Rental Road', city: 'Bradenton', zip: '34205' }],
+    [{ address_line1: '12 Test Street Apt B' }], // a unit the account does not hold is another premise
+    [{ address_line1: '12 Test Street #4', zip: '34205' }],
     [{ address_line1: '12 Test Street', city: 'Venice' }],
     [{ city: 'Venice' }],
     [{ zip: '34285' }],
@@ -128,6 +131,14 @@ describe('a known customer\'s open times are for the property on their account',
     // No address stated: nothing says the visit moved, so nothing is revoked.
     await executeTool('find_slots', { when: 'next week' }, fullTier({ revokeAccountSlots }));
     expect(revokeAccountSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('find_slots with another property but NO timeframe still refuses and revokes, before asking for the day', async () => {
+    const revokeAccountSlots = jest.fn();
+    const out = await executeTool('find_slots', { address_line1: '9 Rental Road', city: 'Venice' }, fullTier({ revokeAccountSlots }));
+    expect(out).toMatch(/not the service address on this caller's account/);
+    expect(revokeAccountSlots).toHaveBeenCalledTimes(1);
+    expect(await executeTool('find_slots', {}, fullTier())).toMatch(/Ask the caller what day or timeframe/);
   });
 
   test('the scheduling kill switch answers before any account read', async () => {

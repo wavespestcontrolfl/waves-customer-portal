@@ -515,6 +515,13 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
     if (!(sameCity && sameZip)) return { kind: 'other_property' };
     // Only a STREET proves it is the account's property.
     if (!stated.street) return { kind: 'which_property' };
+    // …and a UNIT the account does not hold is another premise at that
+    // street. booking's matcher accepts a submitted unit against a unitless
+    // record (its legacy rule for /book); here the visit would be written at
+    // the stored address WITHOUT the unit, so it goes to a person instead.
+    const UNIT_RE = /(?:\b(?:apt|apartment|unit|suite|ste|lot|bldg|building|trailer|trlr|rm|room)\b\.?\s*#?\s*[\w-]+|#\s*[\w-]+)/i;
+    const accountHasUnit = Boolean(text(customer.address_line2)) || UNIT_RE.test(String(customer.address_line1 || ''));
+    if (UNIT_RE.test(stated.street) && !accountHasUnit) return { kind: 'other_property' };
     return require('../../routes/booking')._internals.addressMatchesCustomer(customer, stated.street, stated.zip)
       ? account : { kind: 'other_property' };
   } catch (err) {
@@ -1709,10 +1716,12 @@ async function executeTool(name, input = {}, ctx = {}) {
     }
 
     if (name === 'find_slots') {
-      if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
+      // The location is judged FIRST: a call that names another property but
+      // omits the timeframe must still revoke the account's earlier offers.
       const account = await knownCallerAvailabilityLocation(input, ctx);
       const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
+      if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
       const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
