@@ -115,17 +115,30 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
     tools: portalToolsFor({ payments, visits, reservice }),
     actions: [],
     cards: payments || visits ? [] : null,
-    // Whether the payment card tool is in this lane (its own gate).
+    // Whether the payment card and re-service tools are in this lane.
     payments,
+    reservice,
     context: { secondaryProperty: secondaryProperty !== false },
   };
 }
 
-// The customer's last three messages, newest last, ending with this one (the
-// history read already holds it once saved; a failed save leaves it out).
+// The customer's last three messages, newest last, ending with this one: a
+// newest-first read of its own (the model's history read is oldest-first and
+// capped, so in a long chat it never reaches the latest words). A failed read,
+// or a save that failed, still leaves this message.
 const CUSTOMER_WORDS_KEPT = 3;
-function recentCustomerWords(history, message) {
-  const words = (history || []).filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content);
+async function recentCustomerWords(conversationId, message) {
+  let words = [];
+  try {
+    const rows = await db('agent_messages')
+      .where({ conversation_id: conversationId, role: 'user' })
+      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(CUSTOMER_WORDS_KEPT)
+      .select('content');
+    words = rows.map((r) => r.content).filter((c) => typeof c === 'string').reverse();
+  } catch (err) {
+    logger.warn(`[ai-assistant] recent customer words read failed: ${err.message}`);
+  }
   if (words[words.length - 1] !== message) words.push(message);
   return words.slice(-CUSTOMER_WORDS_KEPT);
 }
@@ -378,7 +391,7 @@ class WavesAssistant {
     const history = await this.buildHistory(conversation.id);
     // The customer's own latest words, which the re-service tool classifies
     // (the model's reading of them never decides what is covered).
-    if (lane.context) lane.context.customerWords = recentCustomerWords(history, message);
+    if (lane.reservice) lane.context.customerWords = await recentCustomerWords(conversation.id, message);
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
