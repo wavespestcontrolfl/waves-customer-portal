@@ -5972,6 +5972,36 @@ a write failure is warn-logged by error kind ONLY). No cookie, user agent
 or referrer is ever read; the network address is used only by the
 one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
+Typed-decision labeler token (`POST /api/admin/typed-decisions/reviews/:id/label`
+with header `X-Labeler-Token`; `server/routes/admin-typed-decisions.js`
+`machineLabeler`; owner 2026-10-02, "token is fine"). The Claude labeling
+runner (two blind graders that agree; `~/.claude` factory, outside this repo)
+writes its labels here instead of through a person's admin session. Every other
+caller and every other path of this router keeps `adminAuthenticate` +
+`requireAdmin` unchanged: the token branch runs ONLY when the header is present.
+**Auth:** constant-time compare (`safeEqual`) against
+`TYPED_DECISIONS_LABELER_TOKEN`; unset or shorter than 32 characters = off.
+**Token format gate / generic 404:** the check is against the env value with no
+DB read; a wrong, short or unset token, any method other than POST, any path
+other than `/reviews/<uuid>/label`, and `GATE_TYPED_DECISIONS` off all answer the
+same `404 { error: 'Not found' }`. **Gate:** `GATE_TYPED_DECISIONS` (dark gate:
+the limiter is skipped while it is off, so a probe never sees a revealing 429).
+**Rate limit:** 120 requests a minute per IP (`labelerLimiter`), applied only
+after the token and gate pass. **Privacy headers:** `Cache-Control: no-store`,
+`X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer` on every response to a
+request carrying the header. **Writes:** exactly the label write a person makes
+(the same verdict / `seen_answer` / `seen_subject` binding and 409s), narrowed:
+`force` is refused (`403 labeler_no_force`) before any write, the update matches
+only rows still `unreviewed` (a row a person labeled answers
+`409 already_labeled`), `labeled_by` is the fixed string `claude-labeler`, and
+the audit row is actor `system`. **Payload:** the same `{ review }` as the staff
+route (the review row's ids, answers and label; subject text is never returned
+by this write). Exception to the baseline, recorded on purpose: past the token
+check, the route's own validation answers keep their staff-route statuses (400
+bad body, 404 unknown review, 409 `subject_changed` / `answer_changed` /
+`already_labeled`), because the caller holds a valid secret and needs them to
+skip or retry; none of them is reachable without the token.
+
 The route-WIDE invariants — every public route must be listed here, the
 baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the

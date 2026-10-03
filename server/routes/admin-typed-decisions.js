@@ -18,6 +18,7 @@
 const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
 const { readCorrectionReason } = require('../services/correction-reasons');
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -34,18 +35,25 @@ const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow
 // ONLY POST /reviews/:id/label, writes only rows nobody has labeled yet (no
 // force, never over a person's label) and is recorded as labeled_by
 // 'claude-labeler'. Unset (or shorter than 32 characters) = off. A request
-// without the header goes through admin sign-in exactly as before.
+// without the header goes through admin sign-in exactly as before. Contract:
+// docs/public-route-contracts.md "Typed-decision labeler token": a wrong or
+// unset token, any other path or method, and the dark gate all answer the same
+// generic 404 (checked against the env value, no DB read); a valid token rides
+// a per-IP limiter only while the gate is live; privacy headers on every
+// token response.
 const MACHINE_LABELER = 'claude-labeler';
-const LABEL_PATH = /^\/reviews\/[^/]+\/label$/;
+const LABEL_PATH = /^\/reviews\/[0-9a-f-]{36}\/label$/i;
 const MIN_LABELER_TOKEN_CHARS = 32;
+const labelerLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 function machineLabeler(req, res, next) {
   const supplied = req.get('x-labeler-token');
   if (supplied === undefined) return next();
+  res.set({ 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer' });
   const expected = process.env.TYPED_DECISIONS_LABELER_TOKEN || '';
   const ok = expected.length >= MIN_LABELER_TOKEN_CHARS && safeEqual(supplied, expected);
-  if (!ok || req.method !== 'POST' || !LABEL_PATH.test(req.path)) return res.status(401).json({ error: 'Unauthorized' });
+  if (!ok || req.method !== 'POST' || !LABEL_PATH.test(req.path) || !typedDecisionsLive()) return res.status(404).json({ error: 'Not found' });
   req.machineLabeler = true;
-  return next();
+  return labelerLimiter(req, res, next);
 }
 router.use(machineLabeler);
 router.use((req, res, next) => (req.machineLabeler ? next() : adminAuthenticate(req, res, next)));

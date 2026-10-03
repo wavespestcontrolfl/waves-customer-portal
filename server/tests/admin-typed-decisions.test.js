@@ -362,20 +362,37 @@ describe('machine labeler token (X-Labeler-Token)', () => {
     expect(called(log, 'decision_reviews', 'update')).toHaveLength(0);
   });
 
-  test('a wrong token, a short configured token, or no configured token is 401 with no database read', async () => {
+  test('a wrong token, a short configured token, or no configured token is a generic 404 with no database read', async () => {
     const log = installDb({ decision_reviews: { first: [baseRow()] } });
-    expect((await send('POST', `/reviews/${ID}/label`, `${TOKEN}x`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    const wrong = await send('POST', `/reviews/${ID}/label`, `${TOKEN}x`, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(wrong).toEqual({ status: 404, body: { error: 'Not found' } });
     process.env.TYPED_DECISIONS_LABELER_TOKEN = 'short';
-    expect((await send('POST', `/reviews/${ID}/label`, 'short', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    expect((await send('POST', `/reviews/${ID}/label`, 'short', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
     delete process.env.TYPED_DECISIONS_LABELER_TOKEN;
-    expect((await send('POST', `/reviews/${ID}/label`, '', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    expect((await send('POST', `/reviews/${ID}/label`, '', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
     expect(log.decision_reviews || []).toHaveLength(0);
   });
 
   test('the token opens nothing but the label route', async () => {
     installDb({ decision_reviews: { list: [baseRow()] } });
-    expect((await send('GET', '/reviews', TOKEN)).status).toBe(401);
-    expect((await send('GET', '/status', TOKEN)).status).toBe(401);
-    expect((await send('GET', `/reviews/${ID}/label`, TOKEN)).status).toBe(401);
+    expect((await send('GET', '/reviews', TOKEN)).status).toBe(404);
+    expect((await send('GET', '/status', TOKEN)).status).toBe(404);
+    expect((await send('GET', `/reviews/${ID}/label`, TOKEN)).status).toBe(404);
+    expect((await send('POST', '/reviews/not-a-uuid/label', TOKEN, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+  });
+
+  test('the dark gate answers the same generic 404, and token responses carry privacy headers', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    process.env.GATE_TYPED_DECISIONS = 'false';
+    const r = await fetch(`${baseUrl}/admin/typed-decisions/reviews/${ID}/label`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': TOKEN }, body: JSON.stringify({ verdict: 'jev_right', seen_answer: SEEN }),
+    });
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'Not found' });
+    expect(r.headers.get('cache-control')).toBe('no-store');
+    expect(r.headers.get('x-robots-tag')).toBe('noindex');
+    expect(r.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(r.headers.get('ratelimit-limit')).toBeNull();
+    expect(log.decision_reviews || []).toHaveLength(0);
   });
 });
