@@ -240,15 +240,19 @@ if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
 // Gate index (rule 7) — docs/gate-index.md matches what the code implies.
 // =========================================================================
 const { INDEX_FILE: GATE_INDEX_FILE, expectedIndex, currentIndex } = require('./generate-gate-index');
-const expectedGateLines = expectedIndex().split('\n');
-const currentGateLines = new Set(currentIndex().split('\n'));
+const expectedGateIndex = expectedIndex();
+const currentGateIndex = currentIndex();
+const expectedGateLines = expectedGateIndex.split('\n');
+const currentGateLines = new Set(currentGateIndex.split('\n'));
 const expectedGateLineSet = new Set(expectedGateLines);
 const staleGateLines = [
   ...expectedGateLines.filter((line) => !currentGateLines.has(line)).map((line) => `missing or changed: ${line}`),
   ...[...currentGateLines].filter((line) => !expectedGateLineSet.has(line)).map((line) => `no longer true: ${line}`),
 ];
-if (staleGateLines.length || expectedIndex() !== currentIndex()) {
-  const onRailway = Object.keys(process.env).some((key) => key.startsWith('RAILWAY_'));
+if (expectedGateIndex !== currentGateIndex) {
+  // Markers Railway injects into a deployment's build, never a credential a
+  // developer exports (RAILWAY_TOKEN must not switch the rule off locally).
+  const onRailway = Boolean(process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA);
   console.error(`${GATE_INDEX_FILE}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
   for (const line of staleGateLines.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
   if (staleGateLines.length > 10) console.error(`    ... and ${staleGateLines.length - 10} more line(s).`);

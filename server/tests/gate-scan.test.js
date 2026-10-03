@@ -15,6 +15,13 @@ describe('gate scan: what counts as a gate the code reads', () => {
     `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO', 'GATE_CHARLIE', 'GATE_DELTA_SINCE', 'GATE_ECHO']);
   });
 
+  test('reads destructured from process.env, with an alias or a default', () => {
+    expect(names(`
+      const { GATE_ALPHA, GATE_BRAVO: bravo = 'off', NODE_ENV } = process.env;
+      const { GATE_NOT_ENV } = options;
+    `)).toEqual(['GATE_ALPHA', 'GATE_BRAVO']);
+  });
+
   test('a gate named only in a comment is not a read', () => {
     expect(names(`
       // set GATE_LINE_COMMENT=true to turn this on

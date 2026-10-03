@@ -8,6 +8,7 @@
  *
  * A gate is a GATE_* name the code READS from the environment:
  *   process.env.GATE_X or env.GATE_X, process.env['GATE_X'],
+ *   const { GATE_X } = process.env,
  *   a gate helper called with the name (gateEnvValue('GATE_X'),
  *   gateEnvTimestamp('GATE_X'), gate('GATE_X')), or a gate-named constant
  *   that holds the name for a later lookup (const GATE_ENV = 'GATE_X').
@@ -45,6 +46,9 @@ const READ_PATTERNS = [
   // const GATE_ENV = 'GATE_X'; const SUMMARY_GATE = 'GATE_X';
   new RegExp(`\\b(?:const|let|var)\\s+[A-Za-z0-9_$]*(?:GATE|[gG]ate)[A-Za-z0-9_$]*\\s*=\\s*${QUOTED}`, 'g'),
 ];
+
+const DESTRUCTURED = /\{([^{}]*)\}\s*=\s*(?:process\.)?env\b/g;
+const KEY = new RegExp(`^(${NAME})(?![A-Z0-9_])`);
 
 function walk(dir, out) {
   let entries;
@@ -109,6 +113,15 @@ function gatesInSource(src) {
     pattern.lastIndex = 0;
     let match;
     while ((match = pattern.exec(code))) names.add(match[1]);
+  }
+  // const { GATE_X, GATE_Y: alias = 'off' } = process.env;
+  DESTRUCTURED.lastIndex = 0;
+  let block;
+  while ((block = DESTRUCTURED.exec(code))) {
+    for (const property of block[1].split(',')) {
+      const key = property.trim().match(KEY);
+      if (key) names.add(key[1]);
+    }
   }
   return names;
 }
