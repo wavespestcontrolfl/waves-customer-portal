@@ -613,20 +613,47 @@ postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () =>
     } finally { await cleanup(f); }
   });
 
-  test('editing a stamped line\'s AMOUNT or SERVICE strips the marker → the next unpriced plan visit bills the month', async () => {
-    for (const edit of [{ unit_price: 60, amount: 60 }, { description: 'Something else entirely', category: 'Other' }]) {
-      const f = await seedMember();
-      try {
-        const a = await mintDues(f, 'Lawn Care');
-        const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, ...edit } : li));
-        await InvoiceService.update(a.invoice.id, { line_items: lines });
-        expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
-        // The month is uncovered again: the next plan visit mints dues.
-        await mintDues(f, 'Pest Control');
-        expect((await liveInvoicesFor(f)).filter((r) => stampedOf(r))).toHaveLength(1);
-        expect(await invoicesFor(f)).toHaveLength(2);
-      } finally { await cleanup(f); }
-    }
+  // The rule is judged against the STORED invoice only: a stamped line keeps its
+  // marker while its month, category and amount are unchanged (a wording fix
+  // to the description is fine); change the amount or category and it goes.
+  test.each([
+    ['AMOUNT', { unit_price: 60, amount: 60 }],
+    ['CATEGORY', { category: 'Other' }],
+  ])('editing a stamped line\'s %s strips the marker → the next unpriced plan visit bills the month', async (_name, edit) => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, ...edit } : li));
+      await InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      // The month is uncovered again: the next plan visit mints dues.
+      await mintDues(f, 'Pest Control');
+      expect((await liveInvoicesFor(f)).filter((r) => stampedOf(r))).toHaveLength(1);
+      expect(await invoicesFor(f)).toHaveLength(2);
+    } finally { await cleanup(f); }
+  });
+
+  test('a DESCRIPTION-only edit keeps the marker', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, description: 'Lawn Care (September visit)' } : li));
+      await InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), description: 'Lawn Care (September visit)' });
+    } finally { await cleanup(f); }
+  });
+
+  test('the rate changes after the mint and staff add an unrelated fee, dues line untouched → the stamp is kept and the month stays covered', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await mockPg('customers').where({ id: f.customerId }).update({ monthly_rate: 59 });
+      const lines = [...a.invoice.line_items, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }];
+      await InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 49 });
+      const { monthlyDuesCollected } = require('../services/billing-lane');
+      expect(await monthlyDuesCollected(mockPg, f.customerId, new Date())).toBe(true);
+    } finally { await cleanup(f); }
   });
 
   test('an edit that leaves the dues line intact (an extra line added) keeps the marker', async () => {
@@ -638,6 +665,16 @@ postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () =>
       expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 49 });
       await mintDues(f, 'Pest Control').catch(() => {});
       expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('a marker for a DIFFERENT month than the stored stamp is stripped', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, membership_dues_month: '2099-01' } : li));
+      await InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
     } finally { await cleanup(f); }
   });
 

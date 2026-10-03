@@ -1808,8 +1808,8 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
 // membership_dues_month is written ONLY by the completion mint
 // (stampMembershipDuesUnderLock). After the mint it can be KEPT or REMOVED,
 // never created or re-pointed: create() drops it unless the mint vouches for
-// it, and every rewrite of line_items (update) re-runs the mint's provenance
-// check on the line as edited and strips the marker when it no longer holds.
+// it, and every rewrite of line_items (update) keeps it only on the stored
+// stamped line, unchanged in month, category and amount.
 function stripMembershipDuesMarkers(lineItems) {
   if (!Array.isArray(lineItems) || !lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
     return lineItems;
@@ -1821,37 +1821,30 @@ function stripMembershipDuesMarkers(lineItems) {
   });
 }
 
-async function sanitizeMembershipDuesMarkers(existing, newLines) {
+// Judged against the STORED invoice only — no customer or visit read, so a
+// later rate or lane change cannot erase the month's dedupe evidence and
+// there is no read to fail. A line keeps the marker iff it IS the stored
+// stamped line, unchanged where it matters: same month, same category, same
+// amount (the invoice's own line math, in cents). The description may change
+// (a wording fix keeps the stamp). First such line only; a marker the stored
+// invoice did not carry — or carried for another month — is stripped, so an
+// edit can keep a stamp but never create one. Mint-time provenance
+// (stampMembershipDuesUnderLock) stays the only authority for creating it.
+function sanitizeMembershipDuesMarkers(existing, newLines) {
   if (!Array.isArray(newLines) || !newLines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
     return newLines;
   }
   const stored = parseInvoiceLineItems(existing.line_items).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
   if (!stored) return stripMembershipDuesMarkers(newLines);
-  let visit = null;
-  let customer = null;
-  try {
-    let visitId = existing.scheduled_service_id || null;
-    if (!visitId && existing.service_record_id) {
-      visitId = (await db("service_records").where({ id: existing.service_record_id }).first("scheduled_service_id"))?.scheduled_service_id || null;
-    }
-    if (visitId) visit = await db("scheduled_services").where({ id: visitId }).first("estimated_price", "primary_line_price", "is_callback");
-    customer = await db("customers").where({ id: existing.customer_id }).first("billing_mode", "monthly_rate", "waveguard_tier");
-  } catch (err) {
-    // Unverifiable provenance never keeps a marker (a stripped marker only
-    // re-bills the month; a kept one could hide it).
-    logger.warn(`[invoice] dues provenance recheck failed for invoice ${existing.id}: ${err.message}`);
-  }
-  const sameService = (li) => String(li.description || "").trim() === String(stored.description || "").trim()
-    && String(li.category || "") === String(stored.category || "");
+  const lineCents = (li) => Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100);
   let kept = false;
   return newLines.map((li) => {
     if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
-    const lineAmount = Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100) / 100;
-    const holds = !kept
+    const unchanged = !kept
       && li[MEMBERSHIP_DUES_LINE_KEY] === stored[MEMBERSHIP_DUES_LINE_KEY]
-      && sameService(li)
-      && membershipDuesProvenanceHolds({ visit, customer, lineAmount });
-    if (holds) { kept = true; return li; }
+      && String(li.category || "") === String(stored.category || "")
+      && lineCents(li) === lineCents(stored);
+    if (unchanged) { kept = true; return li; }
     const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
     return rest;
   });
@@ -9558,10 +9551,10 @@ const InvoiceService = {
       }
     }
 
-    // The dues stamp survives an edit only while the mint's provenance still
-    // holds on the line as edited (see stripMembershipDuesMarkers).
+    // The dues stamp survives an edit only on the stored stamped line, unchanged
+    // in month, category and amount (see sanitizeMembershipDuesMarkers).
     if (updates.line_items) {
-      updates = { ...updates, line_items: await sanitizeMembershipDuesMarkers(existing, updates.line_items) };
+      updates = { ...updates, line_items: sanitizeMembershipDuesMarkers(existing, updates.line_items) };
     }
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
