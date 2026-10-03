@@ -585,6 +585,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
+  lawnPairedRecheck: Object.freeze({
+    name: 'lawnPairedRecheck',
+    // The paired-photo recheck (services/lawn-paired-recheck.js,
+    // GATE_LAWN_PAIRED_RECHECK, lawn report rebuild P19b; owner ruling
+    // 2026-09-29 round 3b): one multimodal call per visit reads last visit's and
+    // today's same-spot overview photos as pairs and returns a closed
+    // better / same / worse / cannot_tell verdict. Same two legs as
+    // lawnVisitAssessment (the lawn photo lane's models; no Claude leg, no
+    // parallel providers): Gemini answers, OpenAI stands in only when it
+    // returns nothing usable.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
+  }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
     // Photo ID (pest-identification.js: website funnel, SMS photo triage,
@@ -611,6 +624,17 @@ const TEXT_POLICIES = Object.freeze({
     // with ladder 'gemini_only') only. Owner 2026-10-02: Gemini's one read
     // answers; OpenAI stands in only when Gemini returns nothing usable.
     // plantIdVision below keeps visit prep on its full ladder.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
@@ -746,6 +770,10 @@ module.exports = {
 //                                  default: gpt-4o-transcribe-diarize
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
 //                                  default: gemini-2.5-flash
+//   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
+//                                  (services/fast-complete-voice-fill.js; goes through
+//                                  call-recording-processor's transcribeWithOpenAI)
+//                                  default: gpt-transcribe (32-clip test 2026-10-03)
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary

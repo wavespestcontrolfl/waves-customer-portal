@@ -79,6 +79,10 @@ const TECHNICIAN_ALLOW_LIST = [
   // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
+  // Neighborhood gate codes from a visit (owner 2026-10-03): add a code that
+  // worked, or report one wrong. The router pins both to a visit on the
+  // technician's own route; the directory itself stays admin-only.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/neighborhood-access\/visits\/[^/]+\/entries(\/[^/]+\/wrong)?$/ },
   // Pay at the visit (owner: card on file, pay after the first visit).
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/invoices\/[^/]+$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote|void)$/ },

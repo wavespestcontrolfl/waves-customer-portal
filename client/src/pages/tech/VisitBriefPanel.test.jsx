@@ -197,6 +197,84 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText('Chemical sensitivity — no interior spray')).toBeInTheDocument();
   });
 
+  describe('neighborhood gate codes from the visit', () => {
+    const gateStop = (alert = {}) => stopOf({
+      ...BASE_SERVICE,
+      neighborhoodGateActions: true,
+      propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: 'entry-1', neighborhoodEntryCode: '4242', reportedWrong: false, ...alert }],
+    });
+    const panel = (stop, props = {}) => render(
+      <VisitBriefPanel stop={stop} detail={undefined} onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()} {...props} />,
+    );
+
+    it('Wrong code asks first, reports the entry through the visit and refreshes the route', async () => {
+      const request = vi.fn().mockResolvedValue({ id: 'entry-1', status: 'needs_confirm' });
+      const onGateChanged = vi.fn();
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
+      panel(gateStop(), { request, onGateChanged });
+      fireEvent.click(screen.getByRole('button', { name: 'Wrong code' }));
+      expect(request).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wrong code' })); });
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledWith(
+        '/admin/neighborhood-access/visits/svc-1/entries/entry-1/wrong',
+        { method: 'POST', body: '{"code":"4242"}' },
+      );
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent('Reported. The office will check that code.');
+    });
+
+    it('a code the office changed meanwhile is refused and the route refreshes', async () => {
+      const request = vi.fn().mockRejectedValue(Object.assign(new Error('That code was changed. Check your route for the new one.'), { status: 409, code: 'entry_changed' }));
+      const onGateChanged = vi.fn();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      panel(gateStop(), { request, onGateChanged });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wrong code' })); });
+      expect(screen.getByRole('alert')).toHaveTextContent('That code was changed');
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('a code already reported shows that instead of the button', () => {
+      panel(gateStop({ reportedWrong: true }), { request: vi.fn() });
+      expect(screen.getByText('Reported wrong')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Wrong code' })).not.toBeInTheDocument();
+    });
+
+    it('Add gate code posts the typed code and shows the server\'s refusal inline', async () => {
+      const request = vi.fn()
+        .mockRejectedValueOnce(new Error('A keypad code is 3 to 8 digits, with an optional leading or trailing # or *'))
+        .mockResolvedValue({ id: 'entry-2', status: 'active' });
+      const onGateChanged = vi.fn();
+      panel(gateStop(), { request, onGateChanged });
+      fireEvent.click(screen.getByRole('button', { name: 'Add gate code' }));
+      fireEvent.change(screen.getByLabelText('Neighborhood gate code'), { target: { value: ' 12 ' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+      expect(request).toHaveBeenCalledWith('/admin/neighborhood-access/visits/svc-1/entries', { method: 'POST', body: '{"code":"12"}' });
+      expect(screen.getByRole('alert')).toHaveTextContent('A keypad code is 3 to 8 digits');
+      expect(onGateChanged).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByLabelText('Neighborhood gate code'), { target: { value: '5150' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent("Saved to this neighborhood's gate codes.");
+      expect(screen.queryByLabelText('Neighborhood gate code')).not.toBeInTheDocument();
+    });
+
+    it('a stop with no neighborhood and no alerts still offers nothing; a marked stop offers Add with no alerts', () => {
+      const { unmount } = panel(stopOf(BASE_SERVICE), { request: vi.fn() });
+      expect(screen.queryByText('Access')).not.toBeInTheDocument();
+      unmount();
+      panel(stopOf({ ...BASE_SERVICE, neighborhoodGateActions: true }), { request: vi.fn() });
+      expect(screen.getByRole('button', { name: 'Add gate code' })).toBeInTheDocument();
+    });
+
+    it('without the stop mark (gate off) a neighborhood code line has no controls', () => {
+      panel(stopOf({ ...BASE_SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)' }] }), { request: vi.fn() });
+      expect(screen.getByText('Gate: 4242 (neighborhood)')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Wrong code' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add gate code' })).not.toBeInTheDocument();
+    });
+  });
+
   it('shows the retry row only when every detail fetch failed', () => {
     const onRetry = vi.fn();
     render(

@@ -55,6 +55,29 @@ write engine's own `server/services/rider-series.js`):
 | `OVERDUE_WAIT_DAYS` | 28 | `MAX_WAIT_DAYS - MIN_GAP_DAYS` |
 | `MAX_HORIZON_EXTRA_DAYS` | 730 | horizon cap past the standalone horizon |
 
+Gaps per rider cadence (`RIDER_GAPS`, owner ruling 2026-10-01, second batch).
+The three constants above are the quarterly row. On a monthly lawn host (28 to
+35 days between visits) `min` sits between k−1 and k lawn gaps, so the rider
+takes every k-th lawn visit:
+
+| rider cadence | min | target | max | lawn visit taken |
+|---|---|---|---|---|
+| `monthly` | 21 | 28 | 49 | every visit |
+| `bimonthly` | 49 | 56 | 77 | every 2nd |
+| `quarterly` | 77 | 84 | 105 | every 3rd (every 2nd on a 6-week lawn) |
+| `semiannual` | 161 | 182 | 196 | every 6th |
+| `seasonal_feb_oct` | 21 | 28 | 49 | every Feb–Oct visit |
+
+A seasonal rider never takes a Nov–Jan lawn date. Its wait does not run
+through the winter: a window that starts off season starts on the season's
+first day, and one that only ends off season stays open the same number of
+days into the next season. With no lawn date to take it stands alone on its
+own Feb–Oct walk date. A cadence with no row is planned with the quarterly
+gaps. Which host may carry which rider is `RIDER_PAIRINGS`; its `gated` rows
+(bi-monthly pest or tree & shrub, monthly pest, semiannual pest and seasonal
+mosquito, all on a monthly lawn) are open only while
+`GATE_RIDER_PAIRS_MONTHLY_LAWN` is on.
+
 `planRiderDates` (pure, no DB) and `computeRiderHorizon` apply the SAME rule
 the write engine uses — copied, not re-derived, so the preview and the
 eventual write engine can never silently disagree about "what the plan is."

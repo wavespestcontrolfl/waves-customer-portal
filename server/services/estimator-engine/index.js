@@ -493,6 +493,7 @@ function commercialHint(context) {
 }
 
 const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
+const { applyBusinessCommercialVerdict, stampBusinessScope, withoutBusinessListing } = require('./business-scope-engine');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
@@ -517,7 +518,8 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // The normalized profile carries the pricing feature modifiers the raw
       // record doesn't (pool/cage, shrub density, landscape complexity,
       // water adjacency) — dropping it priced known features as absent.
-      enriched = lookup?.enriched || null;
+      // Minus the Places listing (never stored; business-scope-engine.js).
+      enriched = withoutBusinessListing(lookup?.enriched || null);
       lookupCache = lookup?.meta?.cache || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
@@ -2450,6 +2452,17 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // re-gathered signals carry their OWN audit, so a corrected address is
     // judged on its own lookup, not the original one's.
     const effectiveParcelOk = parcelSignalsDescribeGatheredAddress(effectiveSignals);
+    // GATE_LOOKUP_BUSINESS_IDENTITY: a business listed at the address with the
+    // scope still open is only ever a "staff must confirm" (red lane, or a
+    // review flag for a caller who lives there). Places never changes the
+    // intent or any size here. null (and no effect anywhere below) without it.
+    const businessVerdict = applyBusinessCommercialVerdict({
+      intent,
+      enriched: effectiveSignals.enriched,
+      parcelOk: effectiveParcelOk,
+      extraction: context.extraction,
+      crossProperty: crossPropertyRegather,
+    });
     propertyFacts = resolvePropertyFacts({
       // Caller-stated facts (extraction) describe the property discussed on
       // THIS call — they stay.
@@ -2464,7 +2477,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // draft to review.
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
-    result.propertyFacts = propertyFacts;
+    result.propertyFacts = stampBusinessScope(propertyFacts, businessVerdict);
 
     // Facts view for the SCOPE classifiers on a true property switch: the
     // arbitration deliberately keeps the call's caller-stated facts (they

@@ -149,9 +149,11 @@ const POLICY_SELECTOR = {
   estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
+  lawnPairedRecheck: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPestV2: { primary: 'GEMINI_PHOTO_ID_PEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
+  treeShrubWatchSignals: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
@@ -409,7 +411,7 @@ const LANES = [
   // 09-28): identify mode only, and only for an identity lane where Gemini
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
   // invalid, or out of budget leaves the escalation result unchanged.
-  L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE, shadow only: records what it would book, books nothing (owner ruling 2026-10-02: one model, Sonnet 5.5)' }),
+  L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
   L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
@@ -419,6 +421,10 @@ const LANES = [
   L('typed_decisions_clef', 'Typed decisions, second provider (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecisionClef'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS_CLEF dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
+  L('lawn_paired_recheck', 'Lawn paired-photo recheck (last visit vs today)', 'lawn-paired-recheck.js', 'multimodal', P('lawnPairedRecheck', 'primary'), P('lawnPairedRecheck', 'fallback'), { inbound: true, note: 'GATE_LAWN_PAIRED_RECHECK, dark; one call per visit after the visit memory freezes; verdict is a closed enum (never customer copy) and a miss writes nothing (owner ruling 2026-09-29 round 3b)' }),
+  // Tree & Shrub Fast Complete watch-signal read (GATE_TS_WATCH_LIST, dark): one small Gemini read per
+  // photo that returns only watch-list keys for the technician's sheet, OpenAI on a Gemini miss.
+  L('ts_watch_signals', 'Tree & shrub watch-list signals (Fast Complete)', 'tree-shrub-assessment.js', 'multimodal', P('treeShrubWatchSignals', 'primary'), P('treeShrubWatchSignals', 'fallback'), { inbound: true, note: 'GATE_TS_WATCH_LIST, dark; keys only, tech-facing, never customer copy; a miss shows the sheet no read' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
   // or serious Gemini answer, and Fable breaks a Gemini/Sol NAME disagreement
   // (grass type, what a finding is) only. Single leg, no automatic fallback.
@@ -582,6 +588,7 @@ const LANES = [
   L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D(['OPENAI_TRANSCRIPT_LABEL_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
+  L('voice_fill_transcription', 'Fast Complete voice fill · speech to text', 'fast-complete-voice-fill.js', 'locked', D('OPENAI_VOICE_FILL_TRANSCRIBE_MODEL', 'gpt-transcribe', { live: true }), null, { inbound: true, lock: LOCK.benchmark('32 recorded visits 2026-10-03: 19-20 forms filled perfectly vs 16 on gpt-4o-transcribe, both primed with the sheet\'s product names'), note: 'GATE_FAST_COMPLETE_VOICE_FILL; the clip is transcribed with the sheet\'s product names, then fast_complete_voice_fill maps it' }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
   // Blog image generation (content/image-generator.js, env BLOG_IMAGE_PROVIDER).
   // Literals are the REAL no-env defaults — computed through the same
@@ -659,6 +666,7 @@ const LANE_AREA = {
   contact_dictation: 'calls',
   address_recovery: 'calls',
   tech_dictation: 'calls',
+  voice_fill_transcription: 'office',
   parse_when: 'calls',
   voice_relay: 'voice',
   voice_relay_collections: 'voice',
@@ -671,6 +679,8 @@ const LANE_AREA = {
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
+  lawn_paired_recheck: 'photos',
+  ts_watch_signals: 'photos',
   tree_shrub: 'photos',
   treatment_zone: 'photos',
   tech_caption_vision: 'photos',
@@ -819,6 +829,7 @@ const LANE_DESCRIBE = {
   contact_dictation: 'Decodes dictated contact details',
   address_recovery: 'Recovers a street address that did not validate',
   tech_dictation: 'Transcribes field notes from the tech',
+  voice_fill_transcription: 'Hears what the tech said for Fast Complete voice fill',
   parse_when: 'Reads "next Tuesday morning" into a date',
   voice_relay: 'Speaks with callers on the phone line (Sandy)',
   voice_relay_collections: 'Speaks with customers on collections calls',
@@ -833,6 +844,8 @@ const LANE_DESCRIBE = {
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
+  lawn_paired_recheck: "Compares last visit's and today's same-spot lawn photos as pairs: better, same or worse (dark)",
+  ts_watch_signals: 'Flags which of this month\'s tree and shrub watch-list items a photo may show, for the technician (dark)',
   tree_shrub: 'Assesses trees and shrubs from a photo',
   treatment_zone: 'Suggests treatment zones on the property map',
   tech_caption_vision: 'Reads a job photo for a caption',

@@ -46,6 +46,7 @@ import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import TechFieldHome from './TechFieldHome';
+import TechScheduleChanges from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
@@ -290,7 +291,8 @@ async function techRequest(path, options = {}) {
   const res = await fetch(`${API}/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // A FormData body (a recorded clip) sets its own multipart boundary.
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: `Bearer ${token}`,
       ...(options.headers || {}),
     },
@@ -386,7 +388,7 @@ export default function TechHomePage({ section = 'today' }) {
   const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
   const base = useTechBasePath();
-  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null, techRole = null } = useOutletContext() || {};
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
@@ -395,6 +397,8 @@ export default function TechHomePage({ section = 'today' }) {
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
+  // The inline schedule-change feed has loaded (TechScheduleChanges onReady).
+  const [scheduleFeedReady, setScheduleFeedReady] = useState(false);
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
@@ -939,6 +943,11 @@ export default function TechHomePage({ section = 'today' }) {
   return (
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
+        // The field workspace's Today overview shows schedule changes in the
+        // page (TechScheduleChanges) once its feed has loaded; Tools, More, an
+        // open visit, or a feed that has not loaded keep the floating cards
+        // (pre-push audit P1, Codex #5786 P2).
+        inlineScheduleChanges={fieldWorkspace && section === 'today' && !selectedVisitKey && scheduleFeedReady}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
@@ -959,8 +968,10 @@ export default function TechHomePage({ section = 'today' }) {
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
+          scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
+          timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           timekeeping={<>
-            <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
+            <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/documents${visitSearch}`}>Staff documents</Link></div>}
             {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`${base}/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
@@ -981,6 +992,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+                onGateChanged={fetchSchedule}
               /></div>}
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
@@ -1277,6 +1289,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onToggle={() => toggleStop(stop)}
                 onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
+                onGateChanged={fetchSchedule}
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedVisit(s)
@@ -1509,6 +1522,8 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          // One gate for every sheet's voice fill: only an exact true turns it on.
+          voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setLawnReserviceFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1857,7 +1872,7 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine, onGateChanged }) {
   // The busy guard lives in the list's toggleStop (any header, not only
   // this row's, must leave a panel with a text or bridge in flight mounted).
   const toggle = () => onToggle();
@@ -1961,6 +1976,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           techLine={techLine}
           onBusyChange={onBusyChange}
           request={techRequest}
+          onGateChanged={onGateChanged}
         />
       )}
     </div>

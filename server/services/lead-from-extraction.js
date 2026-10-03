@@ -1031,4 +1031,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
   sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage, surfaceEstimateRequestForCustomer,
+  isLeadStage,
 };

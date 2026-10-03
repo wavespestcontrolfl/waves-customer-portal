@@ -213,10 +213,11 @@ const PRODUCT_ROWS = {
     family: FAMILY.BROADLEAF,
     mode: null,
     appliesTo: 'selective weed control',
-    metric: 'weed_suppression',
-    metricWindows: {
-      weed_suppression: judged('gain', { startDays: 3, fullMinDays: 14, closeDays: 21 }),
-    },
+    // No metric and no progress window (owner 2026-10-03): the day counts were
+    // our own estimates with no label or turf source, so the progress engine
+    // builds no comparison for this row and never calls it behind.
+    metric: null,
+    metricWindows: {},
     transient: false,
     judgedByAbsence: false,
     approved: true,
@@ -224,7 +225,9 @@ const PRODUCT_ROWS = {
       first: proposed(3, 7),
       full: proposed(14, 21),
     },
-    visibleChange: 'Weeds usually start to yellow or curl within about 3 to 7 days, then brown and die back over about 2 to 3 weeks.',
+    // No numbers (owner 2026-10-03): neither label states a results timeline and
+    // no turf source gives one, so the sentences say what happens, not when.
+    visibleChange: 'Treated weeds usually yellow or curl first, then brown and die back. How fast depends on the weed and the weather.',
     limits: [],
     secondApp: {
       possible: true,
@@ -232,10 +235,10 @@ const PRODUCT_ROWS = {
       line: 'Larger or deeper-rooted weeds can need a second application at a later visit.',
     },
     byNextVisit: {
-      too_early: 'Weeds usually take about a week to show a change, so your next visit is early for a final read.',
-      partial: 'By your next visit, treated weeds should be yellowing or curling, with browning still to come.',
-      visible: 'By your next visit, most treated weeds should be yellowing, browning or both.',
-      complete: 'By your next visit, most treated weeds should be yellow, brown or fading. Any still green then get a second look.',
+      too_early: 'Your next visit may be too early for a final read on the treated weeds.',
+      partial: 'By your next visit, treated weeds may be yellowing or curling, with browning still to come.',
+      visible: 'By your next visit, treated weeds may be yellowing, browning or both.',
+      complete: 'By your next visit, treated weeds may be yellow, brown or fading. Any still green then get a second look.',
     },
     contactTrigger: 'If treated weeds are still fully green after about 3 weeks, let us know.',
   },
@@ -397,13 +400,11 @@ const PRODUCT_ROWS = {
     family: FAMILY.GRANULAR_N,
     mode: null,
     appliesTo: 'slow-release feed',
-    metric: 'color_health',
-    metricWindows: {
-      // Color and density are separate metrics with separate windows: color
-      // judged against 7-21 days, density only against 60-90 days.
-      color_health: judged('gain', { startDays: 7, fullMinDays: 14, closeDays: 21 }),
-      turf_density: judged('gain', { startDays: 60, fullMinDays: 60, closeDays: 90, existingPromptTiming: true }),
-    },
+    // No metric and no progress window (owner 2026-10-03): the day counts were
+    // our own estimates with no label or turf source, so the progress engine
+    // builds no comparison for this row and never calls it behind.
+    metric: null,
+    metricWindows: {},
     transient: false,
     judgedByAbsence: false,
     approved: true,
@@ -413,14 +414,16 @@ const PRODUCT_ROWS = {
       // color); not a catalog quote, so still 'proposed'.
       full: proposed(14, 21, { existingPromptTiming: true }),
     },
-    visibleChange: 'Greening usually starts in about 7 to 14 days and builds as the feed releases. Color comes first and thickening takes longer.',
-    limits: ['Thickening can take about 60 to 90 days.'],
+    // No numbers (owner 2026-10-03): the published figures are for quick-release
+    // nitrogen and do not carry over to every slow-release blend.
+    visibleChange: 'Greening builds gradually as the feed releases. Color comes first and thickening takes longer.',
+    limits: [],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Greening usually starts in about 1 to 2 weeks, so your next visit is early for a first read.',
-      partial: 'By your next visit, greening should be starting. Thickening takes longer.',
-      visible: 'By your next visit, color should be building. Thickening takes longer.',
-      complete: 'By your next visit, color should be up. Thickening takes longer.',
+      too_early: 'Your next visit may be too early for a first read on color.',
+      partial: 'By your next visit, greening may be starting. Thickening takes longer.',
+      visible: 'By your next visit, color may be building. Thickening takes longer.',
+      complete: 'By your next visit, color may be up. Thickening takes longer.',
     },
     contactTrigger: 'If there is no green-up after about 3 weeks in growing weather, let us know.',
   },
@@ -457,13 +460,14 @@ const PRODUCT_ROWS = {
       first: proposed(3, 5),
       full: null,
     },
-    visibleChange: 'Color often deepens within about 3 to 5 days. That lift can fade as new growth comes in.',
+    // "Within days" is what the extension sources support; no day count.
+    visibleChange: 'Color may deepen within days. That lift can fade as new growth comes in.',
     limits: [],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Color often deepens within about 3 to 5 days, so your next visit is early for a read.',
-      // Covers short and long gaps alike: deeper color inside the 3-5 day
-      // window, fading after it (terminal review).
+      too_early: 'Your next visit may be too early for a read on color.',
+      // Covers short and long gaps alike: deeper color at first, fading
+      // later (terminal review).
       visible: 'By your next visit, the color lift from this spray may still show or may be fading, since it is short-lived.',
     },
     contactTrigger: 'If there is no color change after about 7 days in clear photos, let us know.',
@@ -474,12 +478,11 @@ const PRODUCT_ROWS = {
     family: FAMILY.FUNGICIDE,
     mode: 'curative',
     appliesTo: 'disease control',
-    metric: 'stress_damage',
-    metricWindows: {
-      // Spread stopping (a score that stops falling), NOT regrowth: regrowth
-      // takes 2 to 4 weeks (large patch: weeks to months) and is not judged.
-      stress_damage: judged('hold', { startDays: 3, closeDays: 10 }),
-    },
+    // No metric and no progress window (owner 2026-10-03): the day counts were
+    // our own estimates with no label or turf source, so the progress engine
+    // builds no comparison for this row and never calls it behind.
+    metric: null,
+    metricWindows: {},
     transient: false,
     judgedByAbsence: false,
     approved: true,
@@ -490,14 +493,16 @@ const PRODUCT_ROWS = {
       first: proposed(3, 7, { catalogPhrase: 'within days' }),
       full: proposed(14, 28),
     },
-    visibleChange: 'This treatment often slows the spread of the disease within days.',
-    limits: ['Brown grass does not turn green again. New leaves have to grow in, which usually takes about 2 to 4 weeks.'],
+    // No timing (owner 2026-10-03): no source gives a time for spread to stop.
+    // UF/IFAS: fungicide stops spread and damage stays until new leaves grow.
+    visibleChange: 'This treatment helps control disease spread. Damaged areas recover as the lawn produces new growth.',
+    limits: ['Brown grass does not turn green again. New leaves have to grow in.'],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Spread often slows within days, so your next visit is early for a read on the full result.',
-      partial: 'By your next visit, patch edges should be holding steady, with new growth still filling in.',
-      visible: 'By your next visit, patch edges should be steady and new leaves should be growing in.',
-      complete: 'By your next visit, patch edges should be steady and regrowth should be under way.',
+      too_early: 'Your next visit may be too early for a read on the full result.',
+      partial: 'By your next visit, patch edges may be holding steady, with new growth still filling in.',
+      visible: 'By your next visit, patch edges may be steady, with new leaves growing in.',
+      complete: 'By your next visit, patch edges may be steady, with regrowth under way.',
     },
     contactTrigger: 'If a patch is still growing after about 7 to 10 days, let us know.',
     // Owner 09-29: when the longer catalog window for a named large patch
@@ -509,8 +514,8 @@ const PRODUCT_ROWS = {
           full: catalog(null, null, 'large-patch', { text: 'weeks to months' }),
         },
         byNextVisit: {
-          too_early: 'Spread often slows within days, so your next visit is early for a read on regrowth.',
-          partial: 'By your next visit, the patch edge should be steady, with regrowth still under way over weeks to months.',
+          too_early: 'Your next visit may be too early for a read on regrowth.',
+          partial: 'By your next visit, the patch edge may be steady, with regrowth still under way over weeks to months.',
         },
       },
     },
@@ -540,12 +545,11 @@ const PRODUCT_ROWS = {
     family: FAMILY.INSECTICIDE,
     mode: 'curative',
     appliesTo: 'insect control',
-    metric: 'stress_damage',
-    metricWindows: {
-      // Activity stopping (a score that stops falling), NOT fill-in, which
-      // takes several weeks and has no number to judge against.
-      stress_damage: judged('hold', { startDays: 3, closeDays: 7 }),
-    },
+    // No metric and no progress window (owner 2026-10-03): the day counts were
+    // our own estimates with no label or turf source, so the progress engine
+    // builds no comparison for this row and never calls it behind.
+    metric: null,
+    metricWindows: {},
     transient: false,
     judgedByAbsence: false,
     approved: true,
@@ -553,15 +557,17 @@ const PRODUCT_ROWS = {
       first: proposed(3, 7),
       full: proposed(null, null, { text: 'several weeks' }),
     },
-    visibleChange: 'Insect activity usually stops within about 3 to 7 days.',
+    // No timing (owner 2026-10-03): no source gives a time for feeding to stop
+    // or for damaged turf to fill in.
+    visibleChange: 'This treatment works to stop the insects causing the damage.',
     limits: [
-      'Grass the insects already killed does not turn green again. Healthy runners fill in over several weeks in warm weather.',
+      'Grass the insects already killed does not turn green again. Healthy runners fill in over time in warm weather.',
       'Badly damaged patches can need new sod.',
     ],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Insect activity usually stops within about 3 to 7 days, so your next visit is early for a read.',
-      partial: 'By your next visit, insect activity should have stopped and the patch edge should be holding. Fill-in takes several weeks.',
+      too_early: 'Your next visit may be too early for a read on the damaged area.',
+      partial: 'By your next visit, the patch edge may be holding, with fill-in still to come.',
     },
     contactTrigger: 'If a patch is still spreading a week after treatment, let us know.',
   },
@@ -616,7 +622,7 @@ const ISSUE_ROWS = {
     secondApp: null,
     byNextVisit: {
       partial: 'Green-up often takes about 2 to 3 weeks, so your next visit is early for a final read on that area.',
-      visible: 'By your next visit, the area should match the rest of the lawn. If it does not, we can look at other causes.',
+      visible: 'By your next visit, the area should match the rest of the lawn. If not, we look at other causes.',
     },
     contactTrigger: 'If there is no response after about 3 weeks, let us know.',
   },
@@ -638,12 +644,12 @@ const ISSUE_ROWS = {
       first: proposed(3, 7),
       full: proposed(null, null, { text: 'several weeks' }),
     },
-    visibleChange: 'Insect activity usually stops within about 3 to 7 days. Fill-in takes several weeks in warm weather.',
+    visibleChange: 'Treatment works to stop the chinch bugs. Fill-in takes time in warm weather.',
     limits: ['Badly damaged patches can need new sod.'],
     secondApp: null,
     byNextVisit: {
-      too_early: 'Activity usually stops within about 3 to 7 days, so your next visit is early for a read.',
-      partial: 'By your next visit, the edge of the patch should have stopped moving, with fill-in still under way.',
+      too_early: 'Your next visit may be too early for a read on the patch.',
+      partial: 'By your next visit, the edge of the patch may have stopped moving, with fill-in still under way.',
     },
     contactTrigger: 'If the patch keeps spreading after a week, let us know.',
   },

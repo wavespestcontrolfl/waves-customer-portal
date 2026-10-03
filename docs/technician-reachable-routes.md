@@ -51,6 +51,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/discounts` | admin-discounts |
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
+| GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/context` | admin-dispatch |
+| POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/complete` | admin-dispatch |
@@ -58,7 +60,9 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/dispatch/:serviceId/completion-profile` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/completion-status` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/default-products` | admin-dispatch |
-| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/dictation` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/products` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/lane-facts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/lawn-reservice/fast-context` | admin-dispatch |
 | PATCH | `/api/admin/dispatch/:serviceId/note` | admin-dispatch |
@@ -176,6 +180,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/lawn-assessment/history/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/latest/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/service/:serviceId` | admin-lawn-assessment |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries` | admin-neighborhood-access |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries/:entryId/wrong` | admin-neighborhood-access |
 | GET | `/api/admin/notifications` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/done` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/read` | admin-notifications |
@@ -294,6 +300,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/notifications/:id/dismiss` | tech-notifications |
 | POST | `/api/tech/notifications/:id/read` | tech-notifications |
 | POST | `/api/tech/notifications/:id/undo-stop` | tech-notifications |
+| POST | `/api/tech/notifications/dismiss-batch` | tech-notifications |
+| GET | `/api/tech/notifications/schedule-changes` | tech-notifications |
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
@@ -535,6 +543,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/sms-templates/preview` | admin-sms-templates |
 | GET | `/api/admin/triage` | admin-triage |
 | POST | `/api/admin/triage/:id/apply-property-roles` | admin-triage |

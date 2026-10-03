@@ -7451,7 +7451,9 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     const contentType = res.headers.get('content-type') || '';
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
-    if (!text) return null;
+    // A successful response with no words. Callers that must tell silence from a
+    // provider failure (Fast Complete voice fill) ask for it with opts.emptyOk.
+    if (!text) return opts.emptyOk ? { text: '', segments: [] } : null;
     // PAN redaction guard — applied at the PROVIDER RETURN, before any other
     // LLM sees the text: the labeling pass (labelTranscriptWithOpenAI)
     // consumes this raw transcript, so scrubbing only at persistence would

@@ -2175,6 +2175,20 @@ class SmartRebooker {
         occurrence_service_id: service.service_id || null,
         occurrence_property_id: service.property_id || null,
       });
+      // A flagged ("not closed out") visit that is moved to a new time is rebooked:
+      // settle its open flagged rows — the one just written included, when this move
+      // is itself a no-show Quick Move — and close its card. Savepoint-confined and
+      // best-effort inside the helper; never blocks the move. Only when the slot
+      // changed: a technician-only move at the same date and window is not a rebooking.
+      const notClosedOut = require('./not-closed-out');
+      if (notClosedOut.slotChanged(
+        { date: originalDate, start: service.window_start, end: service.window_end },
+        { date: newDate, start: win.start || service.window_start, end: win.start ? win.end : service.window_end },
+      )) {
+        await notClosedOut.resolveForService({
+          serviceId, resolution: 'rebooked', resolvedBy: initiatedBy, trx,
+        });
+      }
     });
 
     // Tech-facing notice (tech-visit-notifications.js), post-commit,
@@ -2198,6 +2212,9 @@ class SmartRebooker {
         void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
           snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+          // The old slot rides along so a move off today/tomorrow stays a
+          // today/tomorrow change on the Today page (Codex #5783 P2).
+          previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
         });
       } else if (committedTechId) {
         const priorDay = service.scheduled_date instanceof Date
@@ -4106,6 +4123,16 @@ class SmartRebooker {
           ...scopeOf(row.scope),
         });
       }
+      // Every occurrence this move wrote (anchor, recurring siblings, carried
+      // partners — moveRows; preserved and skipped rows are not in it) whose slot
+      // changed is rebooked: settle any flagged row of theirs. A row the move only
+      // re-assigned (same date and window) keeps its flagged row.
+      const notClosedOut = require('./not-closed-out');
+      const slotOf = (r) => ({ date: r && r.scheduled_date, start: r && r.window_start, end: r && r.window_end });
+      await notClosedOut.resolveForServices({
+        serviceIds: moveRows.filter((r) => notClosedOut.slotChanged(slotOf(r.before), slotOf(r.after))).map((r) => r.id),
+        resolution: 'rebooked', resolvedBy: initiatedBy, trx,
+      });
 
       return touched;
     }).catch(async (err) => {

@@ -98,10 +98,13 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
  * category is pest_control. The category is services-table backed (the
  * authoritative signal) — not the broad detectServiceCategory fallback.
  */
-async function resolveEligibility(serviceId, knex = db) {
+async function resolveEligibility(serviceId, knex = db, { strict = false } = {}) {
   const svc = await loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
-  const profile = await resolveCompletionProfileForScheduledService(svc, knex).catch((err) => {
+  // strict (lawn Fast Complete): the resolver rethrows a failed availability probe
+  // or lookup instead of synthesizing a profile that has lost its project-backed
+  // and companion flags. A failure is still a null profile here, but a null one.
+  const profile = await resolveCompletionProfileForScheduledService(svc, knex, { strict }).catch((err) => {
     logger.warn(`[pest-recap] profile lookup failed for ${serviceId}: ${err.message}`);
     return null;
   });
@@ -528,6 +531,16 @@ const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
 // serializes a driver Date as ISO, the lock reads the same driver value.
 const dateIdentity = (v) => (v == null ? '' : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10));
 
+// The identity keys recapVisitIdentityChanged compares (each only when the client
+// sent it). They are all fields recapServiceIdentity returns, so a sheet that
+// echoes the identity object it was given sends every one. A caller that must
+// not accept a partial identity (lawn Fast Complete) requires this whole list;
+// a drift test pins that each key is returned by recapServiceIdentity and moves
+// the verdict.
+const RECAP_COMPARED_IDENTITY_KEYS = Object.freeze([
+  'propertyId', 'customerId', 'catalogServiceId', 'serviceType', 'scheduledDate', 'isCallback', 'address',
+]);
+
 // True when the client's expected ownership identity no longer matches the
 // locked visit row. Only keys the client sent are compared (ownership,
 // catalog service, service type, calendar day); the address is
@@ -539,6 +552,8 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
+  // The assigned technician, sent only by the lawn Fast Complete sheet.
+  if ('technicianId' in expected && !sameIdentityKey(expected.technicianId, locked.technician_id)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
   // Whether it is a free callback decides the pay link and the review ask
   // the client sends, so a change to it is a changed visit.
@@ -1718,6 +1733,8 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  loadServiceWithCustomer,
+  RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,
   traceOnReportForVisit,
   draftRecapMessage,

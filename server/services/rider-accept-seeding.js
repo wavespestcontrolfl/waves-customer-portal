@@ -3,10 +3,12 @@
  * 2026-10-01; plan ~/rider-one-appointment-plan-20261001.md step 3).
  *
  * When one accepted estimate sells a lawn series (every 6 weeks, or monthly)
- * and a quarterly rider series (pest, tree & shrub, termite bait) that start
- * the same day at the same property, the rider's follow-ups take their dates
- * from the lawn series' dates (planRiderDates, the 77/84/105 rule) instead of
- * walking quarterly months on their own. They land on lawn dates at the same
+ * and a rider series the pairing table allows (quarterly pest, tree & shrub or
+ * termite bait; with GATE_RIDER_PAIRS_MONTHLY_LAWN also bi-monthly, monthly,
+ * semiannual and seasonal riders on a monthly lawn) that start the same day
+ * at the same property, the rider's follow-ups take their dates from the lawn
+ * series' dates (planRiderDates, with the rider cadence's own gaps) instead
+ * of walking their own cadence. They land on lawn dates at the same
  * stop, so the canonical seeder's own maybeGroupRow call puts each pair in one
  * visit. The rider parent is linked to the lawn parent through
  * scheduled_services.rides_parent_id so later extensions
@@ -112,7 +114,7 @@ async function beforeSeed(ctx, conn, parentRow, plan) {
 }
 
 async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }) {
-  const { planRiderDates, riderPairingEnabled } = require('./rider-series-preview');
+  const { planRiderDates, riderPairingEnabled, riderGapsFor } = require('./rider-series-preview');
   if (!ctx.lawn || !riderPairingEnabled(ctx.lawn.host, family, pattern)) return null;
   const lawn = ctx.lawn.parent;
   const firstDate = dateOnly(rider.scheduled_date);
@@ -145,8 +147,9 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     skipWeekends: seedOpts.skipWeekends !== false,
     weekendShift: seedOpts.weekendShift,
     blackoutDates,
+    gaps: riderGapsFor(pattern),
   }).slice(0, wanted);
-  // Every rider date must BE a lawn date: the rule's own +84 fallback (no lawn
+  // Every rider date must BE a lawn date: the rule's own stand-alone date (no lawn
   // date near) is a valid cadence but not a ride, so it is not linked.
   const hostSet = new Set(hostFollowUps.map(dateOnly));
   if (wanted < 1 || overrideDates.length < wanted || !overrideDates.every((d) => hostSet.has(d))) {

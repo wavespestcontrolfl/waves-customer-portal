@@ -27,6 +27,8 @@ const {
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
+const { watchListForMonth } = require('../config/tree-shrub-watch-list');
+const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 
 const ROTATION_WINDOW_DAYS = 60;
 // Palm spacing = the shared three-calendar-month rule (owner program, #5089).
@@ -45,6 +47,12 @@ const CLASSIFIER_COLUMNS = [
   'irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary',
   'analysis_n', 'analysis_p', 'fertilizer_analysis', 'product_type',
 ];
+
+// The one predicate for "this visit is a Tree & Shrub Fast Complete visit": its completion
+// profile's typed findings form. The lawn Fast Complete eligibility reuses it to exclude
+// these visits (they share the lawn_care category), so the sheets partition the visits.
+const TREE_SHRUB_FINDINGS_TYPE = 'tree_shrub';
+const isTreeShrubFastProfile = (profile) => profile?.findingsType === TREE_SHRUB_FINDINGS_TYPE;
 
 const dayNumber = (day) => {
   const [y, m, d] = String(day).split('-').map(Number);
@@ -70,7 +78,7 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
 // cover: companion sections (the retired lawn+T&S combo) and grouped visits.
 async function treeShrubFastIneligibleReason(svc, profile, knex) {
   if (!profile) return 'profile_unavailable';
-  if (profile.findingsType !== 'tree_shrub') return 'not_tree_shrub';
+  if (!isTreeShrubFastProfile(profile)) return 'not_tree_shrub';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';
   if (svc.visit_id) {
@@ -420,7 +428,16 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
+    // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate
+    // off = no key at all.
+    ...(tsWatchListLive() && { watchList: watchListForVisit(svc.scheduled_date) }),
   };
+}
+
+// The sheet's watch list for the visit month: key, label, signal, referOnly.
+function watchListForVisit(scheduledDate) {
+  return watchListForMonth(visitWatchMonth(scheduledDate))
+    .map(({ key, label, signal, referOnly }) => ({ key, label, signal, referOnly }));
 }
 
 module.exports = {
@@ -428,6 +445,7 @@ module.exports = {
   PALM_FERTILIZER_SPACING_DAYS,
   buildTreeShrubFastContext,
   treeShrubFastIneligibleReason,
+  isTreeShrubFastProfile,
   treeShrubProductFlags,
   buildTreeShrubWarnings,
   buildLastVisit,

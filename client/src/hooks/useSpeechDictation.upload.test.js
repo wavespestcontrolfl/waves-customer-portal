@@ -209,4 +209,126 @@ describe("useSpeechDictation upload fallback", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  describe("clip mode (clipHandler)", () => {
+    it("always records, even where SpeechRecognition exists, and never asks availability or transcribes", async () => {
+      const recognition = vi.fn();
+      window.SpeechRecognition = recognition;
+      const clipHandler = vi.fn(async () => {});
+      const onTranscript = vi.fn();
+      const { result } = renderHook(() => useSpeechDictation(onTranscript, { clipHandler }));
+      expect(result.current.mode).toBe("upload");
+      expect(result.current.supported).toBe(true);
+
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      expect(recognition).not.toHaveBeenCalled();
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      const [blob, seconds] = clipHandler.mock.calls[0];
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.size).toBeGreaterThan(0);
+      expect(typeof seconds).toBe("number");
+      expect(fetch).not.toHaveBeenCalled();
+      expect(onTranscript).not.toHaveBeenCalled();
+      expect(track.stop).toHaveBeenCalled();
+      delete window.SpeechRecognition;
+    });
+
+    it("is uploading while the handler runs", async () => {
+      let finish;
+      const clipHandler = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.uploading).toBe(true));
+      await act(async () => { finish(); });
+      await waitFor(() => expect(result.current.uploading).toBe(false));
+    });
+
+    it("stops recording when the page is hidden, and hands over what was recorded", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      expect(result.current.listening).toBe(false);
+      expect(track.stop).toHaveBeenCalled();
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    });
+
+    it("never starts a clip on a page hidden while the mic prompt was open", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(track.stop).toHaveBeenCalled());
+      expect(result.current.listening).toBe(false);
+      expect(clipHandler).not.toHaveBeenCalled();
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    });
+
+    it("takes the hidden-page guard off once the clip stops, and on unmount", async () => {
+      // pagehide is the guard's own listener (visibilitychange is shared with speech mode)
+      const added = vi.spyOn(window, "addEventListener");
+      const removed = vi.spyOn(window, "removeEventListener");
+      const count = (spy) => spy.mock.calls.filter(([type]) => type === "pagehide").length;
+      const { result, unmount } = renderHook(() => useSpeechDictation(null, { clipHandler: vi.fn(async () => {}) }));
+      // the guard is on by the time recording is reported: no gap to miss a lock in
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      expect(count(added)).toBe(1);
+      expect(count(removed)).toBe(0);
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+      expect(count(removed)).toBe(1);
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      unmount();
+      expect(count(added)).toBe(2);
+      expect(count(removed)).toBe(2);
+      added.mockRestore(); removed.mockRestore();
+    });
+
+    it("a forgotten mic stops by itself at the cutoff and hands over the clip", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler, clipMaxMs: 40 }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      expect(result.current.listening).toBe(false);
+      expect(track.stop).toHaveBeenCalled();
+    });
+
+    it("a clip the tech stops is not stopped again by the cutoff", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler, clipMaxMs: 60 }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)); });
+      expect(clipHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops recording on pagehide", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+    });
+
+    it("is unsupported where the browser cannot record", () => {
+      delete window.MediaRecorder;
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler: vi.fn() }));
+      expect(result.current.supported).toBe(false);
+      expect(result.current.mode).toBe(null);
+    });
+  });
 });
+

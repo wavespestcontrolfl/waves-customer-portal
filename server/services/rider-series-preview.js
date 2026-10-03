@@ -54,6 +54,26 @@ const NEAR_TERM_DAYS = 7;
 // the plan floor) waits for a host date before taking a standalone date on
 // the floor: the normal window's width, MAX_WAIT_DAYS - MIN_GAP_DAYS.
 const OVERDUE_WAIT_DAYS = MAX_WAIT_DAYS - MIN_GAP_DAYS;
+// The same rule per rider cadence (owner ruling 2026-10-01, second batch): the
+// rider takes the first lawn date at least `min` days after its last visit,
+// waits for one until `max`, else stands alone at `target`. On a monthly lawn
+// (28-35 day gaps) `min` sits between k-1 and k lawn gaps, so the rider gets
+// every k-th lawn visit: monthly 1, bi-monthly 2, quarterly 3, semiannual 6.
+// `season`: Feb-Oct only — Nov-Jan lawn dates are never taken and the wait
+// carries over the winter.
+const QUARTERLY_GAPS = { min: MIN_GAP_DAYS, target: TARGET_GAP_DAYS, max: MAX_WAIT_DAYS };
+const RIDER_GAPS = {
+  quarterly: QUARTERLY_GAPS,
+  monthly: { min: 21, target: 28, max: 49 },
+  bimonthly: { min: 49, target: 56, max: 77 },
+  semiannual: { min: 161, target: 182, max: 196 },
+  seasonal_feb_oct: { min: 21, target: 28, max: 49, season: true },
+};
+// A cadence with no row (a pair the table does not allow, previewed anyway)
+// keeps the quarterly rule it has always been planned with.
+function riderGapsFor(pattern) {
+  return RIDER_GAPS[pattern] || QUARTERLY_GAPS;
+}
 // Same bound the write engine's computeRiderHorizon applies (see its own
 // comment there): at most ~2 years past the rider's own standalone
 // horizon, so a host row seeded or hand-edited an arbitrary distance out
@@ -137,7 +157,7 @@ function computeRiderHorizon(anchorDate, hostDates, pattern) {
   const { plannedVisitCountForPattern } = require('./recurring-appointment-seeder');
   const count = plannedVisitCountForPattern(pattern, {});
   const gaps = Math.max(0, count - 1);
-  const standaloneHorizon = addDaysStr(anchorDate, gaps * TARGET_GAP_DAYS);
+  const standaloneHorizon = addDaysStr(anchorDate, gaps * riderGapsFor(pattern).target);
   const sorted = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
   let horizon = standaloneHorizon;
   if (sorted.length) {
@@ -158,34 +178,77 @@ function computeRiderHorizon(anchorDate, hostDates, pattern) {
 // genuinely fewer of them per function, not the same branches relocated
 // into a single-call helper.
 function nextRiderDate({
-  last, floor, sortedHosts, skipWeekends, dir, blackoutDates,
+  last, floor, sortedHosts, skipWeekends, dir, blackoutDates, gaps = QUARTERLY_GAPS,
 }) {
-  let minDate = addDaysStr(last, MIN_GAP_DAYS);
-  let maxDate = addDaysStr(last, MAX_WAIT_DAYS);
+  let minDate = addDaysStr(last, gaps.min);
+  let maxDate = addDaysStr(last, gaps.max);
   if (!minDate || !maxDate) return null;
   const overdue = !!floor && minDate < floor;
   if (overdue) {
     minDate = floor;
-    maxDate = addDaysStr(floor, OVERDUE_WAIT_DAYS);
+    maxDate = addDaysStr(floor, gaps.max - gaps.min);
   }
+  if (gaps.season) ({ minDate, maxDate } = seasonWindow(minDate, maxDate, gaps.max - gaps.min));
   const hostCandidate = sortedHosts.find((d) => d >= minDate);
   if (hostCandidate && hostCandidate <= maxDate) return hostCandidate;
-  const base = overdue ? floor : addDaysStr(last, TARGET_GAP_DAYS);
+  if (gaps.season) return seasonStandaloneDate({ last, overdue, minDate, skipWeekends, dir, blackoutDates });
+  const base = overdue ? floor : addDaysStr(last, gaps.target);
   let next = shiftPastWeekend(base, skipWeekends, dir);
   if (floor && next && next < floor) next = shiftPastWeekend(base, skipWeekends, 'forward');
   if (next && blackoutDates) next = clearOfBlackout(next, blackoutDates, { skipWeekends });
   return next;
 }
 
-// Which series may ride which (owner rulings 2026-10-01). Every pairing uses
-// the one 77/84/105 date rule below, so a 6-week lawn host gives a quarterly
-// rider every 2nd lawn date and a monthly lawn host every 3rd. One table: a
-// later host:rider mix (bi-monthly, semiannual, mosquito riders — they need
-// their own gaps) is one more row here, not another set of call-site tests.
+function inSeason(dateStr) {
+  const { SEASON_FIRST_MONTH, SEASON_LAST_MONTH } = require('./recurring-appointment-seeder');
+  const month = Number(String(dateStr).slice(5, 7));
+  return month >= SEASON_FIRST_MONTH && month <= SEASON_LAST_MONTH;
+}
+
+// The first in-season day on or after a date: the date itself in season, else
+// the 1st of the coming season's first month.
+function seasonOpenOnOrAfter(dateStr) {
+  if (inSeason(dateStr)) return dateStr;
+  const { SEASON_FIRST_MONTH, SEASON_LAST_MONTH } = require('./recurring-appointment-seeder');
+  const year = Number(dateStr.slice(0, 4)) + (Number(dateStr.slice(5, 7)) > SEASON_LAST_MONTH ? 1 : 0);
+  return `${year}-${String(SEASON_FIRST_MONTH).padStart(2, '0')}-01`;
+}
+
+// A seasonal rider's wait does not run through the winter: a window that
+// starts off season starts at the season's opening instead, and one that only
+// ends off season stays open the same number of days into the next season.
+function seasonWindow(minDate, maxDate, width) {
+  const opens = seasonOpenOnOrAfter(minDate);
+  if (opens !== minDate) return { minDate: opens, maxDate: addDaysStr(opens, width) };
+  const reopens = seasonOpenOnOrAfter(maxDate);
+  return { minDate, maxDate: reopens === maxDate ? maxDate : addDaysStr(reopens, width) };
+}
+
+// No lawn date in a seasonal rider's window: the date its own Feb-Oct walk
+// gives (an overdue rider: the window's first day), kept in season the way
+// the seeder keeps it. null = no clear in-season date, so the plan stops.
+function seasonStandaloneDate({ last, overdue, minDate, skipWeekends, dir, blackoutDates }) {
+  const Seeder = require('./recurring-appointment-seeder');
+  const base = overdue ? minDate : Seeder.seasonalFebOctDate(last, 1);
+  let next = shiftPastWeekend(base, skipWeekends, overdue ? 'forward' : dir);
+  if (next && blackoutDates) next = clearOfBlackout(next, blackoutDates, { skipWeekends });
+  return next && Seeder.clampDateToSeason(Seeder.SEASONAL_FEB_OCT, next, { skipWeekends, blackoutDates });
+}
+
+// Which series may ride which (owner rulings 2026-10-01), one table. Each
+// rider cadence has its own day gaps (RIDER_GAPS): a quarterly rider gets
+// every 2nd date of a 6-week lawn host and every 3rd of a monthly one. The
+// `gated` rows are the second batch (monthly lawn hosts only), open while
+// GATE_RIDER_PAIRS_MONTHLY_LAWN is on. Not chosen, so no row: a 6-week lawn
+// with a bi-monthly rider, and any pair hosted on a pest visit.
 const QUARTERLY_RIDER_FAMILIES = ['pest_control', 'tree_shrub', 'termite_bait'];
 const RIDER_PAIRINGS = [
   { host: 'lawn_6wk', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
   { host: 'lawn_monthly', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+  { host: 'lawn_monthly', riderFamilies: ['pest_control', 'tree_shrub'], riderPattern: 'bimonthly', gated: true },
+  { host: 'lawn_monthly', riderFamilies: ['pest_control'], riderPattern: 'monthly', gated: true },
+  { host: 'lawn_monthly', riderFamilies: ['pest_control'], riderPattern: 'semiannual', gated: true },
+  { host: 'lawn_monthly', riderFamilies: ['mosquito'], riderPattern: 'seasonal_feb_oct', gated: true },
 ];
 
 // 'lawn_6wk' | 'lawn_monthly' | null for a series row. Prod stores 6-week lawn
@@ -219,10 +282,14 @@ function riderFamilyOf(row) {
   return serviceKeyFor(snapshot ? { service_key: snapshot } : { service_type: row?.service_type });
 }
 
+// Optional call: suites that mock feature-gates partially never define the
+// second-batch reader, which means off.
 function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
   const host = riderHostKind(hostRow);
+  const secondBatch = () => !!require('../config/feature-gates').riderPairsMonthlyLawnLive?.();
   return !!host && RIDER_PAIRINGS.some((p) => p.host === host
-    && p.riderPattern === riderPattern && p.riderFamilies.includes(riderFamily));
+    && p.riderPattern === riderPattern && p.riderFamilies.includes(riderFamily)
+    && (!p.gated || secondBatch()));
 }
 
 /**
@@ -235,20 +302,21 @@ function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
  */
 function planRiderDates({
   hostDates = [], lastRiderDate, horizonDate, skipWeekends = false, weekendShift = 'forward',
-  earliestDate = null, blackoutDates = null,
+  earliestDate = null, blackoutDates = null, gaps = QUARTERLY_GAPS,
 } = {}) {
   const anchor = dateOnly(lastRiderDate);
   const horizon = dateOnly(horizonDate);
   const floor = dateOnly(earliestDate);
   const dates = [];
   if (!anchor || !horizon) return dates;
-  const sortedHosts = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
+  const sortedHosts = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort()
+    .filter((d) => !gaps.season || inSeason(d));
   const dir = weekendShift === 'back' ? 'back' : 'forward';
 
   let last = anchor;
   for (let guard = 0; guard < 1000; guard++) {
     const next = nextRiderDate({
-      last, floor, sortedHosts, skipWeekends, dir, blackoutDates,
+      last, floor, sortedHosts, skipWeekends, dir, blackoutDates, gaps,
     });
     if (!next || next <= last || next > horizon) break;
     dates.push(next);
@@ -955,6 +1023,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       skipWeekends: skipRiderEffective,
       weekendShift,
       blackoutDates,
+      gaps: riderGapsFor(riderParent.recurring_pattern),
     });
 
     // Movable visits after the horizon (the last scheduled lawn date, or the
@@ -1012,6 +1081,7 @@ module.exports = {
   OVERDUE_WAIT_DAYS,
   MAX_HORIZON_EXTRA_DAYS,
   planRiderDates,
+  riderGapsFor,
   computeRiderHorizon,
   riderHostKind,
   riderPairingEnabled,

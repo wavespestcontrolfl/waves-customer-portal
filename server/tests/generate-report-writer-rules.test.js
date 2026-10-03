@@ -9,6 +9,7 @@ let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
 let mockServiceType = 'Quarterly Pest Control Service';
 let mockCatalogRows = [];
 let mockCatalogFails = false;
+let mockAliasRows = [];
 let mockBooked = {};
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
@@ -54,7 +55,8 @@ jest.mock('../models/db', () => {
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1', ...mockBooked } : null);
     chain.then = (resolve, reject) => (table === 'products_catalog' && mockCatalogFails
       ? Promise.reject(new Error('catalog read failed'))
-      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row)) : [])).then(resolve, reject);
+      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row))
+        : (table === 'product_aliases' ? mockAliasRows : []))).then(resolve, reject);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -99,6 +101,7 @@ beforeEach(() => {
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
   mockCatalogFails = false;
+  mockAliasRows = [];
   mockBooked = {};
   delete process.env.GATE_REPORT_WRITER_RULES;
 });
@@ -266,6 +269,118 @@ test('gate on: a catalog product the note mentions is screened even though it wa
     .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Customer asked about Termidor. Treated the thresholds (catalog mention case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
+test('gate on: a catalog name the model brings on its own is screened though the prompt never mentions it', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Trapper T-Rex Rat Snap Trap', active_ingredient: null }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor here. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds (unprompted catalog name case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
+test('gate on: an ordinary word inside a catalog name does not reject the copy', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Trapper T-Rex Rat Snap Trap', active_ingredient: null }];
+  const withTraps = CLEAN_V2.replace('Ghost ants were trailing', 'We checked the snap traps in the garage. Ghost ants were trailing');
+  mockProvider.mockImplementationOnce(async () => ({ ok: true, text: withTraps }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds and checked the garage (ordinary word case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: withTraps }));
+});
+
+test('gate on: a cached draft is screened again against the catalog as it is now', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const named = CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor here. Ghost ants were trailing');
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: named }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const body = { serviceNotes: 'Treated the thresholds (cached draft rescreen case).' };
+  // The product is not in the catalog yet: the draft passes and is cached.
+  const first = mkRes();
+  await handler(mkReq(body), first);
+  expect(first.json).toHaveBeenCalledWith(expect.objectContaining({ report: named }));
+  // Added to the catalog: the cached draft is not served.
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }];
+  const second = mkRes();
+  await handler(mkReq(body), second);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(second.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
+  // A clean cached draft is still served from the cache.
+  const third = mkRes();
+  await handler(mkReq(body), third);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(third.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2, cached: true }));
+});
+
+test('gate on: a cached draft is screened again for an active ingredient filled in since', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const named = CLEAN_V2.replace('Ghost ants were trailing', 'We put down a quintazole band. Ghost ants were trailing');
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: named }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const body = {
+    serviceNotes: 'Treated the thresholds (cached draft active case).',
+    productsApplied: 'Zylo Mix (1 fl oz/gal)',
+    products: [{ productId: 'prod-9', name: 'Zylo Mix', applicationMethod: 'perimeter_spray' }],
+  };
+  // The selected product has no active ingredient on file yet.
+  mockCatalogRows = [{ id: 'prod-9', name: 'Zylo Mix', active_ingredient: null }];
+  const first = mkRes();
+  await handler(mkReq(body), first);
+  expect(first.json).toHaveBeenCalledWith(expect.objectContaining({ report: named }));
+  // Filled in: the cached draft names it and is not served.
+  mockCatalogRows = [{ id: 'prod-9', name: 'Zylo Mix', active_ingredient: 'Quintazole' }];
+  const second = mkRes();
+  await handler(mkReq(body), second);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(second.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
+});
+
+test('gate on: a registered alias of a catalog product is screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ id: 'prod-3', name: 'Atticus Talak 7.9 F', active_ingredient: 'Bifenthrin' }];
+  mockAliasRows = [{ product_id: 'prod-3', alias_name: 'Talstar P' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Talstar here. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds and the lanai (registered alias case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
+test('gate on: an alias the note itself writes out is screened in any case', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ id: 'prod-4', name: 'Zylo Mix', active_ingredient: null }];
+  mockAliasRows = [{ product_id: 'prod-4', alias_name: 'BugShield' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'You asked about bugshield. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Customer asked about bugshield. Treated the thresholds (mentioned alias case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
+test('gate on: the active ingredients of a product the note names by alias are screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ id: 'prod-5', name: 'Hydretain Liquid', active_ingredient: 'Humectant blend' }];
+  mockAliasRows = [{ product_id: 'prod-5', alias_name: 'Moisture Manager' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We applied a humectant blend. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Applied moisture manager to dry spots. Treated the thresholds (alias actives case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(2);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
@@ -539,3 +654,37 @@ describe('the promise check reaches the writer', () => {
   });
 });
 
+
+// Prod 2026-10-02: a visit's notes said "yard" and "along with", which made
+// yard-sign supplies and two fertilizers whose names hold "with" count as
+// products the prompt named; every draft was refused for "with" or "Waves",
+// and the office read "temporarily unavailable".
+test('gate on: notes that say "yard" and "along with" keep an ordinary draft; supplies and "with" are no brands (prod 2026-10-02)', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [
+    { name: 'Pesticide application sign 4x5 (yard sign card)', category: 'supplies', active_ingredient: null },
+    { name: 'Yard sign sticker 4x5 "Serviced by Waves"', category: 'supplies', active_ingredient: null },
+    { name: 'LESCO 24-0-11 with PolyPlus OPTI', category: 'fertilizer', active_ingredient: '24-0-11' },
+    { name: 'The Andersons 17-0-3 Fertilizer with Grubout Plus', category: 'fertilizer', active_ingredient: 'Unknown - pending SDS' },
+  ];
+  const ordinary = CLEAN_V2
+    .replace('We treated the door thresholds', 'Along with the yard, we treated the door thresholds')
+    .replace('Let us know', 'Let Waves know');
+  mockProvider.mockImplementation(async () => ({ ok: true, text: ordinary }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'A repellent solution along with a surfactant went into the yard and ornamentals (ordinary words case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: ordinary }));
+});
+
+test('gate on: every draft refused for its wording, with nothing safe to fall back on, says so instead of "unavailable" (prod 2026-10-02)', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({ ok: true, text: CLEAN_V2.replace('activity was light.', 'activity was light, and the treatment is safe for pets.') }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds (refused wording case).', products: [], productsApplied: '' }), res);
+  expect(res.statusCode).toBe(503);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    retryable: true,
+    error: expect.stringMatching(/did not pass the report’s wording checks/),
+  }));
+});
