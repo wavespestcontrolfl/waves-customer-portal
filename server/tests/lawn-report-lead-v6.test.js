@@ -33,7 +33,7 @@ const reportOf = (overrides = {}) => ({
 const V6 = {
   headline: 'Healthy overall, with a few spots to watch',
   whatWeDid: 'We spot-treated the broadleaf weeds with a selective weed control.',
-  whatToExpect: 'By your next visit, most treated weeds should be browning or fading.',
+  whatToExpect: 'By your next visit, most treated weeds should be yellowing, browning or both.',
   watching: 'Thin areas along the driveway edge, which may be signs of heat stress.',
 };
 

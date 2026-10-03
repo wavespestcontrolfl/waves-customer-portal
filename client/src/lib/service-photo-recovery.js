@@ -80,7 +80,9 @@ async function postServicePhoto(photo, serviceId, token, deviceScope) {
   // owed; re-uploading would incorrectly apply the current visit's identity
   // guard to work that was committed against the original visit.
   if (photo.uploadReceipt?.photo?.id) {
-    if (photo.uploadReceipt.reconcileRequired) await reconcileRecoveredPhoto(serviceId, token);
+    if (photo.uploadReceipt.reconcileRequired) {
+      await reconcileRecoveredPhoto(serviceId, token, photo.uploadReceipt);
+    }
     return photo.uploadReceipt;
   }
   const fd = new FormData();
@@ -99,12 +101,16 @@ async function postServicePhoto(photo, serviceId, token, deviceScope) {
     photo.uploadReceipt = {
       photo: { id: data.photo.id, staged: Boolean(data.photo.staged) },
       reconcileRequired: Boolean(data.reconcileRequired),
+      serviceRecordId: data.serviceRecordId || null,
+      visit: data.visit || null,
     };
     if (deviceScope) await persistCurrentPhotoStage(
       photo, serviceId, deviceScope, 'uploaded', 'Photo attached; completed-visit updates may still be pending.',
       { verifyConflict: false },
     );
-    if (data.reconcileRequired) await reconcileRecoveredPhoto(serviceId, token);
+    if (data.reconcileRequired) {
+      await reconcileRecoveredPhoto(serviceId, token, photo.uploadReceipt);
+    }
     return data;
   }
   if (res.ok) throw new Error('Upload response did not include a photo receipt');
@@ -114,12 +120,26 @@ async function postServicePhoto(photo, serviceId, token, deviceScope) {
   throw failure;
 }
 
-async function reconcileRecoveredPhoto(serviceId, token) {
+function reconciliationIdentity(uploadReceipt) {
+  const expectedServiceRecordId = typeof uploadReceipt.serviceRecordId === 'string'
+    ? uploadReceipt.serviceRecordId.trim() : '';
+  const expectedVisit = uploadReceipt.visit;
+  if (!expectedServiceRecordId || !expectedVisit || typeof expectedVisit !== 'object' || Array.isArray(expectedVisit)) {
+    const failure = new Error('Photo attached, but its completion receipt is missing the original visit identity');
+    failure.uploadStage = 'reconciliation_failed';
+    throw failure;
+  }
+  return { expectedServiceRecordId, expectedVisit };
+}
+
+async function reconcileRecoveredPhoto(serviceId, token, uploadReceipt) {
+  const identity = reconciliationIdentity(uploadReceipt);
   let res;
   try {
     res = await fetch(`${API}/api/tech/services/${serviceId}/photos/reconcile`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(identity),
     });
   } catch (error) {
     error.uploadStage = 'reconciliation_failed';
@@ -128,7 +148,8 @@ async function reconcileRecoveredPhoto(serviceId, token) {
   if (res.ok) return;
   const data = await res.json().catch(() => ({}));
   const failure = new Error(data.error || `Photo attached, but visit reconciliation failed (HTTP ${res.status})`);
-  failure.uploadStage = 'reconciliation_failed';
+  failure.uploadStage = data.code === 'photo_reconciliation_handed_off'
+    ? 'reconciliation_handed_off' : 'reconciliation_failed';
   throw failure;
 }
 
@@ -176,6 +197,9 @@ function uploadFailureMessage(error, { saved = false } = {}) {
   if (error.visitVerificationFailed) return saved
     ? 'Could not verify the current visit. The saved photo was not uploaded. Retry after the visit is available, or discard it.'
     : 'Could not verify the current visit. Keep this screen open and retry, or discard the selected photo.';
+  if (error.uploadStage === 'reconciliation_handed_off') {
+    return 'Photo attached. The office now owns the remaining report updates. Dismiss this saved notice when you are ready.';
+  }
   if (error.uploadStage === 'reconciliation_failed') return `${error.message}. Retry the saved photo to finish updating the completed visit.`;
   if (error.uploadStage === 'failed') return error.message || 'Upload failed';
   return `${error.message || 'Upload interrupted'}. Upload not confirmed — retry the saved photo or discard it.`;

@@ -605,12 +605,13 @@ describe('concurrent whole-set saves are serialized (codex P2 r11)', () => {
   // nothing.
   const { saveMarksForPhoto } = require('../services/service-report/photo-marks');
 
-  const fakeKnex = (calls) => {
+  const fakeKnex = (calls, { photoGone = false } = {}) => {
     const trx = (table) => {
       const chain = {
         where: () => chain,
+        orderBy: () => chain,
         forUpdate: () => { calls.push(`forUpdate:${table}`); return chain; },
-        first: async () => { calls.push(`first:${table}`); return { id: 'ss-1' }; },
+        first: async () => { calls.push(`first:${table}`); return photoGone && table !== 'scheduled_services' ? null : { id: 'ss-1' }; },
         del: async () => { calls.push(`del:${table}`); return 1; },
         insert: async () => { calls.push(`insert:${table}`); return []; },
       };
@@ -631,8 +632,22 @@ describe('concurrent whole-set saves are serialized (codex P2 r11)', () => {
       'forUpdate:scheduled_services',
       'first:scheduled_services',
       'del:service_photo_marks',
+      'first:scheduled_service_photo_staging',
       'insert:service_photo_marks',
     ]);
+  });
+
+  test('a photo removed before the lock was taken gets no marks (Codex P2 on #5745)', async () => {
+    const calls = [];
+    await expect(saveMarksForPhoto({
+      scheduledServiceId: 'ss-1',
+      s3Key: 'photos/wall.jpg',
+      marks: [{ mark_number: 1, x: 0.5, y: 0.5, kind: 'foam_injection' }],
+      knex: fakeKnex(calls, { photoGone: true }),
+    })).rejects.toMatchObject({ code: 'photo_not_found' });
+    expect(calls).not.toContain('insert:service_photo_marks');
+    // looked for the photo only after the visit lock
+    expect(calls.indexOf('first:scheduled_service_photo_staging')).toBeGreaterThan(calls.indexOf('forUpdate:scheduled_services'));
   });
 
   test('clearing marks takes the lock too', async () => {

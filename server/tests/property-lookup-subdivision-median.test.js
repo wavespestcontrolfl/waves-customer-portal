@@ -118,6 +118,7 @@ beforeEach(() => {
           status: 'OK',
           results: [{
             formatted_address: '1010 Example Loop, Lakewood Ranch, FL 34211, USA',
+            types: ['street_address'],
             geometry: { location: { lat: 27.4678, lng: -82.3852 }, location_type: 'ROOFTOP' },
             address_components: [{ long_name: 'Manatee County', types: ['administrative_area_level_2'] }],
           }],

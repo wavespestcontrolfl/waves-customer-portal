@@ -2111,13 +2111,13 @@ function initScheduledJobs() {
     if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
     const tickStartedAt = Date.now();
     try {
-      // A pass in which any customer's filing or any conflict bell failed is
-      // reported to job health as failed (both retry next pass).
+      // A pass in which any customer's filing or a conflict step (the count,
+      // retiring an old bell) failed is reported to job health as failed.
       const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
         const result = await require('./neighborhood-access').sweepSavedGateCodes();
         if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
         if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
-        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
         return result;
       });
       // No connection / lost lock session = no filing ran: a missed tick in
@@ -3409,6 +3409,39 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:10AM ET — Call incident adjudicator (correction loop for calls,
+  // Part B wave 1). After the 03:40 self-audit: each new field disagreement
+  // becomes an ai_incidents row, confirmed only when a second model on the
+  // other provider from the auditor's reaches the auditor's answer blind. Shadow data; dark behind
+  // GATE_CALL_INCIDENTS (needs GATE_CALL_SELF_AUDIT); CALL_INCIDENT_BATCH=0
+  // stops it. The gate is read inside the job.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateCallFindings } = require('./call-incidents');
+      await runExclusive('call-incidents-adjudicate', () => adjudicateCallFindings());
+    } catch (err) {
+      logger.error(`Call incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:50AM ET — Correction-loop fix proposals for calls, same
+  // rules as SMS, on the latest extraction prompt version. No model call.
+  // Gate read inside the job (GATE_CALL_INCIDENTS).
+  // =========================================================================
+  cron.schedule('50 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeCallFixes } = require('./call-incidents');
+      await runExclusive('call-fix-proposals', () => proposeCallFixes());
+    } catch (err) {
+      logger.error(`Call fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -2846,9 +2846,29 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Judged here, under the customer locks and BEFORE the FK sweep repoints
     // those invoices to the winner (the send fence keys on customer_id).
     if (winner.payer_id && !loser.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx, {
+          // The loser's records resolve through the winner's payer after the merge.
+          pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || null } },
+        })) {
       throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
     }
+    // The loser's visit-linked invoices move under the winner and resolve through the winner's default
+    // payer (the loser's, when the winner has none: the fill-if-empty backfill). One that would move to a
+    // payer while its send or charge is in flight defers the merge, judged before the sweep and before any
+    // Stripe cancellation, whichever payers the two records carry (an active winner absorbing a loser
+    // whose own payer is inactive moves them too).
+    if (await require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { customerId: loser.id }, {
+      pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || loser.payer_id || null } },
+    })) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
+    // Remember who owns each side's visit-linked invoices BEFORE the sweep moves the loser's under the
+    // winner, so the withdrawal after the Bill-To lands acts on the invoices whose owner moved.
+    const LinkedOwners = require('./visit-linked-invoice-withdrawal');
+    // It also takes both sides' visit and payer rows FOR SHARE now, before the sweep writes invoice rows:
+    // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -3331,7 +3351,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // covers the repointed loser invoices; this one covers the winner's own
       // before anything is cancelled.
       if (backfills.payer_id && !winner.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
         throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
       }
       // Past every defer: now the Stripe writes.
@@ -3345,7 +3368,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // winner's ownership covers the repointed loser invoices too, so this
     // one query fences both records for the loser-payer direction (the
     // winner-payer direction was fenced before the sweep).
-    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
       throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
     }
     if (Object.keys(backfills).length) {
@@ -4368,6 +4394,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);
+    // The undo's reconciliation reads each customer's visit and payer rows; take them (FOR SHARE) now,
+    // after the customer rows and before any invoice row is written back.
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: loserId }, null, { lock: true });
     if (!winner) refuse('The kept customer no longer exists');
     if (winner.deleted_at || winner.active === false) {
       refuse('The kept customer is inactive or deleted — reactivate it before undoing the merge');
