@@ -562,7 +562,8 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
   const job = parseData(estimate?.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.deferred_to_first_visit !== true || ![AWAITING, 'pending'].includes(String(job.status || ''))) return false;
   const invoice = job.invoice_id ? await conn('invoices').where({ id: job.invoice_id }).first('status') : null;
-  if (!invoice || ['paid', 'processing', 'void', 'refunded'].includes(String(invoice.status || ''))) return false;
+  const invStatus = String(invoice?.status || '');
+  if (!invoice || ['processing', 'paid', 'prepaid'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return false;
   // A visit that already claimed the text keeps it on a retry, even when
   // another held visit finished in between (GitHub Codex #5640 r13).
   if (String(job.first_visit_text_visit_id || '') === String(svc.id)) return true;

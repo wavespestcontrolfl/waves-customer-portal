@@ -504,7 +504,7 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a year already paid or in process before the first visit keeps the regular text (GitHub Codex #5640 r13)', async () => {
       const Release = require('../services/paf-prepay-release');
-      for (const status of ['paid', 'processing']) {
+      for (const status of ['paid', 'prepaid', 'processing']) {
         const f = await deferredAccept();
         await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
         await trx('invoices').where({ id: f.invoiceId }).update({ status });
