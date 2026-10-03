@@ -250,18 +250,24 @@ async function loadHistory(svc, dbh, day, serviceLine) {
   const { detectServiceLine } = require('../service-report/service-line-configs');
   const { parseETDateTime } = require('../../utils/datetime-et');
   const { loadRecentLineServices } = require('../../utils/last-line-service');
-  const completed = await dbh('scheduled_services')
+  const earlier = () => dbh('scheduled_services')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .whereNot({ id: svc.id })
-    .where('scheduled_date', '<', day)
+    .where('scheduled_date', '<', day);
+  // Counted in the database, never from a capped read.
+  const [{ count }] = await earlier().count('* as count');
+  // The window's anchor can only lie inside the cap, so every completion in
+  // that span is read (bounded by the cap, not by a row limit) and the line is
+  // matched in memory: no newer visit of another line can push it out.
+  const capDay = new Date(new Date(`${day}T12:00:00Z`).getTime() - (WINDOW_CAP_DAYS + 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const recent = await earlier().where('scheduled_date', '>=', capDay)
     .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
-    .limit(200)
     .select('service_type', 'scheduled_date', 'completed_at');
-  const last = completed.find((r) => detectServiceLine(r.service_type) === serviceLine);
+  const last = recent.find((r) => detectServiceLine(r.service_type) === serviceLine);
   const { lineRecords } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 10 });
   const lastRecord = lineRecords.find((r) => dayString(r.service_date) < day);
   return {
-    count: completed.length,
+    count: Number(count) || 0,
     textsFrom: last ? (last.completed_at ? new Date(last.completed_at) : parseETDateTime(`${dayString(last.scheduled_date)}T00:00`)) : null,
     lastNote: lastRecord ? (compact(redactForState(lastRecord.technician_notes), NOTE_CHARS) || null) : null,
   };

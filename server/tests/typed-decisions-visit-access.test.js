@@ -411,6 +411,19 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state.last_tech_notes).toBe('Dog was loose in the yard.');
   });
 
+  test('many newer visits of another line neither cap the count nor hide the same-line anchor', async () => {
+    await visit({ scheduled_date: '2026-09-10', status: 'completed', completed_at: new Date('2026-09-10T18:00:00Z') });
+    await database('scheduled_services').insert(Array.from({ length: 230 }, () => ({
+      id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', scheduled_date: '2026-09-20', status: 'completed',
+    })));
+    await text('Please knock today', '2026-09-05T15:00:00Z');
+    await text('Ants are back in the lanai', '2026-09-25T15:00:00Z');
+    const built = await build(await visit());
+    expect(built.state.visit_count).toBe(231);
+    expect(built.state.recent_texts).toContain('Ants are back in the lanai');
+    expect(built.state.recent_texts).not.toContain('Please knock today');
+  });
+
   test('a provider that is down does not keep later visits from their first answer', async () => {
     process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
     mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false, reason: 'error' } : reply()));
