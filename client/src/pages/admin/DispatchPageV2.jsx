@@ -92,10 +92,12 @@ import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
   shouldOpenTreeShrubFastComplete,
+  shouldOpenLawnFastComplete,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
 import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
+import FastCompleteLawnSheet from "../../components/tech/FastCompleteLawnSheet";
 import { shortAddress } from "../tech/visitBrief";
 import { serviceWindowLabel } from "../tech/routeStops";
 import { requestDispatchSync } from "../../lib/dispatchSync";
@@ -443,6 +445,7 @@ export default function DispatchPageV2({
   // Tree & Shrub Fast Complete (GATE_TS_FAST_COMPLETE): the one-screen sheet
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
+  const [lawnFastService, setLawnFastService] = useState(null);
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -611,7 +614,7 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
-  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || continueProjectService;
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnFastService || continueProjectService;
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,
@@ -890,6 +893,10 @@ export default function DispatchPageV2({
     }
     if (!fullForm && shouldOpenTreeShrubFastComplete(service)) {
       setTreeShrubFastService(service);
+      return;
+    }
+    if (!fullForm && shouldOpenLawnFastComplete(service)) {
+      setLawnFastService(service);
       return;
     }
     setCompletingService(service);
@@ -1919,6 +1926,48 @@ export default function DispatchPageV2({
           onFullForm={() => {
             const service = treeShrubFastService;
             setTreeShrubFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+        />
+      )}
+      {lawnFastService && (
+        <FastCompleteLawnSheet
+          key={lawnFastService.id}
+          service={{
+            id: lawnFastService.id,
+            customerName: lawnFastService.customer_name || lawnFastService.customerName,
+            serviceType: lawnFastService.service_type || lawnFastService.serviceType,
+            address: shortAddress(lawnFastService.address) || lawnFastService.address || "",
+            timeLabel: serviceWindowLabel(lawnFastService) || "",
+            // One-time lawn visits carry typed findings the server requires.
+            findingsType: lawnFastService.completionProfile?.findingsType || null,
+            // The visit the user opened, checked against the live context.
+            routedCustomerId: lawnFastService.customerId || lawnFastService.customer_id || null,
+            routedScheduledDate: lawnFastService.scheduledDate || lawnFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in lawnFastService ? lawnFastService.propertyId : undefined,
+            routedAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : null,
+          }}
+          request={adminFetch}
+          catalog={products}
+          onClose={(options) => {
+            setLawnFastService(null);
+            if (options?.refresh) {
+              setScheduleRefreshKey((k) => k + 1);
+              void fetchSchedule(date, { silent: true });
+            }
+          }}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch.
+            const service = lawnFastService;
+            setLawnFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = lawnFastService;
+            setLawnFastService(null);
             handleComplete(service, { fullForm: true });
           }}
         />

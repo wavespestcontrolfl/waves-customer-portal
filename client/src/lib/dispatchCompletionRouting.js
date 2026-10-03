@@ -1,4 +1,5 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
+import { isLawnFastCompleteEligible } from "./lawn-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -34,6 +35,19 @@ export function mergePostPaymentService(freshService, paymentService) {
 // without it a cached row moved to another property could complete unnoticed.
 export function shouldOpenTreeShrubFastComplete(service) {
   return isTreeShrubFastCompleteEligible(service)
+    && service != null && "propertyId" in service
+    && !service?.completionInvoiceAlreadySent
+    && !service?.checkoutInvoiceId
+    && !service?.checkoutInvoiceToken;
+}
+
+// Admin Dispatch opens the lawn Fast Complete sheet for a visit the shared rule
+// makes eligible, on the same terms as the Tree & Shrub sheet above: not a
+// visit returning from the payment flow, and not a row with no `propertyId`
+// key. The sheet then confirms it with the server's context and hands the visit
+// to the full form when the server says it is not eligible.
+export function shouldOpenLawnFastComplete(service) {
+  return isLawnFastCompleteEligible(service)
     && service != null && "propertyId" in service
     && !service?.completionInvoiceAlreadySent
     && !service?.checkoutInvoiceId
