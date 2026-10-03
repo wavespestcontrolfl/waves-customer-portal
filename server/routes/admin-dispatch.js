@@ -12,6 +12,7 @@ const {
   pestPressureConfigAllowsTechnicianRating,
   completionOwnershipError,
   techTipsGateOn,
+  backfillCompletionPlan,
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
@@ -836,6 +837,56 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
     const facts = await readLaneFacts({ note, laneKey });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/standard-wording { values, activityScore, backfill }
+// — the standard sentences a typed visit's customer report keeps when its
+// record says nothing was found (GATE_STANDARD_WORDING_PREVIEW; owner mockup
+// approval 2026-10-03), for the office form to show where it greys out
+// Generate AI report. Built as /complete builds the report, from the visit's
+// own form (its completion profile, never the client's) and the form's own
+// fields only (visit-typed-facts.js currentValuesFor), dated as /complete
+// dates it (today, or the scheduled day for a backdated closeout); answers
+// { available: true, headline, body } only when the report keeps its standard
+// wording, else { available: false }. A technician reads only their own
+// current visit; admins office-wide (the completion routes' rule). Read-only.
+router.post('/:serviceId/standard-wording', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').standardWordingPreviewLive()) return res.json({ available: false });
+    const raw = req.body?.values;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return res.status(400).json({ error: 'values must be an object' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!profile?.findingsType) return res.json({ available: false });
+    const { currentValuesFor } = require('../services/visit-typed-facts');
+    const { standardWordingPreview } = require('../services/service-report/standard-wording-preview');
+    const score = req.body?.activityScore;
+    const backfillPlan = backfillCompletionPlan({
+      backfill: req.body?.backfill === true,
+      scheduledDate: svc.scheduled_date,
+      role: req.techRole,
+    });
+    const wording = await standardWordingPreview(db, {
+      svc,
+      serviceDate: backfillPlan.active ? backfillPlan.serviceDate : etDateString(),
+      profile,
+      values: currentValuesFor(profile.findingsType, raw),
+      techScore: Number.isInteger(score) ? score : null,
+    });
+    return res.json(wording ? { available: true, ...wording } : { available: false });
+  } catch (err) { return next(err); }
 });
 
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast

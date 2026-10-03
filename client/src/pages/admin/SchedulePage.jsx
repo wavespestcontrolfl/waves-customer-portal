@@ -9491,6 +9491,36 @@ export function restoredActivityScoreState(activity, values, savedScore, savedTo
   };
 }
 
+// The standard wording a nothing-found report keeps (GATE_STANDARD_WORDING_
+// PREVIEW, owner mockup approval 2026-10-03): read-only, under the greyed-out
+// Generate AI report, the exact sentences the customer will read.
+export function StandardWordingCard({ wording }) {
+  if (!wording) return null;
+  const text = { margin: 0, fontSize: 14, color: CP_M.ink };
+  return (
+    <div
+      data-testid="standard-wording"
+      style={{
+        border: `1px solid ${CP_M.ink}`,
+        borderRadius: 12,
+        background: CP_M.card,
+        padding: "12px 14px",
+        marginBottom: 20,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase", color: CP_M.ink4 }}>
+        Report the customer will see · standard wording
+      </div>
+      {wording.headline && <p style={text}>{wording.headline}</p>}
+      {wording.body && <p style={text}>{wording.body}</p>}
+      <p style={{ ...text, color: CP_M.ink4 }}>Nothing was found, so the report uses its standard wording instead of a write-up.</p>
+    </div>
+  );
+}
+
 export function TypedFindingsSection({
   variant,
   schema,
@@ -14277,6 +14307,39 @@ export function CompletionPanel({
   // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
   // notes for a typed visit's own findings (the schedule row's flag).
   const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
+  // GATE_STANDARD_WORDING_PREVIEW (owner mockup approval 2026-10-03): while
+  // the record says nothing was found (the rule that greys out Generate AI
+  // report), the exact sentences the customer's report keeps, from the
+  // server's own report builder, read again as the record changes. A card
+  // that may be out of date is never shown: it clears until the new answer.
+  const standardWordingWanted = isTypedFindings
+    && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore);
+  // Generate AI report is off when the report keeps its standard wording, so
+  // it looks off (the approved mockup); before, it looked on and did nothing.
+  const generateHeldForStandardWording = standardWordingWanted || zeroStateCompanionOnly;
+  const [standardWording, setStandardWording] = useState(null);
+  useEffect(() => {
+    setStandardWording(null);
+    if (!standardWordingWanted) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      adminFetch(`/admin/dispatch/${service.id}/standard-wording`, {
+        method: "POST",
+        body: JSON.stringify({
+          values: findingsValues,
+          activityScore: typedActivityScore,
+          backfill: backfillEligible && backfillCloseout,
+        }),
+      })
+        .then((data) => {
+          if (!cancelled) {
+            setStandardWording(data?.available === true ? { headline: data.headline || "", body: data.body || "" } : null);
+          }
+        })
+        .catch(() => { if (!cancelled) setStandardWording(null); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [standardWordingWanted, service.id, findingsValues, typedActivityScore, backfillEligible, backfillCloseout]);
   // Fast Complete step 5: a termite treatment's state record fills from the
   // visit's own products and trace (lib termiteRecordFromVisit), each field
   // only while it is empty or still holds what was last filled this way, so
@@ -20604,7 +20667,8 @@ export function CompletionPanel({
                   ...secondaryPill,
                   marginTop: 4,
                   marginBottom: 20,
-                  opacity: generating ? 0.5 : 1,
+                  opacity: generating ? 0.5 : generateHeldForStandardWording ? 0.45 : 1,
+                  cursor: generateHeldForStandardWording && !generating ? "default" : secondaryPill.cursor,
                 }}
               >
                 {generating ? "Generating…" : "Generate AI report"}
@@ -20634,6 +20698,7 @@ export function CompletionPanel({
                 Include recent customer calls/texts/emails
               </label>
             )}
+            {!quickComplete && <StandardWordingCard wording={standardWording} />}
             {!quickComplete && generatedReportCleared && (
               <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
                 Findings changed after the AI report was generated — the draft
@@ -23095,7 +23160,8 @@ export function CompletionPanel({
                 color: D.teal,
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: generating ? "wait" : "pointer",
+                cursor: generating ? "wait" : generateHeldForStandardWording ? "default" : "pointer",
+                opacity: generateHeldForStandardWording && !generating ? 0.45 : 1,
                 marginTop: 8,
                 marginBottom: 20,
                 display: "flex",
@@ -23131,6 +23197,7 @@ export function CompletionPanel({
               Include recent customer calls/texts/emails
             </label>
           )}
+          {!quickComplete && <StandardWordingCard wording={standardWording} />}
           {!quickComplete && generatedReportCleared && (
             <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
               Findings changed after the AI report was generated — the draft
