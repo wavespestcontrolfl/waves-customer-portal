@@ -176,6 +176,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/lawn-assessment/history/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/latest/:customerId` | admin-lawn-assessment |
 | GET | `/api/admin/lawn-assessment/service/:serviceId` | admin-lawn-assessment |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries` | admin-neighborhood-access |
+| POST | `/api/admin/neighborhood-access/visits/:visitId/entries/:entryId/wrong` | admin-neighborhood-access |
 | GET | `/api/admin/notifications` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/done` | admin-notifications |
 | PUT | `/api/admin/notifications/:id/read` | admin-notifications |
