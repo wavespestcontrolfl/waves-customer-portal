@@ -528,9 +528,7 @@ async function uploadServicePhotoForVisit({
 }) {
   const expected = parseExpectedServicePhotoVisit(expectedVisit);
   const newlyUploadedObjects = [];
-  const ownsTransaction = !knex?.isTransaction;
-  let transactionBodyCompleted = false;
-  return withPhotoDbTransaction(knex, async (trx) => {
+  return withTrackedServicePhotoTransaction({ knex, newlyUploadedObjects }, async (trx) => {
     const visit = await trx('scheduled_services')
       .where({ id: scheduledServiceId })
       .forUpdate()
@@ -588,7 +586,6 @@ async function uploadServicePhotoForVisit({
         knex: trx,
       });
       const lockedVisit = servicePhotoVisitSnapshot(visit);
-      transactionBodyCompleted = true;
       return {
         photo,
         staged: false,
@@ -614,7 +611,6 @@ async function uploadServicePhotoForVisit({
       knex: trx,
     });
     const lockedVisit = servicePhotoVisitSnapshot(visit);
-    transactionBodyCompleted = true;
     return {
       photo,
       staged: true,
@@ -622,25 +618,6 @@ async function uploadServicePhotoForVisit({
       serviceRecordId: null,
       visit: lockedVisit,
     };
-  }).catch(async (err) => {
-    // The inner upload helpers can clean up insert-time failures, but their
-    // success still precedes this outer transaction's commit. A handler
-    // failure in a transaction owned here can remove only objects created by
-    // this attempt; deduped rows are deliberately absent from this list.
-    // Once the transaction body returned, a rejection belongs to COMMIT. Its
-    // outcome can still become visible after a fresh connection reads no row,
-    // so absence is not proof of rollback. Retain bytes for later repair.
-    // The same rule applies when the caller owns the surrounding transaction.
-    if ((!ownsTransaction || transactionBodyCompleted) && newlyUploadedObjects.length) {
-      logger.warn('[service-photos] retaining uploaded objects after an uncertain transaction outcome');
-      throw err;
-    }
-    // A handler failure from a transaction owned here has finished rolling
-    // back before Knex rejects. A single snapshot still protects cleanup from
-    // straddling a concurrent staging-to-gallery promotion.
-    const cleanupKnex = knex?.isTransaction ? db : knex;
-    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects, { verifyAbsentWith: cleanupKnex });
-    throw err;
   });
 }
 
