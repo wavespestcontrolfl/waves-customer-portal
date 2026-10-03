@@ -133,10 +133,65 @@ describe('service photo uploads', () => {
 
   test('metadata-read fallback retains the object when INSERT returns only its id', async () => {
     const { uploadServicePhotoBuffer } = require('../services/service-photos');
-    const photo = await uploadServicePhotoBuffer({ serviceRecordId: 'record-1', buffer: Buffer.from('photo'), knex: makeKnex({ metadataAvailable: false }) });
+    const newlyUploadedObjects = [];
+    const photo = await uploadServicePhotoBuffer({
+      serviceRecordId: 'record-1',
+      buffer: Buffer.from('photo'),
+      newlyUploadedObjects,
+      knex: makeKnex({ metadataAvailable: false }),
+    });
     expect(photo).toEqual({ id: 'photo-1' });
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     expect(mockS3Send.mock.calls[0][0].constructor.name).toBe('PutObjectCommand');
+    expect(newlyUploadedObjects).toEqual([{ s3_key: mockS3Send.mock.calls[0][0].input.Key }]);
+  });
+
+  test('retains tracked objects when COMMIT fails with an uncertain outcome', async () => {
+    const { withTrackedServicePhotoTransaction } = require('../services/service-photos');
+    const commitError = new Error('transaction commit failed');
+    const trx = { isTransaction: true };
+    const knex = {
+      transaction: jest.fn(async (handler) => {
+        await handler(trx);
+        throw commitError;
+      }),
+      raw: jest.fn(),
+    };
+
+    await expect(withTrackedServicePhotoTransaction({
+      knex,
+      newlyUploadedObjects: [{ s3_key: 'service-photos/record/new.jpg' }],
+    }, async () => 'written')).rejects.toBe(commitError);
+
+    expect(knex.raw).not.toHaveBeenCalled();
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(
+      expect.stringContaining('uncertain transaction outcome'),
+    );
+  });
+
+  test('cleans tracked objects after a known owned-transaction rollback', async () => {
+    const { withTrackedServicePhotoTransaction } = require('../services/service-photos');
+    const handlerError = new Error('handler failed');
+    const trx = { isTransaction: true };
+    const knex = {
+      transaction: jest.fn(async (handler) => handler(trx)),
+      raw: jest.fn(async () => ({ rows: [{ referenced: false }] })),
+    };
+
+    await expect(withTrackedServicePhotoTransaction({
+      knex,
+      newlyUploadedObjects: [{ s3_key: 'service-photos/record/new.jpg' }],
+    }, async () => { throw handlerError; })).rejects.toBe(handlerError);
+
+    expect(knex.raw).toHaveBeenCalledTimes(1);
+    expect(knex.raw.mock.calls[0][0]).toContain('SELECT EXISTS');
+    expect(knex.raw.mock.calls[0][1]).toEqual([
+      'service-photos/record/new.jpg',
+      'service-photos/record/new.jpg',
+    ]);
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    expect(mockS3Send.mock.calls[0][0].constructor.name).toBe('DeleteObjectCommand');
   });
 
   test('uploads completion data-url photos into service_photos rows', async () => {
@@ -270,6 +325,7 @@ describe('service photo uploads', () => {
   test('stages a pre-completion photo against the scheduled visit', async () => {
     const { uploadStagedServicePhotoBuffer } = require('../services/service-photos');
     const knex = makeKnex();
+    const newlyUploadedObjects = [];
 
     const row = await uploadStagedServicePhotoBuffer({
       scheduledServiceId: 'service-1',
@@ -279,12 +335,14 @@ describe('service photo uploads', () => {
       mimeType: 'image/jpeg',
       photoType: 'before',
       capturedAt: '2026-07-15T12:00:00.000Z',
+      newlyUploadedObjects,
       knex,
     });
 
     expect(row.id).toBe('photo-1');
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     expect(mockS3Send.mock.calls[0][0].input.Key).toContain('service-photo-staging/service-1/');
+    expect(newlyUploadedObjects).toEqual([{ s3_key: mockS3Send.mock.calls[0][0].input.Key }]);
     expect(knex.getInsertPayload()).toMatchObject({
       scheduled_service_id: 'service-1',
       technician_id: 'tech-1',
