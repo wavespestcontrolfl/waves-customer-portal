@@ -526,12 +526,14 @@ function acceptLoneCandidateContradicted(candidate, estimate) {
 // single phone hit, or — among several — a unique email or service-address
 // match. Otherwise return null so the accept creates a fresh profile;
 // attaching the tier/monthly_rate/schedules to a guessed profile splits the
-// real customer's history. (A lone hit the estimate contradicts is still
-// returned as the match here - every non-accept reader keeps today's answer -
-// and flagged `contradicted` on the verdict, which the accept path parks.)
+// real customer's history. A lone hit the estimate contradicts is NOT a match for
+// ANY reader (every payload, policy and billing-lane projection then reads the
+// estimate as having no matched customer, so nothing about the rejected profile
+// can surface): the verdict carries `contradicted` + `rejectedCustomerId` for the
+// park decision and the office alert only.
 function pickAcceptCustomerMatch(candidates, estimate) {
   if (!candidates.length) return null;
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) return acceptLoneCandidateContradicted(candidates[0], estimate) ? null : candidates[0];
   let pool = candidates;
   const email = String(estimate.customer_email || '').trim().toLowerCase();
   if (email) {
@@ -613,6 +615,21 @@ async function acceptPhoneParkedVerdict(estimate) {
   if (!estimate || estimate.customer_id || !estimate.customer_phone) return null;
   const verdict = await matchAcceptCustomerByPhone(estimate);
   return verdict.contradicted ? { rejectedCustomerId: verdict.rejectedCustomerId } : null;
+}
+
+// THE public blocking state of an estimate, in precedence order, used by every surface that must agree on it
+// (GET /data, the accept, both card-intent routes, slot browsing / find / reserve / extend and the texting
+// scheduler's slot gate, and the payment-step reminder recheck): the existing review states first (quote-required
+// from the pricing resolver, termite-trenching review from the estimate data), then contact_review from the
+// park verdict. `quoteRequirement` is optional for callers that never resolve it (a surface that doesn't
+// refuse quote-required today keeps not refusing it). Returns null, or { state, ... } with state one of
+// 'quote_required' | 'termite_trenching_review' | 'contact_review' (the last carries rejectedCustomerId, for the
+// office alert only). Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
+async function estimatePublicBlockingState(estimate, { estData, quoteRequirement } = {}) {
+  if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
+  if (estimateTrenchingReviewRequired(estData || parseEstimateDataSafe(estimate))) return { state: 'termite_trenching_review' };
+  const parked = await acceptPhoneParkedVerdict(estimate);
+  return parked ? { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId } : null;
 }
 
 // The ONE office alert for a parked accept (Customers, needs-you, a person acts), deduped per estimate so
@@ -9778,37 +9795,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
-    // B18 park, BEFORE anything is read for the plan, taken or written: an unlinked estimate whose lone phone
-    // candidate it contradicts (email AND address both differ) cannot complete self-serve. This verdict is also
-    // the ONE preflight identity (cached for this request) every later card / hold / prepay decision reads, and
-    // the accept transaction re-resolves it authoritatively and aborts on any difference. The office alert is
-    // raised here, once per attempt (idempotent by dedupe key), after the decision and with no transaction
-    // open. A failed lookup just leaves no verdict: the in-transaction match decides.
-    if (!estimate.customer_id && estimate.customer_phone) {
-      let parked = null;
-      try { parked = await acceptPhoneParkedVerdict(estimate); } catch { /* the authoritative in-transaction match decides */ }
-      if (parked) {
-        // A stale tab can have captured a recurring SetupIntent before the customer record turned
-        // contradictory. Retire the one this request submits with main's own helper - the same one the
-        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
-        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
-        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
-        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
-        // like the in-transaction path. No submitted intent = no Stripe call.
-        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-          ? req.body.recurringCardSetupIntentId.trim() : '';
-        if (parkedSetupIntentId) {
-          try {
-            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
-          } catch (retireErr) {
-            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
-          }
-        }
-        await raiseAcceptParkedAlert({ estimate, rejectedCustomerId: parked.rejectedCustomerId });
-        return res.status(409).json(acceptOfficeReviewBody());
-      }
-    }
-
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
     // above the Accept button. Only sanitize/validate here (a malformed
@@ -10212,6 +10198,38 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         reviewBeforeBooking: true,
         reason: 'termite_trenching_review',
       });
+    }
+    // B18 park, decided right after the existing review states (quote-required above, trenching review here) so the
+    // accept reports the same blocking state /data and the intent routes do, and BEFORE any contact fill, card,
+    // hold, prepay quote or write. An unlinked estimate whose lone phone candidate it contradicts (email AND
+    // address both differ) cannot complete self-serve: the helper's contact_review state. The verdict is cached
+    // per request (the ONE preflight identity; the accept transaction re-resolves it and aborts on any
+    // difference) and every match reader already sees NO match for it. The office alert is raised here, once
+    // per attempt (idempotent by dedupe key), after the decision with no transaction open. A failed lookup just
+    // leaves no verdict: the in-transaction match decides.
+    if (!estimate.customer_id && estimate.customer_phone) {
+      let blocking = null;
+      try { blocking = await estimatePublicBlockingState(estimate, { estData, quoteRequirement }); } catch { /* the authoritative in-transaction match decides */ }
+      if (blocking?.state === 'contact_review') {
+        // A stale tab can have captured a recurring SetupIntent before the customer record turned
+        // contradictory. Retire the one this request submits with main's own helper - the same one the
+        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
+        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
+        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
+        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
+        // like the in-transaction path. No submitted intent = no Stripe call.
+        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+          ? req.body.recurringCardSetupIntentId.trim() : '';
+        if (parkedSetupIntentId) {
+          try {
+            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
+          } catch (retireErr) {
+            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+          }
+        }
+        await raiseAcceptParkedAlert({ estimate, rejectedCustomerId: blocking.rejectedCustomerId });
+        return res.status(409).json(acceptOfficeReviewBody());
+      }
     }
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
@@ -29035,8 +29053,10 @@ async function composeEstimateDataPayload(estimate, {
     // the card-intent endpoints and the accept refuse it too. The lookup shares this request's one cached verdict;
     // a failed lookup is not a park here (the intent endpoints and the accept re-check and fail closed).
     let phoneReviewHold = false;
-    if (terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking && !adminDraftPreview) {
-      try { phoneReviewHold = !!(await acceptPhoneParkedVerdict(estimate)); } catch (parkErr) {
+    if (terminalState === null && !adminDraftPreview) {
+      try {
+        phoneReviewHold = (await estimatePublicBlockingState(estimate, { estData: estimateDataForIntelligence, quoteRequirement }))?.state === 'contact_review';
+      } catch (parkErr) {
         logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
       }
     }
@@ -30510,6 +30530,8 @@ module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
+module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
+module.exports.ACCEPT_OFFICE_REVIEW_MESSAGE = ACCEPT_OFFICE_REVIEW_MESSAGE;
 module.exports.acceptOfficeReviewBody = acceptOfficeReviewBody;
 module.exports.acceptLoneCandidateContradicted = acceptLoneCandidateContradicted;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;

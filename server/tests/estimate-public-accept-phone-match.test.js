@@ -85,13 +85,14 @@ beforeEach(() => {
 });
 
 describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts', () => {
-  it('(a) email AND address both present and both disagree: flagged contradicted, the match itself is unchanged', async () => {
+  it('(a) email AND address both present and both disagree: flagged contradicted and there is NO match for any reader', async () => {
     mockDbFixtures['customers:list'] = [BOB];
     const res = await matchAcceptCustomerByPhone(janeEstimate());
     expect(res.contradicted).toBe(true);
     expect(res.rejectedCustomerId).toBe('cust-bob');
     expect(res.candidateCount).toBe(1);
-    expect(res.match).toBe(BOB);
+    // Every payload / policy / billing-lane projection reads the estimate as having no matched customer.
+    expect(res.match).toBeNull();
   });
 
   it('(a) email compare is case/space-insensitive, address compare keeps the token boundary', async () => {

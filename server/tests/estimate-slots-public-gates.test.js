@@ -68,7 +68,8 @@ jest.mock('../routes/estimate-public', () => ({
   estimateTrenchingReviewRequired: jest.fn(() => false),
   // B18 park (the real implementations are pinned in estimate-public-accept-phone-match / -atomicity).
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
-  acceptPhoneParkedVerdict: jest.fn(async () => null),
+  estimatePublicBlockingState: jest.fn(async () => null),
+  ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked-message',
   acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
@@ -367,20 +368,68 @@ describe('bermuda-suppression money/slot gate', () => {
   });
 });
 
-describe('B18 park: no card is captured for an estimate whose phone belongs to another customer', () => {
-  const { acceptPhoneParkedVerdict } = require('../routes/estimate-public');
+describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
+  const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
   const PARKED_ESTIMATE = { id: 'est-parked', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, customer_id: null, customer_phone: '(941) 555-0123', estimate_data: {} };
+  const PARKED = { state: 'contact_review', rejectedCustomerId: 'cust-bob' };
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
   test.each(['card-hold-intent', 'recurring-card-intent'])('%s refuses with the coded park 409 before any intent or policy work', async (leg) => {
     currentEstimate = PARKED_ESTIMATE;
-    acceptPhoneParkedVerdict.mockResolvedValueOnce({ rejectedCustomerId: 'cust-bob' });
-    const res = await fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await post(leg);
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
     expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
     expect(resolveCardHoldPolicy).not.toHaveBeenCalled();
-    expect(acceptPhoneParkedVerdict).toHaveBeenCalledWith(PARKED_ESTIMATE);
+    // The helper gets the estimate row (phone/email/address columns included) and the resolved estimate data.
+    expect(estimatePublicBlockingState).toHaveBeenCalledWith(PARKED_ESTIMATE, expect.objectContaining({ estData: expect.anything() }));
+  });
+
+  test('available-slots answers the review shape (no times) and never reaches the slot service', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ primary: [], availableSlots: [], reviewBeforeBooking: true, reason: 'contact_review', message: 'parked-message' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('find-slots answers the review shape and reserve answers the coded 409; no slot is searched or held', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const found = await post('find-slots', { query: 'next week please' });
+    // (askToken gating may answer before the park check in this harness: assert only that no search ran.)
+    expect(findEstimateSlots).not.toHaveBeenCalled();
+    if (found.status === 200) expect(await found.json()).toMatchObject({ reviewBeforeBooking: true, reason: 'contact_review' });
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(reserved.status).toBe(409);
+    expect(await reserved.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
+  test('extend refuses on the pre-transaction read AND hands the service the same predicate for the locked row', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValue(PARKED);
+    try {
+      const res = await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    } finally { estimatePublicBlockingState.mockResolvedValue(null); }
+  });
+
+  test('the texting AI\'s gate (slotBrowseRefusal) inherits it: no times offered for a parked estimate, and none when the verdict cannot be read', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    currentEstimate = { ...PARKED_ESTIMATE, customer_id: 'cust-1' };
+    customersById = { 'cust-1': { phone: '(941) 555-0123' } };
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+    estimatePublicBlockingState.mockRejectedValueOnce(new Error('phone lookup down'));
+    await expect(offerableEstimateSlots('est-parked', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });
 

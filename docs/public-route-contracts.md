@@ -1695,27 +1695,40 @@ answers:
   cohort accept WILL defer its attached invoice but the tab attested no timing (a tab from before
   the sub-gate). The page shows the answered timing for that selection and refetches.
 - `409 { error, code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' }`
-  when an unlinked estimate's phone matches a lone customer the estimate contradicts (above). Decided
-  BEFORE any plan, card, hold, prepay quote or write, from the request's one cached preflight verdict, so
-  nothing is created, charged, captured, reserved, texted or changed: no customer, no account, no status
-  change, no conversion. The `error` is the review-before-booking sentence the page already shows. The
-  office gets ONE Customers needs-you alert (`accept-phone-contradicted:<estimateId>`, a person acts: fix
-  the phone on the estimate or link it to the right customer), raised right after that decision on
-  every attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
+  when an unlinked estimate's phone matches a lone customer the estimate contradicts (above). ONE helper,
+  `estimatePublicBlockingState`, decides the estimate's public blocking state in precedence order - the
+  existing quote-required and termite-trenching-review states first, then `contact_review` from the park
+  verdict - and `GET /data`, the accept, both card-intent routes, slot browsing / find-slots / reserve /
+  extend (the extend recheck runs again on the locked row), the texting scheduler's slot gate and the
+  abandoned-payment-step reminder recheck all call it, so every surface reports the same blocking state
+  (an estimate that is already quote-required or trenching-review gets that refusal and no phone alert).
+  The accept decides it right after those refusals and BEFORE any contact fill, plan, card, hold, prepay
+  quote or write, from the request's one cached preflight verdict, so nothing is created, charged,
+  captured, reserved, texted or changed: no customer, no account, no status change, no conversion. The
+  `error` is the review-before-booking sentence the page already shows. A lone hit the estimate contradicts
+  is NO match for any reader of the matcher, so every payload, policy and billing-lane projection treats
+  the estimate as having no matched customer and nothing about the other customer can surface. The office
+  gets ONE Customers needs-you alert (`accept-phone-contradicted:<estimateId>`, a person acts: fix the
+  phone on the estimate or link it to the right customer), raised right after that decision on every
+  attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
   authoritative match, or the locked re-read of a reused lone candidate (judged on the pre-fill identity
   snapshot), finds the contradiction the preflight did not see; that transaction rolls back, the existing
-  retirement of a captured recurring card runs, and the alert is raised after the rollback. The preflight park does
-  the same with a `recurringCardSetupIntentId` the request submits (a stale tab that captured before the record
-  turned contradictory): it is retired (only if it belongs to this estimate) BEFORE the 409, a retirement Stripe
-  cannot confirm answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` (no alert on that response; the retry
-  parks again and raises it), and a request with no intent makes no Stripe call. `GET /:token/data`
-  answers such an estimate with `cta.reviewBeforeBooking: true`, `cta.reviewReason: 'contact_review'` and
-  `cta.canAccept: false` (the page's existing review state; nothing about the other customer), and
-  `POST /:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 without minting a
-  SetupIntent. The estimate's own phone is left as staff typed it, so its follow-up texts are unchanged
-  until the office fixes the number. Several phone candidates, or a lone candidate that agrees on
-  email or address, behave as before. A one-time card-hold SetupIntent a stale tab captured before the
-  park stays unbound at Stripe (customerless until an accept commits); it is not retired.
+  retirement of a captured recurring card runs, and the alert is raised after the rollback. The preflight
+  park does the same with a `recurringCardSetupIntentId` the request submits (a stale tab that captured
+  before the record turned contradictory): it is retired (only if it belongs to this estimate) BEFORE the
+  409, a retirement Stripe cannot confirm answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` (no
+  alert on that response; the retry parks again and raises it), and a request with no intent makes no
+  Stripe call. `GET /:token/data` answers such an estimate with `cta.reviewBeforeBooking: true`,
+  `cta.reviewReason: 'contact_review'` and `cta.canAccept: false` (the page's existing review state).
+  `POST /:token/card-hold-intent`, `/recurring-card-intent` and `/reserve` (and an `extend`) answer the same
+  409 without minting a SetupIntent or holding a slot; `available-slots` and `find-slots` answer an empty
+  review shape (`reviewBeforeBooking: true`, `reason: 'contact_review'`, no times); the reminder sweep skips
+  it. A stale tab handles the 409 from the accept and from both card intents through one transition (drop the
+  captured cards, release the slot hold, refetch `/data`). The estimate's own phone is left as staff typed
+  it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
+  a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a
+  stale tab captured before the park stays unbound at Stripe (customerless until an accept commits); it
+  is not retired.
 - `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
   cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
   Auto Pay was turned on since the policy was resolved, the saved method a `saved_method_consented`

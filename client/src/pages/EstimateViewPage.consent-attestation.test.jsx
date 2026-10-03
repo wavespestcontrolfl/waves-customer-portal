@@ -70,9 +70,17 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });
 
-  it('B18: an ACCEPT_NEEDS_OFFICE_REVIEW 409 from a stale tab drops any captured card (both refs) and refetches /data, which answers with the review state', () => {
+  it('B18: ALL THREE call sites (accept, card-hold-intent, recurring-card-intent) take an ACCEPT_NEEDS_OFFICE_REVIEW 409 through the ONE transition', () => {
+    // The accept handler's 409 branch and both intent responses call the same function.
+    expect(src.match(/throw new Error\(await enterContactReviewRef\.current\(body\)\);/g)).toHaveLength(3);
+    expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+    expect(src).toMatch(/\/card-hold-intent`[\s\S]{0,700}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+    expect(src).toMatch(/\/recurring-card-intent`[\s\S]{0,700}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*throw new Error\(await enterContactReviewRef\.current\(body\)\);/);
+  });
+
+  it('B18: the one transition drops every captured/minted card, releases the slot hold and refetches /data (the review state)', () => {
     expect(src).toMatch(
-      /if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[\s\S]{0,900}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);\s*throw new Error/,
+      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,500}await releaseHeldReservation\(heldId\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
     );
   });
 

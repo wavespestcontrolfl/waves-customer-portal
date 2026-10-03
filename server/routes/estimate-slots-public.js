@@ -55,8 +55,9 @@ const {
   handleEstimateAsk,
   isEstimateAcceptActive,
   matchAcceptCustomerByPhone,
-  acceptPhoneParkedVerdict,
+  estimatePublicBlockingState,
   acceptOfficeReviewBody,
+  ACCEPT_OFFICE_REVIEW_MESSAGE,
   isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
@@ -231,7 +232,22 @@ function isCommercialAutoEstimate(estimate = {}) {
 }
 
 // The estimate columns the page's slot gate reads (slotBrowseRefusal).
-const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest'];
+// The estimate columns the park verdict (contact_review) reads: an unlinked estimate's phone / email / address.
+const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_phone', 'customer_email', 'address'];
+const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
+
+// B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by
+// the ONE precedence helper in estimate-public.js - the existing quote-required / trenching refusals each caller
+// already makes come first). The same shapes the trenching refusals answer on each path.
+async function contactReviewHold(estimate, opts) {
+  return (await estimatePublicBlockingState(estimate, opts))?.state === 'contact_review';
+}
+function parkedSlotBrowseBody() {
+  return {
+    primary: [], expander: [], availableSlots: [], summary: null,
+    reviewBeforeBooking: true, reason: 'contact_review', message: ACCEPT_OFFICE_REVIEW_MESSAGE,
+  };
+}
 
 // Everything GET /:token/available-slots can answer with INSTEAD of slots —
 // the estimate is refused, terminal, or not self-schedulable (commercial,
@@ -280,6 +296,7 @@ async function slotBrowseRefusal(estimate) {
       },
     };
   }
+  if (await contactReviewHold(estimate)) return { status: 200, body: parkedSlotBrowseBody() };
   return null;
 }
 
@@ -432,7 +449,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -471,6 +488,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
       });
     }
+    if (await contactReviewHold(estimate)) return res.json(parkedSlotBrowseBody());
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
       ? req.body.selectedFrequency.trim()
@@ -542,7 +560,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -569,6 +587,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
+    if (await contactReviewHold(estimate)) return res.status(409).json(acceptOfficeReviewBody());
 
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
 
@@ -679,7 +698,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (the accept
     // refuses it; the office has been told). A failed lookup fails closed (the route's own 500).
-    if (await acceptPhoneParkedVerdict(estimate)) return res.status(409).json(acceptOfficeReviewBody());
+    if (await contactReviewHold(estimate, { estData, quoteRequirement })) return res.status(409).json(acceptOfficeReviewBody());
 
     // The hold only applies to a one-time booking — mirror accept's one-time
     // availability gate before minting the intent so a one_time request on an
@@ -788,7 +807,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
-    if (await acceptPhoneParkedVerdict(estimate)) return res.status(409).json(acceptOfficeReviewBody());
+    if (await contactReviewHold(estimate, { estData, quoteRequirement })) return res.status(409).json(acceptOfficeReviewBody());
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
@@ -953,7 +972,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -966,7 +985,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
     // the service under the estimate's row lock (codex r6 P1) — the route's
     // read can go stale while the txn waits, and these shapes live in
     // estimate_data, which the locked viewability check does not re-derive.
-    const noBookingRefusal = (row) => {
+    const noBookingRefusal = async (row) => {
       // The suppression gate belongs in the locked recheck too (codex r8 P2):
       // staff can reshape an estimate into a Bermuda-suppression shape after
       // the pre-txn rejectIneligibleEstimate passed, and extending then
@@ -1005,9 +1024,11 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       if (estimateTrenchingReviewRequired(parseEstimateData(row))) {
         return { status: 409, body: TRENCHING_REVIEW_409 };
       }
+      // The locked row (the service re-runs this under the estimate's row lock) carries the phone columns too.
+      if (await contactReviewHold(row)) return { status: 409, body: acceptOfficeReviewBody() };
       return null;
     };
-    const preTxnRefusal = noBookingRefusal(estimate);
+    const preTxnRefusal = await noBookingRefusal(estimate);
     if (preTxnRefusal) return res.status(preTxnRefusal.status).json(preTxnRefusal.body);
 
     try {
@@ -1179,9 +1200,10 @@ async function estimateBelongsToCustomer(estimate, customerId) {
 }
 
 async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
-  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id', 'customer_phone');
+  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS);
   if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
-  if (await slotBrowseRefusal(estimate)) return null;
+  // Fail closed: a refusal, or a verdict that cannot be read (the park lookup), offers no times.
+  if (await slotBrowseRefusal(estimate).catch(() => true)) return null;
   // The page's /data resolution for this estimate: its acceptance contract
   // decides whether the slot picker renders at all (quote-required, linked
   // existing appointment, invoice-only, commercial site-confirmation → no

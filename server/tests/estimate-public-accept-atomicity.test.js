@@ -4264,6 +4264,19 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     });
   });
 
+  test('review precedence: an estimate that already needs trenching review gets THAT refusal (no contact_review, no phone alert), exactly as /data and the intent routes report it', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-park-13', token: 'tok-est-park-13-x0123456789', monthly_total: 0, annual_total: 0, onetime_total: 2210,
+      estimate_data: JSON.stringify({ result: { recurring: { services: [] }, oneTime: { items: [{ name: 'Termite Trenching', service: 'termite_trenching', price: 2210 }], membershipFee: 0 } } }),
+    }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    const res = await putAccept('tok-est-park-13-x0123456789', { serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data).toMatchObject({ reviewBeforeBooking: true, reason: 'termite_trenching_review' });
+    expect(res.data.code).toBeUndefined();
+    expect(parkedAlertCalls()).toHaveLength(0);
+  });
+
   test('control: a lone candidate that agrees on email, or on address, is reused exactly as before (no park, no alert)', async () => {
     for (const [id, overrides] of [['est-park-2', { email: 'pat@example.com' }], ['est-park-3', { address_line1: '123 Palm Ave' }]]) {
       jest.clearAllMocks();

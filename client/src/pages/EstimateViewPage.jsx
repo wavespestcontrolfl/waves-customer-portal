@@ -6497,6 +6497,30 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }).then((r) => r.ok || r.status === 404).catch(() => false);
   }, [token, readOnlyPreview]);
 
+  // B18: the server parked this estimate for the office (ACCEPT_NEEDS_OFFICE_REVIEW: its phone belongs to another
+  // customer) - answered by the accept PUT AND by both card-intent routes. ONE transition for all three call sites:
+  // drop every captured or minted card (Auto Pay card, one-time hold, open modals), release the slot hold the way the
+  // accept recovery does, and refetch /data, which now answers with the page's existing review-before-booking state
+  // (cta.reviewBeforeBooking, reviewReason 'contact_review'). Returns the sentence to show. A ref, assigned every
+  // render, so the handlers need no dependency on it.
+  const enterContactReviewRef = useRef(null);
+  enterContactReviewRef.current = async (body) => {
+    recurringCardSetupIntentIdRef.current = null;
+    setInlineCardIntent(null);
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+    cardHoldSetupIntentIdRef.current = null;
+    setCardHoldIntent(null);
+    const heldId = reservationRef.current?.scheduledServiceId || null;
+    setReservation(null);
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    await releaseHeldReservation(heldId);
+    await loadEstimate({ preserveSelection: true });
+    return body?.error || 'A Waves specialist reviews this quote with you and schedules your visit.';
+  };
+
   // The ONE recovery for a hold that is definitively gone (codex r3 P1).
   // Clearing `reservation` alone was not enough: `data.estimate.acceptance`
   // still described the adopted hold, and canShowSlotPicker only renders the
@@ -7487,15 +7511,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         }
         if (r.status === 409) {
           if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
-            // The accept was parked for the office (the estimate's phone belongs to another customer): nothing was
-            // booked or charged. Drop any captured card and refetch /data, which now answers with the page's
-            // existing review-before-booking state (cta.reviewBeforeBooking, reviewReason 'contact_review').
-            recurringCardSetupIntentIdRef.current = null;
-            setInlineCardIntent(null);
-            cardHoldSetupIntentIdRef.current = null;
-            setCardHoldIntent(null);
-            await loadEstimate({ preserveSelection: true });
-            throw new Error(body.error || 'A Waves specialist reviews this quote with you and schedules your visit.');
+            throw new Error(await enterContactReviewRef.current(body));
           }
           if (body.code === 'PAYMENT_TIMING_REFRESH') {
             // The server bills this selection now (afterVisitDeferred false) or
@@ -7713,6 +7729,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -7814,6 +7833,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the

@@ -121,3 +121,49 @@ test.each([
   expect(res.status).toBe(200);
   expect(ctaOf(res)).toMatchObject({ canAccept: true, reviewBeforeBooking: false, reviewReason: null });
 });
+
+// The P0: a parked estimate's payload must not be derived from the rejected customer. Every match reader sees NO
+// match for it, so the policy / billing fields are exactly those of an estimate with no candidate at all.
+describe('parked /data derives nothing from the rejected customer', () => {
+  const RICH_BOB = {
+    ...BOB,
+    billing_mode: 'monthly_membership',
+    waveguard_tier: 'Gold',
+    monthly_rate: 79,
+    autopay_enabled: true,
+    autopay_paused_until: '2099-01-01',
+    autopay_opt_out: true,
+    pipeline_stage: 'active_customer',
+    active: true,
+  };
+  const neutralFields = (res) => {
+    const body = JSON.parse(res.text);
+    return {
+      monthlyBilled: body.cta.monthlyBilled,
+      recurringCardPolicy: body.recurringCardPolicy ?? null,
+      cardHoldPolicy: body.cardHoldPolicy ?? null,
+      depositPolicy: body.depositPolicy ?? null,
+      membership: body.estimate.membership ?? null,
+    };
+  };
+
+  test('a rejected candidate with monthly billing, a saved method, paused Auto Pay and an opt-out produces the same policy/billing fields as no candidate at all', async () => {
+    phoneCandidates = [];
+    const none = await getData(makeEstimate());
+    phoneCandidates = [RICH_BOB];
+    const parkedRes = await getData(makeEstimate());
+    expect(ctaOf(parkedRes)).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+    expect(neutralFields(parkedRes)).toEqual(neutralFields(none));
+    expect(parkedRes.text).not.toContain('Gold');
+    expect(parkedRes.text).not.toContain('cust-bob');
+  });
+
+  test('control (the fixture is sensitive): the SAME rich candidate that AGREES on email is matched, and monthly billing then shows', async () => {
+    phoneCandidates = [{ ...RICH_BOB, email: 'pat@example.com' }];
+    const matched = await getData(makeEstimate());
+    expect(ctaOf(matched).reviewBeforeBooking).toBe(false);
+    phoneCandidates = [];
+    const none = await getData(makeEstimate());
+    expect(neutralFields(matched)).not.toEqual(neutralFields(none));
+  });
+});
