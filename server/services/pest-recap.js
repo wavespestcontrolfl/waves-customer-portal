@@ -1733,6 +1733,7 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  sheetRecordFor,
   loadServiceWithCustomer,
   RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,

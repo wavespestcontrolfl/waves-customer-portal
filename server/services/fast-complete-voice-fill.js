@@ -44,7 +44,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { callAnthropic } = require('./llm/call');
-const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('./pest-recap');
+const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts, sheetRecordFor } = require('./pest-recap');
 
 // The model tier for the fill. One constant: the bake-off (FAST vs FLAGSHIP)
 // changes this line only.
@@ -82,6 +82,17 @@ const PEST_SHEET_ACTIVITY = Object.freeze(['none', 'light', 'moderate', 'heavy']
 // The How row (a spray) and the ways an added product can go down.
 const PEST_SHEET_VISIT_METHODS = Object.freeze(['spot_treatment', 'perimeter_spray']);
 const PEST_SHEET_PRODUCT_METHODS = Object.freeze(['spot_treatment', 'perimeter_spray', 'bait_placement', 'granular_broadcast']);
+// A specialty visit's rows (a lane or a typed form on the report flow) offer the
+// pest ways plus three more: FastCompleteSheet.jsx LANE_METHOD_CHOICES.
+const SPECIALTY_SHEET_PRODUCT_METHODS = Object.freeze([...PEST_SHEET_PRODUCT_METHODS, 'broadcast_spray', 'fog_ulv', 'soil_drench']);
+// Where a liquid and a granular broadcast are offered side by side, the bare word
+// "broadcast" proves neither: a spray needs "spray" beside it, granules need a
+// granule word. Fog/ULV's words are too short for the derived rule.
+const SPECIALTY_METHOD_WORDS = Object.freeze({
+  broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
+  granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
+  fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+});
 const UNITS_BY_MEASURE = Object.freeze({
   liquid: Object.freeze(['tsp', 'fl_oz', 'gal']),
   weight: Object.freeze(['g', 'oz', 'lb']),
@@ -183,15 +194,19 @@ async function loadProductAliases(knex, productIds) {
   }
 }
 
-// `anyPestVisit`: the report flow's readers take every untyped pest visit the
-// sheet opens for (pest-recap's eligibility: a pest_control profile that is not
-// typed and not project-backed); the re-service sheet's fill takes only a pest
-// re-service.
+// `anyPestVisit`: the report flow's readers take every visit that sheet opens
+// for: an untyped pest visit (pest-recap's eligibility: a pest_control profile
+// that is not typed and not project-backed), and a specialty visit whose own
+// record the sheet reads from the note (a lane or a typed form, pest-recap's
+// sheetRecordFor, with its own gates). The re-service sheet's fill takes only a
+// pest re-service.
 async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   if (!anyPestVisit && profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
-  if (!eligible) return { ok: false, reason: 'not_eligible' };
+  const record = anyPestVisit ? await sheetRecordFor(profile, svc, knex) : { lane: null, typedType: null };
+  const specialty = record.lane || record.typedType || null;
+  if (!eligible && !specialty) return { ok: false, reason: 'not_eligible' };
   const catalog = (await loadRecapCatalogProducts(knex).catch(() => []))
     .filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
   // A failed read leaves no usable catalog: with no catalog nothing can be
@@ -222,13 +237,17 @@ async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = 
     ok: true,
     context: {
       sheet: 'pest_reservice',
-      label: profile?.serviceKey === 'pest_re_service' ? SHEET_LABEL : PEST_VISIT_LABEL,
+      label: specialty ? `${String(specialty).replace(/_/g, ' ')} visit` : (profile?.serviceKey === 'pest_re_service' ? SHEET_LABEL : PEST_VISIT_LABEL),
       products,
       pests: [...PEST_SHEET_PESTS],
       areas: [...PEST_SHEET_AREAS],
       activity: [...PEST_SHEET_ACTIVITY],
       visitMethods: [...PEST_SHEET_VISIT_METHODS],
-      productMethods: [...new Set([...PEST_SHEET_PRODUCT_METHODS, ...products.map((p) => p.catalogMethod).filter(Boolean)])],
+      productMethods: [...new Set([...(specialty ? SPECIALTY_SHEET_PRODUCT_METHODS : PEST_SHEET_PRODUCT_METHODS), ...products.map((p) => p.catalogMethod).filter(Boolean)])],
+      // A specialty visit's rows offer three more ways (FastCompleteSheet
+      // LANE_METHOD_CHOICES), and with a liquid and a granular broadcast side by
+      // side the bare word "broadcast" proves neither.
+      ...(specialty ? { standardMethods: SPECIALTY_SHEET_PRODUCT_METHODS, methodWords: SPECIALTY_METHOD_WORDS } : {}),
     },
   };
 }
@@ -243,15 +262,12 @@ const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(servi
 // lists below only give the shared schema its enums; nothing is read from them.
 const LAWN_SHEET_LABEL = 'lawn re-service';
 // The lawn sheet's own evidence for a way, where the pest words or the derived
-// rule would be wrong on a lawn. It offers a liquid and a granular broadcast side
-// by side, so the bare word "broadcast" proves neither: a spray needs "spray"
-// beside it, granules need a granule word. Fog/ULV's words are too short for the
-// derived rule. The ways left to that rule read their own distinctive stem
-// (drench, foliar, injection); spot treatment keeps the shared "spot".
+// rule would be wrong on a lawn: the side-by-side broadcast and fog words above,
+// and the three below. The ways left to the derived rule read their own
+// distinctive stem (drench, foliar, injection); spot treatment keeps the shared
+// "spot".
 const LAWN_METHOD_WORDS = Object.freeze({
-  broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
-  granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
-  fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+  ...SPECIALTY_METHOD_WORDS,
   // The derived rule keeps a key's last word's stem, which here would read any
   // "checked" as a station check and "stressed" or "street" as a pin stream.
   station_check: /\bstations?\b/,
@@ -1239,11 +1255,12 @@ function methodLexicon(method, ctx = null) {
 }
 
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
-  // The pest sheet: the four standard ways plus the product's own. A sheet whose
-  // rows each pick their own way (lawn): any way that sheet offers.
+  // The pest sheet: its standard ways (four; a specialty visit's seven) plus the
+  // product's own. A sheet whose rows each pick their own way (lawn): any way that
+  // sheet offers.
   const offered = ctx.anyProductMethod
     ? ctx.productMethods.includes(raw.method)
-    : PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
+    : (ctx.standardMethods || PEST_SHEET_PRODUCT_METHODS).includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
   if (!offered) return '';
   const mentions = productMentions(product, heard, world);
   const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
@@ -1889,6 +1906,7 @@ module.exports = {
   MAX_TRANSCRIPT_CHARS,
   CAPS,
   SHEET,
+  SPECIALTY_SHEET_PRODUCT_METHODS,
   PEST_SHEET_PESTS,
   PEST_SHEET_AREAS,
   PEST_SHEET_ACTIVITY,
