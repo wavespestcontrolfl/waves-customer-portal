@@ -66,15 +66,21 @@ const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
+  // Matching (POST /dispatch/match/simulate) and Booking (POST
+  // /dispatch/csr/slots) are dispatcher tools, owner-only for a technician
+  // login (technician allow-list, 2026-10-02): a technician keeps Board,
+  // Schedule, Protocols, Scores and Insights.
   {
     key: TABS.MATCH,
     label: "Matching",
     Icon: ClipboardList,
+    adminOnly: true,
   },
   {
     key: TABS.CSR,
     label: "Booking",
     Icon: Headphones,
+    adminOnly: true,
   },
   {
     key: TABS.REVENUE,
@@ -123,7 +129,8 @@ export default function AdminDispatchPage() {
   // admin ever resolves the gate; anyone else falls back as before.
   const scorecardDeepLinkPending = isAdmin && scorecardStatus === "pending"
     && searchParams.get(TAB_KEY) === TABS.SCORECARD;
-  const tabList = scorecardEnabled ? [...TAB_LIST, SCORECARD_TAB] : TAB_LIST;
+  const roleTabs = isAdmin ? TAB_LIST : TAB_LIST.filter((t) => !t.adminOnly);
+  const tabList = scorecardEnabled ? [...roleTabs, SCORECARD_TAB] : roleTabs;
   const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-8" : "xl:grid-cols-7"}`;
 
   const validTabKeys = tabList.map((t) => t.key);

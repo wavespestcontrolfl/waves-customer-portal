@@ -4,6 +4,8 @@
 // Renders as an inline <button>styled like a link by default so the
 // caller can pass className / style to match the surrounding text.
 
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const DEFAULT_FROM = "+19412975749";
 
@@ -64,7 +66,12 @@ export default function CallBridgeLink({
   stopPropagation = true,
   ...rest
 }) {
+  // The call bridge is an owner-only route (technician allow-list,
+  // 2026-10-02): a technician sees the number as plain text, not a control
+  // that can only 403.
+  const canCall = useCanAccessCalls();
   if (!phone) return null;
+  if (!canCall) return <span className={className}>{children ?? phone}</span>;
   return (
     <button
       type="button"

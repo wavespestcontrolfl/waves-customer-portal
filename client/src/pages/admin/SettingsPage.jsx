@@ -248,11 +248,12 @@ export default function SettingsPage() {
   // non-admin roles instead of rendering panels that can only 403
   // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
   const isAdminRole = user?.role === "admin";
-  // Non-admin Settings: General (account view) + Operating Costs +
-  // Portal Usage. Integrations (its tab renders "Admin access required"),
-  // Service Reports, Scheduling, KPI targets, feature gates, and System
-  // are owner-only.
-  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "gates", "system", "service-reports", "blackout-days", "link-library"];
+  // Non-admin Settings: General (account view) + Portal Usage. Integrations
+  // (its tab renders "Admin access required"), Service Reports, Scheduling,
+  // KPI targets, feature gates, and System are owner-only.
+  // Operating Costs reads and writes /admin/revenue/settings (company
+  // financials), owner-only under the 2026-10-02 technician allow-list.
+  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "operating-costs", "gates", "system", "service-reports", "blackout-days", "link-library"];
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
     (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
   ).map((g) => (
@@ -406,7 +407,7 @@ export default function SettingsPage() {
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {tab === "blackout-days" && <BlackoutDaysTab />}
       {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
-      {tab === "operating-costs" && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
+      {tab === "operating-costs" && isAdminRole && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "system" && (
         <div className="space-y-5">
           <Card>

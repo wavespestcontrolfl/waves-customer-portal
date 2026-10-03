@@ -138,6 +138,23 @@ describe("AdminDispatchPage", () => {
     }
   });
 
+  it("hides the Matching and Booking dispatcher tabs from a technician, who keeps the rest", () => {
+    // POST /dispatch/match/simulate and /dispatch/csr/slots are closed to a
+    // technician by the staff allow-list; an admin still gets both tabs (see
+    // the full-strip test above).
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    renderSchedule("/admin/dispatch?tab=csr");
+
+    for (const label of ["Matching", "Booking"]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
+    for (const label of ["Board", "Schedule", "Protocols", "Scores", "Insights"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    // A deep link to the hidden Booking tab falls back to the Board tab.
+    expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
+  });
+
   it("keeps the Scorecard tab off the strip while GATE_ROUTE_SCORECARD is off", async () => {
     renderSchedule("/admin/dispatch?tab=board");
     await waitFor(() => expect(mockAdminFetch).toHaveBeenCalledWith("/admin/route-scorecard/status"));

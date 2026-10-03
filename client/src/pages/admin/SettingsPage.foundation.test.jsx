@@ -127,6 +127,23 @@ describe("Settings new UI foundation", () => {
     expect(view.container.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
   });
 
+  it("keeps Operating Costs owner-only: a technician gets no Costs tab and no company-financials read", async () => {
+    // GET/PUT /admin/revenue/settings are closed to a technician by the staff
+    // allow-list; the admin still reads them (see the next test).
+    const adminFixture = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => (
+      String(url).replace(/^\/api/, "") === "/admin/auth/me"
+        ? response({ id: "synthetic-tech", name: "Synthetic technician", email: "tech@example.invalid", role: "technician" })
+        : adminFixture(url, options)
+    ));
+    mount("operating-costs");
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/admin/auth/me"))).toBe(true));
+    await screen.findByRole("button", { name: /General/ });
+    expect(screen.queryByRole("button", { name: /Financials|Costs/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Operating costs", { exact: true })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/revenue/settings"))).toBe(false);
+  });
+
   it("preserves the operating-cost save endpoint and numeric payload", async () => {
     mount("operating-costs");
     const payroll = await screen.findByLabelText("Office payroll");
