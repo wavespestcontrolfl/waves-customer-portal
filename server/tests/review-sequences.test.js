@@ -7791,9 +7791,27 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2 });
-    seqRow(mock).status = 'stopped';
-    seqRow(mock).stop_reason = 'customer_says_reviewed';
+    // The claim is kept on the row: the series-final guard sees it while the cadence is still active ...
+    expect(JSON.parse(seqRow(mock).reviewed_claim)).toMatchObject({ quote: 'left you a review' });
     expect(await ReviewService._seriesEngagement(['seq-hold'])).toBe(true);
+    // ... and the check-in step still goes out (it is not an ask).
+    seqRow(mock).next_run_at = new Date(Date.now() - 60000);
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSaysReviewed).toHaveBeenCalledTimes(1);
+  });
+
+  test('a later ask on a cadence that already holds a confirmed claim is skipped without asking the model again', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({
+      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]),
+      reviewed_claim: JSON.stringify({ quote: 'left you a review', at: new Date().toISOString() }),
+    });
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
+    expect(mockSaysReviewed).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a held final step completes the cadence at once (never left active past its plan)', async () => {

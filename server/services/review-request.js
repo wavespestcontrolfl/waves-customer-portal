@@ -6972,10 +6972,21 @@ const ReviewService = {
       // the same customer-wide stop a tracked click takes (this caller holds
       // review-send:<customer>). A cadence with a later private check-in
       // stays active for it and skips this ask.
-      const said = await Holds.customerSaysReviewed(seq.customer_id, { since: seq.started_at || seq.created_at });
-      if (said.claim) {
-        const detail = { quote: said.claim.quote, at: said.claim.at };
-        await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
+      // A claim already confirmed is on the row (reviewed_claim): every open
+      // cadence of the customer gets it, so a later ask or the series-final
+      // guard reads it without asking the model again.
+      let claim = parseDecision(seq.reviewed_claim);
+      if (!claim) {
+        const said = await Holds.customerSaysReviewed(seq.customer_id, { since: seq.started_at || seq.created_at });
+        if (said.claim) {
+          claim = { quote: said.claim.quote, at: said.claim.at };
+          await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"])
+            .update({ reviewed_claim: JSON.stringify(claim), updated_at: new Date() });
+          await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
+        }
+      }
+      if (claim) {
+        const detail = { quote: claim.quote, at: claim.at };
         const after = await db("review_sequences").where({ id: seq.id }).first("status");
         if (after?.status === "active") return skipStep("ask_skipped_customer_says_reviewed", detail);
         await db("review_sequences").where({ id: seq.id }).update({ decision: sequenceDecision({ reason: "customer_says_reviewed", detail }) });
@@ -7452,6 +7463,7 @@ const ReviewService = {
   async _seriesEngagement(seriesIds = []) {
     if (!seriesIds.length) return false;
     const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked", "customer_says_reviewed"]).first())
+      || (await db("review_sequences").whereIn("id", seriesIds).whereNotNull("reviewed_claim").first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
       || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
