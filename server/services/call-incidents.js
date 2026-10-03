@@ -344,6 +344,29 @@ const STAFF_TAG_FACTS = Object.freeze({
 });
 const STAFF_TAG_EVIDENCE = 'call_tab_tag';
 
+/**
+ * What production's extraction EXPLICITLY recorded for the fields a tag can
+ * speak to. A field is present only when the pipeline really answered it: a
+ * finished call (processed / voicemail / spam) whose extraction carries that
+ * boolean, or a spam status. An unprocessed call, a failed extraction or a
+ * missing field is absent — never read as "false" (the self-audit's
+ * productionAnswers coerces, which is right for its sampled, processed calls
+ * and wrong here).
+ */
+function explicitProduction(call) {
+  const status = String(call?.processing_status || '');
+  if (!['processed', 'voicemail', 'spam'].includes(status)) return {};
+  let ex = call.ai_extraction;
+  if (typeof ex === 'string') ex = safeJson(ex);
+  if (!ex || typeof ex !== 'object') ex = {};
+  const out = {};
+  if (typeof ex.is_lead === 'boolean') out.is_lead = ex.is_lead;
+  if (status === 'spam') out.is_spam = true;
+  else if (typeof ex.is_spam === 'boolean') out.is_spam = ex.is_spam;
+  if (typeof ex.appointment_confirmed === 'boolean') out.appointment_agreed = ex.appointment_confirmed;
+  return out;
+}
+
 /** The fields where a staff tag contradicts production: [{ field, production, staff }]. */
 function staffTagCorrections(tag, production) {
   const facts = STAFF_TAG_FACTS[tag];
@@ -360,15 +383,20 @@ function staffTagCorrections(tag, production) {
  * duplicate, never counted twice). `call` is the call_log row as it stood
  * BEFORE the tag was applied. Best-effort by contract: this runs inside a
  * staff action, so it never throws and never blocks it; the gate off, or any
- * failure, records nothing. The first tag per call and field stands (a later
- * re-tag is a person correcting a person, not the extraction).
+ * failure, records nothing. Only the FIRST staff tag on a call is compared
+ * (a re-tag is a person correcting a person), and only against fields the
+ * extraction explicitly answered.
  */
 async function recordStaffTagCorrections({ dbi = db, call, tag, by = null, now = new Date() } = {}) {
   try {
     const { callIncidentsLive } = require('../config/feature-gates');
     if (!callIncidentsLive() || !call?.id) return { recorded: 0, skipped: 'gate_off' };
-    const { productionAnswers } = require('./call-self-audit');
-    const corrections = staffTagCorrections(tag, productionAnswers(call));
+    // A call that already carries a staff tag is being RE-tagged: a person
+    // correcting a person. Only staff write these values (the pipeline's own
+    // dispositions use another vocabulary), so the first tag — whether or not
+    // it contradicted the extraction — is the only one compared.
+    if (Object.prototype.hasOwnProperty.call(STAFF_TAG_FACTS, String(call.disposition || ''))) return { recorded: 0, skipped: 'retag' };
+    const corrections = staffTagCorrections(tag, explicitProduction(call));
     let recorded = 0;
     for (const c of corrections) {
       const base = {
@@ -427,6 +455,7 @@ module.exports = {
   decideCallFinding,
   STAFF_TAG_FACTS,
   staffTagCorrections,
+  explicitProduction,
   recordStaffTagCorrections,
   parseReaderJson,
   askSecondReader,

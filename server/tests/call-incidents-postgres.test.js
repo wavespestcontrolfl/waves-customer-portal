@@ -79,6 +79,20 @@ describe('the two-model rule for a call finding', () => {
     expect(calls.staffTagCorrections('something_else', prod)).toEqual([]);
   });
 
+  test('only fields the extraction explicitly answered on a finished call can be contradicted', () => {
+    const done = (ex, status = 'processed') => calls.explicitProduction({ processing_status: status, ai_extraction: ex });
+    expect(done({ is_lead: false, is_spam: false, appointment_confirmed: true })).toEqual({ is_lead: false, is_spam: false, appointment_agreed: true });
+    // Missing fields are absent, never false; a JSON string is read too.
+    expect(done(JSON.stringify({ is_lead: true }))).toEqual({ is_lead: true });
+    expect(done({})).toEqual({});
+    expect(done(null)).toEqual({});
+    expect(done({ is_spam: false }, 'spam')).toEqual({ is_spam: true });
+    // Not finished: nothing was answered.
+    for (const status of ['pending', 'processing', 'failed', null]) expect(done({ is_lead: false, is_spam: false }, status)).toEqual({});
+    expect(calls.staffTagCorrections('new_lead_booked', done({}))).toEqual([]);
+    expect(calls.staffTagCorrections('spam', done({ is_lead: false }, 'failed'))).toEqual([]);
+  });
+
   test('staff tag capture never throws and records nothing with the gate off', async () => {
     const saved = process.env.GATE_CALL_INCIDENTS;
     delete process.env.GATE_CALL_INCIDENTS;
@@ -88,7 +102,7 @@ describe('the two-model rule for a call finding', () => {
     const savedAudit = process.env.GATE_CALL_SELF_AUDIT;
     process.env.GATE_CALL_SELF_AUDIT = 'true';
     // A broken database is swallowed: the staff action must go through.
-    await expect(calls.recordStaffTagCorrections({ dbi: never, call: { id: 'c1', ai_extraction: '{}' }, tag: 'spam' })).resolves.toMatchObject({ recorded: 0, error: true });
+    await expect(calls.recordStaffTagCorrections({ dbi: never, call: { id: 'c1', processing_status: 'processed', ai_extraction: '{"is_spam":false}' }, tag: 'spam' })).resolves.toMatchObject({ recorded: 0, error: true });
     if (saved === undefined) delete process.env.GATE_CALL_INCIDENTS; else process.env.GATE_CALL_INCIDENTS = saved;
     if (savedAudit === undefined) delete process.env.GATE_CALL_SELF_AUDIT; else process.env.GATE_CALL_SELF_AUDIT = savedAudit;
   });
@@ -308,9 +322,27 @@ describe('the two-model rule for a call finding', () => {
     ]);
     expect(rows[0]).toMatchObject({ area: 'calls', surface: 'call_extraction', prompt_version: null });
     expect(rows[0].adjudication.staff).toEqual({ value: true, tag: 'new_lead_booked', by: 'tech-1' });
-    // A re-tag is a person correcting a person: the first tag per field stands.
-    expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'existing_complaint', now: NOW })).toEqual({ recorded: 0 });
+    // A re-tag is a person correcting a person: the call already carries a staff tag.
+    expect(await calls.recordStaffTagCorrections({ dbi: database, call: { ...row, disposition: 'new_lead_booked' }, tag: 'existing_complaint', now: NOW })).toMatchObject({ recorded: 0, skipped: 'retag' });
     expect(await database('ai_incidents').where({ incident_key: row.id }).count('* as n').first()).toEqual({ n: '2' });
+  });
+
+  test('a first tag that AGREED with the extraction still stands: a later conflicting tag records nothing', async () => {
+    const row = { id: randomUUID(), created_at: new Date('2026-10-02T15:00:00Z'), processing_status: 'processed', disposition: 'existing_customer_routed', ai_extraction: JSON.stringify({ is_lead: false, is_spam: false }) };
+    // The pipeline's own disposition is not a staff tag: this first tag is compared, and agrees.
+    expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'existing_complaint', now: NOW })).toEqual({ recorded: 0 });
+    // The route has now stored that tag on the call; the re-tag is not compared.
+    expect(await calls.recordStaffTagCorrections({ dbi: database, call: { ...row, disposition: 'existing_complaint' }, tag: 'new_lead_booked', now: NOW })).toMatchObject({ recorded: 0, skipped: 'retag' });
+    expect(await database('ai_incidents').where({ incident_key: row.id }).count('* as n').first()).toEqual({ n: '0' });
+  });
+
+  test('a tag on a call the extraction never answered records nothing', async () => {
+    for (const over of [{ processing_status: 'failed', ai_extraction: JSON.stringify({ is_lead: false }) }, { processing_status: 'processed', ai_extraction: null }, { processing_status: 'processed', ai_extraction: JSON.stringify({}) }]) {
+      const row = { id: randomUUID(), created_at: new Date('2026-10-02T15:00:00Z'), ...over };
+      expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'new_lead_booked', now: NOW })).toEqual({ recorded: 0 });
+      expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'spam', now: NOW })).toEqual({ recorded: 0 });
+    }
+    expect(await database('ai_incidents').count('* as n').first()).toEqual({ n: '0' });
   });
 
   test('a staff tag on a call the two models already confirmed in that cell is a duplicate, not a second count', async () => {
