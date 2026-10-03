@@ -97,6 +97,10 @@
      full-width column instead of a blank one (Codex #5794). */
   .tf-today-grid:not(:has(> .tf-col:last-child > :not(:empty))) { grid-template-columns: minmax(0, 1fr); }
   .tf-today-grid:not(:has(> .tf-col:last-child > :not(:empty))) > .tf-col:last-child { display: none; }
+  /* Nothing in the route column (a failed route read): the other column
+     takes the full width (Codex #5794). */
+  .tf-today-grid:not(:has(> .tf-col:first-child > :not(:empty))) { grid-template-columns: minmax(0, 1fr); }
+  .tf-today-grid:not(:has(> .tf-col:first-child > :not(:empty))) > .tf-col:first-child { display: none; }
   .tf-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
   /* Compact buttons only with a mouse: field phones and tablets keep the
