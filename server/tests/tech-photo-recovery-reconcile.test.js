@@ -84,8 +84,10 @@ async function withServer(fn) {
   try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
 }
 
-const reconcile = (baseUrl, token = 'tech') => fetch(`${baseUrl}/api/tech/services/svc-1/photos/reconcile`, {
-  method: 'POST', headers: { Authorization: `Bearer ${token}` },
+const reconcile = (baseUrl, token = 'tech', body = null) => fetch(`${baseUrl}/api/tech/services/svc-1/photos/reconcile`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+  ...(body ? { body: JSON.stringify(body) } : {}),
 });
 
 describe('POST /:id/photos/reconcile', () => {
@@ -319,6 +321,25 @@ describe('POST /:id/photos/reconcile — parked photo summary', () => {
       expect((await res.json()).code).toBe('photos_still_missing');
       expect(updates).toHaveLength(0);
       expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  test('explicit abandonment suppresses the incomplete summary and reconciles the committed photos', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];
+    tables.service_photos = [{ id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl, 'tech', { abandonMissingPhotos: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).photoSummary).toEqual({ pending: true, restored: false, abandoned: true });
+      expect(updates).toHaveLength(2);
+      expect(JSON.parse(updates[0].patch.service_data).typedReportSnapshot).toEqual({
+        photoSummary: null, serviceLabel: 'Pest',
+      });
+      expect(updates[1].patch).toEqual({ pdf_storage_key: null });
+      expect(tables.service_photos).toEqual([
+        { id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' },
+      ]);
     });
   });
 

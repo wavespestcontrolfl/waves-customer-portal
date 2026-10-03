@@ -871,13 +871,19 @@ function parseJsonColumn(value) {
 // narrative once every closeout photo has landed. Returns { photoSummary }
 // on success (a no-op shape when nothing was pending) or { error: { status,
 // body } } for the fail-closed 409 when photos are still missing.
-async function reconcilePhotoSummary(record) {
+async function reconcilePhotoSummary(record, { abandonMissingPhotos = false } = {}) {
   const {
-    hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered,
+    hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, abandonPhotoSummaryRecovery,
+    completionPhotosFullyRecovered,
   } = require('../services/service-report/photo-summary-recovery');
   const serviceData = parseJsonColumn(record.service_data);
   if (!hasPendingPhotoSummary(serviceData)) {
     return { photoSummary: { pending: false, restored: false } };
+  }
+  if (abandonMissingPhotos) {
+    abandonPhotoSummaryRecovery(serviceData);
+    await db('service_records').where({ id: record.id }).update({ service_data: JSON.stringify(serviceData) });
+    return { photoSummary: { pending: true, restored: false, abandoned: true } };
   }
   // The uploader dedupes on (service_record_id, image_sha256) across
   // every photo_type, so a recovered image whose bytes already exist on
@@ -1026,7 +1032,9 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       .first('id', 'service_line', 'service_data', 'structured_notes');
     if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
 
-    const summary = await reconcilePhotoSummary(record);
+    const summary = await reconcilePhotoSummary(record, {
+      abandonMissingPhotos: req.body?.abandonMissingPhotos === true,
+    });
     if (summary.error) return res.status(summary.error.status).json(summary.error.body);
 
     const pdfResult = await reconcilePdfReport(record.id);
@@ -1036,7 +1044,8 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
 
     logger.info(
       `[tech-track] photo recovery reconciled service=${svc.id} record=${record.id} ` +
-      `tech=${req.technicianId} pdfRequeued=${pdfResult.pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
+      `tech=${req.technicianId} abandonedMissing=${summary.photoSummary.abandoned === true} ` +
+      `pdfRequeued=${pdfResult.pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
     );
     return res.json({
       ok: true, serviceRecordId: record.id, photoSummary: summary.photoSummary, pdf: pdfResult.pdf, treeShrub,

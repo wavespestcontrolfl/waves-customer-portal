@@ -17870,7 +17870,7 @@ export function CompletionPanel({
   async function retryCompletionPhotos() {
     if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
+    if (![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean)) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
@@ -17879,7 +17879,7 @@ export function CompletionPanel({
     let reconciliationNeeded = draft.reconcileOwed === true;
     let retryPermanentlyBlocked = false;
     try {
-      const photos = draft.servicePhotos;
+      const { servicePhotos: photos = [] } = draft;
       for (const [index, photo] of photos.entries()) {
         try {
           const form = buildPhotoRetryFormBody(
@@ -17910,7 +17910,10 @@ export function CompletionPanel({
         // until the server reconciles them. Keep the marker (photos already
         // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
         try {
-          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, {
+            method: "POST",
+            body: JSON.stringify({ abandonMissingPhotos: draft.abandonMissingPhotos === true }),
+          });
         } catch {
           const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
             pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
@@ -17974,6 +17977,7 @@ export function CompletionPanel({
         servicePhotos: [],
         generationPhotoCount: 0,
         reconcileOwed: true,
+        abandonMissingPhotos: true,
         pendingPhotoCompletion: result,
       };
       draftSnapshotRef.current = owed;

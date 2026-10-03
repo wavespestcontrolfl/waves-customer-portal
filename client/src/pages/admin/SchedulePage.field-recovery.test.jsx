@@ -2,7 +2,7 @@
 import { IDBFactory } from 'fake-indexeddb';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CompletionPanel, completionResumeOwed, restoreCompletionResumeBody } from './SchedulePage';
+import { CompletionPanel, completionResumeOwed, completionResumeOwedKey, restoreCompletionResumeBody } from './SchedulePage';
 import { getCompletionDraft, putCompletionDraft } from '../../lib/completion-resume-store';
 import * as completionStore from '../../lib/completion-resume-store';
 
@@ -391,11 +391,43 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(completionResumeOwed(service.id)).toBe(true);
     await waitFor(async () => expect(await getCompletionDraft(service.id)).toMatchObject({ servicePhotos: [], reconcileOwed: true }));
 
+    view.unmount();
+    const reopened = await mount(vi.fn());
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
     expect(reconciles).toHaveLength(1);
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true });
+    expect(completionResumeOwed(service.id)).toBe(false);
+    reopened.unmount();
+    expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
+  it('reconciles a metadata-only recovery after the photo-free IndexedDB write was lost', async () => {
+    const metadata = {
+      serviceId: service.id,
+      draftId: 'metadata-only-reconcile',
+      savedAt: '2099-01-01T12:03:00Z',
+      generationPhotoCount: 0,
+      reconcileOwed: true,
+      pendingPhotoCompletion: { serviceRecordId: 'record-1', completionPhotoUpload: { failed: 0, reconcileOwed: true } },
+    };
+    localStorage.setItem(key, JSON.stringify(metadata));
+    localStorage.setItem(completionResumeOwedKey(service.id), '1');
+    const originalFetch = fetch.getMockImplementation();
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return originalFetch(url, options);
+    });
+
+    const view = await mount(vi.fn());
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
+    expect(reconciles).toHaveLength(1);
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false });
     expect(completionResumeOwed(service.id)).toBe(false);
     view.unmount();
-    expect(await getCompletionDraft(service.id)).toBeNull();
   });
 
   it('keeps the autosaved photo revision when closeout reports failed uploads, so a lost IndexedDB write still reopens recovery (Codex r-63b2098 P1)', async () => {

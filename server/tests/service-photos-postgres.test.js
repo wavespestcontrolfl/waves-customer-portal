@@ -1,6 +1,7 @@
 // Real PostgreSQL races against the managed worktree QA database only.
 // S3 transport is captured; row locks, dedupe, hashing and rollback are real.
-const { randomUUID } = require('node:crypto');
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+const { createHash, randomUUID } = require('node:crypto');
 const mockObjects = new Map();
 let mockExpectedUploads = 1;
 let mockUploadCount = 0;
@@ -22,7 +23,10 @@ jest.mock('@aws-sdk/client-s3', () => {
   }
   return { S3Client, PutObjectCommand, DeleteObjectCommand };
 });
-jest.mock('../config', () => ({ s3: { bucket: 'waves-qa-fixture', region: 'us-east-1' } }));
+jest.mock('../config', () => ({
+  s3: { bucket: 'waves-qa-fixture', region: 'us-east-1' },
+  jwt: { secret: process.env.JWT_SECRET },
+}));
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 
 (process.env.DATABASE_URL ? describe : describe.skip)('completed service photo integrity (PostgreSQL)', () => {
@@ -30,6 +34,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   let upload;
   let validatePhotoChain;
   const customerId = randomUUID();
+  const adminId = randomUUID();
   const recordId = randomUUID();
   const completedVisitId = randomUUID();
   const stagedVisitId = randomUUID();
@@ -44,6 +49,9 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     validatePhotoChain = require('../services/service-report/photo-chain').validatePhotoChain;
     visitDate = require('../utils/datetime-et').etDateString();
     await db.transaction(async trx => {
+      await trx('technicians').insert({ id: adminId, name: 'QA photo recovery admin',
+        email: `qa-photo-admin-${adminId}@example.invalid`, role: 'admin', active: true,
+        employment_status: 'active', auth_token_version: 1, must_change_password: false });
       await trx('customers').insert({ id: customerId, first_name: 'QA', phone: '+19415550100', email: `qa-photo-${customerId}@example.invalid` });
       await trx('scheduled_services').insert([
         { id: completedVisitId, customer_id: customerId, scheduled_date: visitDate, service_type: 'QA completed photo guard', status: 'on_site' },
@@ -69,6 +77,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
       await db('service_records').where({ id: recordId, customer_id: customerId }).del();
       await db('scheduled_services').whereIn('id', [completedVisitId, stagedVisitId]).del();
       await db('customers').where({ id: customerId, email: `qa-photo-${customerId}@example.invalid` }).del();
+      await db('technicians').where({ id: adminId }).del();
       expect(await db('service_records').where({ id: recordId })).toHaveLength(0);
       expect(await db('customers').where({ id: customerId })).toHaveLength(0);
     } finally { await db.destroy(); }
@@ -156,5 +165,58 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     expect(result).toMatchObject({ staged: false, reconcileRequired: true, serviceRecordId: recordId });
     expect(result.visit.status).toBe('completed');
     expect(await db('service_photos').where({ service_record_id: recordId })).toHaveLength(1);
+  }, 30000);
+
+  test('abandoning missing device copies preserves committed bytes and suppresses their incomplete summary', async () => {
+    const committed = await upload(input);
+    const committedHash = createHash('sha256').update(input.buffer).digest('hex');
+    const missingHash = createHash('sha256').update('missing device photo').digest('hex');
+    await db('service_records').where({ id: recordId }).update({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: {
+        photoSummary: null,
+        photoSummaryPendingRecovery: 'Summary described both submitted photos.',
+      } }),
+      structured_notes: JSON.stringify({ completionPhotos: {
+        uploaded: 1, failed: 1, expectedImageHashes: [committedHash, missingHash],
+      } }),
+      pdf_storage_key: 'reports/stale-before-recovery.pdf',
+    });
+
+    const express = require('express');
+    const jwt = require('jsonwebtoken');
+    const config = require('../config');
+    const router = require('../routes/tech-track');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/services', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const token = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
+    const reconcile = (abandonMissingPhotos) => fetch(`${base}/api/tech/services/${completedVisitId}/photos/reconcile`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ abandonMissingPhotos }),
+    });
+    try {
+      expect((await reconcile(false)).status).toBe(409);
+      const discarded = await reconcile(true);
+      expect(discarded.status).toBe(200);
+      expect((await discarded.json()).photoSummary).toMatchObject({ abandoned: true, restored: false });
+      // A reopen after a lost response is idempotent and still reconciles the
+      // already committed gallery without reviving the discarded narrative.
+      expect((await reconcile(true)).status).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+
+    const reopened = await db('service_records').where({ id: recordId }).first('service_data', 'pdf_storage_key');
+    const serviceData = typeof reopened.service_data === 'string' ? JSON.parse(reopened.service_data) : reopened.service_data;
+    expect(serviceData.typedReportSnapshot).toEqual({ photoSummary: null });
+    expect(reopened.pdf_storage_key).toBeNull();
+    expect(await db('service_photos').where({ service_record_id: recordId }).select('id', 's3_key'))
+      .toEqual([expect.objectContaining({ id: committed.id })]);
+    expect(mockObjects.size).toBe(1);
   }, 30000);
 });
