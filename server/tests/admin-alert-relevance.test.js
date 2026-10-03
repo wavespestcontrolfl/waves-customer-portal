@@ -346,22 +346,24 @@ describe('class rules', () => {
     expect(classify(note({ category: 'missed_call', metadata: { triggerKey: 'missed_call', payload: { commitmentId: P } } }))).toBeNull();
   });
 
-  test('portal chat about adding a service: settled only by an estimate sent to that customer after the bell; other topics are never judged (owner 2026-10-03)', async () => {
+  // The fake answers the handoff-witness query (call-commitments.js
+  // handedOffWithin + the ownership fence) with whatever estimates it holds;
+  // the SQL itself is proved in admin-alert-relevance-db.test.js.
+  test('portal chat about adding a service: settled once the handoff witness finds an estimate for that customer after the bell; other topics are never judged (owner 2026-10-03)', async () => {
     const chat = (topic) => note({
       category: 'alert', link: `/admin/customers?customerId=${CUST}`,
       metadata: { dedupeKey: 'portal-chat-escalation:esc-1', customerId: CUST, escalationId: 'esc-1', ...(topic ? { topic } : {}) },
     });
     const row = chat('add_service');
     expect(await reasonFor(row)).toEqual({ cls: 'portal_chat_add_service', reason: null });
-    // A draft, an estimate sent before the question, and one sent to someone else.
-    mockTables.estimates = [
-      { id: uid(530), customer_id: CUST, sent_at: null },
-      { id: uid(531), customer_id: CUST, sent_at: BEFORE_BELL },
-      { id: uid(532), customer_id: uid(599), sent_at: AFTER_BELL },
-    ];
-    expect((await reasonFor(row)).reason).toBeNull();
-    mockTables.estimates.push({ id: uid(533), customer_id: CUST, sent_at: AFTER_BELL });
+    // The witness is asked about this customer, from the bell's own time.
+    const asked = mockQueries.filter((q) => q.table === 'estimates').pop();
+    expect(JSON.stringify(asked.calls)).toContain(CUST);
+    mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
     expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+    // A bell with no usable customer id asks nothing and is never settled.
+    const nobody = note({ category: 'alert', metadata: { dedupeKey: 'portal-chat-escalation:esc-2', customerId: 'not-an-id', topic: 'add_service' } });
+    expect((await reasonFor(nobody)).reason).toBeNull();
     // A cancellation or a complaint is not answered by an estimate, and a bell
     // from before the topic was stored is left to a person.
     for (const other of [chat('cancellation'), chat('complaint'), chat(null)]) expect(classify(other)).toBeNull();
@@ -786,6 +788,15 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     row.metadata = JSON.stringify({ ...JSON.parse(row.metadata), ...retiredStamp(reason, at) });
     return row;
   };
+
+  test('a promise-chaser retirement is final: the promise reopened later does not put the bell back (its emitter\'s own close is final too)', async () => {
+    const P = uid(720);
+    mockTables.call_commitments = [{ id: P, status: 'open', human_state: null }];
+    const chaser = swept(note({ category: 'missed_call', metadata: { triggerKey: 'promise_chaser', dedupeKey: `promise_chaser:${P}:0:2026-09-27`, payload: { commitmentId: P } } }), 'The promise was closed');
+    mockTables.notifications = [chaser];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0, retired: 0 });
+    expect([chaser.done_by, chaser.resolution]).toEqual(['relevance', 'The promise was closed']);
+  });
 
   test('a retired bell whose subject is relevant again is unread again with the stamp gone; one still moved on stays retired', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' }), visit({ id: OPEN_VISIT, status: 'completed' })];

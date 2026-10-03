@@ -59,8 +59,12 @@
  * listed below. Two customer-contact bells are in it by owner ruling
  * (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
- * hand-off about adding a service once an estimate goes to that customer.
- * Every other missed-call bell and portal chat topic stays a person's to close.
+ * hand-off about adding a service once an estimate is handed off to that
+ * customer. Every other missed-call bell and portal chat topic stays a
+ * person's to close. A promise-chaser retirement is final (`rearm: false`),
+ * like the close its own emitter writes inside its 30-minute window: a
+ * promise reopened later is the promise list's and the SLA pager's to
+ * surface, and a later callback rings its own bell.
  */
 
 const db = require('../models/db');
@@ -144,21 +148,8 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), customerQuotes: new Map(), promises: new Map(), consents: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), chatQuoted: new Set(), promises: new Map(), consents: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
-
-// The latest estimate sent to each customer, as customer id → Date.
-async function latestQuoteSent(conn, customerIds) {
-  const latest = new Map();
-  if (!customerIds.length) return latest;
-  const quotes = await conn('estimates').whereIn('customer_id', customerIds).whereNotNull('sent_at').select('customer_id', 'sent_at');
-  for (const quote of quotes) {
-    const key = String(quote.customer_id);
-    const at = new Date(quote.sent_at);
-    if (!Number.isNaN(at.getTime()) && !(latest.get(key) >= at)) latest.set(key, at);
-  }
-  return latest;
-}
 
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
@@ -173,11 +164,22 @@ async function loadSubjects(rows, conn = db) {
   if (promiseIds.length) {
     data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'human_state', 'reviewed_at'));
   }
-  // The add-a-service portal chat bells' customers (read from the bell's own
-  // metadata, like the stale-consent class below).
-  data.customerQuotes = await latestQuoteSent(conn, [...new Set(all
-    .filter((r) => isAddServiceChat(r.meta))
-    .map((r) => idTextOrNull(r.meta.customerId)).filter(Boolean))]);
+  // Each add-a-service portal chat bell: was an estimate handed off to its
+  // customer after the bell? The promise lane's own handoff witness
+  // (call-commitments.js handedOffWithin: a real delivery or the customer's
+  // acceptance after the boundary) and its estimate-ownership fence, never
+  // sent_at: a suppressed send stamps sent_at with nothing delivered, and an
+  // estimate accepted during its first send is delivered with sent_at still
+  // null. One small query per bell (the class is a handful of rows).
+  for (const row of rows) {
+    const meta = parseMeta(row.metadata);
+    const customerId = isAddServiceChat(meta) ? uuidOrNull(meta.customerId) : null;
+    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
+    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+    const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
+    if (handedOff) data.chatQuoted.add(String(row.id));
+  }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -227,7 +229,12 @@ async function loadSubjects(rows, conn = db) {
     // Every quote sent to the lead's customer, not only the one the lead
     // points at now: a newer draft can take over leads.estimate_id
     // (draft-builder's writeGuardedLeadEstimateLink) without un-sending it.
-    data.leadQuotes = await latestQuoteSent(conn, leadCustomerIds);
+    const quotes = await conn('estimates').whereIn('customer_id', leadCustomerIds).whereNotNull('sent_at').select('customer_id', 'sent_at');
+    for (const quote of quotes) {
+      const key = String(quote.customer_id);
+      const at = new Date(quote.sent_at);
+      if (!Number.isNaN(at.getTime()) && !(data.leadQuotes.get(key) >= at)) data.leadQuotes.set(key, at);
+    }
   }
   return data;
 }
@@ -250,9 +257,9 @@ function subjectFor(row, data, todayET) {
     // The latest consent the bell's customer recorded at the current text
     // version (loaded for stale-consent bells only).
     consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
-    // The latest estimate sent to the bell's customer (loaded for add-a-service
-    // portal chat bells only).
-    customerQuotedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.customerQuotes.get(id) : null; })(),
+    // An estimate was handed off to the bell's customer after the bell
+    // (loaded for add-a-service portal chat bells only).
+    chatQuoted: data.chatQuoted.has(String(row.id)),
   };
 }
 
@@ -361,8 +368,9 @@ function promiseMarksSettled(s) {
 // Waves promise to them was still open) is settled once that promise is
 // closed: kept, dismissed, or dismissed by staff while its status stays open
 // (call-commitments.js reads human_state the same way). A promise row that is
-// gone is "unknown", never "closed". A promise reopened later puts the bell
-// back (the re-arm pass).
+// gone is "unknown", never "closed". Final, never re-armed: the emitter's own
+// close (ringForCall, inside its 30-minute window) is final too, so the two
+// closes read the same; see the module header.
 function chasedPromiseClosed(s) {
   const promise = s.refs.owedPromiseId ? s.promiseOf(s.refs.owedPromiseId) : undefined;
   if (!promise) return null;
@@ -370,8 +378,9 @@ function chasedPromiseClosed(s) {
 }
 
 // A portal chat hand-off (ai-assistant/assistant.js notifyTeamOfEscalation)
-// about adding a service is answered by an estimate: settled once one goes to
-// that customer after the bell (owner 2026-10-03). Any estimate counts, not
+// about adding a service is answered by an estimate: settled once one is
+// handed off to that customer after the bell (owner 2026-10-03; the witness
+// is loadSubjects'). Any estimate counts, not
 // only one for the service asked about: the bell records the topic, not the
 // service. Every other topic (a cancellation, a complaint, a schedule change)
 // is never judged, and neither is a bell written before the topic was stored.
@@ -380,9 +389,7 @@ function isAddServiceChat(meta) {
   return String(meta.dedupeKey || '').startsWith(PORTAL_CHAT_PREFIX) && meta.topic === 'add_service';
 }
 function addServiceQuoted(s) {
-  if (!s.bellAt || !isAddServiceChat(s.meta)) return null;
-  const at = s.customerQuotedAt;
-  return at && at.getTime() > s.bellAt.getTime() ? 'Estimate was sent' : null;
+  return isAddServiceChat(s.meta) && s.chatQuoted ? 'Estimate was sent' : null;
 }
 
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
@@ -408,7 +415,7 @@ const CLASSES = [
     key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
   },
   { // promise-chaser-bell.js — one bell per promise and call day
-    key: 'promise_chaser', categories: ['missed_call'], prefix: 'promise_chaser:', match: (meta) => meta.triggerKey === 'promise_chaser', rule: chasedPromiseClosed,
+    key: 'promise_chaser', categories: ['missed_call'], prefix: 'promise_chaser:', match: (meta) => meta.triggerKey === 'promise_chaser', rule: chasedPromiseClosed, rearm: false,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
@@ -612,7 +619,7 @@ async function rearmRelevantAgain(now, todayET) {
     for (const { row, bell } of judged) {
       try {
         const cls = classify(bell);
-        if (!cls || cls.rule(subjectFor(bell, data, todayET))) continue;
+        if (!cls || cls.rearm === false || cls.rule(subjectFor(bell, data, todayET))) continue;
         rearmed += await putBack(row);
       } catch (err) {
         logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${err.message}`);
