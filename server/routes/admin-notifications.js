@@ -380,7 +380,7 @@ router.put('/read-all', async (req, res, next) => {
 // teammate (admin role required) — necessary because the technicians.active
 // checkpoint is otherwise tautological: adminAuthenticate rejects inactive
 // callers before this handler runs.
-router.get('/diagnose', async (req, res, next) => {
+router.get('/diagnose', requireAdmin, async (req, res, next) => {
   try {
     const requestedUserId = req.query.userId ? parseInt(req.query.userId, 10) : null;
     const targetingOther = requestedUserId && requestedUserId !== req.technicianId;

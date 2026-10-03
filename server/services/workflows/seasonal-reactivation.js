@@ -71,7 +71,7 @@ class SeasonalReactivation {
           .orWhereNull('last_contact_date');
       })
       .select(
-        'id', 'first_name', 'phone', 'nearest_location_id as location_id', 'address_line1 as address',
+        'id', 'first_name', 'phone', 'address_line1 as address',
         // Injected into the shared gate below so it revalidates THIS row
         // instead of re-reading what the audience query just returned.
         'active', 'pipeline_stage', 'churned_at', 'deleted_at'
@@ -127,7 +127,10 @@ class SeasonalReactivation {
           }
         }
 
-        const locationPhone = TWILIO_NUMBERS.getOutboundNumber(customer.location_id);
+        // The number the approved draft will actually send from (the
+        // customer's home line under GATE_HOME_LINE), so the text never
+        // asks them to call a different line than the one it came from.
+        const locationPhone = await require('../twilio').deriveOutboundNumber({ customerId: customer.id });
         const locationInfo = TWILIO_NUMBERS.findByNumber(locationPhone);
         const callNumber = locationInfo?.formatted || '(941) 318-7612';
 
@@ -157,6 +160,10 @@ class SeasonalReactivation {
           purpose: 'marketing_seasonal',
           source_ref: `customers:${customer.id}`,
           context_summary: `Seasonal reactivation (${seasonal.type}): ${hookText}`,
+          // The line the body's call-us number names: approval sends FROM it
+          // (resolveDraftRecipient), so a home-line change or gate flip while
+          // the draft waits never splits the two.
+          flags: JSON.stringify({ fromNumber: locationPhone }),
         });
 
         drafted++;

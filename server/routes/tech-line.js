@@ -25,6 +25,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { techLineContext } = require('../services/tech-line');
+const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const crypto = require('crypto');
@@ -74,9 +75,9 @@ function sanitized(err, label) {
 // visits assigned to them; admins any visit.
 async function visitCustomer(req, scheduledServiceId) {
   if (!UUID_RE.test(String(scheduledServiceId || ''))) return { status: 400, error: 'scheduledServiceId is required' };
-  const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'customer_id', 'technician_id');
+  const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
   if (!svc) return { status: 404, error: 'Visit not found' };
-  if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) return { status: 403, error: 'Not assigned to this visit' };
+  if (!technicianVisitRowInScope(req, svc)) return { status: 403, error: 'Not assigned to this visit' };
   const customer = await db('customers').where({ id: svc.customer_id }).whereNull('deleted_at').first();
   if (!customer) return { status: 404, error: 'Customer not found' };
   const to = toE164(customer.phone);

@@ -288,6 +288,16 @@ describe('POST /api/public/appointment/:token/photos', () => {
     if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS; else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep;
   });
 
+  // reservice-public.js (GATE_RESERVICE_PHOTOS) and schedule.js call these
+  // through require('./appointment-public'); their own suites mock this
+  // module, so the real export surface is pinned here.
+  test('exports the visit-prep helpers other photo routes reuse', () => {
+    expect(typeof router.deriveVisitPrepEligibility).toBe('function');
+    expect(typeof router.reloadEligibleVisitPrepRowCore).toBe('function');
+    expect(typeof router.notifyOfficeVisitPrepSubmission).toBe('function');
+    expect(typeof router.visitPrepUpload?.array).toBe('function');
+  });
+
   test('sub-gate off: generic 404, before the route limiter, and multer never runs', async () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'false';
     await withServer(async (baseUrl) => {

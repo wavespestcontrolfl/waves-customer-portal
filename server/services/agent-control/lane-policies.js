@@ -88,6 +88,8 @@ const LANE_RUNTIME = {
   // customer's texts + completion notes and stores it on review_sequences —
   // no customer-visible output of its own, so internal_write like sms_intent.
   review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // test answers to foreign-language texts, stored in sms_translation_trials and never sent
+  sms_translation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   // Its verdict authorizes an automatic customer send (tech-voice review asks).
   review_ask_fact_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
   sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },

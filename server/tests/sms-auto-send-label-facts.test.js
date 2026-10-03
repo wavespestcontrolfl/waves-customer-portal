@@ -167,3 +167,11 @@ test('a LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY provider refusal releases the claim
   await attempt({ labelFactsSnapshot: LABEL_SNAPSHOT });
   expect(decisions.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
 });
+
+// Codex round-63 P2: a billing / Zelle change at the provider boundary is retryable too - released, never a failed auto-send
+test.each(['BILLING_CHANGED_AT_BOUNDARY', 'ZELLE_CHANGED_AT_BOUNDARY'])('a %s provider refusal releases the claim instead of failing it', async (code) => {
+  sendCustomerMessage.mockResolvedValue({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code });
+  await attempt({ labelFactsSnapshot: LABEL_SNAPSHOT });
+  expect(decisions.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+});
+

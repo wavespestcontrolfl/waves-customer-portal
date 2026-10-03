@@ -9,10 +9,11 @@
 //   railway run --service Postgres node ops/agents/fix-proposal-link.js --list [--area=sms]
 //   railway run --service Postgres node ops/agents/fix-proposal-link.js --id=<uuid|8-char-prefix> \
 //     [--status=accepted|pr_open|shipped|reverted|dismissed|superseded|insufficient_evidence] \
-//     [--pr=5601] [--pr-url=https://…] [--commit=<sha>] [--dev-run=<uuid>] [--holdout-run=<uuid>] \
+//     [--pr=5601] [--pr-url=https://…] [--commit=<sha>] \
 //     [--shipped-version=<prompt version>] [--revert-pr=5620] [--by=<who>] [--execute]
 //
-// Without --execute every check runs (legal move, required stamps, unknown
+// Replay run ids are stamped only by `correction-replay.js record`, never by
+// hand. Without --execute every check runs (legal move, required stamps, unknown
 // fields) and the change is printed; nothing is written. The legal moves and
 // required stamps live in server/services/ai-incidents/fix-proposals.js, and
 // the table's CHECK holds the same stamps. Output carries ids, cells, PR
@@ -38,10 +39,6 @@ const asPr = (flag) => (v) => {
   if (!/^\d+$/.test(v)) throw usageError(`--${flag} must be a PR number`);
   return Number(v);
 };
-const asRun = (flag) => (v) => {
-  if (!UUID_RE.test(v)) throw usageError(`--${flag} must be a run uuid`);
-  return v;
-};
 const asSha = (v) => {
   if (!/^[0-9a-f]{7,64}$/i.test(v)) throw usageError('--commit must be a git sha');
   return v;
@@ -51,8 +48,6 @@ const STAMP_FLAGS = Object.freeze({
   pr: ['pr_number', asPr('pr')],
   'pr-url': ['pr_url', asText],
   commit: ['reviewed_commit', asSha],
-  'dev-run': ['dev_run_id', asRun('dev-run')],
-  'holdout-run': ['holdout_run_id', asRun('holdout-run')],
   'shipped-version': ['shipped_version', asText],
   'revert-pr': ['revert_pr_number', asPr('revert-pr')],
 });

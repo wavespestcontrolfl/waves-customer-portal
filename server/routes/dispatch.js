@@ -8,6 +8,8 @@
 const router = require('express').Router();
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { stampedLine2Sql } = require('../services/stamped-address');
+const { requireAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 
 let db;
 function getDb() {
@@ -171,7 +173,9 @@ function toDispatchJob(row, index = 0) {
   return { ...job, ...ruleBasedScore(job) };
 }
 
-async function canonicalJobs({ date, techId, status } = {}) {
+// `scope` (the staff request): a technician sees only their own current/recent
+// visits whatever techId the query string says (codex #5568 r2 P1).
+async function canonicalJobs({ date, techId, status, scope = null } = {}) {
   const dbConn = getDb();
   const query = dbConn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -197,7 +201,8 @@ async function canonicalJobs({ date, techId, status } = {}) {
     .orderByRaw("COALESCE(scheduled_services.route_order, 999), COALESCE(scheduled_services.window_start, '23:59'), scheduled_services.created_at");
 
   if (date) query.where('scheduled_services.scheduled_date', date);
-  if (techId) query.where('scheduled_services.technician_id', techId);
+  if (scope && isTechnicianRequest(scope)) technicianCurrentVisitFilter(scope, query);
+  else if (techId) query.where('scheduled_services.technician_id', techId);
 
   const rows = await query;
   return rows.filter((row) => matchesLegacyStatus(row, status)).map(toDispatchJob);
@@ -374,8 +379,10 @@ async function getInsights(days) {
   };
 }
 
+// Admin-only (codex #5568 r2 P1): the route board, its reoptimize and the
+// insights roll-up cover every technician's day.
 // GET /api/dispatch/routes?date=YYYY-MM-DD&mode=mixed&zone=all
-router.get('/routes', async (req, res) => {
+router.get('/routes', requireAdmin, async (req, res) => {
   try {
     const { date = etDateString(), mode = 'mixed', zone = 'all' } = req.query;
     const routes = await buildRoutes(date);
@@ -386,7 +393,7 @@ router.get('/routes', async (req, res) => {
 });
 
 // POST /api/dispatch/routes/reoptimize
-router.post('/routes/reoptimize', async (req, res) => {
+router.post('/routes/reoptimize', requireAdmin, async (req, res) => {
   try {
     const { date = etDateString(), mode = 'mixed', zone = 'all' } = req.body || {};
     const routes = await buildRoutes(date);
@@ -431,7 +438,7 @@ router.post('/jobs/:id/cancel', async (req, res) => {
 router.get('/jobs', async (req, res) => {
   try {
     const { date, techId, status } = req.query;
-    const jobs = await canonicalJobs({ date, techId, status });
+    const jobs = await canonicalJobs({ date, techId, status, scope: req });
     res.json(jobs);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -483,7 +490,7 @@ router.post('/csr/slots', async (req, res) => {
 });
 
 // GET /api/dispatch/insights?days=30
-router.get('/insights', async (req, res) => {
+router.get('/insights', requireAdmin, async (req, res) => {
   try {
     const days = parseInt(req.query.days, 10) || 30;
     res.json(await getInsights(days));

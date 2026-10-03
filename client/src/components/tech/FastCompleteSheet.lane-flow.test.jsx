@@ -186,6 +186,34 @@ describe('the lane record on the sheet', () => {
     expect(request.bodies('/complete')[0].structuredObservations).toEqual(['Scheduled follow-up treatment', 'Live nymphs', 'Preparation complete']);
   });
 
+  test('a pick drops the words a fill stood on, even when the filled value is picked again', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    await generate();
+    fireEvent.click(within(recordCard()).getByRole('button', { name: 'Change Evidence observed' }));
+    fireEvent.click(within(within(recordCard()).getByRole('group', { name: 'Evidence observed' })).getByRole('button', { name: 'Live nymphs' }));
+    fireEvent.click(within(recordCard()).getByRole('button', { name: 'Change Evidence observed' }));
+    fireEvent.click(within(within(recordCard()).getByRole('group', { name: 'Evidence observed' })).getByRole('button', { name: 'Live adults' }));
+    expect(within(fieldRow('Evidence observed')).getByText('Live adults')).toBeTruthy();
+    expect(within(fieldRow('Evidence observed')).queryByText('“live ones on the couch seams”')).toBeNull();
+    // A group nobody touched keeps its words.
+    expect(within(fieldRow('Preparation status')).getByText('“they had everything bagged”')).toBeTruthy();
+  });
+
+  test('a place unticked and ticked again by hand shows no words for it', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    await generate();
+    fireEvent.click(within(recordCard()).getByRole('button', { name: 'Change Where' }));
+    const where = () => within(within(recordCard()).getByRole('group', { name: 'Where' }));
+    fireEvent.click(where().getByRole('button', { name: 'Primary bedroom' }));
+    fireEvent.click(where().getByRole('button', { name: 'Primary bedroom' }));
+    expect(within(fieldRow('Where')).getByText('“the living room couch”')).toBeTruthy();
+    expect(within(fieldRow('Where')).queryByText(/treated the master bedroom/)).toBeNull();
+  });
+
   test('a place toggled by hand stays the tech\'s: a later read never refills the places', async () => {
     const request = makeRequest();
     await openSheet(request);
