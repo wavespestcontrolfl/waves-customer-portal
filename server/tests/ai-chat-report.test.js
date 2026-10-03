@@ -319,7 +319,25 @@ describe('POST /ai/chat canReport flag', () => {
 
   describe('GATE_PORTAL_CHAT_RESERVICE on: the session property scope decides the re-service button', () => {
     beforeEach(() => { process.env.GATE_PORTAL_CHAT_RESERVICE = 'true'; });
-    afterEach(() => { delete process.env.GATE_PORTAL_CHAT_RESERVICE; });
+    afterEach(() => { delete process.env.GATE_PORTAL_CHAT_RESERVICE; delete process.env.PORTAL_CHAT_SELF_SERVE; });
+
+    test('the chat\'s master switch off: no scope read (the resolver can write)', async () => {
+      process.env.PORTAL_CHAT_SELF_SERVE = 'off';
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty: true }));
+    });
 
     test.each([
       ['an unscoped session (single home)', async () => ({ enabled: false }), false],

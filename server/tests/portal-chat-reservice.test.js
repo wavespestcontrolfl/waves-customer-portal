@@ -14,6 +14,7 @@ const mockGates = { reserviceStreamline: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates[name] === true }));
 // The real classifier of the customer's words; only the switch is stubbed.
 const mockSelfServe = jest.fn(() => true);
+const mockOpen = jest.fn();
 jest.mock('../services/reservice-scheduler', () => {
   const actual = jest.requireActual('../services/reservice-scheduler');
   return {
@@ -21,6 +22,7 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
     reserviceSelfServeEnabled: (...a) => mockSelfServe(...a),
+    openReserviceCallbacks: (...a) => mockOpen(...a),
   };
 });
 
@@ -56,6 +58,7 @@ beforeEach(() => {
   });
   mockPage.pageLaneState.mockResolvedValue(pageState({ pest: null, lawn: null }));
   mockPage.reserviceLocationReviewRequired.mockResolvedValue(false);
+  mockOpen.mockResolvedValue({});
   reschedulePage.loadById.mockResolvedValue({ id: 'svc-callback-1' });
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
 });
@@ -96,6 +99,7 @@ test('a second offer call in one turn adds no second button', async () => {
 });
 
 test.each([
+  ['the open re-service read fails', () => mockOpen.mockRejectedValue(new Error('db down'))],
   ['the page holds no lane at all (no plan, inactive, or no catalog row)', () => mockPage.pageLaneState.mockResolvedValue(pageState({}))],
   ['the page holds only the other lane', () => mockPage.pageLaneState.mockResolvedValue(pageState({ lawn: null }))],
   ['the page knows no such token', () => mockPage.pageLaneState.mockResolvedValue(null)],
@@ -118,7 +122,7 @@ test.each([
 });
 
 test('a re-service already booked in the line: its date and window, a button to move it, no new offer', async () => {
-  mockPage.pageLaneState.mockResolvedValue(pageState({ pest: BOOKED_PEST }));
+  mockOpen.mockResolvedValue({ pest: BOOKED_PEST });
 
   const { result, actions } = await offer('pest');
 
@@ -132,14 +136,24 @@ test('a re-service already booked in the line: its date and window, a button to 
   expect(JSON.stringify(result)).not.toMatch(/tok_move/);
 });
 
+test('a re-service booked while the plan covered the line still shows after coverage changed', async () => {
+  mockOpen.mockResolvedValue({ pest: BOOKED_PEST });
+  mockPage.pageLaneState.mockResolvedValue(pageState({}));
+
+  const { result } = await offer('pest');
+
+  expect(result.already_booked.date).toBe('Oct 9, 2026');
+  expect(mockPage.pageLaneState).not.toHaveBeenCalled();
+});
+
 test.each([
   ['the reschedule page refuses the visit (notice window, grouped, inactive account)', () => { reschedulePage.pageEligibility.mockResolvedValue({ ok: false, reason: 'notice_window' }); }],
   ['the eligibility read fails', () => { reschedulePage.pageEligibility.mockRejectedValue(new Error('db down')); }],
   ['the token names no visit of this customer', () => { bookedRow = undefined; }],
-  ['the booked visit has no reschedule link', () => { mockPage.pageLaneState.mockResolvedValue(pageState({ pest: { ...BOOKED_PEST, rescheduleUrl: null } })); }],
+  ['the booked visit has no reschedule link', () => { mockOpen.mockResolvedValue({ pest: { ...BOOKED_PEST, rescheduleUrl: null } }); }],
   ['the booked visit lookup fails', () => { bookedRow = Promise.reject(new Error('db down')); bookedRow.catch(() => {}); }],
 ])('a booked re-service the page would not move: its date, but no button: %s', async (_label, arrange) => {
-  mockPage.pageLaneState.mockResolvedValue(pageState({ pest: BOOKED_PEST }));
+  mockOpen.mockResolvedValue({ pest: BOOKED_PEST });
   arrange();
 
   const { result, actions } = await offer('pest');

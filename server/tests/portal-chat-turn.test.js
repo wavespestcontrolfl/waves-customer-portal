@@ -32,6 +32,7 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
     reserviceSelfServeEnabled: () => true,
+    openReserviceCallbacks: async () => ({}),
   };
 });
 // The /reservice page's own verdict: pest bookable for cust-1.

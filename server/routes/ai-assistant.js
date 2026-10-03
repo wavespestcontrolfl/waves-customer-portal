@@ -1,5 +1,5 @@
 const express = require('express');
-const { gateEnvValue, portalChatReserviceLive } = require('../config/feature-gates');
+const { gateEnvValue, portalChatReserviceLive, portalChatSelfServeLive } = require('../config/feature-gates');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
@@ -107,10 +107,10 @@ router.post('/chat', authenticate, async (req, res, next) => {
 
     // The free re-service button books at the account's primary address, so
     // it is withheld when the session is looking at another saved property
-    // (the Schedule tab's rule). Only read when that tool can run; a failed
-    // read withholds it.
+    // (the Schedule tab's rule). Only read when that tool can run (the chat's
+    // master switch and its own gate); a failed read withholds it.
     let secondaryProperty = true;
-    if (portalChatReserviceLive()) {
+    if (portalChatSelfServeLive() && portalChatReserviceLive()) {
       try {
         secondaryProperty = isSecondarySelection(await resolveSessionScope(req));
       } catch (err) {

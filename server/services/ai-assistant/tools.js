@@ -531,6 +531,15 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
   const refusal = reportRefusal(customerWords, line);
   if (refusal) return refusal;
+  // An open re-service in the line is read on its own, as the page does: a
+  // visit booked while the plan covered the line stays on the schedule after
+  // coverage changes, and the customer is told about it.
+  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId).catch((err) => {
+    logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
+    return null;
+  });
+  if (!open) return RESERVICE_HAND_OFF;
+  if (open[line]) return bookedReserviceResult(customerId, line, open[line], actions);
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
     logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
     return null;
@@ -546,8 +555,6 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
     return null;
   });
   if (!state || String(state.customer.id) !== String(customerId)) return RESERVICE_HAND_OFF;
-  const booked = state.lanes.find((l) => l.key === line)?.alreadyBooked;
-  if (booked) return bookedReserviceResult(customerId, line, booked, actions);
   if (!state.bookableLanes.includes(line)) return RESERVICE_HAND_OFF;
   // An address held for staff review shows no times on the page, only
   // instructions to text or call: hand off rather than promise a time.
