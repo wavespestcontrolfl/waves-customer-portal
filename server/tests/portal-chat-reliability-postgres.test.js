@@ -358,7 +358,9 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
       CREATE FUNCTION delay_stale_portal_reply_checkpoint() RETURNS trigger AS $$
       BEGIN
         IF NEW.response->>'reply' = 'stale local answer' THEN
-          PERFORM pg_sleep(2);
+          -- Outlast the 2 s turn budget by a full second: the checkpoint must
+          -- still be asleep when the deadline cancel reaches it, however late.
+          PERFORM pg_sleep(3);
         END IF;
         RETURN NEW;
       END;

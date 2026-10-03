@@ -18,6 +18,8 @@ const { LAWN_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabula
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 
+const { FIELD_CAPS } = require('../services/service-report/lawn-copy-v6');
+
 const {
   PRODUCT_ROWS, ISSUE_ROWS, PRODUCT_CLASS_ENTRIES, PRODUCT_CLASS, MAX_LINE_WORDS, CELSIUS_YTD_CAP, FAMILY,
 } = config;
@@ -25,8 +27,11 @@ const {
 const PREVIEW = { includeUnapproved: true };
 
 const REPRESENTATIVE = {
-  [FAMILY.BROADLEAF]: 'Celsius WG',
-  [FAMILY.SEDGE]: 'Dismiss',
+  [FAMILY.BROADLEAF]: 'LESCO Three-Way Selective Herbicide',
+  [FAMILY.CELSIUS]: 'Celsius WG',
+  [FAMILY.SPEEDZONE]: 'SpeedZone Southern',
+  [FAMILY.SEDGEHAMMER]: 'SedgeHammer Plus',
+  [FAMILY.SEDGE]: 'Dismiss NXT',
   [FAMILY.PRE_EMERGENT]: 'Prodiamine 65 WDG',
   [FAMILY.GRANULAR_N]: 'LESCO 24-0-11',
   [FAMILY.POTASSIUM]: 'LESCO K-Flow 0-0-25',
@@ -89,12 +94,17 @@ describe('lawn expectations config rows', () => {
     ALL_ROWS.forEach((row) => expect(config.ROW_PRIORITY).toContain(row.id));
   });
 
-  it('every row is owner-approved (2026-10-02) and every window carries a proposed|catalog source', () => {
+  it('every row is owner-approved (2026-10-02) and every window carries a proposed|catalog|label source', () => {
     for (const row of ALL_ROWS) {
       expect(row.approved).toBe(true);
       for (const win of [row.windows?.first, row.windows?.full, row.contactWindow].filter(Boolean)) {
-        expect(['proposed', 'catalog']).toContain(win.source);
+        expect(['proposed', 'catalog', 'label']).toContain(win.source);
         if (win.source === 'catalog') expect(win.catalogRef).toBeTruthy();
+        // A label-sourced window names its label and carries the label's words.
+        if (win.source === 'label') {
+          expect(win.labelRef).toMatch(/^EPA \d/);
+          expect(win.labelQuote.length).toBeGreaterThan(20);
+        }
         if (win.minDays == null) expect(win.text).toBeTruthy(); // qualitative window names itself
       }
     }
@@ -210,7 +220,7 @@ describe('product name map', () => {
   });
 
   it('matches case-insensitively on the whole name, never a prefix or substring', () => {
-    expect(classifyLawnProduct({ name: '  celsius   wg ' })).toMatchObject({ family: FAMILY.BROADLEAF });
+    expect(classifyLawnProduct({ name: '  celsius   wg ' })).toMatchObject({ family: FAMILY.CELSIUS });
     expect(classifyLawnProductStatus('Celsius')).toBe('unmapped');
     expect(classifyLawnProductStatus('Celsius WG 10 lb bag')).toBe('unmapped');
     expect(classifyLawnProductStatus('')).toBe('unmapped');
@@ -222,29 +232,29 @@ describe('buildLawnExpectations', () => {
   const base = { visitDate: '2026-10-01', nextVisitDate: '2026-11-05' };
 
   it('an unapproved row is withheld unless the caller asks for a preview', () => {
-    const original = PRODUCT_ROWS.herbicide_broadleaf;
-    PRODUCT_ROWS.herbicide_broadleaf = { ...original, approved: false };
+    const original = PRODUCT_ROWS.herbicide_celsius;
+    PRODUCT_ROWS.herbicide_celsius = { ...original, approved: false };
     try {
       const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
       expect(out.rows).toEqual([]);
       expect(out.lines).toEqual([]);
       expect(out.primaryRowId).toBeNull();
-      expect(out.withheld).toEqual([{ rowId: 'herbicide_broadleaf', reason: 'not_approved' }]);
+      expect(out.withheld).toEqual([{ rowId: 'herbicide_celsius', reason: 'not_approved' }]);
     } finally {
-      PRODUCT_ROWS.herbicide_broadleaf = original;
+      PRODUCT_ROWS.herbicide_celsius = original;
     }
   });
 
   it('an approved row is surfaced without the preview flag', () => {
-    const approved = { ...PRODUCT_ROWS.herbicide_broadleaf, approved: true };
-    const original = PRODUCT_ROWS.herbicide_broadleaf;
-    PRODUCT_ROWS.herbicide_broadleaf = approved;
+    const approved = { ...PRODUCT_ROWS.herbicide_celsius, approved: true };
+    const original = PRODUCT_ROWS.herbicide_celsius;
+    PRODUCT_ROWS.herbicide_celsius = approved;
     try {
       const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
-      expect(out.primaryRowId).toBe('herbicide_broadleaf');
+      expect(out.primaryRowId).toBe('herbicide_celsius');
       expect(out.lines.length).toBeGreaterThan(0);
     } finally {
-      PRODUCT_ROWS.herbicide_broadleaf = original;
+      PRODUCT_ROWS.herbicide_celsius = original;
     }
   });
 
@@ -263,15 +273,28 @@ describe('buildLawnExpectations', () => {
       ...base,
       applications: [{ name: 'Celsius WG' }, { name: 'Mystery Product 9000' }],
     }, PREVIEW);
-    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_broadleaf']);
+    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_celsius']);
   });
 
   it('two products in one family give one row', () => {
     const out = buildLawnExpectations({
       ...base,
-      applications: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }],
+      applications: [{ name: 'SpeedZone Southern' }, { name: 'SpeedZone Southern EW' }],
     }, PREVIEW);
-    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_broadleaf']);
+    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_speedzone']);
+  });
+
+  it('label-sourced products each get their own row, never the shared broadleaf row', () => {
+    const out = buildLawnExpectations({
+      ...base,
+      applications: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }, { name: 'SedgeHammer Plus' }, { name: 'Dismiss NXT' }],
+    }, PREVIEW);
+    expect(out.rows.map((r) => r.id).sort()).toEqual([
+      'herbicide_celsius', 'herbicide_sedge', 'herbicide_sedgehammer', 'herbicide_speedzone',
+    ]);
+    for (const name of ['LESCO Three-Way Selective Herbicide', 'Atrazine 4L']) {
+      expect(classifyLawnProduct({ name })).toMatchObject({ family: FAMILY.BROADLEAF });
+    }
   });
 
   it('every emitted line is within the cap and clean, for every mapped product and every gap', () => {
@@ -298,7 +321,7 @@ describe('buildLawnExpectations', () => {
   });
 
   describe('Celsius cap swap', () => {
-    const second = PRODUCT_ROWS.herbicide_broadleaf.secondApp;
+    const second = PRODUCT_ROWS.herbicide_celsius.secondApp;
     const run = (count) => buildLawnExpectations({
       ...base, applications: [{ name: 'Celsius WG' }], celsiusYtdCount: count,
     }, PREVIEW).rows[0];
@@ -325,9 +348,70 @@ describe('buildLawnExpectations', () => {
       expect(run(undefined).secondApp.capped).toBe(false);
     });
 
-    it('only the broadleaf row carries a second-application line', () => {
-      const withSecond = ALL_ROWS.filter((r) => r.secondApp).map((r) => r.id);
-      expect(withSecond).toEqual(['herbicide_broadleaf']);
+    it('only the broadleaf and Celsius rows carry a second-application line', () => {
+      const withSecond = ALL_ROWS.filter((r) => r.secondApp).map((r) => r.id).sort();
+      expect(withSecond).toEqual(['herbicide_broadleaf', 'herbicide_celsius']);
+    });
+
+    it('the Celsius count never swaps the line of another product', () => {
+      const row = buildLawnExpectations({
+        ...base, applications: [{ name: 'LESCO Three-Way Selective Herbicide' }], celsiusYtdCount: CELSIUS_YTD_CAP + 1,
+      }, PREVIEW).rows[0];
+      expect(row.id).toBe('herbicide_broadleaf');
+      expect(row.secondApp).toEqual({ possible: true, capped: false });
+      expect(row.lines).toContain(PRODUCT_ROWS.herbicide_broadleaf.secondApp.line);
+    });
+  });
+
+  describe('label-sourced rows claim only what the label states', () => {
+    it('SpeedZone and the sedge rows carry no progress window, so none is ever ahead or behind', () => {
+      for (const id of ['herbicide_speedzone', 'herbicide_sedgehammer', 'herbicide_sedge']) {
+        const row = PRODUCT_ROWS[id];
+        expect(row.metricWindows).toEqual({});
+        for (const d of [0, 14, 30, 71, 400]) {
+          for (const scoreDelta of [-40, 0, 40]) {
+            expect(['behind', 'ahead']).not.toContain(judgeProgress(row, { metric: 'weed_suppression', daysSinceApplication: d, scoreDelta }));
+          }
+        }
+      }
+    });
+
+    it('the 75% SedgeHammer, Dismiss and Dismiss NXT state no timing or duration of any kind', () => {
+      // The 75% label was not read; the Dismiss labels' 60-day claim holds only
+      // inside a labeled rate range, and the engine is not given the rate.
+      for (const name of [
+        'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide', 'Dismiss', 'Dismiss 64 oz', 'Dismiss NXT',
+      ]) {
+        const out = buildLawnExpectations({ ...base, nextVisitGapDays: 28, applications: [{ name }] }, PREVIEW);
+        expect(out.rows.map((r) => r.id)).toEqual(['herbicide_sedge']);
+        expect(out.lines.join(' ')).not.toMatch(/\d|week|day|hour/i);
+      }
+    });
+
+    it('rows with no label or catalog timeline print no number in the report sentences', () => {
+      // Owner 2026-10-03: where no label states a timeline and no turf source
+      // gives one, the report says what happens, not when.
+      for (const id of ['herbicide_broadleaf', 'granular_fertilizer', 'iron_micros', 'fungicide_curative', 'insecticide_curative']) {
+        const row = PRODUCT_ROWS[id];
+        const printed = [row.visibleChange, ...row.limits, ...Object.values(row.byNextVisit)];
+        for (const line of printed) expect(line).not.toMatch(/\d/);
+      }
+      const chinch = ISSUE_ROWS.chinch;
+      for (const line of [chinch.visibleChange, ...Object.values(chinch.byNextVisit)]) expect(line).not.toMatch(/\d/);
+    });
+
+    it('every row leaves room for its by-next-visit line under the report word cap', () => {
+      for (const row of ALL_ROWS) {
+        for (const line of Object.values(row.byNextVisit || {})) {
+          expect(wordCount(row.visibleChange) + wordCount(line)).toBeLessThanOrEqual(FIELD_CAPS.whatToExpect);
+        }
+      }
+    });
+
+    it('SpeedZone by-next-visit lines keep the label\'s "can occur": no line says weeds should have died', () => {
+      const lines = Object.values(PRODUCT_ROWS.herbicide_speedzone.byNextVisit);
+      for (const line of lines) expect(line).not.toMatch(/should (?:be dying|have died)/);
+      expect(PRODUCT_ROWS.herbicide_speedzone.byNextVisit.complete).toMatch(/may have died back/);
     });
   });
 
@@ -344,10 +428,19 @@ describe('buildLawnExpectations', () => {
     });
 
     it('sedge, granular nitrogen and curative fungicide follow their own windows', () => {
-      expect(state('herbicide_sedge', 6)).toBe('too_early');
-      expect(state('herbicide_sedge', 7)).toBe('partial');
-      expect(state('herbicide_sedge', 21)).toBe('visible');
-      expect(state('herbicide_sedge', 28)).toBe('complete');
+      // SedgeHammer: the label gives one figure (symptoms within 2 weeks), no full window.
+      expect(state('herbicide_sedgehammer', 13)).toBe('too_early');
+      expect(state('herbicide_sedgehammer', 14)).toBe('visible');
+      expect(state('herbicide_sedgehammer', 70)).toBe('visible');
+      // Celsius: growth stops within hours, control in 1 to 4 weeks.
+      expect(state('herbicide_celsius', 0)).toBe('partial');
+      expect(state('herbicide_celsius', 6)).toBe('partial');
+      expect(state('herbicide_celsius', 7)).toBe('visible');
+      expect(state('herbicide_celsius', 28)).toBe('complete');
+      // SpeedZone: injury within hours, death can occur in 7 to 14 days.
+      expect(state('herbicide_speedzone', 6)).toBe('partial');
+      expect(state('herbicide_speedzone', 7)).toBe('visible');
+      expect(state('herbicide_speedzone', 14)).toBe('complete');
       expect(state('granular_fertilizer', 6)).toBe('too_early');
       expect(state('granular_fertilizer', 14)).toBe('visible');
       expect(state('granular_fertilizer', 21)).toBe('complete');
@@ -382,14 +475,25 @@ describe('buildLawnExpectations', () => {
       const early = lineFor('2026-10-03');
       const mid = lineFor('2026-10-08');
       const late = lineFor('2026-11-05');
-      expect(early).toMatchObject({ rowId: 'herbicide_broadleaf', state: 'too_early' });
-      expect(mid.state).toBe('partial');
+      expect(early).toMatchObject({ rowId: 'herbicide_celsius', state: 'partial' });
+      expect(mid.state).toBe('visible');
       expect(late.state).toBe('complete');
       expect(new Set([early.line, mid.line, late.line]).size).toBe(3);
     });
 
     it('every row resolves a line for every reachable state (no gap leaves a hole)', () => {
+      // The one row with no by-next-visit line: sedge products with no timeline
+      // to state (75% SedgeHammer, Dismiss, Dismiss NXT).
+      const silent = ALL_ROWS.filter((r) => !Object.keys(r.byNextVisit || {}).length).map((r) => r.id);
+      expect(silent).toEqual(['herbicide_sedge']);
       for (const row of ALL_ROWS) {
+        if (silent.includes(row.id)) {
+          const out = buildLawnExpectations({ visitDate: '2026-12-01', nextVisitGapDays: 28, applications: [{ name: REPRESENTATIVE[row.family] }] }, PREVIEW);
+          expect(out.rows.map((r) => r.id)).toEqual([row.id]);
+          expect(out.byNextVisit).toEqual([]);
+          expect(out.rows[0].sentences.map((s) => s.key)).not.toContain('byNextVisit');
+          continue;
+        }
         for (const gap of [0, 1, 3, 7, 10, 14, 21, 28, 42, 90]) {
           const out = buildLawnExpectations({
             visitDate: '2026-12-01',
@@ -519,15 +623,24 @@ describe('buildLawnExpectations', () => {
     });
 
     it('a normal row can still be behind, and too_early never is', () => {
+      // Celsius WG: gain window opens day 1, full from day 7, closes day 28.
       const row = rowFor('Celsius WG');
       expect(row.behindEligible).toBe(true);
-      expect(judgeProgress(row, { daysSinceApplication: 2, scoreDelta: -20 })).toBe('too_early');
-      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: -9 })).toBe('behind');
-      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: 0 })).toBe('behind');
-      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('ahead');
-      expect(judgeProgress(row, { daysSinceApplication: 25, scoreDelta: 9 })).toBe('on_track');
+      expect(judgeProgress(row, { daysSinceApplication: 0, scoreDelta: -20 })).toBe('too_early');
+      expect(judgeProgress(row, { daysSinceApplication: 29, scoreDelta: -9 })).toBe('behind');
+      expect(judgeProgress(row, { daysSinceApplication: 29, scoreDelta: 0 })).toBe('behind');
+      expect(judgeProgress(row, { daysSinceApplication: 3, scoreDelta: 9 })).toBe('ahead');
+      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('on_track');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 1 })).toBe('in_window');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: null })).toBe('unclear');
+    });
+
+    it('a broadleaf row (windows removed 2026-10-03) is never behind-eligible and never judged', () => {
+      const row = rowFor('LESCO Three-Way Selective Herbicide');
+      expect(row.behindEligible).toBe(false);
+      expect(judgeProgress(row, { daysSinceApplication: 2, scoreDelta: -20 })).toBe('holding_steady');
+      expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: -9 })).toBe('holding_steady');
+      expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 9 })).toBe('holding_steady');
     });
   });
 
@@ -538,14 +651,25 @@ describe('buildLawnExpectations', () => {
 
     it('covers the rows that can be judged (config-derived, not a hand list)', () => {
       expect(rowsWithWindows.map((r) => r.id).sort()).toEqual([
-        'herbicide_broadleaf', 'herbicide_sedge', 'granular_fertilizer', 'fungicide_curative',
-        'insecticide_curative', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
+        'herbicide_celsius', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
       ].sort());
+    });
+
+    it('the product rows with no metric and no window are exactly the ones whose day counts were unsourced', () => {
+      const unjudged = Object.values(PRODUCT_ROWS).filter((r) => r.metric === null);
+      expect(unjudged.map((r) => r.id).sort()).toEqual([
+        'fungicide_curative', 'granular_fertilizer', 'herbicide_broadleaf', 'herbicide_sedge',
+        'herbicide_sedgehammer', 'herbicide_speedzone', 'insecticide_curative',
+      ]);
+      for (const row of unjudged) {
+        expect(row.metricWindows).toEqual({});
+        expect(row.behindEligible).toBe(false);
+      }
     });
 
     it.each(cases)('%s / %s window is well formed and sourced', (_id, _metric, _row, win) => {
       expect(['gain', 'hold']).toContain(win.mode);
-      expect(['proposed', 'catalog']).toContain(win.source);
+      expect(['proposed', 'catalog', 'label']).toContain(win.source);
       if (win.source === 'catalog') expect(win.catalogRef).toBeTruthy();
       expect(Number.isFinite(win.closeDays)).toBe(true);
       expect(win.closeDays).toBeGreaterThanOrEqual(win.startDays);
@@ -568,9 +692,9 @@ describe('buildLawnExpectations', () => {
     });
 
     it('a metric a row has no window for is never judged, on any day', () => {
-      const broadleaf = PRODUCT_ROWS.herbicide_broadleaf;
+      const celsius = PRODUCT_ROWS.herbicide_celsius;
       for (const d of [0, 30, 400]) {
-        expect(judgeProgress(broadleaf, { metric: 'turf_density', daysSinceApplication: d, scoreDelta: -40 })).toBe('holding_steady');
+        expect(judgeProgress(celsius, { metric: 'turf_density', daysSinceApplication: d, scoreDelta: -40 })).toBe('holding_steady');
       }
     });
 
@@ -603,16 +727,28 @@ describe('buildLawnExpectations', () => {
       expect(judgeProgress(scalped, { metric: 'color_health', daysSinceApplication: 20, scoreDelta: 0 })).toBe('in_window');
     });
 
-    it('granular nitrogen: color closes at 21 days, density only at 90', () => {
-      const n = PRODUCT_ROWS.granular_fertilizer;
-      expect(judgeProgress(n, { metric: 'color_health', daysSinceApplication: 22, scoreDelta: 0 })).toBe('behind');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 30, scoreDelta: 0 })).toBe('too_early');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 75, scoreDelta: 0 })).toBe('in_window');
-      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 91, scoreDelta: 0 })).toBe('behind');
+    it('rows without a progress window are never judged: not behind, ahead, too_early, in_window or on_track, on any metric', () => {
+      // Owner 2026-10-03: the day counts for these rows were unsourced estimates.
+      // Granular nitrogen (color at 21 days, density at 90), selective broadleaf,
+      // curative fungicide and curative insecticide no longer carry a window.
+      const rows = [
+        PRODUCT_ROWS.granular_fertilizer, PRODUCT_ROWS.herbicide_broadleaf,
+        PRODUCT_ROWS.fungicide_curative, PRODUCT_ROWS.insecticide_curative,
+      ];
+      for (const row of rows) {
+        expect(row.metric).toBeNull();
+        for (const metric of ['weed_suppression', 'color_health', 'stress_damage', 'turf_density', undefined]) {
+          for (const daysSinceApplication of [0, 5, 22, 30, 75, 91, 400]) {
+            for (const scoreDelta of [-30, -12, 0, 9, 30]) {
+              expect(judgeProgress(row, { metric, daysSinceApplication, scoreDelta })).toBe('holding_steady');
+            }
+          }
+        }
+      }
     });
 
-    it('spread rows (fungicide, insecticide, chinch, large patch) judge a falling score, never regrowth or fill-in', () => {
-      for (const row of [PRODUCT_ROWS.fungicide_curative, PRODUCT_ROWS.insecticide_curative, ISSUE_ROWS.chinch, ISSUE_ROWS.large_patch]) {
+    it('spread issue rows (chinch, large patch) judge a falling score, never regrowth or fill-in', () => {
+      for (const row of [ISSUE_ROWS.chinch, ISSUE_ROWS.large_patch]) {
         expect(row.metricWindows.stress_damage.mode).toBe('hold');
         // 30 days later, flat: spread stopped, so not behind and not "no regrowth"
         expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: 0 })).toBe('on_track');
@@ -791,9 +927,10 @@ describe('buildLawnExpectations', () => {
         expect(tagged).toEqual(named);
       });
 
-      it('a tag with no named cause (fairy ring) keeps the default window', () => {
+      it('a tag with no named cause (fairy ring) keeps the default lines', () => {
         const out = run({ app: { targets: ['Fairy ring'] } });
-        expect(out.rows[0].lines.join(' ')).toContain('2 to 4 weeks');
+        expect(out.rows[0].lines.join(' ')).toContain('New leaves have to grow in.');
+        expect(out.rows[0].lines.join(' ')).not.toContain('weeks to months');
       });
     });
 
@@ -924,7 +1061,7 @@ describe('keyed sentences (what the P14 writer selects by id)', () => {
   it('keys name the sentence, so a swapped second-application line keeps its key', () => {
     const second = (count) => buildLawnExpectations({ applications: [{ name: 'Celsius WG' }], nextVisitGapDays: 28, celsiusYtdCount: count }, PREVIEW)
       .rows[0].sentences.find((s) => s.key === 'secondApp');
-    expect(second(1).text).toMatch(/second application/);
+    expect(second(1).text).toMatch(/follow-up application/);
     expect(second(3).text).toMatch(/different weed-control product/);
   });
 });
