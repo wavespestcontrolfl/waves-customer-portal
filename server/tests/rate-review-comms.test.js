@@ -488,8 +488,19 @@ describe('sendBatch', () => {
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1 });
   });
 
-  test('a claim gone stale after a crash is held send_uncertain, never reclaimed', async () => {
-    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) })] }));
+  test('a claim that died before its provider handoff (stale, no handoff recorded) is sendable again; a fresh one is still in flight', async () => {
+    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000), metadata: { ...parseJsonMeta(draft(1)), pending_letter: { key: 'old', letter: { lines: [] } } } })] }));
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.counts.letters).toBe(1);
+    expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toMatchObject({ sent: 1 });
+    expect(notices()[0].status).toBe('sent');
+    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 1000) })] }));
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('in_flight');
+  });
+
+  test('a claim gone stale after a crash WITH its handoff recorded is held send_uncertain, never reclaimed', async () => {
+    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000), metadata: { ...parseJsonMeta(draft(1)), pending_letter: { key: 'old', handoff_at: NOW.toISOString(), letter: { lines: [] } } } })] }));
     const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(preview.customers[0].suppressedLines[0].reason).toBe('send_uncertain');
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });

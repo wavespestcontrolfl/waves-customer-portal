@@ -427,11 +427,18 @@ async function liveLanesFor(dbh, notices, { snapshots, customers, today, include
 // Only a notice no attempt ever handed to a provider is sendable. A send
 // is single-shot: an attempt whose outcome is uncertain (the provider may
 // have accepted it) is never retried automatically — it is held for the
-// owner (send_uncertain, or a 'sending' claim gone stale after a crash).
+// owner (send_uncertain, or a 'sending' claim gone stale after a crash that had
+// recorded its provider handoff). A stale claim WITHOUT the handoff marker never
+// reached a provider (the marker is committed before any request): it is
+// sendable again, not uncertain.
 const SENDABLE_STATUSES = ['draft', 'viewed', 'unreachable'];
+const claimStale = (notice, now) => String(notice.status) === 'sending' && new Date(notice.updated_at).getTime() < now.getTime() - CLAIM_STALE_MS;
+const claimHandedOff = (notice) => !!parseJson(notice.metadata, {}).pending_letter?.handoff_at;
+const staleUnhanded = (notice, now) => claimStale(notice, now) && !claimHandedOff(notice);
+const claimable = (notice, now) => SENDABLE_STATUSES.includes(String(notice.status)) || staleUnhanded(notice, now);
 function sendOutcomeUncertain(notice, now) {
   if (String(notice.status) === UNCERTAIN) return true;
-  return String(notice.status) === 'sending' && new Date(notice.updated_at).getTime() < now.getTime() - CLAIM_STALE_MS;
+  return claimStale(notice, now) && claimHandedOff(notice);
 }
 
 function hasContact(customer, prefs) {
@@ -509,7 +516,7 @@ const LINE_RULES = [
   ['apply_hold', ({ notice, linesGone }) => linesGone.has(String(notice.id))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
-  ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
+  ['in_flight', ({ notice, now }) => !claimable(notice, now)],
   // At least 30 days out from today, the delivery day; a prepaid renewal
   // 32 (the apply lane's own rule: the nightly apply must write the
   // successor amount before the 30-day renewal reminder goes out).
@@ -726,17 +733,20 @@ class ClaimLost extends Error {}
 // line that cannot be claimed, or any error part-way, rolls the whole claim back, so
 // nothing is ever left half 'sending'. The fence is not held through the provider
 // call — the SMS sender takes the same fence on its own connection.
-async function claimLines(dbh, entry) {
+async function claimLines(dbh, entry, now = new Date()) {
   try {
     return await dbh.transaction(async (trx) => {
       await lockCustomerComms(trx, entry.customerId);
       const claimed = [];
       for (const l of entry.lines) {
         await PriceChangeNotices.lockNoticeEvent(trx, { customerId: l.notice.customer_id, effectiveDate: l.effectiveDate, currentCents: l.notice.current_amount_cents, newCents: l.notice.new_amount_cents });
+        // Read under the fence and the row lock: sendable, or a claim that died before its
+        // provider handoff (stale, no marker) — the same rule the preview applied.
+        const current = await trx('price_change_notices').where({ id: l.noticeId, customer_id: entry.customerId }).whereNull('sent_at').forUpdate().first();
+        if (!current || !claimable(current, now)) throw new ClaimLost();
         const n = await trx('price_change_notices')
-          .where({ id: l.noticeId, customer_id: entry.customerId })
+          .where({ id: l.noticeId, customer_id: entry.customerId, status: current.status })
           .whereNull('sent_at')
-          .whereIn('status', SENDABLE_STATUSES)
           .update({ status: 'sending', updated_at: new Date() });
         if (!n) throw new ClaimLost();
         // A new attempt starts with no failures remembered from an earlier one.
@@ -952,7 +962,7 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
 
 async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, clock, progress = {} }) {
   let entry = originalEntry;
-  const claimed = await claimLines(dbh, entry);
+  const claimed = await claimLines(dbh, entry, clock());
   if (!claimed) return { outcome: 'in_flight' };
   // What the caller needs to settle an exception: the claimed rows, and whether a
   // provider boundary has been crossed yet (set just before the first handoff).
