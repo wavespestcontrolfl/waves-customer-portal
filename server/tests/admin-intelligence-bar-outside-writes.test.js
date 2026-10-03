@@ -212,6 +212,8 @@ describe('outside-service write tools are full-access-only in the /query dispatc
   // redacted). Its machine code is kept; anything that is not code-shaped is dropped.
   test.each([
     ['target_clarification_required', { code: 'target_clarification_required' }],
+    ['COLLECTIVE_MOVE_REQUIRED', { code: 'COLLECTIVE_MOVE_REQUIRED' }],
+    ['Collective_Move', undefined],
     ['Jane Example, 12 Fixture Lane', undefined],
     [undefined, undefined],
   ])('a refused PII tool keeps its machine code on the health event (code %p)', async (code, metadata) => {

@@ -549,8 +549,9 @@ const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 // The refusal's machine code (capability_not_loaded, invalid_input,
 // target_clarification_required, ...) stays on the health event even when its
 // text is redacted: without it a refused PII tool leaves no reason at all. Only
-// a code-shaped value is kept, so free text can never ride in through `code`.
-const TOOL_HEALTH_CODE_RE = /^[a-z][a-z0-9_]{1,63}$/;
+// a code-shaped value is kept (snake_case, or the older UPPER_SNAKE such as
+// COLLECTIVE_MOVE_REQUIRED), so free text can never ride in through `code`.
+const TOOL_HEALTH_CODE_RE = /^(?:[a-z][a-z0-9_]{1,63}|[A-Z][A-Z0-9_]{1,63})$/;
 function toolHealthFailureCode(result) {
   const code = result?.code;
   return typeof code === 'string' && TOOL_HEALTH_CODE_RE.test(code) ? code : null;
