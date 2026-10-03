@@ -225,6 +225,8 @@ describe('lawn re-service, voice fill on', () => {
     expect(tile('Celsius WG').getAttribute('aria-pressed')).toBe('false');
     // turning it off answers its confirm
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
+    // the same note, read again: the reader may quote other words for it this time
+    request.fill = read([{ ...CELSIUS_HALF, heard: 'an ounce of Celsius' }]);
     await fill(request, 2);
     expect(tile('Celsius WG').getAttribute('aria-pressed')).toBe('false');
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();

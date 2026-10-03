@@ -145,9 +145,10 @@ export function useNoteClip({ enabled, request, serviceId, onText }) {
 }
 
 // What the tech declined: a product the fill put on the sheet that the tech then
-// took off, with the words it was heard in. The same words do not bring it back;
-// the tech saying it again another way (an edited note) does.
-const notDeclined = (declined) => (product) => declined.get(String(product.productId)) !== String(product.heard || '');
+// took off, with the note it was read from. Reading the same note again does not
+// bring it back (whatever words the reader quotes this time); an edited note does.
+const noteKey = (note) => String(note || '').trim();
+const notDeclined = (declined, note) => (product) => declined.get(String(product.productId)) !== noteKey(note);
 
 // A spray's way is the note's own read on this sheet (visit-voice-facts), so a
 // product's spray way is not a tap here; any other way (a bait, a granule) is.
@@ -163,7 +164,7 @@ const withFill = (rows, added, patches) => {
 // The products the note names, read when the report is written and applied as
 // unconfirmed rows: `read(note)` asks, `settle(fill, sprayMethod)` turns the answer
 // into taps and answers the rows as they then stand (the report is written from
-// those). Confirms and Checks hold Complete & send until the tech answers each.
+// those; `note` is the note that was read). Confirms and Checks hold Complete & send until the tech answers each.
 // `products` is the sheet's useProductRows; `ops` its row rules.
 export function useProductVoiceFill({ enabled, request, serviceId, products, ctx, ops }) {
   const [checks, setChecks] = useState([]);
@@ -175,7 +176,7 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   // same note.
   const answered = useRef(new Set());
   // A product the fill added that the tech then removed stays removed: the next
-  // read of the same words does not bring it back.
+  // read of the same note does not bring it back.
   const addedByFill = useRef(new Map());
   const declined = useRef(new Map());
   const latest = useRef({ products, ctx, ops });
@@ -194,13 +195,13 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     }
   }, [request, serviceId]);
 
-  const settle = useCallback((fill, sprayMethod) => {
+  const settle = useCallback((fill, sprayMethod, note) => {
     const rows = rowsRef.current;
     if (!fill || fill.status !== 'read') return rows;
     const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps } = latest.current;
     const plan = planVoiceFill({
       fill: {
-        products: (fill.products || []).filter(notDeclined(declined.current)).map((product) => withoutSprayWay(product, sheetOps)),
+        products: (fill.products || []).filter(notDeclined(declined.current, note)).map((product) => withoutSprayWay(product, sheetOps)),
         unclear: fill.unclear,
       },
       rows,
@@ -211,7 +212,7 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     sheetProducts.applyFill(plan.added, plan.patches);
     const filled = withFill(rows, plan.added, plan.patches);
     rowsRef.current = filled;
-    for (const row of plan.added) addedByFill.current.set(String(row.productId), String(plan.heard.products[String(row.productId)] || ''));
+    for (const row of plan.added) addedByFill.current.set(String(row.productId), noteKey(note));
     setConfirms((prev) => [
       ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
       ...plan.confirms.map((confirm) => ({ ...confirm, id: ++nextId.current })),
@@ -230,10 +231,10 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   useEffect(() => {
     const form = { method: '' };
     const onSheet = new Set(rows.map((row) => String(row.productId)));
-    for (const [id, words] of addedByFill.current) {
+    for (const [id, readFrom] of addedByFill.current) {
       if (onSheet.has(id)) continue;
       addedByFill.current.delete(id);
-      declined.current.set(id, words);
+      declined.current.set(id, readFrom);
     }
     setChecks((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
     setConfirms((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
@@ -286,7 +287,7 @@ export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx })
   const nextId = useRef(0);
   const answered = useRef(new Set());
   // A product the fill turned on or added that the tech then turned off or removed
-  // stays that way on the next read of the same words.
+  // stays that way on the next read of the same note.
   const setByFill = useRef(new Map());
   const declined = useRef(new Map());
   const latest = useRef({ products, ctx });
@@ -314,7 +315,7 @@ export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx })
     const { products: sheetProducts, ctx: sheetCtx } = latest.current;
     const rows = sheetProducts.rows;
     const plan = planLawnVoiceFill({
-      fill: { ...answer, products: (answer.products || []).filter(notDeclined(declined.current)) },
+      fill: { ...answer, products: (answer.products || []).filter(notDeclined(declined.current, note)) },
       rows,
       catalog: sheetCtx.products,
       methods: sheetCtx.methods.map((choice) => choice.value),
@@ -326,7 +327,7 @@ export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx })
       ...plan.added.map((row) => [String(row.productId), row]),
     ]);
     const held = (item) => (item.watch ? { ...item, baseline: lawnRowWatch(filled.get(item.watch)) } : item);
-    for (const item of plan.confirms) setByFill.current.set(item.watch, String(item.heard || ''));
+    for (const item of plan.confirms) setByFill.current.set(item.watch, noteKey(note));
     setConfirms((prev) => [
       ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
       ...plan.confirms.map((item) => ({ ...held(item), id: ++nextId.current })),
@@ -344,10 +345,10 @@ export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx })
   const { rows } = products;
   useEffect(() => {
     const byKey = new Map(rows.map((row) => [String(row.productId), row]));
-    for (const [id, words] of setByFill.current) {
+    for (const [id, readFrom] of setByFill.current) {
       if (byKey.get(id)?.active) continue;
       setByFill.current.delete(id);
-      declined.current.set(id, words);
+      declined.current.set(id, readFrom);
     }
     const stillOpen = (list) => {
       const open = list.filter((item) => !item.watch || lawnRowWatch(byKey.get(item.watch)) === item.baseline);
