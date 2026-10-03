@@ -1929,6 +1929,13 @@ function stripMembershipDuesMarkers(lineItems) {
   });
 }
 
+function stripPayerBilledDuesMarker(items, customerId) {
+  if (Array.isArray(items) && items.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
+    logger.warn(`[invoice] customer ${customerId}: a payer is now responsible for this invoice — the membership-dues stamp was dropped, the month is not marked covered`);
+  }
+  return stripMembershipDuesMarkers(items);
+}
+
 // THE set of lines that together represent a membership-dues visit's charge,
 // shared by the mint (provenance) and the edit sanitizer ("unchanged"): the
 // marker-bearing PRIMARY line plus the scheduled-line replay's reconciliation
@@ -2122,6 +2129,44 @@ async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
 // raises it too, and for a refund this alert is also the recovery path for an
 // armed monthly retry the sweep resolved while the invoice was paid: that row
 // stays disarmed (nothing re-arms it), the office rebills the month.
+// THE candidate filter both dues alerts share: which of a customer's visits does
+// the month's dues COVER (so they complete without an invoice of their own)?
+// Decided by the coverage predicate completion uses (membershipDuesCoverVisit,
+// the month's dues as the cover), with payer ownership resolved the way
+// completion resolves it (PayerService.resolveForInvoice: a concrete ACTIVE payer
+// wins, an inactive one or a self-pay pin falls back to self-pay), one call per
+// visit: the alerts are post-commit and best effort, and a month holds a handful
+// of visits. An unreadable resolution counts as self-pay (over-reports). Needs
+// each candidate's id, estimated_price and is_recurring, and the customer's
+// billing_mode, monthly_rate and waveguard_tier.
+async function filterVisitsCoveredByDues(candidates, customer, customerId, logLabel) {
+  const { membershipDuesCoverVisit } = require("./billing-lane");
+  const PayerService = require("./payer");
+  const payerBilled = new Map();
+  for (const v of candidates) {
+    try {
+      const resolved = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: v.id });
+      payerBilled.set(v.id, !!resolved?.payerId);
+    } catch (e) {
+      logger.warn(`[invoice] ${logLabel} payer resolve failed for visit ${v.id}: ${e.message}`);
+      payerBilled.set(v.id, false);
+    }
+  }
+  return candidates.filter((v) => membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled.get(v.id) === true,
+    perApplicationBilling: customer?.billing_mode === "per_application",
+    annualPrepayBilling: customer?.billing_mode === "annual_prepay",
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    // A display price of at least one cent (the predicate's own "has a price" input, not a charge amount).
+    hasVisitPrice: Number(v.estimated_price) >= 0.01,
+    isRecurring: v.is_recurring,
+    waveguardTier: customer?.waveguard_tier,
+    monthlyRate: customer?.monthly_rate,
+    billingMode: customer?.billing_mode,
+  }));
+}
+
 const duesCoverageReleasedKey = (invoiceId) => `dues_coverage_released:${invoiceId}`;
 async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = "voided" } = {}) {
   const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
@@ -2130,8 +2175,6 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = 
     if (await monthlyDuesCollected(db, invoiceRow.customer_id, new Date(`${month}-15T12:00:00Z`))) return;
     const customer = await db("customers").where({ id: invoiceRow.customer_id })
       .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier");
-    const { membershipDuesCoverVisit } = require("./billing-lane");
-    const PayerService = require("./payer");
     const candidates = await db("scheduled_services as s")
       .where({ "s.customer_id": invoiceRow.customer_id, "s.status": "completed" })
       .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
@@ -2141,34 +2184,7 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = 
         .whereRaw("i.scheduled_service_id = s.id")
         .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
       .select("s.id", "s.estimated_price", "s.is_recurring");
-    // Payer ownership is resolved the way completion resolves it
-    // (PayerService.resolveForInvoice: a concrete ACTIVE payer wins, an inactive
-    // one or a self-pay pin falls back to self-pay), one call per visit: the
-    // alert is post-commit and best effort, and a month holds a handful of
-    // visits. An unreadable resolution counts as self-pay (over-reports).
-    const payerBilled = new Map();
-    for (const v of candidates) {
-      try {
-        const resolved = await PayerService.resolveForInvoice({ customerId: invoiceRow.customer_id, scheduledServiceId: v.id });
-        payerBilled.set(v.id, !!resolved?.payerId);
-      } catch (e) {
-        logger.warn(`[invoice] dues-coverage-released payer resolve failed for visit ${v.id}: ${e.message}`);
-        payerBilled.set(v.id, false);
-      }
-    }
-    const rows = candidates.filter((v) => membershipDuesCoverVisit({
-      visitIsPayerBilled: payerBilled.get(v.id) === true,
-      perApplicationBilling: customer?.billing_mode === "per_application",
-      annualPrepayBilling: customer?.billing_mode === "annual_prepay",
-      customerAutopayActive: false,
-      duesCollectedThisMonth: true,
-      // A display price of at least one cent (the predicate's own "has a price" input, not a charge amount).
-      hasVisitPrice: Number(v.estimated_price) >= 0.01,
-      isRecurring: v.is_recurring,
-      waveguardTier: customer?.waveguard_tier,
-      monthlyRate: customer?.monthly_rate,
-      billingMode: customer?.billing_mode,
-    }));
+    const rows = await filterVisitsCoveredByDues(candidates, customer, invoiceRow.customer_id, "dues-coverage-released");
     if (!rows.length) return;
     const { composeAdminAlert, raiseAdminAlert } = require("./admin-alert-compose");
     const { fitAction } = require("./admin-alert-names");
@@ -2274,31 +2290,48 @@ async function reconcileMembershipDuesRestore(ctx) {
     const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
     const replacementLabel = ctx.replacement ? (ctx.replacement.invoice_number || ctx.replacement.id) : `payment ${ctx.collectedPaymentId}`;
     const originalLabel = ctx.invoiceNumber || ctx.invoiceId;
-    // Both paid (a replacement paid / prepaid / processing, or a payment that
-    // collected the month): one payment must be refunded. Otherwise the
-    // replacement is still collectible: void or adjust it by hand.
-    const bothPaid = !!ctx.collectedPaymentId
+    // What the bounce left the ORIGINAL as: 'paid' / 'processing' (the money
+    // stood) on the single-payment path, but the combined-charge path can also
+    // REOPEN it unpaid (the original ACH debit failed, so only one payment, the
+    // replacement's, can have succeeded). "Paid twice, refund one" is only true
+    // when the original is settled AND the other side is paid.
+    const originalSettled = ["paid", "prepaid", "processing"].includes(String(ctx.originalStatus || "paid"));
+    const otherPaid = !!ctx.collectedPaymentId
       || ["paid", "prepaid", "processing"].includes(String(ctx.replacement?.status));
-    const spec = bothPaid
+    const spec = !originalSettled
       ? {
-        action: fitAction("Billing", name, [(who) => `refund ${who}'s extra ${monthName} dues`, (who) => `refund ${who}'s extra dues`]),
-        why: `${monthName} dues are paid twice after a bank refund bounced.`,
-        doneWhen: "month_refunded_once",
-      }
-      : {
-        action: fitAction("Billing", name, [(who) => `void or adjust ${who}'s extra ${monthName} dues`, (who) => `adjust ${who}'s extra dues`]),
-        why: `A refund bounced, so the original dues invoice is paid again; a second invoice still bills ${monthName}.`,
+        // The reopened original is the duplicate obligation: void or adjust IT.
+        action: fitAction("Billing", name, [(who) => `void or adjust ${who}'s reopened ${monthName} dues`, (who) => `adjust ${who}'s reopened dues`]),
+        why: otherPaid
+          ? `The ${monthName} dues were paid on another invoice; a failed bank debit reopened this one.`
+          : `Two open invoices bill the ${monthName} dues after a failed bank debit reopened this one.`,
         doneWhen: "month_billed_once",
-      };
+        subjectId: ctx.invoiceId,
+      }
+      : otherPaid
+        ? {
+          action: fitAction("Billing", name, [(who) => `refund ${who}'s extra ${monthName} dues`, (who) => `refund ${who}'s extra dues`]),
+          why: `${monthName} dues are paid twice after a bank refund bounced.`,
+          doneWhen: "month_refunded_once",
+        }
+        : {
+          action: fitAction("Billing", name, [(who) => `void or adjust ${who}'s extra ${monthName} dues`, (who) => `adjust ${who}'s extra dues`]),
+          why: `A refund bounced, so the original dues invoice is paid again; a second invoice still bills ${monthName}.`,
+          doneWhen: "month_billed_once",
+        };
+    const { subjectId, ...alertSpec } = spec;
+    const advice = !originalSettled
+      ? "void or adjust the reopened original (it is the duplicate: the month is already covered on the other invoice or payment, or both are open)"
+      : otherPaid ? "refund the extra payment" : "void or adjust the extra invoice (it may carry other charges)";
     await raiseAdminAlert("billing", {
       area: "Billing",
-      ...spec,
+      ...alertSpec,
       severity: "needs-you",
       link: `/admin/customers?customerId=${ctx.customerId}`,
-      subject: { type: "invoice", id: String(ctx.replacement?.id || ctx.invoiceId) },
+      subject: { type: "invoice", id: String(subjectId || ctx.replacement?.id || ctx.invoiceId) },
       who: "person",
     }, {
-      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was restored to paid. ${ctx.replacement ? `Dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. Nothing was voided, edited or refunded automatically: ${bothPaid ? "refund the extra payment" : "void or adjust the extra invoice (it may carry other charges)"}.`,
+      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was ${originalSettled ? "restored to paid" : "reopened unpaid (its bank debit never settled)"}. ${ctx.replacement ? `Dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. Nothing was voided, edited or refunded automatically: ${advice}.`,
       bell: true,
       dedupeKey: `dues_restore_conflict:${ctx.invoiceId}:${ctx.replacement?.id || ctx.collectedPaymentId}`,
     });
@@ -2364,11 +2397,16 @@ async function alertPrepaidVisitsToApplyToDuesInvoice(invoiceRow) {
       .whereNotExists(db("payments as p")
         .whereRaw("p.metadata::jsonb ->> 'scheduled_service_id' = s.id::text")
         .whereIn("p.status", ["paid", "processing"]))
-      .select("s.id", "s.status", "s.prepaid_amount", "s.prepaid_method", "s.annual_prepay_term_id");
-    const visits = prepaidVisitsToApplyToDuesInvoice(candidates, { ownVisitId: invoiceRow.scheduled_service_id });
+      .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
+      .select("s.id", "s.status", "s.estimated_price", "s.is_recurring", "s.prepaid_amount", "s.prepaid_method", "s.annual_prepay_term_id");
+    const customer = await db("customers").where({ id: invoiceRow.customer_id })
+      .first("first_name", "last_name", "billing_mode", "monthly_rate", "waveguard_tier");
+    // Only visits the month's dues COVER: a priced non-recurring or payer-billed
+    // visit's cash belongs to its own service (the same filter as the release alert).
+    const covered = await filterVisitsCoveredByDues(candidates, customer, invoiceRow.customer_id, "dues-prepaid-alert");
+    const visits = prepaidVisitsToApplyToDuesInvoice(covered, { ownVisitId: invoiceRow.scheduled_service_id });
     if (!visits.length) return;
     const { raiseAdminAlert } = require("./admin-alert-compose");
-    const customer = await db("customers").where({ id: invoiceRow.customer_id }).first("first_name", "last_name");
     const customerName = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim();
     const [y, m] = month.split("-").map(Number);
     const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
@@ -6057,7 +6095,14 @@ const InvoiceService = {
           // can commit between this customer read and the invoice INSERT.
           customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer),
           title,
-          line_items: JSON.stringify(items),
+          // The dues stamp means "this customer's own monthly dues, billed to
+          // the customer". Bill-To is only final HERE, where the payer this row
+          // is about to be inserted for was resolved: a payer assigned after the
+          // completion's snapshot (or the mint's locked read) makes this a payer
+          // obligation that must never cover the customer's self-pay month, so
+          // the marker is dropped (the mint is unstamped, the month stays
+          // collectible).
+          line_items: JSON.stringify(resolvedPayerId ? stripPayerBilledDuesMarker(items, customerId) : items),
           subtotal,
           discount_amount: discountAmount,
           discount_label: discountLabel,
@@ -13407,7 +13452,7 @@ InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
 InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
 InvoiceService.prepareMembershipDuesRestore = prepareMembershipDuesRestore;
 InvoiceService.reconcileMembershipDuesRestore = reconcileMembershipDuesRestore;
-InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec };
+InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec, filterVisitsCoveredByDues, stripPayerBilledDuesMarker };
 // Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
 InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;
 

@@ -4315,8 +4315,9 @@ async function handleRefundFailed(refund) {
             // Reopen like the failure path — the money never arrived.
             const termInvoice = await trx('invoices').where({ id: invId, status: 'refunded' }).first();
             if (termInvoice) {
+              const reopenedStatus = nextInvoiceStatusAfterFailedPayment(termInvoice);
               const reopened = await trx('invoices').where({ id: invId, status: 'refunded' }).update({
-                status: nextInvoiceStatusAfterFailedPayment(termInvoice),
+                status: reopenedStatus,
                 paid_at: null,
                 stripe_payment_intent_id: null,
                 stripe_charge_id: null,
@@ -4327,6 +4328,8 @@ async function handleRefundFailed(refund) {
               // side effects (codex #3591 r47 local P0) — the reopened
               // invoice's own line is collectible again.
               if (reopened > 0) {
+                // The original comes back UNPAID (its debit never settled).
+                if (duesRestore) duesRestore.originalStatus = reopenedStatus;
                 duesRestores.push(duesRestore);
                 await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, invId);
               }
@@ -4351,7 +4354,10 @@ async function handleRefundFailed(refund) {
                   paid_at: meta.settled_event_at || new Date().toISOString(),
                   updated_at: new Date(),
                 });
-            if (flipped > 0) duesRestores.push(duesRestore);
+            if (flipped > 0) {
+              if (duesRestore) duesRestore.originalStatus = wasStillProcessing ? 'processing' : 'paid';
+              duesRestores.push(duesRestore);
+            }
             if (flipped > 0) {
               // Leaving 'refunded' (codex #3591 r47 local P0): the money
               // stood, so the restored setup stamp / draft re-bill would

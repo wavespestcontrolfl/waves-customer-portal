@@ -1467,6 +1467,36 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
     } finally { await cleanup(f); }
   });
 
+  // ── Bill-To is final at the insert: a payer assigned after the snapshot never keeps the stamp ──
+  test('create() for an invoice that resolves to an active payer drops the dues stamp even when the mint vouched for it (a payer assigned after the snapshot): a PAYER invoice, no stamp, and the customer\'s month is still collectible; a pre-existing stamped payer invoice does not cover either', async () => {
+    const { monthlyDuesCollected } = require('../services/billing-lane');
+    const f = await seedMember();
+    let payerId;
+    try {
+      [{ id: payerId }] = await mockPg('payers').insert({ display_name: `Fixture Payer ${randomUUID().slice(0, 6)}`, active: true }).returning('id');
+      const month = monthOf(etDateString());
+      // The payer lands after the completion decided "self-pay" and before the row is inserted.
+      await mockPg('customers').where({ id: f.customerId }).update({ payer_id: payerId });
+      const created = await InvoiceSvc.create({
+        customerId: f.customerId, title: 'Lawn Care', trustedMembershipDues: true,
+        lineItems: [{ description: 'Lawn Care', quantity: 1, unit_price: 49, amount: 49, category: 'Lawn Care', membership_dues_month: month }],
+      });
+      const row = await mockPg('invoices').where({ id: created.id }).first();
+      expect(String(row.payer_id)).toBe(String(payerId));
+      expect(stampedOf(row)).toBeUndefined();
+      expect(await monthlyDuesCollected(mockPg, f.customerId, new Date())).toBe(false);
+      // A row already stamped that way (older code) does not cover the customer's month either.
+      await mockPg('invoices').where({ id: row.id }).update({
+        line_items: JSON.stringify([{ description: 'Lawn', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: month }]),
+      });
+      expect(await monthlyDuesCollected(mockPg, f.customerId, new Date())).toBe(false);
+    } finally {
+      await mockPg('customers').where({ id: f.customerId }).update({ payer_id: null }).catch(() => {});
+      await cleanup(f);
+      if (payerId) await mockPg('payers').where({ id: payerId }).del().catch(() => {});
+    }
+  });
+
   // ── Owner ruling: a prepaid marker written BEFORE the dues invoice -> one office alert ──
   async function prepaidAlerts(invoiceId, waitForFirst = true) {
     const find = () => mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_prepaid_unapplied:${invoiceId}:%`]);
@@ -1508,6 +1538,9 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       await mark(cancelled);
       await mockPg('scheduled_services').where({ id: cancelled }).update({ status: 'cancelled' });
       await seedVisit(f, { label: 'No marker' });
+      const pricedOwn = await seedVisit(f, { label: 'One-off Treatment', estimatedPrice: 120 });
+      await mockPg('scheduled_services').where({ id: pricedOwn }).update({ is_recurring: false });
+      await mark(pricedOwn); // a priced non-recurring visit: its cash belongs to its own service
       const real = await seedVisit(f, { label: 'Real marker' });
       await mark(real);
       const a = await mintDues(f, 'Pest Control');
@@ -1515,7 +1548,7 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       expect(rows).toHaveLength(1);
       const text = JSON.stringify(rows[0]);
       expect(text).toContain(real);
-      for (const other of [withReceipt, zero, annual, cancelled]) expect(text).not.toContain(other);
+      for (const other of [withReceipt, zero, annual, cancelled, pricedOwn]) expect(text).not.toContain(other);
     } finally { await cleanup(f); }
   });
 

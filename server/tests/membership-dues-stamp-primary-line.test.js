@@ -6,6 +6,11 @@
  * "the month's dues". The Postgres suite covers the full mint.
  */
 jest.mock('../models/db', () => jest.fn());
+const mockResolvePayer = jest.fn(async () => ({ payerId: null }));
+jest.mock('../services/payer', () => ({
+  ...jest.requireActual('../services/payer'),
+  resolveForInvoice: (...args) => mockResolvePayer(...args),
+}));
 const mockRaise = jest.fn(async () => ({ id: 1 }));
 jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
@@ -145,6 +150,30 @@ describe('reconcileMembershipDuesRestore', () => {
     expect(() => composeAdminAlert(spec)).not.toThrow();
   });
 
+  test('the ORIGINAL came back UNPAID (combined path: its debit failed) and the replacement is paid: the month is paid ONCE, so no "paid twice" and no refund; the alert is about voiding or adjusting the reopened original', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ originalStatus: 'overdue', replacement: { id: 'inv-repl', status: 'paid', invoice_number: 'WPC-2' } }));
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const [, spec, opts] = mockRaise.mock.calls[0];
+    expect(spec.action).toMatch(/reopened/);
+    expect(spec.why).not.toMatch(/paid twice/);
+    expect(spec.subject).toEqual({ type: 'invoice', id: 'inv-orig' }); // the invoice to void is the original
+    expect(opts.detail).not.toMatch(/refund the extra payment/);
+    expect(opts.dedupeKey).toBe('dues_restore_conflict:inv-orig:inv-repl');
+    expect(() => composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('original reopened unpaid beside an UNPAID replacement: two open invoices, one adjust-by-hand alert on the original', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ originalStatus: 'sent' }));
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec.why).toMatch(/Two open invoices/);
+    expect(spec.subject.id).toBe('inv-orig');
+  });
+
+  test('an original restored as processing beside a paid replacement is still "paid twice"; no originalStatus means paid', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ originalStatus: 'processing', replacement: { id: 'inv-repl', status: 'paid', invoice_number: 'WPC-2' } }));
+    expect(mockRaise.mock.calls[0][1].why).toMatch(/paid twice/);
+  });
+
   test('a month already collected by a payment (no replacement invoice) alerts once as paid twice, keyed on the payment', async () => {
     await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: null, collectedPaymentId: 'pay-9' }));
     expect(voidSpy).not.toHaveBeenCalled();
@@ -185,5 +214,64 @@ describe('prepareMembershipDuesRestore — the customer collection claim', () =>
     const trx = fakeTrx({ monthFree: false });
     await expect(InvoiceService.prepareMembershipDuesRestore(trx, 'inv-orig')).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_MONTH_BUSY' });
     expect(trx.raw).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The one candidate filter both dues alerts share: only visits the month's dues
+// COVER (the completion predicate), payer ownership resolved like completion.
+describe('filterVisitsCoveredByDues', () => {
+  const { filterVisitsCoveredByDues } = InvoiceService._prepaidDuesAlert;
+  const member = { billing_mode: 'monthly_membership', monthly_rate: 49, waveguard_tier: 'Silver' };
+  beforeEach(() => { jest.clearAllMocks(); mockResolvePayer.mockResolvedValue({ payerId: null }); });
+  const ids = (rows) => rows.map((v) => v.id);
+
+  test('an unpriced plan visit and a priced RECURRING one are covered; a priced NON-recurring visit (its cash belongs to its own service) is not', async () => {
+    const out = await filterVisitsCoveredByDues([
+      { id: 'unpriced', estimated_price: null, is_recurring: true },
+      { id: 'priced-recurring', estimated_price: 85, is_recurring: true },
+      { id: 'priced-one-off', estimated_price: 85, is_recurring: false },
+    ], member, 'cust-1', 'test');
+    expect(ids(out)).toEqual(['unpriced', 'priced-recurring']);
+  });
+
+  test('a payer-billed visit is not covered; an unreadable payer resolution counts as self-pay; a non-member lane covers nothing', async () => {
+    mockResolvePayer.mockImplementation(async ({ scheduledServiceId }) => {
+      if (scheduledServiceId === 'payer-billed') return { payerId: 7 };
+      if (scheduledServiceId === 'unreadable') throw new Error('db down');
+      return { payerId: null };
+    });
+    const rows = [
+      { id: 'payer-billed', estimated_price: null, is_recurring: true },
+      { id: 'unreadable', estimated_price: null, is_recurring: true },
+      { id: 'self-pay', estimated_price: null, is_recurring: true },
+    ];
+    expect(ids(await filterVisitsCoveredByDues(rows, member, 'cust-1', 'test'))).toEqual(['unreadable', 'self-pay']);
+    expect(await filterVisitsCoveredByDues(rows, { ...member, billing_mode: 'per_visit' }, 'cust-1', 'test')).toEqual([]);
+  });
+});
+
+// Bill-To is final where create() resolves it for the row it inserts: a payer
+// invoice never keeps the customer's self-pay dues stamp.
+describe('payer-billed invoices never carry or count as the dues stamp', () => {
+  const { stripPayerBilledDuesMarker } = InvoiceService._prepaidDuesAlert;
+  const lines = [{ client_id: 'scheduled_v1_primary', amount: 49, membership_dues_month: '2026-09' }, { description: 'Fee', amount: 5 }];
+
+  test('stripPayerBilledDuesMarker drops the marker (and only the marker) and warns; lines without a marker are returned untouched', () => {
+    mockLogger.warn.mockClear();
+    const out = stripPayerBilledDuesMarker(lines, 'cust-1');
+    expect(out.some((li) => li.membership_dues_month)).toBe(false);
+    expect(out[0]).toMatchObject({ client_id: 'scheduled_v1_primary', amount: 49 });
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('membership-dues stamp was dropped'));
+    const plain = [{ amount: 49 }];
+    expect(stripPayerBilledDuesMarker(plain, 'cust-1')).toBe(plain);
+  });
+
+  test('the shared lookup ignores a payer-billed stamped invoice (payer_id IS NULL in its query)', async () => {
+    const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
+    const raws = [];
+    const q = { where: () => q, whereRaw: (sql) => { raws.push(sql); return q; }, whereNot: () => q, first: async () => null };
+    const conn = () => q;
+    await findLiveStampedDuesInvoice(conn, 'cust-1', '2026-09');
+    expect(raws).toContain('payer_id IS NULL');
   });
 });

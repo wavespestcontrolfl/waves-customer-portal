@@ -1107,6 +1107,10 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
     const paid = ['paid', 'prepaid', 'processing'];
     invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
   }
+  // A PAYER-billed invoice is a third party's obligation, never the customer's
+  // own monthly dues (the mint drops the stamp on one; this also ignores a row
+  // already stamped that way). Raw, like the status predicate, for thin test doubles.
+  invoiceQuery.whereRaw('payer_id IS NULL');
   if (excludeScheduledServiceId) {
     invoiceQuery.where(function otherVisits() {
       this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
