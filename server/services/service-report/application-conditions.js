@@ -1,5 +1,5 @@
 const logger = require('../logger');
-const { parseETDateTime, etDateString, addETDays } = require('../../utils/datetime-et');
+const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 function finiteNumber(value) {
   if (value == null || value === '') return null;
@@ -154,6 +154,26 @@ function etDayWindow(ymd) {
   return { from, to };
 }
 
+// ET wall-clock label ("YYYY-MM-DDTHH:MM") for an absolute instant. Derived FROM
+// the instant, never parsed back into one: a wall time is ambiguous on the
+// fall-back day and absent on the spring-forward day.
+function etWallLabel(ms) {
+  const p = etParts(new Date(ms));
+  const two = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${two(p.month)}-${two(p.day)}T${two(p.hour)}:${two(p.minute)}`;
+}
+
+// The request asks for timeformat=unixtime. Open-Meteo's docs (open-meteo.com/en/docs,
+// "timeformat"): "If format unixtime is selected, all time values are returned in
+// UNIX epoch time in seconds. Please note that all timestamp are in GMT+0!" - so
+// hourly.time and current.time are true UTC instants even though `timezone` is
+// America/New_York (kept only so past_days / start_date / end_date cut at ET
+// midnight). Anything that is not a finite epoch is dropped.
+function epochMs(seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return null;
+  return seconds * 1000;
+}
+
 function normalizeForecastPayload(payload) {
   const h = payload?.hourly || {};
   const times = Array.isArray(h.time) ? h.time : [];
@@ -165,18 +185,12 @@ function normalizeForecastPayload(payload) {
   const wind = column('wind_speed_10m');
   const gust = column('wind_gusts_10m');
   const hourly = [];
-  let prevMs = null;
-  times.forEach((time, i) => {
-    let ms = parseETDateTime(String(time)).getTime();
-    if (!Number.isFinite(ms)) return;
-    // The fall-back day repeats the 01:00 wall time; parseETDateTime resolves both
-    // to the first (EDT) instant. Rows are chronological, so a stamp that does not
-    // advance is the repeated hour: place it one hour after the previous row.
-    if (prevMs != null && ms <= prevMs) ms = prevMs + HOUR_MS;
-    prevMs = ms;
+  times.forEach((seconds, i) => {
+    const ms = epochMs(seconds);
+    if (ms == null) return;
     hourly.push({
       ms,
-      time: String(time),
+      time: etWallLabel(ms),
       precipitation_in: roundedNumber(precip[i], 3),
       precipitation_probability_pct: roundedNumber(prob[i]),
       temperature_f: roundedNumber(temp[i], 1),
@@ -188,10 +202,10 @@ function normalizeForecastPayload(payload) {
   const c = payload?.current;
   let current = null;
   if (c && typeof c === 'object') {
-    const ms = c.time ? parseETDateTime(String(c.time)).getTime() : NaN;
+    const ms = epochMs(c.time);
     current = {
-      time: c.time ? String(c.time) : null,
-      at: Number.isFinite(ms) ? new Date(ms).toISOString() : null,
+      time: ms == null ? null : etWallLabel(ms),
+      at: ms == null ? null : new Date(ms).toISOString(),
       temperature_f: roundedNumber(c.temperature_2m, 1),
       humidity_pct: roundedNumber(c.relative_humidity_2m),
       wind_mph: roundedNumber(c.wind_speed_10m, 1),
@@ -247,6 +261,7 @@ function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
   url.searchParams.set('temperature_unit', 'fahrenheit');
   url.searchParams.set('wind_speed_unit', 'mph');
   url.searchParams.set('precipitation_unit', 'inch');
+  url.searchParams.set('timeformat', 'unixtime');
   url.searchParams.set('timezone', 'America/New_York');
   return url;
 }
@@ -392,8 +407,8 @@ async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
   const current = forecast.current || {};
   const hourly = forecast.hourly;
   let currentIndex = hourly.length - 1;
-  if (current.time) {
-    const exact = hourly.findIndex((r) => r.time === current.time);
+  if (current.at) {
+    const exact = hourly.findIndex((r) => r.at === current.at);
     if (exact >= 0) {
       currentIndex = exact;
     } else {

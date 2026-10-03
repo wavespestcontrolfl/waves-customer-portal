@@ -16,6 +16,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-manual-customer-sms', () => ({ sendManualCustomerSms: jest.fn() }));
 
 const express = require('express');
+const { unix, hourlyEpochs, etDayHours } = require('./helpers/open-meteo-unixtime');
 const router = require('../routes/admin-dashboard-ops');
 
 let server; let base;
@@ -39,7 +40,7 @@ function dayPayload(date) {
   const relative_humidity_2m = [];
   const wind_speed_10m = [];
   for (let h = 0; h < 24; h += 1) {
-    time.push(`${date}T${String(h).padStart(2, '0')}:00`);
+    time.push(unix(`${date}T${String(h).padStart(2, '0')}:00`));
     precipitation.push(h === 15 ? 0.4 : h === 16 ? 0.2 : 0);
     temperature_2m.push(h === 14 ? 96.5 : 80);
     relative_humidity_2m.push(h === 5 ? 94 : 60);
@@ -92,7 +93,7 @@ test('day rain is the daily-API convention (hour stamps 00:00-23:00 of that date
     const payload = dayPayload(date);
     payload.hourly.precipitation = payload.hourly.precipitation.map(() => 0);
     payload.hourly.precipitation[0] = 0.25; // stamped 00:00 on the date
-    payload.hourly.time.push('2026-08-21T00:00'); // next day's first stamp is not part of this date
+    payload.hourly.time.push(unix('2026-08-21T00:00')); // next day's first stamp is not part of this date
     payload.hourly.precipitation.push(0.9);
     ['temperature_2m', 'relative_humidity_2m', 'wind_speed_10m'].forEach((k) => payload.hourly[k].push(60));
     return { ok: true, json: async () => payload };
@@ -101,9 +102,10 @@ test('day rain is the daily-API convention (hour stamps 00:00-23:00 of that date
   expect(body.rainfall).toBe(0.25);
 });
 
-// Hourly rows for one ET day from a list of wall-clock hour labels (the DST days skip / repeat one).
-function dayRows(date, hours, over = {}) {
-  const time = hours.map((h) => `${date}T${h}`);
+// `count` hourly rows from ET midnight of `date` (23 on the spring-forward day, 25 on the
+// fall-back day), as the provider's unixtime epochs.
+function dayRows(date, count, over = {}) {
+  const time = hourlyEpochs(`${date}T00:00`, count);
   const col = (fill) => time.map(() => fill);
   return {
     hourly: {
@@ -116,8 +118,6 @@ function dayRows(date, hours, over = {}) {
     },
   };
 }
-const hh = (n) => String(n).padStart(2, '0') + ':00';
-const HOURS_24 = Array.from({ length: 24 }, (_, h) => hh(h));
 
 function serve(payload) {
   global.fetch = jest.fn(async (url, opts) => {
@@ -129,7 +129,7 @@ function serve(payload) {
 describe('a partial day never reports a figure built from a handful of hours', () => {
   test('an hour missing from the middle of the day -> that figure is null (as the daily API answered), others stay', async () => {
     const date = '2026-07-14';
-    const payload = dayRows(date, HOURS_24);
+    const payload = dayRows(date, 24);
     payload.hourly.precipitation[9] = null; // one rain hour has no reading
     serve(payload);
     const body = await (await weather(date)).json();
@@ -139,7 +139,7 @@ describe('a partial day never reports a figure built from a handful of hours', (
 
   test('a payload that stops at noon -> every day figure is null, nothing partial is shown', async () => {
     const date = '2026-07-15';
-    serve(dayRows(date, HOURS_24.slice(0, 12), { precipitation: Array(12).fill(0.9), temperature_2m: Array(12).fill(99) }));
+    serve(dayRows(date, 12, { precipitation: Array(12).fill(0.9), temperature_2m: Array(12).fill(99) }));
     const body = await (await weather(date)).json();
     expect(body).toMatchObject({ source: 'open-meteo', date, temp: null, humidity: null, windSpeed: null, rainfall: null });
     expect(body.alerts).toEqual([]);
@@ -147,27 +147,25 @@ describe('a partial day never reports a figure built from a handful of hours', (
 
   test('a full day sums all 24 hours', async () => {
     const date = '2026-07-16';
-    serve(dayRows(date, HOURS_24));
+    serve(dayRows(date, 24));
     expect((await (await weather(date)).json()).rainfall).toBe(0.24);
   });
 
   test('spring-forward day expects 23 hours (02:00 does not exist)', async () => {
     const date = '2026-03-08';
-    const hours = HOURS_24.filter((h) => h !== '02:00');
-    serve(dayRows(date, hours));
+    expect(etDayHours(date)).toBe(23);
+    serve(dayRows(date, 23));
     expect((await (await weather(date)).json()).rainfall).toBe(0.23);
   });
 
   test('fall-back day expects 25 hours (01:00 occurs twice); 24 is partial', async () => {
     const full = '2026-11-01';
-    const hours25 = [...HOURS_24.slice(0, 2), '01:00', ...HOURS_24.slice(2)];
-    serve(dayRows(full, hours25));
+    expect(etDayHours(full)).toBe(25);
+    serve(dayRows(full, 25));
     expect((await (await weather(full)).json()).rainfall).toBe(0.25);
-    const short = '2026-11-08';
-    serve(dayRows(short, HOURS_24)); // a normal 24-hour day: complete
-    expect((await (await weather(short)).json()).rainfall).toBe(0.24);
     const partialFall = '2025-11-02'; // fall-back day of 2025, provider omitted the repeated hour
-    serve(dayRows(partialFall, HOURS_24));
+    expect(etDayHours(partialFall)).toBe(25);
+    serve(dayRows(partialFall, 24));
     expect((await (await weather(partialFall)).json()).rainfall).toBeNull();
   });
 });

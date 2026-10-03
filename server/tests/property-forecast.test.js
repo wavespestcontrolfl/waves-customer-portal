@@ -4,6 +4,8 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
+const { unix, hourlyEpochs, etDayHours } = require('./helpers/open-meteo-unixtime');
+
 const NOW = new Date('2026-10-03T14:20:00Z'); // 10:20 ET (EDT)
 
 // Hourly rows 2026-10-02 00:00 .. 2026-10-09 23:00 ET (past_days=1 + forecast_days=7),
@@ -17,7 +19,7 @@ function hourlyPayload({ rainAt = {}, base = 0 } = {}) {
   for (let d = 2; d <= 9; d += 1) {
     for (let h = 0; h < 24; h += 1) {
       const t = `2026-10-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:00`;
-      time.push(t);
+      time.push(unix(t));
       precipitation.push(rainAt[t] ?? base);
       temperature_2m.push(70 + h / 2);
       relative_humidity_2m.push(60 + h);
@@ -26,7 +28,7 @@ function hourlyPayload({ rainAt = {}, base = 0 } = {}) {
   }
   return {
     current: {
-      time: '2026-10-03T10:15', temperature_2m: 81.4, relative_humidity_2m: 72, wind_speed_10m: 6.2, wind_gusts_10m: 11,
+      time: unix('2026-10-03T10:15'), temperature_2m: 81.4, relative_humidity_2m: 72, wind_speed_10m: 6.2, wind_gusts_10m: 11,
       precipitation_probability: 35, weather_code: 3,
     },
     hourly: { time, precipitation, temperature_2m, relative_humidity_2m, precipitation_probability },
@@ -50,7 +52,7 @@ describe('fetchPropertyForecast', () => {
 
   test('states no rain total when the payload skips an hour or stops short of the window', async () => {
     const drop = (payload, times) => {
-      const keep = payload.hourly.time.map((t) => !times.includes(t));
+      const keep = payload.hourly.time.map((t) => !times.map(unix).includes(t));
       const hourly = Object.fromEntries(Object.entries(payload.hourly).map(([k, v]) => [k, v.filter((_, i) => keep[i])]));
       return { ...payload, hourly };
     };
@@ -105,6 +107,8 @@ describe('fetchPropertyForecast', () => {
     expect(url.searchParams.get('precipitation_unit')).toBe('inch');
     expect(url.searchParams.get('hourly').split(',')).toEqual(expect.arrayContaining(['precipitation', 'temperature_2m', 'relative_humidity_2m']));
     expect(url.searchParams.get('timezone')).toBe('America/New_York');
+    // absolute instants (UTC epoch seconds), not ET wall-clock strings
+    expect(url.searchParams.get('timeformat')).toBe('unixtime');
   });
 
   test('default window is the current ET hour through the next 24 hours', async () => {
@@ -155,22 +159,59 @@ describe('fetchPropertyForecast', () => {
     expect((await fetchPropertyForecast({ ...base, from: '2026-10-03T12:10', to: '2026-10-03T12:50' })).precipitationInTotal).toBeNull();
   });
 
-  test('the fall-back day keeps both 01:00 hours, so its 25-hour total counts the repeated hour', async () => {
+  test('the fall-back day has 25 distinct, strictly increasing instants and its total counts the repeated hour', async () => {
     const { etDayWindow, fetchPropertyForecast } = load();
     const day = etDayWindow('2026-11-01');
     expect((day.to - day.from) / 3600000).toBe(25);
-    const time = [];
-    for (let h = 0; h < 24; h += 1) {
-      time.push(`2026-11-01T${String(h).padStart(2, '0')}:00`);
-      if (h === 1) time.push('2026-11-01T01:00'); // 01:00 EST, the repeated wall hour
-    }
-    time.push('2026-11-02T00:00');
-    // 0.3 is stamped on the repeated 01:00 (EST); 0.1 on the next day's 00:00
+    expect(etDayHours('2026-11-01')).toBe(25);
+    const time = hourlyEpochs('2026-11-01T00:00', 26); // the day's 25 hours + next day 00:00
+    // index 2 = the second 01:00 (EST); the last row is the next day's 00:00
     const precipitation = time.map((_, i) => (i === 2 ? 0.3 : i === time.length - 1 ? 0.1 : 0));
     global.fetch = okFetch({ hourly: { time, precipitation } });
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
     expect(f.hourly).toHaveLength(25);
+    const instants = f.hourly.map((r) => Date.parse(r.at));
+    expect(new Set(instants).size).toBe(25);
+    expect(instants.every((t, i) => i === 0 || t - instants[i - 1] === 3600000)).toBe(true);
+    // the wall labels are derived from the instants: 01:00 appears twice (EDT then EST)
+    expect(f.hourly.filter((r) => r.time === '2026-11-01T01:00')).toHaveLength(2);
     expect(f.precipitationInTotal).toBe(0.4);
+  });
+
+  test('the spring-forward day has 23 distinct, strictly increasing instants and no 02:00', async () => {
+    const { etDayWindow, fetchPropertyForecast } = load();
+    const day = etDayWindow('2026-03-08');
+    expect(etDayHours('2026-03-08')).toBe(23);
+    const time = hourlyEpochs('2026-03-08T00:00', 24); // 23 hours + next day 00:00
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((_, i) => (i === 23 ? 0.2 : 0.01)) } });
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: new Date('2026-03-08T12:00:00Z') });
+    expect(f.hourly).toHaveLength(23);
+    expect(new Set(f.hourly.map((r) => r.at)).size).toBe(23);
+    expect(f.hourly.map((r) => r.time)).not.toContain('2026-03-08T02:00');
+    expect(f.hourly.map((r) => r.time).slice(0, 4)).toEqual(['2026-03-08T00:00', '2026-03-08T01:00', '2026-03-08T03:00', '2026-03-08T04:00']);
+    expect(f.precipitationInTotal).toBe(0.42); // slots 01:00..next 00:00: 22 x 0.01 + 0.2
+  });
+
+  test('a window that crosses the DST change counts true elapsed hours (two EDT hours + the EST ones)', async () => {
+    const { fetchPropertyForecast } = load();
+    // 2026-11-01 00:00 EDT .. 04:00 EST is 5 real hours; every hour carries 0.1
+    const time = hourlyEpochs('2026-10-31T22:00', 12);
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map(() => 0.1) } });
+    const from = new Date(unix('2026-11-01T00:00') * 1000);
+    const to = new Date(from.getTime() + 5 * 3600000);
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from, to, now: NOW });
+    expect(f.hourly).toHaveLength(5);
+    expect(f.hourly.map((r) => r.time)).toEqual(['2026-11-01T00:00', '2026-11-01T01:00', '2026-11-01T01:00', '2026-11-01T02:00', '2026-11-01T03:00']);
+    expect(f.precipitationInTotal).toBe(0.5);
+  });
+
+  test('two rows never share an instant', async () => {
+    global.fetch = okFetch(hourlyPayload());
+    const { fetchPropertyForecast } = load();
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from: '2026-10-02T00:00', to: '2026-10-09T00:00', now: NOW });
+    const instants = f.hourly.map((r) => r.at);
+    expect(instants).toHaveLength(7 * 24);
+    expect(new Set(instants).size).toBe(instants.length);
   });
 
   test('a calendar-day window totals stamps 01:00 through the next day 00:00', async () => {
@@ -187,16 +228,15 @@ describe('fetchPropertyForecast', () => {
   test('a window ending at the last standard slot is fetched by date range so its final slot exists', async () => {
     const { etDayWindow, fetchPropertyForecast } = load();
     const day = etDayWindow('2026-10-09'); // ends at 2026-10-10 00:00, past the last standard stamp (10-09 23:00)
-    const stamps = (date) => Array.from({ length: 24 }, (_, h) => `${date}T${String(h).padStart(2, '0')}:00`);
-    const time = [...stamps('2026-10-09'), ...stamps('2026-10-10')];
-    global.fetch = okFetch({ hourly: { time, precipitation: time.map((t) => (t === '2026-10-10T00:00' ? 0.25 : 0)) } });
+    const time = hourlyEpochs('2026-10-09T00:00', 25);
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((_, i) => (i === 24 ? 0.25 : 0)) } });
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
     const url = new URL(String(global.fetch.mock.calls[0][0]));
     expect(url.searchParams.get('start_date')).toBe('2026-10-09');
     expect(url.searchParams.get('end_date')).toBe('2026-10-10');
     expect(f.precipitationInTotal).toBe(0.25);
     // and if the provider still withholds that slot, the total is null, never short
-    global.fetch = okFetch({ hourly: { time: stamps('2026-10-09'), precipitation: stamps('2026-10-09').map(() => 0) } });
+    global.fetch = okFetch({ hourly: { time: time.slice(0, 24), precipitation: Array(24).fill(0) } });
     const short = await load().fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
     expect(short.status).toBe('ok');
     expect(short.precipitationInTotal).toBeNull();
@@ -204,9 +244,8 @@ describe('fetchPropertyForecast', () => {
 
   test('a window outside the standard span is fetched by date range', async () => {
     // The day's 24 stamps plus the slot stamped at the window's end (next day 00:00).
-    const stamps = (date) => Array.from({ length: 24 }, (_, h) => `${date}T${String(h).padStart(2, '0')}:00`);
-    const time = [...stamps('2026-09-01'), ...stamps('2026-09-02')];
-    global.fetch = okFetch({ hourly: { time, precipitation: time.map((t) => (t === '2026-09-01T00:00' ? 0.3 : t === '2026-09-02T00:00' ? 0.2 : 0)) } });
+    const time = hourlyEpochs('2026-09-01T00:00', 25);
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((_, i) => (i === 0 ? 0.3 : i === 24 ? 0.2 : 0)) } });
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from: '2026-09-01T00:00', to: '2026-09-02T00:00', now: NOW });
     const url = new URL(String(global.fetch.mock.calls[0][0]));

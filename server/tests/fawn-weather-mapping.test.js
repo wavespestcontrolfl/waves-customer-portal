@@ -123,12 +123,13 @@ describe('FawnWeather — real API shape', () => {
       // Hourly rows sit on today's ET date: the shared forecast module slices to
       // the window it asked the provider for, as the real API's rows always are.
       const { etDateString } = require('../utils/datetime-et');
+      const { unix } = require('./helpers/open-meteo-unixtime');
       const today = etDateString(new Date());
       global.fetch = jest.fn(async () => ({
         ok: true,
         json: async () => ({
-          current: { time: `${today}T14:00`, temperature_2m: 88, relative_humidity_2m: 70, wind_speed_10m: 6, weather_code: 1 },
-          hourly: { time: [`${today}T13:00`, `${today}T14:00`], precipitation: [0.1, 0.05] },
+          current: { time: unix(`${today}T14:00`), temperature_2m: 88, relative_humidity_2m: 70, wind_speed_10m: 6, weather_code: 1 },
+          hourly: { time: [unix(`${today}T13:00`), unix(`${today}T14:00`)], precipitation: [0.1, 0.05] },
         }),
       }));
       const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
