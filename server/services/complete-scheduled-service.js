@@ -5416,6 +5416,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
 
     let record;
+    // Canonical visit identity captured under the same row lock that commits
+    // the completion. It becomes the receipt for any later photo recovery,
+    // so recovery never adopts a rescheduled/reassigned row from a fresh GET.
+    let servicePhotoVisit = null;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
     // The completion transaction's wall clock, hoisted to handler scope so
@@ -5438,6 +5442,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
       // supersede the original allocation for lifecycle/tracker handling;
@@ -5844,6 +5849,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
+          servicePhotoVisit = require('./service-photos').servicePhotoVisitSnapshot(lockedSvcRow);
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
@@ -6273,6 +6279,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // Durable across a post-commit effects resume. This is the
+            // original completed visit, not whatever the mutable schedule
+            // row may describe when a failed photo upload is retried.
+            servicePhotoVisit,
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
@@ -9199,6 +9209,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
+        servicePhotoVisit,
         invoiceId: null,
         invoiceTotal: null,
         completionPhotoUpload: completionPhotoUploadResult,
@@ -14935,6 +14946,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
+      servicePhotoVisit,
       invoiceId: invoice?.id || null,
       // Amount DUE (total − applied account credit) so the mobile payment sheet
       // collects/validates what Stripe/Terminal actually charge, not the pre-credit total.
