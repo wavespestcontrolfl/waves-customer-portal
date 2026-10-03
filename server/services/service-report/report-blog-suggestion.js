@@ -202,16 +202,31 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId }));
 }
 
+// A new-blog row of any source that holds the phrase as its topic. A row is a
+// new blog by its routed action (the latest run's, else the latest brief's,
+// else the queue column): a topic mined as another action and rerouted to a
+// blog holds it too (GitHub Codex P2 on 930cb1077e).
+async function heldTopic(knex, phrase) {
+  const effectiveAction = require('../content/opportunity-action-sql');
+  return knex('opportunity_queue')
+    .whereRaw(`${effectiveAction} = ?`, ['new_supporting_blog'])
+    .whereRaw('lower(query) = ?', [phrase])
+    .whereIn('status', HELD_STATUSES)
+    .first('id');
+}
+
 async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
   if (actorId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
   // A topic held already writes nothing, so it answers already_queued even
   // past the day's cap (GitHub Codex P2 on 45144528b8).
-  const held = await trx('opportunity_queue')
-    .where({ action_type: 'new_supporting_blog' })
-    .whereRaw('lower(query) = ?', [phrase])
-    .whereIn('status', HELD_STATUSES)
-    .first('id');
-  if (held) return { status: 'already_queued' };
+  if (await heldTopic(trx, phrase)) return { status: 'already_queued' };
+  // The phrase's own suggestion row: one that ended without a post (skipped,
+  // failed) is a final no, answered before the day's cap since nothing would
+  // be written (GitHub Codex P2 on 930cb1077e); an expired one is revived
+  // below and counts as a suggestion.
+  const own = await trx('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase) }).first('status');
+  if (own && HELD_STATUSES.includes(own.status)) return { status: 'already_queued' };
+  if (own && own.status !== 'expired') return { status: 'declined' };
   if (actorId) {
     const sent = await trx('opportunity_queue')
       .whereRaw("signal_metadata->>'source' = ?", [SOURCE])
@@ -235,10 +250,10 @@ async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
     values,
   );
   if ((result?.rows || []).length) return { status: 'queued' };
-  // The phrase's own suggestion row stands. Held (a tap that raced this one)
-  // answers already_queued; one the chain tried and skipped, or that ended
-  // any other way, is a final no: declined, never queued work (GitHub Codex
-  // P2 on 322faf591d).
+  // Another tap wrote or ended the phrase's own row between the reads above.
+  // Held answers already_queued; one the chain tried and skipped, or that
+  // ended any other way, is a final no: declined, never queued work (GitHub
+  // Codex P2 on 322faf591d).
   const standing = await trx('opportunity_queue').where({ dedupe_key: row.dedupe_key }).first('status');
   return HELD_STATUSES.includes(standing?.status) ? { status: 'already_queued' } : { status: 'declined' };
 }
@@ -257,6 +272,7 @@ module.exports = {
   suggestionRow,
   phraseProblem,
   namesACustomer,
+  heldTopic,
   isBlogSearchSuggestion,
   normalizePhrase,
   dedupeKeyFor,

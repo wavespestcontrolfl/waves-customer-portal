@@ -66,6 +66,8 @@ function queueKnex({
   ownCustomer = null, customerByName = null, customersFail = false,
 } = {}) {
   const calls = [];
+  // The phrase's own row, read by its key: one answer, or one per read.
+  const standingReads = Array.isArray(standing) ? [...standing] : null;
   const knex = (table) => {
     calls.push(['table', table]);
     const chain = {};
@@ -86,7 +88,8 @@ function queueKnex({
       }
       if (table !== 'opportunity_queue') return null;
       const byKey = wheres.some(([m, arg]) => m === 'where' && arg && typeof arg === 'object' && 'dedupe_key' in arg);
-      return byKey ? standing : held;
+      if (!byKey) return held;
+      return standingReads ? (standingReads.shift() ?? null) : standing;
     };
     return chain;
   };
@@ -300,13 +303,27 @@ describe('suggestReportBlogPost', () => {
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });
   });
 
-  test('a suggestion the chain tried and skipped answers declined and stays skipped (GitHub Codex P2 on 322faf591d)', async () => {
-    for (const status of ['skipped', 'failed', undefined]) {
-      const knex = queueKnex({ inserted: false, standing: status ? { status } : null });
+  test('a suggestion the chain tried and skipped answers declined, even past the day\'s cap, and writes nothing (GitHub Codex P2s on 322faf591d and 930cb1077e)', async () => {
+    for (const status of ['skipped', 'failed']) {
+      const knex = queueKnex({ standing: { status }, sentToday: MAX_PER_DAY });
       expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1' })).toEqual({ status: 'declined' });
-      // Its standing row is read by the phrase's own key; the insert's
-      // conflict update revives only an expired row.
+      // Read by the phrase's own key, before the day's count.
       expect(knex.calls).toEqual(expect.arrayContaining([['opportunity_queue where', { dedupe_key: 'techsuggest:v1:standing-water' }]]));
+      expect(knex.calls.some(([name, sql]) => name === 'opportunity_queue whereRaw' && /suggested_by/.test(String(sql)))).toBe(false);
+      expect(queueWrites(knex)).toEqual([]);
+    }
+  });
+
+  test('an expired suggestion is revived as a new one: it counts against the day\'s cap', async () => {
+    const knex = queueKnex({ standing: { status: 'expired' }, sentToday: MAX_PER_DAY });
+    expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1' })).toEqual({ error: 'too_many_suggestions' });
+    expect(queueWrites(knex)).toEqual([]);
+  });
+
+  test('a tap that raced this one: the insert writes nothing and the row it left is read again', async () => {
+    for (const [after, answer] of [[{ status: 'pending' }, 'already_queued'], [{ status: 'skipped' }, 'declined'], [null, 'declined']]) {
+      const knex = queueKnex({ inserted: false, standing: [null, after] });
+      expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'admin-1' })).toEqual({ status: answer });
       expect(String(queueWrites(knex)[0][1])).toMatch(/WHERE opportunity_queue\.status = 'expired'/);
     }
   });
@@ -315,8 +332,10 @@ describe('suggestReportBlogPost', () => {
     const knex = queueKnex({ held: { id: 'mined-row' } });
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });
     expect(queueWrites(knex)).toEqual([]);
+    // A row is a new blog by its routed action, not only the queue column
+    // (GitHub Codex P2 on 930cb1077e).
     expect(knex.calls).toEqual(expect.arrayContaining([
-      ['opportunity_queue where', { action_type: 'new_supporting_blog' }],
+      ['opportunity_queue whereRaw', `${require('../services/content/opportunity-action-sql')} = ?`, ['new_supporting_blog']],
       ['opportunity_queue whereRaw', 'lower(query) = ?', ['standing water']],
       ['opportunity_queue whereIn', 'status', ['pending', 'claimed', 'pending_review', 'done']],
     ]));
