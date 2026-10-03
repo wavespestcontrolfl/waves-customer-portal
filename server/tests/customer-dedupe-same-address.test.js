@@ -310,13 +310,17 @@ describe('merge carries the merged-away person\'s phone (predictWinnerBackfills)
     expect(backfills).not.toHaveProperty('service_preferences');
   });
 
-  test('a number the winner already holds (slot or secondary) is not duplicated', () => {
+  test('a number the winner already holds in a searchable slot is not duplicated', () => {
     const inSlot = winnerRow({ service_contact_name: 'Blake', service_contact_phone: '(941) 555-0102' });
-    expect(predictWinnerBackfills(inSlot, loserRow()).phoneCarry.status).toBe('already_on_winner');
-    const inSecondary = winnerRow({ secondary_phone: '9415550102' });
-    const res = predictWinnerBackfills(inSecondary, loserRow());
+    const res = predictWinnerBackfills(inSlot, loserRow());
     expect(res.phoneCarry.status).toBe('already_on_winner');
-    expect(res.backfills).not.toHaveProperty('service_contact_phone');
+    expect(res.backfills).not.toHaveProperty('service_preferences');
+  });
+
+  test('secondary_phone is NOT searched by the call matcher, so a number held only there is still carried into a slot', () => {
+    const res = predictWinnerBackfills(winnerRow({ secondary_phone: '9415550102' }), loserRow());
+    expect(res.phoneCarry).toMatchObject({ status: 'carried', slot: 1 });
+    expect(res.backfills.service_contact_phone).toBe('+19415550102');
   });
 
   test('a phone-group pair (shared phone) is untouched by the carry', () => {

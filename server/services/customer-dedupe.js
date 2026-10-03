@@ -1460,7 +1460,11 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   const loserPhoneKey = phone10(loser.phone);
   if (loserPhoneKey && loserPhoneKey !== phone10(winner.phone)) {
     phoneCarry.phone_key = loserPhoneKey;
-    const winnerHolds = [winner.secondary_phone, ...CONTACT_SLOTS.map((slot) => winner[slot[1]]),
+    // Only the columns the call pipeline MATCHES on count as "already
+    // there" (primary phone + the three slots). secondary_phone is not
+    // searched by findCustomerForCallContact, so a number held only there
+    // still needs a slot or the person's next call would mint a duplicate.
+    const winnerHolds = [...CONTACT_SLOTS.map((slot) => winner[slot[1]]),
       ...CONTACT_SLOTS.map((slot) => backfills[slot[1]])]
       .some((value) => phone10(value) === loserPhoneKey);
     if (winnerHolds) {
