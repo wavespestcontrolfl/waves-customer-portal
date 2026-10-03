@@ -1356,6 +1356,7 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
       AND ${DATING_ROW_SQL}
+      AND ${LINE_SQL} <> 'other'
     GROUP BY 1, 2
   `, [customerIds]);
   const map = new Map();
