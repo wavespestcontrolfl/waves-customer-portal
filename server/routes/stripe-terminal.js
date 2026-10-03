@@ -947,6 +947,22 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         }
         return { ok: false, chargeFence: terminalChargeFenceResponse(fenceErr) };
       }
+      // Retire any OTHER open PaymentIntent the invoice still points at — the
+      // /pay page mints one on load, and the bind below overwrites the pointer,
+      // which would leave that client secret live and confirmable from a
+      // still-open tab (Apple Pay / ACH confirm client-side) after the card is
+      // tapped here: a second charge. The ONE mechanism for this is
+      // services/prepaid-pi-guard (same as apply-credit, mark-prepaid and manual
+      // payment): it cancels an open PI and refuses when money is in flight or
+      // the PI can't be verified. Run AFTER the combined-session release above
+      // (which already cleared any combined PI) and under the invoice row lock
+      // taken here, so a pay-page mint serialized on that lock can't slip a new
+      // PI in between this check and the bind. The invoice's own card-present PI
+      // (pointer already equals pi.id) is never retired.
+      if (locked.stripe_payment_intent_id && String(locked.stripe_payment_intent_id) !== String(pi.id)) {
+        const piGuard = await require('../services/prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(locked);
+        if (!piGuard.ok) return { ok: false, piGuard };
+      }
       // SET only if still NULL — two concurrent /payment-intent calls for the
       // same jti share an idempotency key and get the same PI back; first
       // UPDATE wins, second is a no-op.
@@ -1006,6 +1022,22 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         return res.status(409).json({
           error: 'Invoice is billed to a third-party payer — do not collect in person',
           code: 'invoice_withdrawn_from_customer',
+        });
+      }
+      if (bound.piGuard) {
+        // The customer's own pay-page payment is already settling (or could not
+        // be verified/closed) — never take a second payment beside it.
+        if (bound.piGuard.reason === 'payment_in_flight') {
+          return res.status(409).json({
+            error: 'A payment is already in progress on this invoice — do not collect in person. Check the invoice status before trying again.',
+            code: 'payment_in_flight',
+            newHandoffRequired: true,
+          });
+        }
+        return res.status(409).json({
+          error: 'Could not verify or close the customer\'s open payment session — try again with a new handoff.',
+          code: 'payment_session_unverifiable',
+          newHandoffRequired: true,
         });
       }
       return res.status(409).json({
