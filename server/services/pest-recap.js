@@ -318,13 +318,24 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
 // sheet reads it; never a combined visit, whose companion sections are
 // required at completion and the sheet has none). Neither for a visit that completes through a project,
 // nor when the profile could not be read (whether it does is then unknown).
-function sheetRecordFor(profile, svc) {
-  if (!profile || profile.projectBacked || profile.requiresProject) return { lane: null, typedType: null };
+// Only the sheet's report flow reads either, so both also need
+// GATE_FAST_COMPLETE_REPORT here: the schedule row a phone cached may predate
+// the gate going off, and this live answer is what stops that sheet (Codex
+// replay of #5633). Neither for a visit a project is now linked to: the
+// office may link one after the schedule loaded, and the sheet would file a
+// second record beside it. A linkage read that fails counts as linked.
+async function sheetRecordFor(profile, svc, knex) {
+  const none = { lane: null, typedType: null };
+  if (!profile || profile.projectBacked || profile.requiresProject) return none;
   const gates = require('../config/feature-gates');
-  return {
+  if (!gates.fastCompleteReportLive()) return none;
+  const record = {
     lane: gates.laneVoiceFillLive() ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type }) : null,
     typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
+  if (!record.lane && !record.typedType) return record;
+  const linked = await knex('projects').where({ scheduled_service_id: svc.id }).first('id').catch(() => ({}));
+  return linked ? none : record;
 }
 
 async function visitTraceOnReport(svc, profile, lane, knex) {
@@ -412,7 +423,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
 
   // The record the Fast Complete sheet reads from the note (null for both:
   // none). The recap's own `eligible` stays pest control only.
-  const { lane, typedType } = sheetRecordFor(profile, svc);
+  const { lane, typedType } = await sheetRecordFor(profile, svc, knex);
   const traceOnReport = lane || typedType ? await visitTraceOnReport(svc, profile, lane, knex) : undefined;
 
   return {
