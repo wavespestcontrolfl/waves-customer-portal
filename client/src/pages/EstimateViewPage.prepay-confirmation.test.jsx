@@ -259,6 +259,11 @@ describe('annual prepay charged after the first visit (GATE_PAF_PREPAY)', () => 
     expect(acceptBodies(fetchMock)[0].prepayChargeConsentVariant).toBeUndefined();
   });
 
+  it('a surcharged deferred quote says account credit can only lower the amount (GitHub Codex #5595)', async () => {
+    await reachAfterVisitPrepayQuote({ quoteExtra: { ...AFTER_VISIT_QUOTE, surcharge: 18, total: 618, totalCents: 61800 } });
+    expect(screen.getByText(/credit card surcharge\. Your card.*is charged after your first visit — nothing is charged today\. If account credit applies, it can only lower the amount\./)).toBeInTheDocument();
+  });
+
   it('the quote-step checkbox (auto-satisfy, no capture) is the AFTER_VISIT_PREPAY text', async () => {
     stubLocalStorage();
     const p = prepayPayload(true, { afterVisit: true });

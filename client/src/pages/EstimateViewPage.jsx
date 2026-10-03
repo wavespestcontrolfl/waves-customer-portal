@@ -9427,7 +9427,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 8, lineHeight: 1.5 }}>
                 {afterVisitQuote
                   ? (Number(prepayChargeQuote.surcharge) > 0
-                    ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge. Your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} is charged after your first visit — nothing is charged today.`
+                    ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge. Your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} is charged after your first visit — nothing is charged today. If account credit applies, it can only lower the amount.`
                     : `${quoteBank ? 'Your saved bank account' : 'Your saved payment method'}${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} is ${quoteBank ? 'debited' : 'charged'} after your first visit — nothing is charged today, and no card surcharge applies. If account credit applies, it can only lower the amount.`)
                   : (Number(prepayChargeQuote.surcharge) > 0
                     ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
