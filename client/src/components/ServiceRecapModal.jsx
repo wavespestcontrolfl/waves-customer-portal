@@ -13,6 +13,7 @@
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
 import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
+import { useFieldPortalClass } from './tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
@@ -78,6 +79,7 @@ export default function ServiceRecapModal({
   onClose,
   onCompleted,
 }) {
+  const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   // Escape must take the same guarded path as the Close button: no close
   // while a submission is pending, and a confirm before losing edits that
@@ -419,7 +421,7 @@ export default function ServiceRecapModal({
   return createPortal(
     <UiSurface
       density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => {
         event.stopPropagation();
         if (event.target === event.currentTarget) close();

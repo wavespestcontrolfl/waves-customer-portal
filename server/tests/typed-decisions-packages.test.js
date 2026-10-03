@@ -8,7 +8,7 @@ describe('typed-decision packages', () => {
   const ids = Object.keys(PACKAGES);
 
   test('ships the three foundation packages', () => {
-    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1']);
+    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1', 'sms_solicitation.v1']);
   });
 
   test.each(ids)('%s: id is <capability>.v<version> and shape is complete', (id) => {

@@ -39,6 +39,7 @@
  */
 
 const logger = require('../logger');
+const { routeSpellingVariants } = require('./route-spellings');
 
 const DEFAULT_TIMEOUT_MS = 3500;
 const METERS_PER_DEGREE_LAT = 111320;
@@ -867,41 +868,71 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
 // Fail-open null on error/timeout — the audit is a diagnostic hint, never
 // worth sinking a lookup for. The street text is stripped to [A-Z0-9 ] before
 // interpolation, so no quoting is reachable.
+//
+// A numbered route ("SR 70") is queried under EVERY spelling the rolls use
+// (routeSpellingVariants), one request per spelling, and the rows merged:
+// Manatee's WAF rejects ANY "… OR …" where-clause ("Request Rejected", live
+// 10-02), so the variants cannot ride one OR'd query, and stopping at the
+// first non-empty spelling would hide a number listed only under another one
+// (the audit would then call a real address missing). Any failed request is
+// a null (no signal), never a partial answer.
 async function queryStreetSitusAddresses(county, streetText, options = {}) {
   if (isDisabled()) return null;
   const layerUrl = COUNTY_LAYERS[county]?.url || SITUS_ONLY_LAYER_URLS[county];
   const fields = SITUS_QUERY_FIELDS[county];
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!layerUrl || !fields || text.length < 3) return null;
+  // options.houseNumber (the audit's targeted query): "<number> %<street>" —
+  // one LIKE with a mid-pattern wildcard reaches any direction or spelling
+  // between the number and the street ("123 NE US 41", "123 N MAIN ST")
+  // without listing them, and needs no AND/OR (Manatee's WAF rejects both,
+  // live 10-02). The number is digits only, so no quoting is reachable.
+  const numberPrefix = /^\d{1,7}$/.test(String(options.houseNumber ?? '')) ? `${options.houseNumber} %` : '';
+  // One deadline across the spellings: the variants run in series (the WAF
+  // forbids OR), and a fresh timer per request would stretch the leg's bound
+  // ~3x on a slow-but-answering county. Out of time = no signal (null).
+  const deadline = Date.now() + timeoutMsFor(options);
+  const merged = { situs: [], zips: [], truncated: false };
+  for (const variant of routeSpellingVariants(text)) {
+    const result = await querySitusLike(county, layerUrl, fields, `${numberPrefix}${variant}`, deadline - Date.now());
+    if (result === null) return null;
+    merged.situs.push(...result.situs);
+    merged.zips.push(...result.zips);
+    merged.truncated = merged.truncated || result.truncated;
+  }
+  return merged;
+}
 
+// One situs LIKE request. Null on any failure, including a spent budget.
+async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs) {
+  if (timeoutMs <= 0) return null;
   const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
     f: 'json',
-    where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
-    outFields: [...fields, ...(zipField ? [zipField] : [])].join(','),
+    where: fields.map((f) => `UPPER(${f}) LIKE '%${likeBody}%'`).join(' OR '),
+    outFields: [...fields, zipField].filter(Boolean).join(','),
     returnGeometry: 'false',
     resultRecordCount: '2000',
   });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
   try {
     const resp = await fetch(`${layerUrl}?${params.toString()}`, { signal: controller.signal });
     if (!resp.ok) throw new Error(`${county} street GIS ${resp.status}`);
     const data = await resp.json();
     if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);
-    const features = Array.isArray(data?.features) ? data.features : [];
     const situs = [];
     const zips = [];
-    for (const f of features) {
-      const g = ciAttr(f.attributes || {});
+    for (const f of data?.features || []) {
+      const g = ciAttr(f.attributes);
       const line = fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
       if (!line) continue;
       situs.push(line);
       // Parallel array: zips[i] is the roll ZIP for situs[i] (null when the
       // layer/row has none — the audit treats unknown as in-scope, fail-open).
-      zips.push(zipField ? zip5(g(zipField)) : null);
+      zips.push(zip5(g(zipField)));
     }
     const truncated = !!data?.exceededTransferLimit;
     logger.info('[county-parcel-gis] street situs query', {
@@ -909,10 +940,9 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
     });
     return { situs, zips, truncated };
   } catch (err) {
-    const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
     // County + error only — no street/address values in logs (PII rule).
     logger.warn('[county-parcel-gis] street situs query failed', {
-      county, aborted, error: err?.message || String(err), elapsedMs: Date.now() - t0,
+      county, aborted: err?.name === 'AbortError', error: err?.message || String(err), elapsedMs: Date.now() - t0,
     });
     return null;
   } finally {

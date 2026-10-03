@@ -20,6 +20,7 @@
 // nag, and saving an empty set is how a tech clears marks they previously
 // placed.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -38,6 +39,7 @@ const API = import.meta.env.VITE_API_URL || '';
 const LONG_PRESS_MS = 500;
 
 export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved }) {
+  const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const [kinds, setKinds] = useState([]);
   const [activeKind, setActiveKind] = useState(null);
@@ -155,7 +157,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   return createPortal(
     <UiSurface
       density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay tech-visit-overlay--stacked', isMobile && 'tech-visit-overlay--fullscreen')}
+      className={cn('tech-visit-surface tech-visit-overlay tech-visit-overlay--stacked', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       style={{ '--tech-vh': `1${DVH}` }}
       // This modal mounts INSIDE the photo manager's React tree (only the DOM
       // node is portaled), whose backdrop closes it on click. React bubbles
