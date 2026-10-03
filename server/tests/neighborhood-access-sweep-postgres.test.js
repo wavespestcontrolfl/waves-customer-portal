@@ -134,22 +134,15 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(await accessRows(n.id)).toEqual([expect.objectContaining({ code: '2222#', status: 'active' })]);
   });
 
-  test('a second, different code flags both and raises ONE Customers bell for the neighborhood', async () => {
+  test('a second, different code flags both for the office and rings no bell (the difference is only logged)', async () => {
     const n = await neighborhood('Willow Grande');
     await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '3333', status: 'active', source: 'backfill' });
-    const customerId = await customerWithCode('4444', { neighborhoodId: n });
+    await customerWithCode('4444', { neighborhoodId: n });
     const r = await sweepSavedGateCodes();
-    expect(r).toMatchObject({ tally: { filed_conflict: 1 }, conflicts: 1 });
+    expect(r).toMatchObject({ tally: { filed_conflict: 1 }, conflicts: 1, bellsFailed: 0 });
     expect((await accessRows(n)).map((x) => [x.code, x.status])).toEqual([['3333', 'needs_confirm'], ['4444', 'needs_confirm']]);
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    const [category, headline, why, opts] = mockRaise.mock.calls[0];
-    expect(category).toBe('customer');
-    expect(headline).toBe('Customers — confirm a neighborhood gate code');
-    expect(why).toBe("Willow Grande now has 2 different gate codes on file after Sample's update.");
-    expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    // Top-level customerId: the internal-test-customer bell suppression reads it.
-    expect(opts.metadata).toMatchObject({ customerId: String(customerId), neighborhoodId: n });
-    expect(why).not.toMatch(/3333|4444/);
+    // Owner ruling 2026-10-03: code differences are logged on the Gate codes page, never rung.
+    expect(mockRaise).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -233,31 +226,6 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await accessRows(n)).map((r) => r.status)).toEqual(['retired']);
   });
 
-  test('maximum-length names still make a valid bell', async () => {
-    const n = await neighborhood('Laurelwood Preserve at Cypress Banks West');
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '2121', status: 'active', source: 'backfill' });
-    const customerId = await customerWithCode('2222', { neighborhoodId: n });
-    await trx('customers').where({ id: customerId }).update({ first_name: 'Maximiliana-Josephine' });
-    await sweepSavedGateCodes();
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    const why = mockRaise.mock.calls[0][2];
-    expect(why.length).toBeLessThanOrEqual(110);
-    expect(why).toBe('Laurelwood Preserve at Cypress Banks now has 2 different gate codes on file.');
-  });
-
-  test.each([
-    ['initials', 'A. J.', 'Oak Hollow', 'Oak Hollow now has 2 different gate codes on file.'],
-    ['a bracketed community name', 'Sample', 'Oak Hollow [North]', 'A neighborhood now has 2 different gate codes on file.'],
-  ])('a name the composer rejects (%s) still rings the bell', async (_label, firstName, name, expected) => {
-    const n = await neighborhood(name);
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '2727', status: 'active', source: 'backfill' });
-    const customerId = await customerWithCode('2828', { neighborhoodId: n });
-    await trx('customers').where({ id: customerId }).update({ first_name: firstName });
-    await sweepSavedGateCodes();
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][2]).toBe(expected);
-  });
-
   test('a filing whose neighborhood was deleted is filed again', async () => {
     const n = await neighborhood('Gone Grove');
     const customerId = await customerWithCode('2929', { neighborhoodId: n });
@@ -306,14 +274,14 @@ postgres('neighborhood gate-code filing sweep', () => {
     ]));
   });
 
-  test('a conflict bell that fails is counted for job health', async () => {
-    const n = await neighborhood('Failing Bell');
+  test('a failed conflict step (retiring an old bell) is counted for job health', async () => {
+    const n = await neighborhood('Failing Step');
     await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '3131', status: 'active', source: 'backfill' });
     await customerWithCode('3232', { neighborhoodId: n });
-    mockRaise.mockRejectedValueOnce(Object.assign(new Error('insert failed'), { code: 'EBELL' }));
+    mockOpenKeys.mockRejectedValueOnce(Object.assign(new Error('read failed'), { code: 'EBELL' }));
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ failed: 0, conflicts: 1 });
-    expect(r.bellsFailed).toBeGreaterThanOrEqual(1);
+    expect(r.bellsFailed).toBe(1);
   });
 
   test('a code cleared and later restored files again (A → blank → A)', async () => {
@@ -350,55 +318,16 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await sweepSavedGateCodes()).customers).toBe(0);
   });
 
-  test('a duplicate that demotes an office code into a conflict rings the bell for that customer', async () => {
+  test('a duplicate that demotes an office code into a conflict is counted, with no bell', async () => {
     const n = await neighborhood('Office Pair');
     await trx('neighborhood_access').insert([
       { neighborhood_id: n, access_type: 'keypad', code: '5151', status: 'active', source: 'office' },
       { neighborhood_id: n, access_type: 'keypad', code: '5252', status: 'active', source: 'office' },
     ]);
-    const customerId = await customerWithCode('5151', { neighborhoodId: n, notes: 'Gate code 5151 is unconfirmed: confirm on site.' });
+    await customerWithCode('5151', { neighborhoodId: n, notes: 'Gate code 5151 is unconfirmed: confirm on site.' });
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ tally: { duplicate: 1 }, conflicts: 1 });
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
-  });
-
-  test('the conflict bell opens the customer whose code was filed last; an unrelated preference edit never steers it', async () => {
-    const n = await neighborhood('Two Saves');
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '6060', status: 'active', source: 'backfill' });
-    const a = await customerWithCode('6161', { neighborhoodId: n });
-    const b = await customerWithCode('6262', { neighborhoodId: n });
-    await sweepSavedGateCodes();
-    // now() is fixed inside the test transaction: stamp the filing times. The id-LAST
-    // customer filed first; the other then edits an unrelated preference.
-    const [first, last] = [a, b].sort();
-    await trx('neighborhood_access_filings').where({ customer_id: last }).update({ filed_at: trx.raw("now() - interval '1 hour'") });
-    await trx('property_preferences').where({ customer_id: last }).update({ access_notes: 'Dog in back yard.', updated_at: trx.raw("now() + interval '1 hour'") });
-    // The bell landed nowhere: the reconcile pass raises it for the conflict.
-    mockRaise.mockClear();
-    await sweepSavedGateCodes();
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(first) });
-  });
-
-  test('an internal test account is never the customer the conflict bell opens', async () => {
-    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
-    const n = await neighborhood('Review Grove');
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '7070', status: 'active', source: 'backfill' });
-    const real = await customerWithCode('7171', { neighborhoodId: n });
-    await sweepSavedGateCodes();
-    const testId = INTERNAL_TEST_CUSTOMER_IDS[0];
-    await trx('customers').where({ id: testId }).del();
-    await trx('customers').insert({ id: testId, first_name: 'Review', last_name: 'Account', phone: '+12025550178', email: `${testId}@example.invalid` });
-    await trx('property_preferences').insert({ customer_id: testId, neighborhood_gate_code: '7171' }).onConflict('customer_id').merge();
-    await trx('neighborhood_access_filings').insert({ customer_id: testId, value_hash: require('node:crypto').createHash('sha256').update('7171').digest('hex'), neighborhood_id: n, outcome: 'duplicate', filed_at: trx.raw("now() + interval '1 hour'") });
-    mockRaise.mockClear();
-    await sweepSavedGateCodes();
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(real) });
+    expect(mockRaise).not.toHaveBeenCalled();
   });
 
   test('a property the office cleared is settled: its saved code is not retried every pass', async () => {
@@ -413,19 +342,6 @@ postgres('neighborhood gate-code filing sweep', () => {
     await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2 });
     expect((await sweepSavedGateCodes()).customers).toBe(1);
     expect((await accessRows(n2)).map((r) => r.code)).toEqual(['4545']);
-  });
-
-  test('a switched-off neighborhood never rings a conflict bell, and its open bell closes', async () => {
-    const n = await neighborhood('Parked Conflict');
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1212', status: 'active', source: 'backfill' });
-    await customerWithCode('3434', { neighborhoodId: n });
-    await trx('neighborhoods').where({ id: n }).update({ active: false });
-    // Open-bell keys are read twice per pass (reconcile, then close).
-    const openKey = `neighborhood-gate-conflict:${n}`;
-    mockOpenKeys.mockResolvedValueOnce([openKey]).mockResolvedValueOnce([openKey]);
-    await sweepSavedGateCodes();
-    expect(mockRaise).not.toHaveBeenCalled();
-    expect(mockClose).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([`neighborhood-gate-conflict:${n}`]), 'gate_code_confirmed', expect.anything());
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
@@ -444,30 +360,6 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(await accessRows(n)).toEqual([]);
   });
 
-  test('a standing conflict with no open bell (an earlier raise failed) is raised on the next pass', async () => {
-    const n = await neighborhood('Fernleaf Hollow');
-    const customerId = await customerWithCode('7777', { neighborhoodId: n });
-    await trx('neighborhood_access').insert([
-      { neighborhood_id: n, access_type: 'keypad', code: '7777', status: 'needs_confirm', source: 'profile', source_customer_id: customerId },
-      { neighborhood_id: n, access_type: 'keypad', code: '8888', status: 'needs_confirm', source: 'backfill' },
-    ]);
-    await trx('neighborhood_access_filings').insert({ customer_id: customerId, value_hash: require('node:crypto').createHash('sha256').update('7777').digest('hex'), neighborhood_id: n, outcome: 'filed_conflict' });
-    await sweepSavedGateCodes(); // the code is already filed; only the bell is missing
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
-    // An open (or person-dismissed) bell is refreshed QUIETLY: its link and
-    // wording follow the current code, it never re-rings, a read stands.
-    mockRaise.mockClear();
-    mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
-    await sweepSavedGateCodes();
-    mockOpenKeys.mockResolvedValue([]);
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    const refresh = mockRaise.mock.calls[0][3];
-    expect(refresh).toMatchObject({ refreshOnDedupe: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
-    expect(refresh.ringOnRefresh()).toBe(false);
-  });
-
   test('a county lookup that failed is retried on the next pass', async () => {
     const customerId = await customerWithCode('9999');
     const lookup = jest.fn(async () => null);
@@ -481,12 +373,17 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(linked.neighborhood_id).not.toBeNull();
   });
 
-  test('a conflict the office resolved has its bell closed by the sweep', async () => {
+  test('a conflict bell raised before the ruling is retired by the pass, even while its codes still differ', async () => {
     const n = await neighborhood('Ashby');
-    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '6666', status: 'active', source: 'office' });
-    mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
+    await trx('neighborhood_access').insert([
+      { neighborhood_id: n, access_type: 'keypad', code: '6666', status: 'needs_confirm', source: 'office' },
+      { neighborhood_id: n, access_type: 'keypad', code: '7676', status: 'needs_confirm', source: 'office' },
+    ]);
+    mockOpenKeys.mockResolvedValueOnce([`neighborhood-gate-conflict:${n}`]);
     await sweepSavedGateCodes();
-    mockOpenKeys.mockResolvedValue([]);
     expect(mockClose).toHaveBeenCalledWith(expect.anything(), [`neighborhood-gate-conflict:${n}`], 'gate_code_confirmed', expect.any(Object));
+    expect(mockRaise).not.toHaveBeenCalled();
+    // The entries themselves are untouched: still logged for the office.
+    expect((await accessRows(n)).map((x) => x.status)).toEqual(['needs_confirm', 'needs_confirm']);
   });
 });
