@@ -297,6 +297,13 @@ describe('computeEditSummary', () => {
       sentRow: sentRow({ onetime_total: '298.00', estimate_data: builderData({ membershipFee: 99, total: 298 }) }),
     });
     expect(withLine.totalsChanged.onetime_total).toEqual({ from: 0, to: 199 });
+    // A one-time discount that takes the stored total under the fee is a decrease.
+    const discounted = computeEditSummary({
+      baseline: owing(99),
+      sentRow: sentRow({ onetime_total: '49.00', estimate_data: builderData({ membershipFee: 99, total: 49 }) }),
+    });
+    expect(discounted.totalsChanged.onetime_total).toEqual({ from: 0, to: -50 });
+    expect(discounted.setupFeeExcluded).toBe(99);
     // A fee the baseline did NOT owe (a bundle edited down to one service)
     // is a real price change.
     for (const baseline of [owing(0), baselineRow()]) {

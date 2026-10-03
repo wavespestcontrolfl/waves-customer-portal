@@ -228,9 +228,11 @@ function computeEditSummary({ baseline, sentRow }) {
     const from = money(fields[key]);
     let to = money(sentRow[key]);
     if (key === 'onetime_total') {
-      // Net of the fee only up to what the engine baseline already owed.
+      // Net of the fee only up to what the engine baseline already owed. A
+      // one-time discount can leave the stored total under the fee; the net
+      // is then negative, which is the discount showing as a decrease.
       const fee = Math.min(builderSetupFee(sentData), engineOwedSetupFee(baselineData));
-      if (fee > 0 && to >= fee) {
+      if (fee > 0) {
         to = money(to - fee);
         summary.setupFeeExcluded = fee;
       }
