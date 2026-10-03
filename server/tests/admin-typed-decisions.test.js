@@ -324,3 +324,58 @@ describe('GET /status', () => {
     expect(body.error).toMatch(/relation missing/);
   });
 });
+
+describe('machine labeler token (X-Labeler-Token)', () => {
+  const TOKEN = 'synthetic-labeler-token-0123456789abcdef';
+  const savedToken = process.env.TYPED_DECISIONS_LABELER_TOKEN;
+  beforeEach(() => { process.env.TYPED_DECISIONS_LABELER_TOKEN = TOKEN; });
+  afterAll(() => { if (savedToken === undefined) delete process.env.TYPED_DECISIONS_LABELER_TOKEN; else process.env.TYPED_DECISIONS_LABELER_TOKEN = savedToken; });
+  const send = async (method, path, token, body) => {
+    const r = await fetch(`${baseUrl}/admin/typed-decisions${path}`, {
+      method, headers: { 'Content-Type': 'application/json', 'X-Labeler-Token': token }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return { status: r.status, body: await r.json() };
+  };
+
+  test('labels an unreviewed row as claude-labeler, never over a person, audit-logged as system', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const { status } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(200);
+    const [patch] = called(log, 'decision_reviews', 'update')[0];
+    expect(patch.labeled_by).toBe('claude-labeler');
+    expect(called(log, 'decision_reviews', 'where')).toContainEqual(['label_status', 'unreviewed']);
+    expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'system', actor_id: null, metadata: expect.objectContaining({ labeled_by: 'claude-labeler' }) }));
+  });
+
+  test('a row a person already labeled answers 409 already_labeled', async () => {
+    installDb({ decision_reviews: { returning: [], first: [baseRow(), { id: ID, label_status: 'disagreement' }] } });
+    const { status, body } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(409);
+    expect(body.code).toBe('already_labeled');
+  });
+
+  test('force is refused (403) before any write', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow()], first: [baseRow()] } });
+    const { status, body } = await send('POST', `/reviews/${ID}/label`, TOKEN, { verdict: 'jev_right', seen_answer: SEEN, force: true });
+    expect(status).toBe(403);
+    expect(body.code).toBe('labeler_no_force');
+    expect(called(log, 'decision_reviews', 'update')).toHaveLength(0);
+  });
+
+  test('a wrong token, a short configured token, or no configured token is 401 with no database read', async () => {
+    const log = installDb({ decision_reviews: { first: [baseRow()] } });
+    expect((await send('POST', `/reviews/${ID}/label`, `${TOKEN}x`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    process.env.TYPED_DECISIONS_LABELER_TOKEN = 'short';
+    expect((await send('POST', `/reviews/${ID}/label`, 'short', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    delete process.env.TYPED_DECISIONS_LABELER_TOKEN;
+    expect((await send('POST', `/reviews/${ID}/label`, '', { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(401);
+    expect(log.decision_reviews || []).toHaveLength(0);
+  });
+
+  test('the token opens nothing but the label route', async () => {
+    installDb({ decision_reviews: { list: [baseRow()] } });
+    expect((await send('GET', '/reviews', TOKEN)).status).toBe(401);
+    expect((await send('GET', '/status', TOKEN)).status).toBe(401);
+    expect((await send('GET', `/reviews/${ID}/label`, TOKEN)).status).toBe(401);
+  });
+});
