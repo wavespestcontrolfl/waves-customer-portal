@@ -2,7 +2,7 @@ const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -6482,7 +6482,12 @@ router.get('/', async (req, res, next) => {
     });
 
     // Assignment picker roster: assignable staff only (technician-eligibility.js).
-    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    const roster = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    // Marked out for this date (GATE_TECH_OUT_REDISTRIBUTE): the day list
+    // shows no open hours for them, since assertAssignableTechnician would
+    // refuse the booking. An unreadable absence table hides nothing.
+    const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
+    const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};

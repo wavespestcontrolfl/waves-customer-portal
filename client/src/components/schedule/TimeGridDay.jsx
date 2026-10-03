@@ -31,7 +31,7 @@ import {
   seriesMoveSummary,
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
-import { openHoursForDay, formatOpenHour } from './openHours';
+import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -680,18 +680,22 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             style={{ top: selTop, height: selHeight }}
           />
         )}
-        {/* Open hours are drawn, not hit targets: a click or drag lands on
-            the slot rows underneath, which already open New appointment. */}
+        {/* Open hours: the mouse passes through (pointer-events-none) to the
+            slot rows underneath, which already open New appointment on click
+            or drag; the button itself is the keyboard / screen-reader way in.
+            Drawn above a skipped or cancelled block, which frees its hour. */}
         {openHours.map((h) => (
-          <div
+          <button
             key={`open-${h}`}
-            aria-hidden
-            className="absolute flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary pointer-events-none"
+            type="button"
+            onClick={() => onCreateSlot?.({ techId: tech.id, windowStart: hourToHHMM(h), windowEnd: hourToHHMM(h + 1) })}
+            aria-label={`Book open hour ${formatOpenHour(h)} for ${tech.name}`}
+            className="absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary pointer-events-none focus-visible:border-zinc-900 u-focus-ring"
             style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 12 }}
           >
             <span className="u-nums">Open · {formatOpenHour(h)}</span>
             <span className="font-medium">+ Book</span>
-          </div>
+          </button>
         ))}
         {showNowLine && <NowLine />}
         {(() => {
@@ -1151,8 +1155,12 @@ export default function TimeGridDay({
   // grouping is off (the group route 404s); Separate stays available on
   // visits that already exist.
   canGroup = false,
+  // Open-hour blocks are a booking prompt: only for staff who can create
+  // appointments (POST /admin/schedule is admin-only).
+  showOpenHours = true,
 }) {
   const todayIso = toISODate(new Date());
+  const hourClock = useHourClock();
   const handleCreateSlot = useCallback((slot) => {
     onCreateSlot?.({ date, ...slot });
   }, [onCreateSlot, date]);
@@ -1190,7 +1198,7 @@ export default function TimeGridDay({
     const seen = new Set();
     const list = [];
     (technicians || []).forEach((t) => {
-      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name }); }
+      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name, outToday: t.outToday === true }); }
     });
     allServices.forEach((s) => {
       if (s.technicianId && !seen.has(s.technicianId)) {
@@ -1652,7 +1660,11 @@ export default function TimeGridDay({
                     showNowLine={date === todayIso}
                     // An unassigned booking holds its hour in every column:
                     // any tech may end up taking it.
-                    openHours={onCreateSlot ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail]) : []}
+                    // A tech marked out for the day gets none (the booking
+                    // would be refused).
+                    openHours={onCreateSlot && showOpenHours && !tech.outToday
+                      ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock })
+                      : []}
                   />
                 ))}
               </div>

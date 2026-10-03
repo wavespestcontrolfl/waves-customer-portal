@@ -23,6 +23,11 @@ describe('openHoursForDay', () => {
     expect(openHoursForDay('2026-10-04', services, { now: EARLY })).toEqual([7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18]);
   });
 
+  it('reads a start-only visit by its stored duration', () => {
+    const services = [{ windowStart: '08:00', estimatedDuration: 120, status: 'confirmed' }];
+    expect(openHoursForDay('2026-10-04', services, { now: EARLY })).toEqual([7, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+  });
+
   it('drops hours already started today and has none on a past day', () => {
     const tenFifteenEt = new Date('2026-10-03T14:15:00Z');
     expect(openHoursForDay('2026-10-03', [], { now: tenFifteenEt })).toEqual([11, 12, 13, 14, 15, 16, 17, 18]);

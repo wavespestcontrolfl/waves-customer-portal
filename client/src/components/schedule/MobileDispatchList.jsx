@@ -19,7 +19,7 @@ import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
-import { openHoursForDay, hourToHHMM, formatOpenHour } from './openHours';
+import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -437,13 +437,18 @@ function withOpenHours(sorted, openHours) {
 
 function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
+  const now = useHourClock();
+  // Techs marked out for the day can't take a booking; with the whole roster
+  // out there is no open hour to offer.
+  const working = (technicians || []).filter((t) => !t.outToday);
+  const allOut = (technicians || []).length > 0 && working.length === 0;
   const openHours = useMemo(
-    () => (onCreateSlot ? openHoursForDay(dateStr, services || []) : []),
-    [onCreateSlot, dateStr, services],
+    () => (onCreateSlot && !allOut ? openHoursForDay(dateStr, services || [], { now }) : []),
+    [onCreateSlot, allOut, dateStr, services, now],
   );
   const rows = useMemo(() => withOpenHours(sorted, openHours), [sorted, openHours]);
-  // One tech on the roster: the open hour is theirs.
-  const soleTechId = (technicians || []).length === 1 ? technicians[0].id : undefined;
+  // One working tech on the roster: the open hour is theirs.
+  const soleTechId = working.length === 1 ? working[0].id : undefined;
   const today = isETToday(dateStr);
   return (
     <section>
@@ -619,7 +624,8 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           technicians={technicians}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
-          onCreateSlot={onCreateSlot}
+          // A week still loading shows the previous week's rows: no booking from them.
+          onCreateSlot={loading ? undefined : onCreateSlot}
         />
       ))}
     </div>

@@ -385,4 +385,20 @@ describe('TimeGridDay open hours', () => {
     expect(screen.queryByText('Open · 9–10 AM')).toBeNull();
     expect(screen.getAllByText(/^Open · /)).toHaveLength(9);
   });
+
+  it('offers a keyboard-reachable Open button, and none for a tech marked out', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    const { rerender } = render(
+      <TimeGridDay date="2026-07-15" services={SERVICES} technicians={[{ id: 'tech-1', name: 'Alex Tech' }]} onChange={vi.fn()} onCreateSlot={onCreateSlot} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' }));
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-07-15', techId: 'tech-1', windowStart: '09:00', windowEnd: '10:00' }));
+    rerender(
+      <TimeGridDay date="2026-07-15" services={SERVICES} technicians={[{ id: 'tech-1', name: 'Alex Tech', outToday: true }]} onChange={vi.fn()} onCreateSlot={onCreateSlot} />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByText(/^Open · /)).toBeNull();
+  });
 });

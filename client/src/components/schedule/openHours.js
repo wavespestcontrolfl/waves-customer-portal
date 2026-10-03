@@ -5,6 +5,7 @@
 // Display only — booking still goes through CreateAppointmentModal and the
 // server's own window and capacity checks.
 
+import { useEffect, useState } from 'react';
 import { etDateString, etParts } from '../../lib/timezone';
 
 // 7 AM to 7 PM (owner 2026-10-03).
@@ -21,13 +22,15 @@ function parseHHMM(s) {
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
-// Minutes [start, end) a visit holds: its booked window, or one hour when
-// the window has no usable end.
+// Minutes [start, end) a visit holds: its booked window; with no usable end,
+// its stored duration (as the server's occupancy reads it), else one hour.
 function occupiedRange(svc) {
   const start = parseHHMM(svc?.windowStart);
   if (start == null) return null;
   const end = parseHHMM(svc?.windowEnd);
-  return [start, end != null && end > start ? end : start + 60];
+  if (end != null && end > start) return [start, end];
+  const dur = Number(svc?.estimatedDuration);
+  return [start, start + (Number.isFinite(dur) && dur > 0 ? dur : 60)];
 }
 
 /**
@@ -51,6 +54,18 @@ export function openHoursForDay(dateStr, services, { now = new Date() } = {}) {
     if (!ranges.some(([s, e]) => s < from + 60 && e > from)) open.push(h);
   }
   return open;
+}
+
+// "Now", refreshed at each hour boundary so a list left open past 10:00
+// stops offering the 10 AM hour.
+export function useHourClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const msToHour = 3600000 - (now.getTime() % 3600000) + 1000;
+    const t = setTimeout(() => setNow(new Date()), msToHour);
+    return () => clearTimeout(t);
+  }, [now]);
+  return now;
 }
 
 export function hourToHHMM(h) {
