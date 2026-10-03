@@ -2012,11 +2012,13 @@ async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
   }
 }
 
-// A void releases a stamped dues invoice's month. Visits of that month that
-// completed AFTER the invoice existed, unpriced, with no invoice of their own
-// and not the invoice's own visit, skipped their dues mint because of it (or of
-// autopay / a cron payment: this identification is advisory, from existing
-// durable rows only, and over-reports rather than under-reports). When nothing
+// A void releases a stamped dues invoice's month. Completed visits of that
+// month, unpriced, with no invoice of their own and not the invoice's own
+// visit, may have skipped their dues mint because of it (or of autopay / a cron
+// payment: this identification is advisory, from existing durable rows only,
+// and over-reports rather than under-reports). completed_at is NOT compared to
+// the invoice's creation: a backdated closeout stores the real service end, so
+// a visit closed out after the invoice existed can carry an earlier time. When nothing
 // else covers the month after the void and there are such visits, ONE office
 // alert asks a person to bill the month again if it is still owed. Never mints.
 // Best effort after the void commits; a failure here never fails the void.
@@ -2031,7 +2033,6 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       .where((q) => q.whereNull("s.estimated_price").orWhere("s.estimated_price", 0))
       .where((q) => q.whereNull("s.is_callback").orWhere("s.is_callback", false))
       .whereNot("s.id", invoiceRow.scheduled_service_id || "00000000-0000-0000-0000-000000000000")
-      .where("s.completed_at", ">", invoiceRow.created_at)
       .whereNotExists(db("invoices as i")
         .whereRaw("i.scheduled_service_id = s.id")
         .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
@@ -2056,7 +2057,7 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow) {
       doneWhen: "month_billed",
       who: "person",
     }, {
-      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided or cancelled, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} after it (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
+      detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} was the ${month} membership dues invoice. It was voided or cancelled, nothing else covers that month now, and ${n} completed plan visit${n > 1 ? "s" : ""} that month (ids ${rows.map((r) => r.id).join(", ")}) have no invoice of their own. Bill the month again if it is still owed; nothing was billed automatically.`,
       bell: true,
       dedupeKey: `dues_coverage_released:${invoiceRow.id}`,
     });

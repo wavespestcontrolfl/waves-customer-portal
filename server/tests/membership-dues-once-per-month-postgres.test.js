@@ -1204,6 +1204,19 @@ postgres('membership dues — locked terms, covered-skip commit, void alert (B08
     } finally { await cleanup(f); }
   });
 
+  test('a backdated closeout (completed_at before the dues invoice existed) still raises the alert when that invoice is voided', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      expect(await complete(f, pest)).toMatchObject({ status: 200 }); // covered by A
+      await mockPg('scheduled_services').where({ id: pest })
+        .update({ completed_at: mockPg.raw("(SELECT created_at - interval '2 hours' FROM invoices WHERE id = ?)", [a.invoice.id]) });
+      await InvoiceSvc.voidInvoice(a.invoice.id);
+      expect(await dueAlertRows(a.invoice.id)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
   test('no alert when nothing was unbilled by the void: no other covered visit, or the month is still covered by another stamped invoice', async () => {
     const f = await seedMember();
     try {
