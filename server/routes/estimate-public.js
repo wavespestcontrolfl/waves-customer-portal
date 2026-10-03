@@ -74,7 +74,7 @@ const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { lockSmsPhone, withSmsConsentLock, tryLockSmsPhone } = require('../utils/customer-comms-lock');
 const {
   CONTRADICTED_PHONE_NOTE_MARK, customerHasContradictedPhoneMarker, customerIsContradictedPhoneQuarantine,
-  estimatePhoneQuarantined,
+  estimatePhoneQuarantined, stampEstimatePhoneDispute,
 } = require('../services/estimate-phone-quarantine');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -558,13 +558,27 @@ function acceptLoneCandidateContradicted(candidate, estimate, ownedAddresses = [
 // soft-deleted ones excluded) contributes its profile address AND its active customer_properties rows
 // (`active` is the only liveness flag that table has) - two reads however many siblings. A candidate with
 // no account_id owns only itself. One read handle for preflight, authoritative match and final re-match.
-async function loadAcceptCandidateOwnedAddresses(candidate, database) {
+//
+// `lock` (the final revalidation only): these rows are the evidence that can KEEP a match, so they are
+// read FOR SHARE, held to commit - an admin edit, deactivation or soft-delete of an evidence row (each an
+// UPDATE) waits until this accept commits, and the accept cannot commit on evidence that just vanished.
+// SHARE, not UPDATE: it blocks every writer of those rows but lets two accepts read the same account's
+// evidence together, so they never queue on or cycle with each other. Order: profiles by id, then
+// properties by id - the writers that touch both (property edit / role / neighborhood routes, ensurePrimary)
+// take the customers row first, then customer_properties ordered by id. Only matching rows are locked: a
+// property activated or added later can only ADD evidence, which never makes a reuse wrong.
+async function loadAcceptCandidateOwnedAddresses(candidate, database, { lock = false } = {}) {
   const cols = ['address_line1', 'address_line2', 'city', 'zip'];
-  const profiles = candidate.account_id
-    ? await database('customers').where({ account_id: candidate.account_id }).whereNull('deleted_at').select(['id', ...cols])
-    : [];
+  let profiles = [];
+  if (candidate.account_id) {
+    let profileQuery = database('customers').where({ account_id: candidate.account_id }).whereNull('deleted_at').orderBy('id');
+    if (lock) profileQuery = profileQuery.forShare();
+    profiles = await profileQuery.select(['id', ...cols]);
+  }
   const profileIds = [...new Set([candidate.id, ...profiles.map((p) => p.id)])];
-  const saved = await database('customer_properties').whereIn('customer_id', profileIds).where({ active: true }).select(cols);
+  let propertyQuery = database('customer_properties').whereIn('customer_id', profileIds).where({ active: true }).orderBy('id');
+  if (lock) propertyQuery = propertyQuery.forShare();
+  const saved = await propertyQuery.select(cols);
   return [...profiles, ...saved];
 }
 
@@ -636,7 +650,7 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   // A read failure here throws (fail closed): treating "could not read the saved properties" as
   // "uncontradicted" would reuse a stranger's saved card.
   const loneOwnedAddresses = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate)
-    ? await loadAcceptCandidateOwnedAddresses(candidates[0], database)
+    ? await loadAcceptCandidateOwnedAddresses(candidates[0], database, { lock: lockRows })
     : [];
   const match = pickAcceptCustomerMatch(candidates, estimate, loneOwnedAddresses);
   // WHY there is no match, for the one case where "no match" must not fall
@@ -14015,6 +14029,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         throw branchErr;
       }
 
+      // B18: persist the quarantine at ESTIMATE scope, last in the transaction (after the accept's own
+      // wholesale estimate_data writes): the accepted estimate, every estimate in its group (a still-sent
+      // sibling the group follow-up transfer re-arms keeps the disputed phone and no customer_id) and other
+      // open estimates for the same person carry the disputed number's identity, so no estimate-based
+      // sender texts it whoever the estimate is linked to. A failed stamp rolls the accept back.
+      if (phoneContradictionRejectedId) {
+        await stampEstimatePhoneDispute(trx, {
+          estimate, identity: acceptedPhoneIdentity || estimate, rejectedCustomerId: phoneContradictionRejectedId, customerId,
+        });
+      }
       // B18: ONE final revalidation of the phone verdict this accept acted on. The authoritative match
       // above, the card policy, the plan and any saved-card / Auto Pay exemption all rest on it, so
       // re-run the FULL matcher now, under the phone fence taken before the match and with the candidate

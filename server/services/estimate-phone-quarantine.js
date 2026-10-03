@@ -33,26 +33,100 @@ function customerIsContradictedPhoneQuarantine(row) {
   return customerHasContradictedPhoneMarker(row) && String(row.phone || '').trim() === '';
 }
 
-function last10(value) {
-  return String(value || '').replace(/\D/g, '').slice(-10);
+// Country-aware identity (utils/phone.js phoneIdentityKey): NANP numbers compare on their last ten digits,
+// anything else keeps its country code, so a +44 number sharing a +1 number's suffix is NOT the same phone.
+const { phoneIdentityKey } = require('../utils/phone');
+
+// The estimate-scope stamp a contradicted accept writes into estimate_data (no migration: the column is
+// jsonb). It names the DISPUTED number by identity key - not by the linked customer - so it follows the
+// estimate wherever it goes: the accepted estimate, every estimate in its group (including a still-sent
+// sibling the group follow-up transfer re-arms WITHOUT a customer_id) and other open estimates for the
+// same person (same phone identity and same email). reviseAdminEstimate carries it across a re-save
+// (REVISE_PRESERVED_ESTIMATE_DATA_KEYS / REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS).
+const ESTIMATE_PHONE_DISPUTE_KEY = 'acceptPhoneDispute';
+
+function parseEstimateData(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+  }
+  return {};
 }
 
-// True when texting estimate.customer_phone would reach a number a contradicted accept quarantined
-// for the estimate's customer: the customer carries the marker and the estimate's phone is not the
-// customer's OWN number (once the office adds the real one, the customer row's phone differs from the
-// disputed one on the estimate, so the estimate's number stays blocked - texts to the real number go
-// through the customer's own phone, never this one). An estimate with no customer or no phone is never
-// quarantined. FAILS CLOSED: an unreadable customer row reads as quarantined, because a wrong text to
-// a stranger cannot be taken back. `dbh` lets a caller inside a transaction read on its own handle.
+// Statuses of an estimate that can still be sent to its phone.
+const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sending', 'sent', 'viewed'];
+
+// Called INSIDE the accept transaction, LAST (after the accept's own wholesale estimate_data writes, which
+// would otherwise overwrite it; the stamp itself is an atomic jsonb_set merge that leaves every other key
+// alone and does not touch updated_at). Stamps the accepted estimate, its group, and other open estimates
+// for the same person. Returns the stamped ids. Throws on a write failure so the accept rolls back: an
+// unstamped quarantine would silently reopen the disputed number.
+async function stampEstimatePhoneDispute(trx, { estimate, identity = estimate, rejectedCustomerId, customerId = null }) {
+  const key = phoneIdentityKey(identity.customer_phone);
+  if (!key) return [];
+  const stamp = {
+    key,
+    rejectedCustomerId: rejectedCustomerId == null ? null : String(rejectedCustomerId),
+    acceptedEstimateId: String(estimate.id),
+    at: new Date().toISOString(),
+  };
+  const ids = new Set([estimate.id]);
+  if (estimate.estimate_group_id) {
+    const siblings = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id }).whereNot({ id: estimate.id }).select('id');
+    siblings.forEach((row) => ids.add(row.id));
+  }
+  const email = String(identity.customer_email || '').trim().toLowerCase();
+  const digits = String(identity.customer_phone || '').replace(/\D/g, '').slice(-10);
+  if (email && digits) {
+    const peers = await trx('estimates')
+      .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNot({ id: estimate.id })
+      .whereRaw("regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+      .select('id', 'customer_phone', 'customer_email', 'customer_id');
+    peers
+      .filter((row) => phoneIdentityKey(row.customer_phone) === key
+        && String(row.customer_email || '').trim().toLowerCase() === email
+        && (!row.customer_id || (customerId && String(row.customer_id) === String(customerId))))
+      .forEach((row) => ids.add(row.id));
+  }
+  await trx('estimates').whereIn('id', [...ids]).update({
+    estimate_data: trx.raw(
+      `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{${ESTIMATE_PHONE_DISPUTE_KEY}}', ?::jsonb, true)`,
+      [JSON.stringify(stamp)],
+    ),
+  });
+  return [...ids];
+}
+
+// True when texting estimate.customer_phone would reach a number a contradicted accept disputed. Either
+// source says so:
+//   1. the estimate carries the stamp AND its CURRENT phone still has the stamped identity key - staff
+//      fixing the estimate's phone lifts it; adding the customer's real number on the profile does not
+//      (the estimate's stale number stays blocked);
+//   2. the estimate's customer carries the marker note and the estimate's phone is not that customer's
+//      OWN number (country-aware compare). This is the persisted state the accept's own text suppression
+//      reads, and it covers an estimate linked to the profile that was never stamped.
+// An estimate with no phone is never quarantined. FAILS CLOSED: unreadable data reads as quarantined, because
+// a wrong text to a stranger cannot be taken back. A row without estimate_data loaded is read by id; `dbh` lets
+// a caller inside a transaction read on its own handle.
 async function estimatePhoneQuarantined(estimate, dbh = db) {
-  if (!estimate?.customer_id || !String(estimate.customer_phone || '').trim()) return false;
+  const phoneKey = phoneIdentityKey(estimate?.customer_phone);
+  if (!phoneKey) return false;
   try {
+    let rawData = estimate.estimate_data;
+    if (rawData === undefined && estimate.id) {
+      const row = await dbh('estimates').where({ id: estimate.id }).first('estimate_data');
+      rawData = row?.estimate_data;
+    }
+    const stamp = parseEstimateData(rawData)[ESTIMATE_PHONE_DISPUTE_KEY];
+    if (stamp?.key && stamp.key === phoneKey) return true;
+    if (!estimate.customer_id) return false;
     const row = await dbh('customers').where({ id: estimate.customer_id }).first('id', 'phone', 'internal_notes');
     if (!customerHasContradictedPhoneMarker(row)) return false;
-    const own = last10(row.phone);
-    return !(own && own === last10(estimate.customer_phone));
+    const own = phoneIdentityKey(row.phone);
+    return !(own && own === phoneKey);
   } catch (err) {
-    logger.warn(`[estimate-phone-quarantine] marker check failed for estimate ${estimate.id} (customer ${estimate.customer_id}) - treating the phone as quarantined: ${err.message}`);
+    logger.warn(`[estimate-phone-quarantine] check failed for estimate ${estimate.id} (customer ${estimate.customer_id}) - treating the phone as quarantined: ${err.message}`);
     return true;
   }
 }
@@ -63,4 +137,6 @@ module.exports = {
   customerHasContradictedPhoneMarker,
   customerIsContradictedPhoneQuarantine,
   estimatePhoneQuarantined,
+  stampEstimatePhoneDispute,
+  ESTIMATE_PHONE_DISPUTE_KEY,
 };

@@ -124,6 +124,8 @@ jest.mock('../models/db', () => {
     // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
     // fixtures keep the tables small enough that the eq/null filters decide.
     b.forUpdate = () => b;
+    // Row-share lock requests are logged (the fake has no real locks) so a test can assert WHICH reads asked.
+    b.forShare = () => { state.ops.push({ type: 'lock', mode: 'share', table }); return b; };
     b.andWhereRaw = () => b;
     b.orWhereNull = () => b;
     b.orWhereNot = () => b;
@@ -4701,6 +4703,97 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(res.status).toBe(200);
     expect(storedEstimate().customer_id).not.toBe('cust-bob');
     expect(contradictionAlerts()).toHaveLength(1);
+  });
+
+  // ── B18 r6: the quarantine is persisted at ESTIMATE scope, in the accept transaction ───────────────
+  const disputeStampOf = (id) => {
+    const row = db.__state.tables.estimates.find((e) => e.id === id);
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    return data.acceptPhoneDispute || null;
+  };
+  const groupedRecurring = (id, over = {}) => ({ ...recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }), estimate_group_id: 'grp-b18-r6', ...over });
+
+  test('a contradicted accept stamps the accepted estimate, every group sibling, and an open estimate for the same person; not an unrelated one', async () => {
+    resetStore(groupedRecurring('est-b18-q1'));
+    db.__state.tables.estimates.push(
+      groupedRecurring('est-b18-q2', { customer_phone: '', customer_email: null }),
+      // Same phone identity + same email, open, unlinked: the same person's other estimate.
+      recurringPestEstimate({ id: 'est-b18-q3', token: 'tok-est-b18-q3-x0123456789', customer_phone: '+19415550123' }),
+      // Same phone but ANOTHER person's email (the rightful owner's own estimate): left alone.
+      recurringPestEstimate({ id: 'est-b18-q4', token: 'tok-est-b18-q4-x0123456789', customer_email: 'bob@example.com' }),
+      // Same person but already accepted elsewhere / not open: left alone.
+      recurringPestEstimate({ id: 'est-b18-q5', token: 'tok-est-b18-q5-x0123456789', status: 'declined' }),
+    );
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    const res = await putAccept('tok-est-b18-q1-x0123456789');
+    expect(res.status).toBe(200);
+    for (const id of ['est-b18-q1', 'est-b18-q2', 'est-b18-q3']) {
+      expect(disputeStampOf(id)).toMatchObject({ key: '9415550123', rejectedCustomerId: 'cust-bob', acceptedEstimateId: 'est-b18-q1' });
+    }
+    for (const id of ['est-b18-q4', 'est-b18-q5']) expect(disputeStampOf(id)).toBeNull();
+    // The accepted estimate's other estimate_data survives the stamp (it is a merge, not a rewrite).
+    const accepted = db.__state.tables.estimates.find((e) => e.id === 'est-b18-q1');
+    const data = typeof accepted.estimate_data === 'string' ? JSON.parse(accepted.estimate_data) : accepted.estimate_data;
+    expect(data.result).toBeTruthy();
+    // And the helper agrees: the accepted estimate and the unlinked sibling are quarantined on that phone.
+    const { estimatePhoneQuarantined } = require('../services/estimate-phone-quarantine');
+    expect(await estimatePhoneQuarantined(accepted)).toBe(true);
+    expect(await estimatePhoneQuarantined({ ...db.__state.tables.estimates.find((e) => e.id === 'est-b18-q3') })).toBe(true);
+    // Staff correcting the sibling's phone lifts it.
+    expect(await estimatePhoneQuarantined({ ...db.__state.tables.estimates.find((e) => e.id === 'est-b18-q3'), customer_phone: '(941) 555-0188' })).toBe(false);
+  });
+
+  test('a rolled-back contradicted accept leaves no stamp on any estimate', async () => {
+    resetStore(groupedRecurring('est-b18-q6'));
+    db.__state.tables.estimates.push(groupedRecurring('est-b18-q7', { customer_phone: '', customer_email: null }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion failed'));
+    const res = await putAccept('tok-est-b18-q6-x0123456789');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(disputeStampOf('est-b18-q6')).toBeNull();
+    expect(disputeStampOf('est-b18-q7')).toBeNull();
+  });
+
+  test('an ordinary (uncontradicted) accept stamps nothing', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-q8', token: 'tok-est-b18-q8-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow({ email: 'pat@example.com' }));
+    conversionOk();
+    expect((await putAccept('tok-est-b18-q8-x0123456789')).status).toBe(200);
+    expect(disputeStampOf('est-b18-q8')).toBeNull();
+  });
+
+  // ── B18 r6: the evidence rows are read FOR SHARE in the final pass only ─────────────────────────
+  test('the sibling-profile and saved-property evidence is locked FOR SHARE in the final pass only, customers before properties', async () => {
+    siblingAccountSetup('est-b18-l1');
+    conversionFor('cust-bob');
+    const res = await putAccept('tok-est-b18-l1-x0123456789');
+    expect(res.status).toBe(200);
+    const shares = db.__state.ops.filter((op) => op.type === 'lock' && op.mode === 'share').map((op) => op.table);
+    // Preflight and authoritative passes load the same evidence unlocked: exactly ONE lock per table.
+    expect(shares).toEqual(['customers', 'customer_properties']);
+  });
+
+  test('the evidence property deactivated after the authoritative match and before the final read aborts for a reload (nothing committed)', async () => {
+    siblingAccountSetup('est-b18-l2');
+    const evidence = db.__state.tables.customer_properties.find((p) => p.id === 'prop-sib-2');
+    // customer_properties reads: preflight (1), authoritative (2), final (3) - the admin deactivation lands before the 3rd.
+    let reads = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'customer_properties') return;
+      reads += 1;
+      if (reads === 3) evidence.active = false;
+    };
+    conversionFor('cust-bob');
+    const res = await putAccept('tok-est-b18-l2-x0123456789');
+    db.__state.onTable = null;
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
   });
 
   // ── B18 r5: a one-time card hold drops with the identity ────────────────────────────────────────

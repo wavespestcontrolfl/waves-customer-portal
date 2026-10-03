@@ -742,6 +742,37 @@ describe('reviseAdminEstimate', () => {
     expect(JSON.parse(invented.updates[0].estimate_data).assessment_exception).toBeUndefined();
   });
 
+  test('carries the contradicted-accept phone-dispute stamp across a revision; a client payload cannot drop, invent or rewrite it (B18)', async () => {
+    const stamp = { key: '9415550123', rejectedCustomerId: 'cust-bob', acceptedEstimateId: 'est-accepted', at: '2026-10-03T00:00:00.000Z' };
+    const stamped = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), acceptPhoneDispute: stamp }),
+    };
+    const kept = makeReviseDatabase({ estimate: stamped });
+    await reviseAdminEstimate({
+      database: kept.database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, acceptPhoneDispute: { key: 'x' } } },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(JSON.parse(kept.updates[0].estimate_data).acceptPhoneDispute).toEqual(stamp);
+
+    const dropped = makeReviseDatabase({ estimate: stamped });
+    await reviseAdminEstimate({ database: dropped.database, estimateId: 'est-1', body: reviseBody, recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(dropped.updates[0].estimate_data).acceptPhoneDispute).toEqual(stamp);
+
+    const invented = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database: invented.database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, acceptPhoneDispute: stamp } },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(JSON.parse(invented.updates[0].estimate_data).acceptPhoneDispute).toBeUndefined();
+  });
+
   test('preserves the locked publication window and anchor routing across wholesale revisions', async () => {
     const originalData = JSON.parse(sentEstimate.estimate_data);
     const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111', estimate_data: JSON.stringify({ ...originalData,

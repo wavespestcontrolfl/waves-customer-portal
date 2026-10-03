@@ -2757,8 +2757,12 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // staff revision must carry it (codex #4815 r9 P2). It is server-owned:
 // the locked pass mirrors the locked row exactly, so a client payload can
 // neither drop it nor invent one.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
-const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception'];
+// acceptPhoneDispute (B18): the estimate-scope quarantine stamp a contradicted public accept writes
+// (services/estimate-phone-quarantine.js) - server-owned like assessment_exception, so an ordinary revision
+// can neither drop it nor invent one; staff lift it by correcting the estimate's phone (the stamp only
+// applies while the phone still has the stamped identity).
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception', 'acceptPhoneDispute'];
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception', 'acceptPhoneDispute'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions

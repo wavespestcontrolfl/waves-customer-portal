@@ -1577,12 +1577,25 @@ still phone-less); every OTHER estimate-based text to that estimate phone is ref
 the same way - the admin follow-up, booking-link, estimate-send, lawn-outline and extension sends
 refuse with 409 `ESTIMATE_PHONE_QUARANTINED` (or an `ok:false` channel outcome) and ask the operator
 to add the customer's real number first, the follow-up cron and the page's service-details send skip
-quietly (decided by the customer's marker, `services/estimate-phone-quarantine.js`; an unreadable
-customer row fails closed); the preflight phone-identity verdict is formed once and the
+quietly (`services/estimate-phone-quarantine.js`; an unreadable row fails closed). The quarantine is
+persisted at ESTIMATE scope in the accept transaction: `estimate_data.acceptPhoneDispute` (the disputed
+number's country-aware identity key from `phoneIdentityKey`, the rejected customer id, the accepting
+estimate) is stamped last on the accepted estimate, every estimate in its group (including a still-sent
+sibling the group follow-up transfer re-arms with no `customer_id`) and other open estimates with the same
+phone identity and the same email; a failed stamp rolls the accept back, and an admin re-save carries it
+(it is a server-owned key). A send is refused while the estimate carries the stamp AND its current phone
+still has the stamped identity - correcting the estimate's phone lifts it, adding the real number on the
+customer profile does not; the customer's marker note (which the accept's own text suppression reads) also
+quarantines a phone that is not the customer's own number, compared by the same country-aware identity (a
+`+44` number sharing the `+1` number's suffix is a different phone). An unrelated estimate for the phone's
+rightful owner (another email) is not stamped; a same-person estimate with no email is covered only through
+its group or the customer marker; the preflight phone-identity verdict is formed once and the
 accept transaction's authoritative match must equal it, taken under the same per-phone advisory
 fence customer creation uses (try-lock, held to commit; a miss is the retryable 409
 `CUSTOMER_BUSY_RETRY`; the customer restore route takes it too), and the whole candidate set is
-re-matched once more just before the commit with the candidate rows locked - any difference in the
+re-matched once more just before the commit with the candidate rows locked (and the account's
+sibling-profile and saved-property evidence rows locked FOR SHARE, profiles then properties by id, held
+to commit - preflight and the authoritative match read them unlocked) - any difference in the
 matched customer or the contradicted verdict (another live profile on the phone, an edited
 candidate) aborts with the reloadable 409 `ACCEPT_BILLING_CHANGED` and nothing commits, and the
 captured Auto Pay card and the one-time card hold are both retired so the reload cannot resubmit

@@ -59,3 +59,16 @@ test('control: an unmarked customer still gets the text', async () => {
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(sendCustomerMessage.mock.calls[0][0].to).toBe(EST.customer_phone);
 });
+
+test('an UNLINKED group sibling re-armed after a contradicted accept (stamp only, no customer_id) is skipped by the cron sender; fixing its phone lifts it', async () => {
+  const sibling = {
+    ...EST, id: 'est-q-sibling', customer_id: null,
+    estimate_data: { acceptPhoneDispute: { key: '9415550123', rejectedCustomerId: 'cust-bob' } },
+  };
+  await sendDualChannel(sibling, { sms: 'Follow-up body', email: EMAIL });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+
+  await sendDualChannel({ ...sibling, customer_phone: '+19415550188' }, { sms: 'Follow-up body', email: EMAIL });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+});

@@ -117,7 +117,61 @@ describe('estimatePhoneQuarantined', () => {
   });
 });
 
+describe('estimatePhoneQuarantined: country-aware identity (a +44 number sharing the +1 suffix is not the same phone)', () => {
+  test('the customer\'s real +44 number with the disputed number\'s ten-digit suffix does NOT make the estimate\'s +1 number sendable', async () => {
+    customerRow = { id: 'cust-1', phone: '+44 941 555 0123', internal_notes: MARKED_NOTE };
+    expect(await estimatePhoneQuarantined(estimateRow)).toBe(true);
+    // The same NANP number in another format IS the customer's own number.
+    customerRow = { id: 'cust-1', phone: '1-941-555-0123', internal_notes: MARKED_NOTE };
+    expect(await estimatePhoneQuarantined(estimateRow)).toBe(false);
+  });
+});
+
+describe('estimatePhoneQuarantined: the estimate-scope stamp (no linked customer needed)', () => {
+  const STAMP = { key: '9415550123', rejectedCustomerId: 'cust-bob', acceptedEstimateId: 'est-accepted' };
+  const sibling = (over = {}) => ({
+    id: 'est-sibling', customer_id: null, customer_phone: '(941) 555-0123', status: 'sent',
+    estimate_data: { acceptPhoneDispute: STAMP }, ...over,
+  });
+
+  test('an UNLINKED group sibling carrying the stamp is quarantined (object or JSON-string estimate_data), in any phone format', async () => {
+    expect(await estimatePhoneQuarantined(sibling())).toBe(true);
+    expect(await estimatePhoneQuarantined(sibling({ estimate_data: JSON.stringify({ acceptPhoneDispute: STAMP }) }))).toBe(true);
+    expect(await estimatePhoneQuarantined(sibling({ customer_phone: '+1 941-555-0123' }))).toBe(true);
+  });
+
+  test('correcting the estimate\'s phone lifts it; a +44 number with the same suffix is a different identity', async () => {
+    expect(await estimatePhoneQuarantined(sibling({ customer_phone: '(941) 555-0188' }))).toBe(false);
+    expect(await estimatePhoneQuarantined(sibling({ customer_phone: '+44 941 555 0123' }))).toBe(false);
+  });
+
+  test('adding the customer\'s real number on a linked profile does not lift the stamp on the estimate\'s stale number', async () => {
+    customerRow = { id: 'cust-1', phone: '(941) 555-0188', internal_notes: null };
+    expect(await estimatePhoneQuarantined(sibling({ customer_id: 'cust-1' }))).toBe(true);
+  });
+
+  test('an estimate without the stamp (and no marked customer) is not quarantined; a row without estimate_data is read by id; a failed read fails closed', async () => {
+    expect(await estimatePhoneQuarantined(sibling({ estimate_data: {} }))).toBe(false);
+    estimateRow.estimate_data = { acceptPhoneDispute: STAMP };
+    expect(await estimatePhoneQuarantined({ id: ESTIMATE_ID, customer_id: null, customer_phone: '(941) 555-0123' })).toBe(true);
+    customerReadFails = true;
+    expect(await estimatePhoneQuarantined(sibling({ customer_id: 'cust-1', estimate_data: {} }))).toBe(true);
+  });
+});
+
 describe('manual admin sends refuse for a quarantined estimate phone', () => {
+  test('a still-sent group sibling re-armed WITHOUT a customer_id (stamp only) is refused by the booking-link and follow-up routes', async () => {
+    estimateRow = { ...estimateRow, customer_id: null, status: 'sent', accepted_at: null,
+      estimate_data: { ...estimateRow.estimate_data, acceptPhoneDispute: { key: '9415550123', rejectedCustomerId: 'cust-bob' } } };
+    for (const path of ['/:id/send-booking-link', '/:id/follow-up']) {
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+      await routeHandler(path)({ params: { id: ESTIMATE_ID }, body: { message: 'x' } }, res, jest.fn());
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({ error: ESTIMATE_PHONE_QUARANTINED_MESSAGE, code: 'ESTIMATE_PHONE_QUARANTINED' });
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   const run = async (path, body = {}) => {
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
     const next = jest.fn();
