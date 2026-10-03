@@ -1554,8 +1554,9 @@ pre-fill identity, so a submitted email never steers which profile the accept
 lands on (a lone phone hit is reused unless the estimate's stored email AND
 address are both present and both provably disagree with the profile's — the
 address by the canonical street comparison, so `Street`/`St`, unit formats and a
-trailing city/ZIP agree, and an address with no street number on either side
-cannot disagree — in which case the
+trailing city/ZIP agree, a different explicit unit, city or ZIP disagrees, and a
+missing unit, city or ZIP, or no street number on either side, cannot disagree
+(that comparison alone decides) — in which case the
 accept mints a fresh profile on its own account and the accepter gets the
 normal card rules. That profile and its account are stored WITHOUT a phone
 (`customers.phone = ''`, the usual phone-less shape): the number is another
@@ -1569,7 +1570,8 @@ office gets one Customers needs-you alert (dedupe `accept-phone-contradicted:<es
 to add the accepter's real number or merge the two profiles (the alert is replayed,
 idempotently, by a re-POST of the already-accepted estimate while the profile is
 still phone-less); the preflight phone-identity verdict is formed once and the
-accept transaction's authoritative match must equal it, else the accept aborts
+accept transaction's authoritative match must equal it and a reused lone candidate is
+re-judged against its row locked at the end of the transaction, else the accept aborts
 with the reloadable 409 `ACCEPT_BILLING_CHANGED` and nothing commits; this covers the lone-candidate case only, and when several
 profiles share the phone and none matches uniquely the fresh profile still
 joins the phone-matched account as before); an authored proposal's `preparedFor` that matched the old name moves

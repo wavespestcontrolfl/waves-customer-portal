@@ -214,8 +214,21 @@ describe('matchAcceptCustomerByPhone: the contradiction uses the canonical addre
     expect(await same({ address_line1: 'Unit 7' }, '742 Evergreen Ter')).toBe(true);
   });
 
-  it('the narrow raw-prefix agreement still keeps a match the canonical comparison would split (city spelled differently)', async () => {
-    expect(await same({ address_line1: '100 Palm Ave', city: 'Sarasota' }, '100 Palm Ave, Tampa, FL')).toBe(true);
+  it('the canonical comparison decides alone: a street line that is a prefix of the estimate address does not rescue a different unit, city or ZIP', async () => {
+    // Different explicit units (the raw prefix "45 Oak Dr" matches, the comparator does not).
+    expect(await differs({ address_line1: '45 Oak Dr', address_line2: 'Apt 2' }, '45 Oak Dr Apt 9')).toBe(true);
+    // Same street line, a genuinely different city or ZIP.
+    expect(await differs({ address_line1: '100 Palm Ave', city: 'Sarasota' }, '100 Palm Ave, Tampa, FL')).toBe(true);
+    expect(await differs({ address_line1: '100 Palm Ave', zip: '34236' }, '100 Palm Ave, Sarasota, FL 33602')).toBe(true);
+    // The comparator reads a misspelled city as a different city (full-city equality).
+    expect(await differs({ address_line1: '100 Palm Ave', city: 'Sarasota' }, '100 Palm Ave, Sarasotta, FL')).toBe(true);
+  });
+
+  it('a missing unit, city or ZIP on either side is NOT a mismatch', async () => {
+    expect(await same({ address_line1: '45 Oak Dr', address_line2: 'Apt 2' }, '45 Oak Dr')).toBe(true);
+    expect(await same({ address_line1: '45 Oak Dr' }, '45 Oak Dr Apt 9')).toBe(true);
+    expect(await same({ address_line1: '100 Palm Ave', city: 'Sarasota', zip: '34236' }, '100 Palm Ave')).toBe(true);
+    expect(await same({ address_line1: '100 Palm Ave', city: null, zip: null }, '100 Palm Ave, Tampa, FL 33602')).toBe(true);
   });
 });
 

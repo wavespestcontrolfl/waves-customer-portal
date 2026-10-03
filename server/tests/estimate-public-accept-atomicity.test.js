@@ -318,7 +318,8 @@ jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({})),
 }));
 jest.mock('../services/notification-service', () => ({
-  notifyAdmin: jest.fn(async () => ({})),
+  // A filed row carries an id (the contradicted-phone alert retries a result without one).
+  notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
   notifyCustomer: jest.fn(async () => ({})),
 }));
 jest.mock('../services/payer', () => ({
@@ -4218,8 +4219,9 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     });
     expect(opts.detail).toContain('Bob Example');
     expect(opts.detail).toContain('created without a phone number');
+    expect(opts.detail).not.toMatch(/card/i);
     expect(opts.detail).toContain('merge the two if they are the same person');
-  });
+  }, 30000); // first accept in the file pays the cold lazy-require of the address comparator
 
   const smsToNumber = (digits) => require('../services/messaging/send-customer-message').sendCustomerMessage.mock.calls
     .filter(([args]) => String(args?.to || '').replace(/\D/g, '').endsWith(digits));
@@ -4338,7 +4340,7 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     // The alert fails (both attempts) after the commit; the accept itself must still succeed.
     notify.mockImplementation(async (category, headline, why, opts) => {
       if (String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:')) throw new Error('notifications down');
-      return {};
+      return { id: 'notif-1' };
     });
     const first = await putAccept('tok-b18-r1-x0123456789');
     expect(first.status).toBe(200);
@@ -4347,7 +4349,7 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect(db.__state.tables.customers.find((c) => c.id === newId).internal_notes).toContain('Other customer id: cust-bob');
 
     // Notifications recover; the customer's retry (already-accepted branch) raises it once.
-    notify.mockImplementation(async () => ({}));
+    notify.mockImplementation(async () => ({ id: 'notif-1' }));
     const retry = await putAccept('tok-b18-r1-x0123456789');
     expect(retry.status).toBe(200);
     const replayed = contradictionAlerts().slice(2);
@@ -4463,6 +4465,89 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
       expect((await putAccept('tok-est-b18-l3-x0123456789', { serviceMode: 'one_time' })).status).toBe(200);
       expect(smsToNumber('9415550123').length).toBeGreaterThan(0);
     });
+  });
+
+  test('admin edit of the lone candidate between the match and the row lock aborts for a reload (re-judged against the LOCKED row)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-k1', token: 'tok-b18-k1-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    // Touches: preflight (1), authoritative match (2), then the end-of-transaction locked read (3):
+    // the edit lands just before that lock, after the authoritative match agreed.
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'customers') return;
+      touches += 1;
+      if (touches === 3) bob.email = 'bob@example.com';
+    };
+    conversionOk();
+    const res = await putAccept('tok-b18-k1-x0123456789');
+    db.__state.onTable = null;
+    expect(touches).toBeGreaterThanOrEqual(3);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('the lone candidate losing the phone between the match and the row lock aborts for a reload', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-k3', token: 'tok-b18-k3-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'customers') return;
+      touches += 1;
+      if (touches === 3) bob.phone = '+19415550000';
+    };
+    conversionOk();
+    const res = await putAccept('tok-b18-k3-x0123456789');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+  });
+
+  test('control: the locked re-check passes when the candidate did not change (lone match reused)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-k2', token: 'tok-b18-k2-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow({ email: 'pat@example.com' }));
+    conversionOk();
+    expect((await putAccept('tok-b18-k2-x0123456789')).status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+  });
+
+  test('the alert is retried when the writer returns no row or a suppression, and only a real id counts as filed', async () => {
+    const notify = require('../services/notification-service').notifyAdmin;
+    for (const [id, results] of [
+      ['est-b18-n1', [null, { id: 'notif-9' }]],
+      ['est-b18-n2', [{ id: null, suppressed: true }, { id: 'notif-9' }]],
+    ]) {
+      jest.clearAllMocks();
+      resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      conversionOk();
+      const queue = [...results];
+      notify.mockImplementation(async (category, headline, why, opts) => (
+        String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:') ? queue.shift() : { id: 'notif-1' }));
+      expect((await putAccept(`tok-${id}-x0123456789`)).status).toBe(200);
+      // First attempt returned no row / was suppressed -> a second attempt filed it.
+      expect(contradictionAlerts()).toHaveLength(2);
+    }
+    // Both attempts unfiled -> two attempts only, an error is logged, the accept still succeeds.
+    jest.clearAllMocks();
+    resetStore(recurringPestEstimate({ id: 'est-b18-n3', token: 'tok-est-b18-n3-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    notify.mockImplementation(async (category, headline, why, opts) => (
+      String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:') ? null : { id: 'notif-1' }));
+    expect((await putAccept('tok-est-b18-n3-x0123456789')).status).toBe(200);
+    expect(contradictionAlerts()).toHaveLength(2);
+    require('../services/notification-service').notifyAdmin.mockImplementation(async () => ({ id: 'notif-1' }));
   });
 
   test('a rolled-back contradicted accept raises no alert and leaves no profile or account behind', async () => {
