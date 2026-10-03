@@ -107,7 +107,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // each recheck test controls what is "currently offered" without a DB.
 jest.mock('../services/availability', () => ({ getAvailableSlots: jest.fn() }));
 const mockTranslationClaim = jest.fn(async () => 'ok');
-jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a) }));
+const mockTranslationFacts = jest.fn(async () => null);
+jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a), translationReplyFactsBlockReason: (...a) => mockTranslationFacts(...a) }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
@@ -431,6 +432,21 @@ describe('admin communications SMS route', () => {
       expect(suggestMode.lockSuggestThread).toHaveBeenCalled();
       // on the thread-lock transaction's own connection (a second pooled connection could deadlock a pool of 2)
       expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567', dbi: expect.anything() }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a suggested reply whose facts changed is refused with 409 before the thread lock, and nothing is sent', async () => {
+    mockTranslationFacts.mockResolvedValueOnce('open-times stale (slot_taken)');
+    mockTranslationClaim.mockClear();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/facts in this suggested reply have changed/);
+      expect(mockTranslationClaim).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });

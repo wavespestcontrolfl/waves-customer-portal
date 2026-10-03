@@ -1675,8 +1675,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             const translation = d?.translation && d.translation.customerId === selectedCustomerId ? d.translation : null;
             setTranslationAssist(translation && !translation.pending ? translation : null);
             // the translation of a text that just arrived is still being checked: ask again shortly
-            // (the server stops saying so after a few minutes)
-            if (translation?.pending) retry = setTimeout(() => setAssistRetry((n) => n + 1), 15000);
+            // (the server says how soon, and stops saying so once a trial can no longer be running)
+            if (translation?.pending) retry = setTimeout(() => setAssistRetry((n) => n + 1), Math.max(Number(translation.retryInMs) || 15000, 5000));
           }
         })
         .catch(() => {

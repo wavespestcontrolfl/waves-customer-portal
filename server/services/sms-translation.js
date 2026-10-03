@@ -809,7 +809,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   // whose words promise work nothing here performs
   const intendedActions = Array.isArray(draft?.parsed?.intended_actions)
     ? draft.parsed.intended_actions.map((a) => ({ type: (typeof a === 'string' ? a : a?.type) || null })) : null;
-  const checks = { inbound_parity: inboundParity, ...(openLoopThanks ? { open_loop_thanks: true } : {}), intended_actions: intendedActions, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
+  const checks = { inbound_parity: inboundParity, ...(openLoopThanks ? { open_loop_thanks: true } : {}), intended_actions: intendedActions, send: sendSnapshotFor({ draft, context: thread.context, inboundEnglish: inbound.english }), converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
   if (!draft?.parsed) return { stop: 'draft_unparseable', fields, checks };
   // an open loop is never answered with silence: the live drafter routes an empty draft to a person
   if (!englishReply) return openLoopThanks ? { stop: 'open_loop_thanks_to_person', fields, checks } : { skip: 'no_reply_needed', fields, checks };
@@ -949,6 +949,79 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
   }
 }
 
+/**
+ * What the Agent Review send boundary re-reads before a reviewed draft goes out, taken from the same draft
+ * result publishSuggestion stores it from (same keys, so agent-decision-send-checks reads it unchanged): quoted
+ * open times, payment-status sentences, label facts, re-service promise, live ETA, open loops, visit status.
+ * null when it cannot be built; the inbox then never offers the reply.
+ */
+function sendSnapshotFor({ draft, context, inboundEnglish }) {
+  try {
+    if (!draft?.parsed || typeof draft.parsed.reply !== 'string') return null;
+    const d = require('./sms-shadow-drafter');
+    const facts = draft.factsBlock || '';
+    const at = draft.factsGeneratedAt instanceof Date && Number.isFinite(draft.factsGeneratedAt.getTime()) ? draft.factsGeneratedAt.toISOString() : null;
+    const lanes = d.validateReserviceOffer({
+      reply: draft.parsed.reply, factsBlock: facts, intendedActions: draft.parsed.intended_actions, inboundMessage: inboundEnglish, offeredTimes: draft.parsed.offered_times, context,
+    }).promisedLanes || null;
+    const booked = d.reserviceBookedSnapshot(draft.reserviceBooked);
+    const liveEta = d.buildLiveEtaSnapshot(context);
+    const techNames = d.techNamesFromContext(context);
+    const loopIds = d.visitLoopCommitmentIds(context, facts);
+    const loopStatus = d.visitLoopStatus(context, facts);
+    return {
+      prompt_version: draft.promptVersion || null,
+      input_snapshot: {
+        ...(draft.openTimesSnapshot ? { open_times_snapshot: draft.openTimesSnapshot } : {}),
+        ...(draft.labelFactsSnapshot ? { label_facts_snapshot: draft.labelFactsSnapshot } : {}),
+        ...(Array.isArray(lanes) && lanes.length ? { reservice_lanes_snapshot: lanes } : {}),
+        ...(booked && Object.keys(booked).length ? { reservice_booked_snapshot: booked } : {}),
+        ...(at ? { facts_generated_at: at } : {}),
+        ...(draft.zelleInvoiceId ? { zelle_invoice_id: draft.zelleInvoiceId } : {}),
+        ...(draft.paymentStatusSnapshot ? { payment_status_snapshot: draft.paymentStatusSnapshot } : {}),
+        ...(liveEta ? { live_eta_snapshot: liveEta } : {}),
+        ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+        ...(Array.isArray(loopIds) && loopIds.length ? { visit_loop_commitment_ids: loopIds } : {}),
+        ...(loopStatus ? { visit_loop_status: loopStatus } : {}),
+      },
+    };
+  } catch (err) {
+    logger.warn(`[sms-translation] send snapshot not built: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+/**
+ * The Agent Review send checks, run for a translation card's reply before its send takes the thread lock (as
+ * verifyAgentDecisionForSend runs them for a reviewed draft): an offered time that is gone, a balance that
+ * changed, a technician no longer on the way, a closed loop. Judged on the ENGLISH reply the translation was
+ * checked against. Returns a short reason, or null when the facts still hold. Fails closed.
+ */
+async function translationReplyFactsBlockReason({ trialId, customerId }) {
+  try {
+    if (!trialId || !customerId || !inboxAssistEnabled()) return 'not_readable';
+    const row = await db(TRIAL_TABLE).where({ id: trialId, customer_id: customerId, verdict: 'ready' }).first('checks', 'reply_english', 'inbound_english');
+    const send = parseChecks(row?.checks).send;
+    if (!row?.reply_english || !send?.input_snapshot) return 'not_readable';
+    return await require('./agent-decision-send-checks').agentDecisionSendBlockReason({
+      decision: {
+        id: null, customer_id: customerId, prompt_version: send.prompt_version || null,
+        suggested_message: row.reply_english, inbound_message: row.inbound_english,
+        input_snapshot: { ...send.input_snapshot, sms: { body: row.inbound_english } },
+      },
+      outgoingBody: row.reply_english,
+    });
+  } catch (err) {
+    logger.warn(`[sms-translation] send recheck failed: ${err.code || err.name || 'error'}`);
+    return 'recheck_failed';
+  }
+}
+
+function parseChecks(value) {
+  if (typeof value !== 'string') return value && typeof value === 'object' ? value : {};
+  try { return JSON.parse(value) || {}; } catch { return {}; }
+}
+
 // What staff read beside a held trial, in plain words; anything not listed reads as the generic line.
 const HOLD_WORDS = [
   [/^figures_changed_in_inbound|^meaning_changed_in_inbound|^inbound_/, 'The translation of the customer\'s text could not be confirmed.'],
@@ -961,7 +1034,8 @@ const HOLD_WORDS = [
 ];
 const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_changed_in_inbound|error$|trigger_row_unread)/;
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
+// longer than a trial can run: up to ten thread rows translated one after another, then the draft and its checks
+const INBOX_PENDING_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * Send boundary for a Use Reply text. The suggested reply is sendable only while the card that offered it would
@@ -975,13 +1049,16 @@ const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 async function claimTranslationReplyForSend({ trialId, customerId, to, now = new Date(), dbi = db }) {
   try {
     if (!trialId || !customerId) return 'stale';
-    const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null, dbi);
+    const assist = await inboxAssistFor(customerId, now, to || null, dbi);
     if (!assist || assist.pending || String(assist.trialId) !== String(trialId)) return 'stale';
     if (assist.replyUsed) return 'claimed';
     if (!assist.replyTranslated) return 'stale';
     // The suggest lane's own guard, under the same thread lock: a human answer, a staff reply queued or still
     // with the provider (which the card's read leaves out), or a newer text all refuse the send.
-    const threadLast10 = String(to || '').replace(/\D/g, '').slice(-10) || null;
+    // (the guard scopes by last-10 digits when given them and ignores the customer: an international number
+    // shares its last ten with unrelated US threads, so it is scoped by the customer instead)
+    const identity = require('../utils/phone').phoneIdentityKey(String(to || ''));
+    const threadLast10 = identity && !identity.startsWith('+') ? identity : null;
     const blocker = await require('./sms-suggest-mode').threadHasLiveAnswer(dbi, { threadLast10, customerId, inboundCreatedAt: assist.createdAt, inboundSmsLogId: assist.smsLogId });
     if (blocker) return blocker === 'reply_in_flight' ? 'claimed' : 'stale';
     const claimed = await dbi(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
@@ -1006,16 +1083,17 @@ function quotesLiveEta(replyEnglish, factsBlock) {
  * response policy's rule) and they have not written again. null when the gate is off, there is no
  * such row, or the read fails. The translated reply is offered only for a 'ready' row under 24 hours old (it may
  * quote a visit time); the English of the customer's text is shown only when its translation passed its checks.
- * A reply quoting minutes-away is never offered. With phoneLast10, only when the text came from that number.
+ * A reply quoting minutes-away is never offered. With phone, only when the text came from that number.
  * Read-only: staff send through the ordinary composer.
  */
-async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null, dbi = db) {
+async function inboxAssistFor(customerId, now = new Date(), phone = null, dbi = db) {
   try {
     if (!customerId || !inboxAssistEnabled()) return null;
     const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
     // (a placeholder for a send still in flight is not a message: left out, as every general reader of sms_log does)
     const policy = require('./sms-response-policy');
-    const last10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
+    // (NANP numbers compare on 10 digits, an international number on its whole +digits identity)
+    const { phoneIdentityKey } = require('../utils/phone');
     // their latest text (an applicant's hiring reply on a shared phone is another thread)
     const last = await excludeUnresolvedSendReservations(dbi('sms_log').where({ customer_id: customerId, direction: 'inbound' }))
       .modify((qb) => require('../utils/recruiting-thread-scope').excludeRecruitingSmsLog(qb, 'message_type'))
@@ -1023,22 +1101,35 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null, 
     if (!last) return null;
     // the composer may be pointed at another number than the one this customer wrote from (a shared or edited
     // To number): the reply is offered only into the thread the text came in on
-    if (phoneLast10 && last10(last.from_phone) !== phoneLast10) return null;
+    if (phone && phoneIdentityKey(last.from_phone) !== phoneIdentityKey(phone)) return null;
     // Answered = the shared response policy's rule, as the inbox's own unanswered state: an accepted human
     // reply to that number after the text. A reminder, receipt, review ask or failed send is not an answer.
-    // (An approved-draft send after the text counts without resolving which text it answered: that hides the
-    // card, never shows it.)
+    // An approved-draft send is judged from its own message_drafts row, as the inbox projection does: a
+    // proactive click follow-up is not an answer, and the draft must be anchored to an inbound text.
     const later = await excludeUnresolvedSendReservations(dbi('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
       .where('created_at', '>', last.created_at).whereIn('message_type', policy.HUMAN_REPLY_TYPES)
-      .select('message_type', 'status', 'to_phone');
-    const answered = (later || []).some((o) => last10(o.to_phone) === last10(last.from_phone)
-      && policy.outboundIsAnswer({ direction: 'outbound', messageType: o.message_type, status: o.status, replyToMessageId: last.id }));
+      .select('message_type', 'status', 'to_phone', 'metadata');
+    const sameThread = (later || []).filter((o) => phoneIdentityKey(o.to_phone) === phoneIdentityKey(last.from_phone));
+    const draftIdOf = (o) => (policy.DRAFT_REPLY_TYPES.includes(o.message_type) ? parseChecks(o.metadata).draft_id || null : null);
+    const draftIds = [...new Set(sameThread.map(draftIdOf).filter((id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id)))];
+    const drafts = draftIds.length ? await dbi('message_drafts').whereIn('id', draftIds).select('id', 'intent', 'sms_log_id') : [];
+    const draftById = new Map((drafts || []).map((d) => [String(d.id), d]));
+    const answered = sameThread.some((o) => {
+      const draft = draftById.get(String(draftIdOf(o))) || null;
+      return policy.outboundIsAnswer({
+        direction: 'outbound', messageType: o.message_type, status: o.status,
+        isClickFollowup: draft?.intent === 'click_followup', replyToMessageId: draft?.sms_log_id || null,
+      });
+    });
     if (answered) return null;
     const row = await dbi(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
-    // The trial runs after the webhook answers and takes several model calls: for a text that just arrived, no
-    // row yet means "not finished", and the composer asks again. (An English text never gets a row, so this
-    // stops by itself after the window.)
-    if (!row) return now.getTime() - new Date(last.created_at).getTime() < INBOX_PENDING_WINDOW_MS ? { pending: true, customerId, smsLogId: last.id } : null;
+    // The trial runs after the webhook answers and takes many model calls: for a recent text, no row yet means
+    // "not finished", and the composer asks again (every 15 seconds at first, then every minute). An English
+    // text never gets a row, so this stops by itself after the window.
+    if (!row) {
+      const waited = now.getTime() - new Date(last.created_at).getTime();
+      return waited < INBOX_PENDING_WINDOW_MS ? { pending: true, customerId, smsLogId: last.id, retryInMs: waited < 2 * 60 * 1000 ? 15000 : 60000 } : null;
+    }
     if (row.verdict === 'skipped') return null;
     const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
     const ageMs = now.getTime() - new Date(row.created_at).getTime();
@@ -1051,8 +1142,9 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null, 
     const quotesEta = fresh && quotesLiveEta(row.reply_english, row.facts_block);
     // Nor a reply the drafter paired with an action (pay link, booking, hand-off): nothing performs it from here.
     // A row stored before the action types were recorded reads as unknown, which is withheld too.
-    const storedChecks = typeof row.checks === 'string' ? (() => { try { return JSON.parse(row.checks); } catch { return {}; } })() : (row.checks || {});
-    const needsAction = fresh && !require('./sms-auto-send').autoSendActionsSafe(storedChecks.intended_actions);
+    // ...nor one stored without the snapshot its send-time fact recheck reads.
+    const storedChecks = parseChecks(row.checks);
+    const needsAction = fresh && !(require('./sms-auto-send').autoSendActionsSafe(storedChecks.intended_actions) && storedChecks.send?.input_snapshot);
     // Nor one already taken to the send boundary once (claimTranslationReplyForSend): its outcome may be unknown.
     const replyUsed = fresh && Boolean(storedChecks.send_claimed_at);
     const ready = fresh && !quotesEta && !needsAction && !replyUsed;
@@ -1086,7 +1178,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null, 
 
 module.exports = {
   runTranslationTrial,
-  inboxAssistFor, claimTranslationReplyForSend,
+  inboxAssistFor, claimTranslationReplyForSend, translationReplyFactsBlockReason,
   inboxAssistEnabled,
   needsTranslation,
   trialEnabled,

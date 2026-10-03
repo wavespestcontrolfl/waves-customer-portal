@@ -6,11 +6,14 @@ const mockTrial = jest.fn();
 const mockLater = jest.fn();
 const mockClaim = jest.fn();
 const mockLiveAnswer = jest.fn();
+const mockDrafts = jest.fn();
+const mockSendChecks = jest.fn();
+jest.mock('../services/agent-decision-send-checks', () => ({ agentDecisionSendBlockReason: (...a) => mockSendChecks(...a) }));
 jest.mock('../services/sms-suggest-mode', () => ({ threadHasLiveAnswer: (...a) => mockLiveAnswer(...a) }));
 
 jest.mock('../models/db', () => Object.assign(jest.fn((table) => {
   // sms_log is read twice: the latest inbound (.first) and the outbound rows after it (.select)
-  const q = { where: () => q, whereRaw: () => q, whereIn: () => q, whereNot: () => q, whereNotIn: () => q, whereNull: () => q, orWhereNull: () => q, modify: () => q, orderBy: () => q, limit: () => q, select: () => mockLater(), update: (...a) => mockClaim(...a), first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
+  const q = { where: () => q, whereRaw: () => q, whereIn: () => q, whereNot: () => q, whereNotIn: () => q, whereNull: () => q, orWhereNull: () => q, modify: () => q, orderBy: () => q, limit: () => q, select: () => (table === 'message_drafts' ? mockDrafts() : mockLater()), update: (...a) => mockClaim(...a), first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
   return q;
 }), { raw: (...a) => a }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -19,14 +22,14 @@ jest.mock('../config/feature-gates', () => {
   return { ...actual, gateEnvValue: (name) => (name === 'GATE_SMS_ANY_LANGUAGE_INBOX' ? mockGateOn : actual.gateEnvValue(name)) };
 });
 
-const { inboxAssistFor, claimTranslationReplyForSend } = require('../services/sms-translation');
+const { inboxAssistFor, claimTranslationReplyForSend, translationReplyFactsBlockReason } = require('../services/sms-translation');
 
 const NOW = new Date('2026-10-03T15:00:00Z');
 const READY = {
   id: 7, sms_log_id: 's1', customer_id: 'c1', language: 'Spanish', inbound_original: '¿A qué hora vienen el martes?',
   inbound_english: 'What time are you coming on Tuesday?', reply_english: 'Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.',
   reply_translated: 'Su visita es el martes 6 de oct, 13:00 - 15:00.', verdict: 'ready', hold_reason: null, created_at: new Date('2026-10-03T14:00:00Z'),
-  checks: { intended_actions: [{ type: 'none' }] },
+  checks: { intended_actions: [{ type: 'none' }], send: { prompt_version: 'house_voice_v12_test', input_snapshot: { facts_generated_at: '2026-10-03T14:00:00.000Z' } } },
 };
 
 beforeEach(() => {
@@ -34,6 +37,8 @@ beforeEach(() => {
   mockLast.mockReset(); mockTrial.mockReset(); mockLater.mockReset(); mockClaim.mockReset();
   mockClaim.mockResolvedValue(1);
   mockLiveAnswer.mockReset(); mockLiveAnswer.mockResolvedValue(null);
+  mockDrafts.mockReset(); mockDrafts.mockResolvedValue([]);
+  mockSendChecks.mockReset(); mockSendChecks.mockResolvedValue(null);
   mockLater.mockResolvedValue([]);
   mockLast.mockResolvedValue({ id: 's1', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:00:00Z') });
   mockTrial.mockResolvedValue(READY);
@@ -67,8 +72,53 @@ describe('inboxAssistFor', () => {
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, heldReason: words });
     mockTrial.mockResolvedValue({ ...READY, checks: null });
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: words });
+    // an action-free reply stored without the snapshot its send-time fact recheck reads is withheld too
     mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [] } });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: words });
+    mockTrial.mockResolvedValue({ ...READY, checks: { ...READY.checks, intended_actions: [] } });
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated, heldReason: null });
+  });
+
+  test('an approved draft after the text is judged from its own draft row: a click follow-up is not an answer', async () => {
+    const draftId = '11111111-2222-3333-4444-555555555555';
+    mockLater.mockResolvedValue([{ message_type: 'ai_approved', status: 'delivered', to_phone: '+19415550100', metadata: JSON.stringify({ draft_id: draftId }) }]);
+    mockDrafts.mockResolvedValue([{ id: draftId, intent: 'click_followup', sms_log_id: null }]);
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated });
+    // no draft row to anchor it: not an answer either
+    mockDrafts.mockResolvedValue([]);
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated });
+    // a reviewed draft that answered an inbound text is
+    mockDrafts.mockResolvedValue([{ id: draftId, intent: 'general', sms_log_id: 's1' }]);
+    expect(await inboxAssistFor('c1', NOW)).toBeNull();
+  });
+
+  test('an international number is matched on its whole identity, and its send guard is scoped by the customer', async () => {
+    mockLast.mockResolvedValue({ id: 's1', from_phone: '+449415550100', created_at: new Date('2026-10-03T14:00:00Z') });
+    expect(await inboxAssistFor('c1', NOW, '+19415550100')).toBeNull(); // a US thread sharing the last ten digits
+    expect(await inboxAssistFor('c1', NOW, '+449415550100')).toMatchObject({ replyTranslated: READY.reply_translated });
+    expect(await claimTranslationReplyForSend({ trialId: 7, customerId: 'c1', to: '+449415550100', now: NOW })).toBe('ok');
+    expect(mockLiveAnswer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ threadLast10: null, customerId: 'c1' }));
+  });
+
+  test('send boundary: the Agent Review send checks re-read the reply\'s facts from the stored snapshot', async () => {
+    expect(await translationReplyFactsBlockReason({ trialId: 7, customerId: 'c1' })).toBeNull();
+    expect(mockSendChecks).toHaveBeenCalledWith({
+      decision: expect.objectContaining({
+        customer_id: 'c1', prompt_version: 'house_voice_v12_test', suggested_message: READY.reply_english, inbound_message: READY.inbound_english,
+        input_snapshot: { facts_generated_at: '2026-10-03T14:00:00.000Z', sms: { body: READY.inbound_english } },
+      }),
+      outgoingBody: READY.reply_english,
+    });
+    mockSendChecks.mockResolvedValue('open-times stale (slot_taken)');
+    expect(await translationReplyFactsBlockReason({ trialId: 7, customerId: 'c1' })).toBe('open-times stale (slot_taken)');
+    // no snapshot, no row, or a failed read: refused
+    mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [] } });
+    expect(await translationReplyFactsBlockReason({ trialId: 7, customerId: 'c1' })).toBe('not_readable');
+    mockTrial.mockResolvedValue(undefined);
+    expect(await translationReplyFactsBlockReason({ trialId: 7, customerId: 'c1' })).toBe('not_readable');
+    mockTrial.mockResolvedValue(READY);
+    mockSendChecks.mockRejectedValue(new Error('boom'));
+    expect(await translationReplyFactsBlockReason({ trialId: 7, customerId: 'c1' })).toBe('recheck_failed');
   });
 
   test('send boundary: sendable only while its card would still offer it, and by one sender', async () => {
@@ -80,7 +130,7 @@ describe('inboxAssistFor', () => {
     expect(await claim()).toBe('claimed');
     // a stamp is never lifted: the card stops offering the reply, and a second send is refused without an UPDATE
     mockClaim.mockClear();
-    mockTrial.mockResolvedValue({ ...READY, checks: { intended_actions: [], send_claimed_at: '2026-10-03T14:10:00.000Z' } });
+    mockTrial.mockResolvedValue({ ...READY, checks: { ...READY.checks, send_claimed_at: '2026-10-03T14:10:00.000Z' } });
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, replyUsed: true, heldReason: 'The suggested reply was already used once.' });
     expect(await claim()).toBe('claimed');
     expect(mockClaim).not.toHaveBeenCalled();
@@ -153,11 +203,14 @@ describe('inboxAssistFor', () => {
     expect(mockTrial).toHaveBeenCalledTimes(1);
   });
 
-  test('no row yet for a text that just arrived: pending for 3 minutes, so the composer asks again', async () => {
+  test('no row yet for a recent text: pending, so the composer asks again (15 s at first, then each minute, 15 minutes at most)', async () => {
     mockTrial.mockResolvedValue(undefined);
-    mockLast.mockResolvedValue({ id: 's2', direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:58:30Z') });
-    expect(await inboxAssistFor('c1', NOW)).toEqual({ pending: true, customerId: 'c1', smsLogId: 's2' });
-    mockLast.mockResolvedValue({ id: 's2', direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:56:00Z') });
+    const at = (iso) => mockLast.mockResolvedValue({ id: 's2', from_phone: '+19415550100', created_at: new Date(iso) });
+    at('2026-10-03T14:58:30Z');
+    expect(await inboxAssistFor('c1', NOW)).toEqual({ pending: true, customerId: 'c1', smsLogId: 's2', retryInMs: 15000 });
+    at('2026-10-03T14:50:00Z');
+    expect(await inboxAssistFor('c1', NOW)).toEqual({ pending: true, customerId: 'c1', smsLogId: 's2', retryInMs: 60000 });
+    at('2026-10-03T14:44:00Z');
     expect(await inboxAssistFor('c1', NOW)).toBeNull();
   });
 

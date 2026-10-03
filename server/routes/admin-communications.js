@@ -668,6 +668,15 @@ router.post('/sms', async (req, res, next) => {
     // below, as an Agent Review draft is. It is never also an Agent Review draft.
     if (translationTrialId && agentDecisionId) return res.status(400).json({ error: 'A suggested reply cannot also be an Agent Review draft.' });
     let translationClaim = translationTrialId ? 'stale' : null;
+    // Its facts are re-read first, with the Agent Review send checks and before the lock as those run: an
+    // offered time that is gone, a balance that changed, a technician no longer on the way.
+    if (translationTrialId) {
+      const factsReason = await require('../services/sms-translation').translationReplyFactsBlockReason({ trialId: translationTrialId, customerId: trustedCustomerId });
+      if (factsReason) {
+        logger.info(`[communications] translated reply refused at send: ${String(factsReason).slice(0, 80)}`);
+        return res.status(409).json({ error: 'The facts in this suggested reply have changed since it was written. Clear the message box and write the reply yourself.' });
+      }
+    }
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
@@ -2386,7 +2395,7 @@ router.get('/agent-draft', async (req, res, next) => {
     // It can never break the draft card: any failure reads as no translation.
     let translation = null;
     try {
-      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId, new Date(), phoneLast10 || null) : null;
+      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId, new Date(), phoneLast10 ? String(req.query.phone) : null) : null;
     } catch (err) {
       logger.warn(`[communications] translation assist skipped: ${err.code || err.name || 'error'}`);
     }
