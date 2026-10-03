@@ -42,9 +42,10 @@ const FAILURE_MODES = Object.freeze(FIELDS.flatMap((f) => [`${f}_false_positive`
 const TRANSCRIPT_CHARS = 5000; // what the auditor was shown
 const MIN_EXCERPT_CHARS = 12;
 const LOOKBACK_DAYS = 14;
-// finding id + 12 hex of md5(what the finding says): production's value, the
-// auditor's value, the auditor's model and the snapshotted extraction version.
-const EVIDENCE_KEY_SQL = "(f.id)::text || ':' || left(md5(coalesce(f.old_value, '') || '|' || coalesce(f.new_value, '') || '|' || coalesce((f.detail::jsonb) ->> 'auditor_model', '') || '|' || coalesce((f.detail::jsonb) ->> 'extraction_prompt_version', '')), 12)";
+// finding id + 12 hex of md5(everything the finding says): both values, the
+// excerpt and the whole detail (the auditor's full verdict, its model, the
+// snapshotted extraction version). Any change to any of it is new evidence.
+const EVIDENCE_KEY_SQL = "(f.id)::text || ':' || left(md5(coalesce(f.old_value, '') || '|' || coalesce(f.new_value, '') || '|' || coalesce(f.transcript_excerpt, '') || '|' || coalesce((f.detail::jsonb)::text, '')), 12)";
 
 const envNum = (name, def) => {
   const v = Number(process.env[name]);

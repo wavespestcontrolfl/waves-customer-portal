@@ -178,6 +178,21 @@ describe('the two-model rule for a call finding', () => {
     expect(rows[0].adjudication.auditor.model).toBe('claude-opus-5-5');
   });
 
+  test('a corrected verdict or excerpt on the same model and version is new evidence too', async () => {
+    const callId = await call();
+    // First audit: the auditor never answered the field (stored "false" is a coercion).
+    const id = await finding(callId, { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {}, extraction_prompt_version: 'v2-extract-abc' }) });
+    const disagreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, excerpt: 'We can be there Thursday between 2 and 4.' } }));
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing });
+    expect((await byFinding(id)).adjudication.rule).toBe('auditor_value_missing');
+    // A re-audit answers the field explicitly, same model and version.
+    await database('call_audit_findings').where({ id }).update({ detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: false }, extraction_prompt_version: 'v2-extract-abc' }) });
+    expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing })).toMatchObject({ candidates: 1, adjudicated: 1 });
+    // And a replaced excerpt alone is new evidence as well.
+    await database('call_audit_findings').where({ id }).update({ transcript_excerpt: 'My kitchen has ants again, can someone come out?' });
+    expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing })).toMatchObject({ candidates: 1 });
+  });
+
   test('a second finding about the same call and field is a duplicate, never counted twice', async () => {
     const callId = await call();
     await finding(callId);
