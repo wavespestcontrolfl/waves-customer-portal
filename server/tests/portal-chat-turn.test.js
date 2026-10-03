@@ -160,6 +160,63 @@ test('a card and a hand-off asked for in one response: the card runs first and r
   escalate.mockRestore();
 });
 
+test('a portal escalation checkpoints its exact handoff and completed cards inside the escalation transaction', async () => {
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
+  const escalation = { id: 'esc-1' };
+  const cards = [{ type: 'payments', title: 'Your most recent payment', rows: [{ id: 'p1' }] }];
+  const actions = [{ type: 'tab', label: 'Open Billing', tab: 'billing' }];
+  const trx = jest.fn((table) => {
+    if (table === 'customers') return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(customer) };
+    if (table === 'ai_escalations') return {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      insert: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) }),
+    };
+    if (table === 'agent_sessions') return { where: jest.fn().mockReturnThis(), update: jest.fn().mockResolvedValue(1) };
+    if (table === 'agent_messages') return {
+      insert: jest.fn().mockReturnValue({
+        onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockResolvedValue(1) }),
+      }),
+    };
+    throw new Error(`unexpected table ${table}`);
+  });
+  let insideTransaction = false;
+  const turn = {
+    requestRowId: 'request-row-handoff',
+    assertActive: jest.fn(),
+    fallbackExtras: () => ({ actions, cards }),
+    persistCommittedResult: jest.fn(async (_executor, result) => {
+      expect(insideTransaction).toBe(true);
+      return result;
+    }),
+    rememberCommittedResult: jest.fn((result) => result),
+    transaction: async (_stage, work) => {
+      insideTransaction = true;
+      try { return await work(trx); } finally { insideTransaction = false; }
+    },
+  };
+  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockResolvedValue(true);
+
+  const result = await assistant.escalatePortalTurn(
+    { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
+    'Please help with this charge',
+    'Customer needs billing help',
+    { gap: false, topic: 'billing', turn },
+  );
+
+  expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
+    escalated: true,
+    escalationId: 'esc-1',
+    teamNotified: true,
+    generated: false,
+    actions,
+    cards,
+  }));
+  expect(turn.rememberCommittedResult).toHaveBeenCalledWith(expect.objectContaining({ escalated: true, cards }));
+  expect(result).toEqual(expect.objectContaining({ escalated: true, actions, cards }));
+  notify.mockRestore();
+});
+
 test('a billing keyword hand-off ("refund") still shows the card under the facts gate, with no model call', async () => {
   process.env.GATE_PORTAL_CHAT_FACTS = 'true';
   mockListPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Pest', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
@@ -182,12 +239,25 @@ test('a card built before the model call fails still shows under the fallback te
   mockCreate
     .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'show_recent_payments', input: {} }] })
     .mockRejectedValueOnce(new Error('provider down'));
+  let fallbackExtras;
+  const turn = {
+    requestRowId: 'request-row-card',
+    query: (query) => query,
+    transaction: (_stage, work) => work(db),
+    waitFor: (work) => typeof work === 'function' ? work() : work,
+    assertActive: jest.fn(),
+    providerOptions: () => ({}),
+    registerFallbackExtras: (provider) => { fallbackExtras = provider; },
+  };
 
-  const result = await assistant.processMessage({ message: 'Explain my last charge', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+  const result = await assistant.processMessage({
+    message: 'Explain my last charge', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn,
+  });
 
   expect(result.reply).toMatch(/having trouble/);
   expect(result.cards).toHaveLength(1);
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+  expect(fallbackExtras()).toEqual(expect.objectContaining({ actions: result.actions, cards: result.cards }));
 });
 
 test('GATE_PORTAL_CHAT_VISIT_FACTS on: structured facts to the model, the summary on a card, and the gates compose', async () => {
@@ -402,6 +472,116 @@ test('a portal reply with no button tool carries no actions field', async () => 
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Ghost ants follow moisture.' }] });
   const result = await assistant.processMessage({ message: 'ants', channel: 'portal_chat', channelIdentifier: 'sess-1' });
   expect(result).not.toHaveProperty('actions');
+});
+
+test('a coordinated portal turn passes its deadline signal and retry budget to Anthropic', async () => {
+  wire('portal_chat', 'cust-1');
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Happy to help.' }] });
+  const controller = new AbortController();
+  const providerOptions = {
+    signal: controller.signal,
+    timeout: 4_200,
+    maxRetries: 0,
+  };
+  const turn = {
+    requestRowId: 'request-row-1',
+    query: (query) => query,
+    waitFor: (promise) => promise,
+    assertActive: jest.fn(),
+    providerOptions: jest.fn(() => providerOptions),
+  };
+
+  const result = await assistant.processMessage({
+    message: 'Hi',
+    channel: 'portal_chat',
+    channelIdentifier: 'sess-1',
+    customerId: 'cust-1',
+    turn,
+  });
+
+  expect(result.reply).toBe('Happy to help.');
+  expect(mockCreate).toHaveBeenCalledWith(expect.any(Object), providerOptions);
+  expect(turn.providerOptions).toHaveBeenCalledTimes(1);
+  expect(turn.assertActive).toHaveBeenCalledWith('model response');
+});
+
+test('a coordinated model reply checkpoints and remembers the exact result inside transcript persistence', async () => {
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Happy to help.' }] });
+  let activeStage = null;
+  const rememberedResult = { reply: 'Happy to help.', requestId: 'request-1', generated: true };
+  const turn = {
+    requestRowId: 'request-row-1',
+    assertActive: jest.fn(),
+    providerOptions: () => undefined,
+    transaction: async (stage, work) => {
+      activeStage = stage;
+      try {
+        return await work(db);
+      } finally {
+        activeStage = null;
+      }
+    },
+    persistCommittedResult: jest.fn(async (executor, result) => {
+      expect(activeStage).toBe('assistant reply persistence');
+      expect(executor).toBe(db);
+      expect(result).toEqual(expect.objectContaining({
+        reply: 'Happy to help.',
+        conversationId: 'conv-1',
+        generated: true,
+      }));
+      return rememberedResult;
+    }),
+    rememberCommittedResult: jest.fn((result) => result),
+  };
+
+  const result = await assistant.answerWithTools({
+    conversation: { id: 'conv-1' },
+    message: 'Hi',
+    history: [{ role: 'user', content: 'Hi' }],
+    contextStr: '',
+    lane: { prompt: 'Help the customer.', tools: [], actions: null, cards: null },
+    customerId: 'cust-1',
+    channel: 'portal_chat',
+    turn,
+  });
+
+  expect(turn.persistCommittedResult).toHaveBeenCalledTimes(1);
+  expect(turn.rememberCommittedResult).toHaveBeenCalledWith(rememberedResult);
+  expect(result).toBe(rememberedResult);
+});
+
+test('a controlled provider stops when the coordinated portal signal aborts', async () => {
+  wire('portal_chat', 'cust-1');
+  const controller = new AbortController();
+  let providerObservedAbort = false;
+  mockCreate.mockImplementation((_body, options) => new Promise((_resolve, reject) => {
+    const abort = () => {
+      providerObservedAbort = true;
+      reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    };
+    if (options.signal.aborted) abort();
+    else options.signal.addEventListener('abort', abort, { once: true });
+  }));
+  const turn = {
+    requestRowId: 'request-row-2',
+    query: (query) => query,
+    waitFor: (promise) => promise,
+    assertActive: jest.fn(),
+    providerOptions: () => ({ signal: controller.signal, timeout: 100, maxRetries: 0 }),
+  };
+  const pending = assistant.processMessage({
+    message: 'Hi',
+    channel: 'portal_chat',
+    channelIdentifier: 'sess-1',
+    customerId: 'cust-1',
+    turn,
+  });
+  setTimeout(() => controller.abort(), 10);
+
+  const result = await pending;
+
+  expect(providerObservedAbort).toBe(true);
+  expect(result.reply).toMatch(/trouble/);
 });
 
 test.each([

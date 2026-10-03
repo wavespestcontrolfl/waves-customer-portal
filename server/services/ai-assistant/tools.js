@@ -191,7 +191,8 @@ function addAction(actions, action) {
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
 // `context.customerMessage`: the customer's message this turn.
-async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
+// eslint-disable-next-line complexity -- one explicit branch per declared assistant tool
+async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}, turn = null) {
   try {
     input = input && typeof input === 'object' ? input : {};
 
@@ -209,17 +210,17 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
 
     switch (toolName) {
       case 'get_upcoming_services':
-        return await getUpcomingServices(contextCustomerId);
+        return await getUpcomingServices(contextCustomerId, turn);
       case 'get_pest_advice':
-        return await getPestAdvice(input.topic);
+        return await getPestAdvice(input.topic, turn);
       case 'offer_reschedule_link':
-        return await offerRescheduleLink(contextCustomerId, actions);
+        return await offerRescheduleLink(contextCustomerId, actions, turn);
       case 'open_portal_section':
-        return openPortalSection(input.section, actions);
+        return openPortalSection(input.section, actions, turn);
       case 'show_recent_payments':
-        return await showRecentPayments(contextCustomerId, actions, cards);
+        return await showRecentPayments(contextCustomerId, actions, cards, turn);
       case 'get_recent_visits':
-        return await getRecentVisits(contextCustomerId, actions, cards);
+        return await getRecentVisits(contextCustomerId, actions, cards, turn);
       case 'offer_reservice':
         return await offerReservice(contextCustomerId, input.service_line, actions, context);
       case 'escalate':
@@ -229,14 +230,15 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.error(`Tool ${toolName} failed: ${err.message}`);
     return { error: `Tool failed: ${err.message}` };
   }
 }
 
-async function getUpcomingServices(customerId) {
+async function getUpcomingServices(customerId, turn) {
   if (!customerId) return { services: [] };
-  const services = await db('scheduled_services')
+  const query = db('scheduled_services')
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
     .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
@@ -244,6 +246,7 @@ async function getUpcomingServices(customerId) {
       'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
+  const services = turn ? await turn.query(query, 'upcoming services') : await query;
 
   return {
     services: services.map(s => ({
@@ -271,17 +274,17 @@ function shortDateLabel(dateKey) {
 
 // The visit as the reschedule page loads it, when that page's own GET verdict
 // would let the customer move it; null otherwise. Any failure fails closed.
-async function movableVisit(id) {
+async function movableVisit(id, database = null) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
-  const svc = await loadById(id).catch(() => null);
-  const verdict = svc && await pageEligibility(svc).catch((err) => {
+  const svc = await (database ? loadById(id, database) : loadById(id)).catch(() => null);
+  const verdict = svc && await (database ? pageEligibility(svc, new Date(), database) : pageEligibility(svc)).catch((err) => {
     logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
     return null;
   });
   return verdict?.ok ? svc : null;
 }
 
-async function offerRescheduleLink(customerId, actions) {
+async function offerRescheduleLink(customerId, actions, turn) {
   const NO_LINK = {
     available: false,
     instruction: 'No visit of this customer can be moved online right now. Use the escalate tool so the team moves it.',
@@ -296,7 +299,7 @@ async function offerRescheduleLink(customerId, actions) {
   // none are left: the button cap applies to movable visits, so no run of
   // visits the page refuses can hide a later one it accepts.
   for (let offset = 0; movable.length < MAX_RESCHEDULE_BUTTONS; offset += RESCHEDULE_PAGE) {
-    const rows = await db('scheduled_services')
+    const query = db('scheduled_services')
       .where('customer_id', customerId)
       .where('scheduled_date', '>=', etDateString())
       // The reschedule page's own status set (a 'rescheduled' visit is still
@@ -308,9 +311,12 @@ async function offerRescheduleLink(customerId, actions) {
       .orderBy('id')
       .limit(RESCHEDULE_PAGE)
       .offset(offset);
+    const rows = turn ? await turn.query(query, 'reschedule visits') : await query;
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-      const svc = await movableVisit(row.id);
+      const svc = turn
+        ? await turn.transaction('reschedule eligibility', (database) => movableVisit(row.id, database))
+        : await movableVisit(row.id);
       if (svc) movable.push({ row, property: String(svc.address_line1 || '').trim() });
     }
     if (rows.length < RESCHEDULE_PAGE) break;
@@ -322,6 +328,7 @@ async function offerRescheduleLink(customerId, actions) {
   // goes on the server-built label only: the tool result below is sent to
   // the model, which is given no account data.
   const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
+  turn?.assertActive('reschedule buttons');
   const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
     const type = String(row.service_type || 'visit');
@@ -355,7 +362,7 @@ const methodLabel = (p) => {
   return `${brand} ending in ${p.lastFour}`;
 };
 
-async function showRecentPayments(customerId, actions, cards) {
+async function showRecentPayments(customerId, actions, cards, turn) {
   const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
   if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
   // Every read starts clean: a card from an earlier call in this turn never
@@ -367,8 +374,11 @@ async function showRecentPayments(customerId, actions, cards) {
   addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   let page;
   try {
-    page = await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
+    page = turn
+      ? await turn.transaction('payment history', (database) => listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN, database }))
+      : await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
   } catch (err) {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
     return NOT_SHOWN;
   }
@@ -402,6 +412,7 @@ async function showRecentPayments(customerId, actions, cards) {
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };
   }
+  turn?.assertActive('payment card');
   cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
   return {
     shown: true,
@@ -413,7 +424,7 @@ async function showRecentPayments(customerId, actions, cards) {
   };
 }
 
-async function getRecentVisits(customerId, actions, cards) {
+async function getRecentVisits(customerId, actions, cards, turn) {
   const UNAVAILABLE = { visits: null, instruction: 'The visit history could not be read. Tell the customer the Completed visits page has it and, for a question about a specific visit, use the escalate tool.' };
   if (!customerId || !Array.isArray(actions) || !Array.isArray(cards)) return UNAVAILABLE;
   // Every read starts clean, and the page that lists every completed visit
@@ -423,8 +434,13 @@ async function getRecentVisits(customerId, actions, cards) {
   addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   let page;
   try {
-    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
+    page = turn
+      ? await turn.transaction('service history', (database) => listPortalServiceHistory(customerId, {
+        limit: RECENT_VISITS_READ, completedOnly: true, database,
+      }))
+      : await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
   } catch (err) {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
     return UNAVAILABLE;
   }
@@ -453,6 +469,7 @@ async function getRecentVisits(customerId, actions, cards) {
     // that the assistant never names a product brand.
     productKinds: [...new Set((svc.products || []).map((p) => String(p.product_category || '').trim()).filter(Boolean))],
   }));
+  turn?.assertActive('visit card');
   cards.push({
     type: 'visits',
     title: rows.length === 1 ? 'Your most recent visit' : `Your last ${rows.length} visits`,
@@ -584,19 +601,28 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   };
 }
 
-function openPortalSection(section, actions) {
+function openPortalSection(section, actions, turn) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
+  turn?.assertActive('portal button');
   addAction(actions, { type: 'tab', label: target.label, tab: target.tab });
   return { shown: true, instruction: `An "${target.label}" button is now shown under your reply. Tell the customer to tap it.` };
 }
 
-async function getPestAdvice(topic) {
+async function getPestAdvice(topic, turn) {
   try {
     const WikiQA = require('../knowledge/wiki-qa');
-    const result = await WikiQA.query(topic, { source: 'ai_assistant' });
+    const read = () => WikiQA.query(topic, { source: 'ai_assistant' }, turn ? {
+      signal: turn.signal,
+      remainingMs: turn.remainingMs,
+      assertActive: turn.assertActive,
+      read: (query, stage) => turn.query(query, stage),
+      write: (work, stage) => turn.transaction(stage, work),
+    } : undefined);
+    const result = turn ? await turn.waitFor(read, 'knowledge answer') : await read();
     return { answer: result.answer, sources: result.articlesUsed };
-  } catch {
+  } catch (err) {
+    if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
     return { answer: 'Knowledge base unavailable. General SWFL advice: contact your technician for specific pest identification and treatment recommendations.' };
   }
 }

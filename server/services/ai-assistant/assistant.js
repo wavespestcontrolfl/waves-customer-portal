@@ -21,7 +21,59 @@ const { recordGap } = require('../agent-gap-reports');
 function recordEscalationGap(customerMessage, reason) {
   const summary = (reason && String(reason).trim()) || customerMessage;
   const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
-  recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+  return recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+}
+
+async function escalationCustomer(customerId, executor = db) {
+  return customerId ? executor('customers').where('id', customerId).first() : null;
+}
+
+function escalationPriority(customerMessage) {
+  const lower = String(customerMessage || '').toLowerCase();
+  if (['cancel', 'lawsuit', 'bbb', 'complaint', 'not happy', 'refund']
+    .some((word) => lower.includes(word))) return 'urgent';
+  return 'normal';
+}
+
+const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
+const waitFor = (work, turn, stage) => turn
+  ? turn.waitFor(work, stage)
+  : (typeof work === 'function' ? work() : work);
+
+// The same assistant serves coordinated portal turns and uncoordinated SMS.
+// Keep the persistence/deadline fork at that boundary so the model/tool loop
+// below follows one path in both channels.
+function assistantTurnExecution(turn) {
+  return {
+    requestFields: turn ? { portal_chat_request_id: turn.requestRowId } : {},
+    assertActive(stage) {
+      if (turn) turn.assertActive(stage);
+    },
+    providerOptions() {
+      return turn ? turn.providerOptions() : undefined;
+    },
+    escalationOptions(options) {
+      return turn ? { ...options, turn } : options;
+    },
+    write(stage, operation) {
+      return turn?.transaction ? turn.transaction(stage, operation) : operation(db);
+    },
+    persistCommittedResult(executor, result) {
+      return turn?.persistCommittedResult
+        ? turn.persistCommittedResult(executor, result)
+        : result;
+    },
+    rememberCommittedResult(result) {
+      return turn?.rememberCommittedResult ? turn.rememberCommittedResult(result) : result;
+    },
+    rethrowDeadline(err) {
+      if (err?.code === 'PORTAL_CHAT_DEADLINE') throw err;
+    },
+    handleWriteError(err, message) {
+      if (err?.code === 'PORTAL_CHAT_DEADLINE' || turn) throw err;
+      logger.error(`[ai-assistant] ${message}: ${err.message}`);
+    },
+  };
 }
 
 let Anthropic;
@@ -323,7 +375,7 @@ class WavesAssistant {
    * Process an incoming message from any channel.
    * Returns { reply, conversationId, escalated, escalationId }
    */
-  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty }) {
+  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty, turn = null }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[ai-assistant] ANTHROPIC_API_KEY not configured');
       return { reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control", escalated: false };
@@ -332,7 +384,7 @@ class WavesAssistant {
     // 1. Find or create conversation (respecting 30-min timeout)
     let conversation;
     try {
-      conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone);
+      conversation = await this.getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn);
     } catch (convErr) {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
       return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
@@ -342,21 +394,27 @@ class WavesAssistant {
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
     const lane = portalLane(channel, { secondaryProperty });
+    turn?.registerFallbackExtras?.(() => laneExtras(lane));
     const trigger = this.matchedEscalationTrigger(message, channel);
 
     // 3. Save the user message
     try {
-      await db('agent_messages').insert({
-        conversation_id: conversation.id,
-        role: 'user',
-        content: message,
-        channel,
-      });
-      await db('agent_sessions').where('id', conversation.id).update({
-        message_count: (conversation.message_count || 0) + 1,
-        last_activity_at: new Date(),
-        timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
-      });
+      const persist = async (executor) => {
+        await executor('agent_messages').insert({
+          conversation_id: conversation.id,
+          role: 'user',
+          content: message,
+          channel,
+          ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
+        }).onConflict().ignore();
+        await executor('agent_sessions').where('id', conversation.id).update({
+          message_count: (conversation.message_count || 0) + 1,
+          last_activity_at: new Date(),
+          timeout_at: new Date(Date.now() + CONVERSATION_TIMEOUT_MS),
+        });
+      };
+      if (turn) await turn.transaction('user message persistence', persist);
+      else await persist(db);
     } catch (msgErr) {
       logger.error(`[ai-assistant] Failed to save user message: ${msgErr.message}`);
     }
@@ -368,16 +426,18 @@ class WavesAssistant {
       // lane the customer still gets the payment card and Open Billing
       // button under the hand-off reply, as a model-led hand-off would give.
       if (topic === 'billing' && lane.payments) {
-        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
+        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards, lane.context, turn);
       }
-      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
+      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', {
+        topic, ...(turn ? { turn } : {}),
+      });
       return { ...escResult, ...laneExtras(lane) };
     }
 
     // 5. Build conversation history for Claude
     // Portal chat reads the newest messages; other channels keep the original
     // oldest-first read.
-    const history = await this.buildHistory(conversation.id, { newest: lane.portal === true });
+    const history = await this.buildHistory(conversation.id, { newest: lane.portal === true, turn });
     // The customer's own words this turn, which the re-service tool
     // classifies (the model's reading of them never decides what is covered).
     // Only this message counts: an earlier report is never carried forward
@@ -395,7 +455,7 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
-      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
+      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel, turn });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       // A card or button a tool already built this turn still shows under
@@ -410,8 +470,9 @@ class WavesAssistant {
    * turn with the hand-off reply), saves and returns the reply. Throws on a
    * provider failure; processMessage owns the fallback reply.
    */
-  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel }) {
+  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel, turn = null }) {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const execution = assistantTurnExecution(turn);
 
     let messages = history;
     let finalReply = '';
@@ -434,7 +495,8 @@ class WavesAssistant {
     // Tool-use loop — Claude may call multiple tools before responding
     let lastResponse = null;
     let loopExhausted = true;
-    for (let turn = 0; turn < 5; turn++) {
+    for (let round = 0; round < 5; round++) {
+      execution.assertActive('model round');
       const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
         model: MODEL,
         ...anthropicEffortConfig(MODEL),
@@ -442,13 +504,14 @@ class WavesAssistant {
         system,
         tools: lane.tools,
         messages: withCacheBreakpoint(messages),
-      }), { laneId: 'portal_assistant' });
+      }, execution.providerOptions()), { laneId: 'portal_assistant' });
+      execution.assertActive('model response');
 
       // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
       // customer turns is the prod verification signal.
       const u = response.usage || {};
       logger.info(
-        `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
+        `[ai-assistant] usage turn=${round} in=${u.input_tokens ?? 0} ` +
         `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
         `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
       );
@@ -481,27 +544,35 @@ class WavesAssistant {
       for (const toolUse of ordered) {
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
-          const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-            { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
           // A card or button an earlier tool in this turn produced still shows
           // under the hand-off reply (a charge question shows the card AND
           // hands off the "why"), except a free re-service booking button: a
           // turn that hands off is one the team decides.
           if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
+          const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
+            execution.escalationOptions({ gap: toolUse.input.not_supported === true, topic: toolUse.input.topic }));
           return { ...escResult, ...laneExtras(lane) };
         }
 
-        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards, lane.context);
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards, lane.context, turn);
+        execution.assertActive('tool result');
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
 
         // Log tool usage
-        await db('agent_messages').insert({
-          conversation_id: conversation.id,
-          role: 'tool_use',
-          content: toolUse.name,
-          tool_calls: JSON.stringify(toolUse.input),
-          tool_results: JSON.stringify(result),
-        }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
+        try {
+          const row = {
+            conversation_id: conversation.id,
+            role: 'tool_use',
+            content: toolUse.name,
+            tool_calls: JSON.stringify(toolUse.input),
+            tool_results: JSON.stringify(result),
+            ...execution.requestFields,
+          };
+          await execution.write('tool transcript', (executor) => executor('agent_messages').insert(row));
+        } catch (err) {
+          execution.rethrowDeadline(err);
+          logger.error(`[ai-assistant] Failed to log tool use: ${err.message}`);
+        }
       }
 
       // Continue the loop with tool results
@@ -524,30 +595,43 @@ class WavesAssistant {
       return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
     }
 
-    // Save the assistant reply
-    await db('agent_messages').insert({
-      conversation_id: conversation.id,
-      role: 'assistant',
-      content: finalReply,
-      channel,
-      sent_to_customer: true,
-    }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
-
-    // generated marks true model output — canned fallbacks and the
-    // deterministic escalation template never carry it, so the portal's
-    // "report AI content" affordance only attaches to real AI replies.
-    return {
+    // The transcript and the exact portal response are one durable outcome.
+    // If final receipt cleanup later fails, the coordinator can return and
+    // replay this checkpoint without regenerating the answer.
+    let replyResult = {
       reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
       // Buttons the portal tools asked for, shown under the reply.
       ...laneExtras(lane),
     };
+    try {
+      const row = {
+        conversation_id: conversation.id,
+        role: 'assistant',
+        content: finalReply,
+        channel,
+        sent_to_customer: true,
+        ...execution.requestFields,
+      };
+      const persisted = await execution.write('assistant reply persistence', async (executor) => {
+        await executor('agent_messages').insert(row).onConflict().ignore();
+        return execution.persistCommittedResult(executor, replyResult);
+      });
+      replyResult = execution.rememberCommittedResult(persisted);
+    } catch (err) {
+      execution.handleWriteError(err, 'Failed to save reply');
+    }
+
+    // generated marks true model output — canned fallbacks and the
+    // deterministic escalation template never carry it, so the portal's
+    // "report AI content" affordance only attaches to real AI replies.
+    return replyResult;
 
   }
 
   /**
    * Get or create an active conversation. Timeout after 30 min of inactivity.
    */
-  async getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone) {
+  async getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone, turn = null) {
     const now = new Date();
     const identifier = channelIdentifier || customerPhone;
 
@@ -563,10 +647,10 @@ class WavesAssistant {
       .where({ channel, channel_identifier: identifier, status: 'active' });
     if (customerId) existingQuery.where({ customer_id: customerId });
     else existingQuery.whereNull('customer_id');
-    const existing = await existingQuery
+    const existing = await runQuery(existingQuery
       .where('timeout_at', '>', now)
       .orderBy('last_activity_at', 'desc')
-      .first();
+      .first(), turn, 'conversation lookup');
 
     // Do not carry legacy full-context snapshots/history across this security
     // boundary. Those conversations may contain model replies grounded in
@@ -582,8 +666,9 @@ class WavesAssistant {
       .where({ channel, channel_identifier: identifier, status: 'active' });
     if (customerId) staleQuery.where({ customer_id: customerId });
     else staleQuery.whereNull('customer_id');
-    await staleQuery
-      .update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+    if (!turn) {
+      await staleQuery.update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+    }
 
     // Keep model context deliberately small. The legacy full-context
     // aggregator included payment history, property flags, SMS/call summaries,
@@ -592,10 +677,10 @@ class WavesAssistant {
     let contextSnapshot = null;
     try {
       if (customerId) {
-        const customer = await db('customers')
+        const customer = await runQuery(db('customers')
           .where({ id: customerId })
           .select('first_name')
-          .first();
+          .first(), turn, 'customer context');
         if (customer?.first_name) {
           contextSnapshot = { version: MINIMAL_CONTEXT_VERSION, firstName: customer.first_name };
         } else {
@@ -607,7 +692,7 @@ class WavesAssistant {
     }
 
     // Create new conversation — pass plain object for jsonb column (Knex serializes it)
-    const [conv] = await db('agent_sessions').insert({
+    const conversationRow = {
       customer_id: customerId || null,
       channel,
       channel_identifier: identifier,
@@ -616,7 +701,21 @@ class WavesAssistant {
       timeout_at: new Date(now.getTime() + CONVERSATION_TIMEOUT_MS),
       message_count: 0,
       context_snapshot: contextSnapshot,
-    }).returning('*');
+    };
+    let conv;
+    if (turn) {
+      conv = await turn.transaction('conversation creation', async (trx) => {
+        const scopedStale = trx('agent_sessions')
+          .where({ channel, channel_identifier: identifier, status: 'active' });
+        if (customerId) scopedStale.where({ customer_id: customerId });
+        else scopedStale.whereNull('customer_id');
+        await scopedStale.update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
+        const [created] = await trx('agent_sessions').insert(conversationRow).returning('*');
+        return created;
+      });
+    } else {
+      [conv] = await db('agent_sessions').insert(conversationRow).returning('*');
+    }
 
     return conv;
   }
@@ -628,12 +727,12 @@ class WavesAssistant {
   // so a long chat still reaches its latest turn (portal chat). Without it,
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
-  async buildHistory(conversationId, { newest = false } = {}) {
-    const msgs = await db('agent_messages')
+  async buildHistory(conversationId, { newest = false, turn = null } = {}) {
+    const msgs = await runQuery(db('agent_messages')
       .where('conversation_id', conversationId)
       .whereIn('role', ['user', 'assistant'])
       .orderBy([{ column: 'created_at', order: newest ? 'desc' : 'asc' }, ...(newest ? [{ column: 'id', order: 'desc' }] : [])])
-      .limit(20);
+      .limit(20), turn, 'conversation history');
     const ordered = newest ? msgs.reverse() : msgs;
     // The model's input must open with a customer turn: a newest-20 window
     // can start on an assistant row, which is dropped.
@@ -658,16 +757,12 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic } = {}) {
-    const customer = conversation.customer_id
-      ? await db('customers').where('id', conversation.customer_id).first()
-      : null;
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, turn = null } = {}) {
+    if (turn) return this.escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, turn });
+    const customer = await escalationCustomer(conversation.customer_id);
 
     // Determine priority
-    const lower = (customerMessage || '').toLowerCase();
-    let priority = 'normal';
-    if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
-    if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
+    const priority = escalationPriority(customerMessage);
 
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
@@ -738,12 +833,99 @@ class WavesAssistant {
     };
   }
 
+  async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, turn }) {
+    const priority = escalationPriority(customerMessage);
+
+    const persisted = await turn.transaction('escalation persistence', async (trx) => {
+      turn.assertActive('escalation persistence');
+      const customer = await escalationCustomer(conversation.customer_id, trx);
+      let escalation = await trx('ai_escalations')
+        .where({ portal_chat_request_id: turn.requestRowId }).first();
+      let created = false;
+      if (!escalation) {
+        [escalation] = await trx('ai_escalations').insert({
+          conversation_id: conversation.id,
+          customer_id: conversation.customer_id,
+          reason: this.classifyEscalation(customerMessage),
+          summary: reason,
+          customer_message: customerMessage,
+          ai_draft_response: null,
+          priority,
+          status: 'pending',
+          portal_chat_request_id: turn.requestRowId,
+        }).returning('*');
+        created = true;
+      }
+
+      await trx('agent_sessions').where('id', conversation.id).update({
+        escalated: true,
+        escalation_reason: reason,
+        status: 'escalated',
+        updated_at: new Date(),
+      });
+      const teamNotified = await this.notifyTeamOfEscalation({
+        escalation, topic, conversation, customer, customerMessage, trx,
+      });
+      const reply = escalationReply({
+        isPortal: true,
+        teamNotified,
+        firstName: String(customer?.first_name || '').trim(),
+      });
+      await trx('agent_messages').insert({
+        conversation_id: conversation.id,
+        role: 'assistant',
+        content: reply,
+        channel: conversation.channel,
+        sent_to_customer: true,
+        portal_chat_request_id: turn.requestRowId,
+      }).onConflict().ignore();
+      // The escalation, customer transcript, bell and the exact response the
+      // portal must show are one durable outcome. Optional work after this
+      // transaction (gap telemetry / urgent SMS) may consume the turn budget;
+      // checkpointing here lets the coordinator return or replay this handoff
+      // instead of replacing it with a generic escalated:false timeout.
+      const handoff = {
+        reply,
+        conversationId: conversation.id,
+        escalated: true,
+        escalationId: escalation.id,
+        teamNotified,
+        generated: false,
+        ...turn.fallbackExtras(),
+      };
+      await turn.persistCommittedResult(trx, handoff);
+      return { customer, escalation, created, handoff };
+    });
+    turn.rememberCommittedResult(persisted.handoff);
+
+    if (gap) {
+      try {
+        await waitFor(() => recordEscalationGap(customerMessage, reason), turn, 'gap persistence');
+      } catch { /* gap reports remain best-effort after the escalation commits */ }
+    }
+
+    // The existing urgent internal SMS remains portal behavior. Only the
+    // attempt that created the durable escalation may send it; a request
+    // retry that reconciles the same row never sends it again.
+    if (priority === 'urgent' && persisted.created && process.env.ADAM_PHONE) {
+      try {
+        const TwilioService = require('../twilio');
+        await waitFor(() => TwilioService.sendSMS(process.env.ADAM_PHONE,
+          `🚨 AI Escalation (${priority})\n${persisted.customer ? persisted.customer.first_name + ' ' + persisted.customer.last_name : 'Unknown'}\nReason: ${reason}\nMsg: "${(customerMessage || '').substring(0, 100)}"`,
+          { messageType: 'internal_alert' }), turn, 'urgent escalation notification');
+      } catch { /* internal SMS is best-effort; the operator bell remains truth */ }
+    }
+
+    logger.info(`AI escalated: ${conversation.id} reason="${reason}" priority=${priority}`);
+    return persisted.handoff;
+  }
+
   /**
    * Ring the admin bell for a portal-chat hand-off. Returns true only when a
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, trx = null }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
@@ -766,6 +948,7 @@ class WavesAssistant {
         // 4000 characters), read from the bell's "Show full text".
         detail: String(customerMessage || ''),
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
+        ...(trx ? { trx } : {}),
       });
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
       // { id: null, suppressed: true } when the bell was withheld (a demo
