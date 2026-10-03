@@ -7147,6 +7147,35 @@ function JobCardTank({ tank, serviceId, D }) {
   );
 }
 
+// Why the customer booked this visit (GATE_JOB_CARD_CUSTOMER_CONTEXT). Their
+// own typed or texted words are quoted; a call is an AI summary and an
+// office entry is the office's wording, so neither is quoted.
+const JOB_CARD_REQUEST_LABELS = {
+  picker: { label: "Customer wrote (re-service page)", quoted: true },
+  text: { label: "Customer texted", quoted: true },
+  call: { label: "From the call (AI summary)", quoted: false },
+  office: { label: "Office note on the booking", quoted: false },
+};
+
+export function JobCardCustomerRequest({ request, D }) {
+  if (!request || (!request.text && !request.pests?.length)) return null;
+  const how = JOB_CARD_REQUEST_LABELS[request.source] || { label: "Why they booked", quoted: false };
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Why they booked</div>
+      {request.text && (
+        <div>
+          <span style={{ color: D.muted }}>{how.label}: </span>
+          {how.quoted ? `\u201C${request.text}\u201D` : request.text}
+        </div>
+      )}
+      {request.pests?.length > 0 && (
+        <div><span style={{ color: D.muted }}>Pests picked: </span>{request.pests.join(", ")}</div>
+      )}
+    </div>
+  );
+}
+
 function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7161,6 +7190,7 @@ function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
       {card.notes?.chemicalSensitivity && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
       )}
