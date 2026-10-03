@@ -600,26 +600,31 @@ describe('customer surfaces', () => {
 
   test('send: the email provider call runs under the comms fence and refuses a notice repointed before dispatch', async () => {
     mockDb.reset(book());
-    let handoff = null;
-    emailLeg.mockImplementation(async (args) => { handoff = args.sendOptions.withProviderHandoff; return { sent: true, attempted: true }; });
+    emailLeg.mockImplementation(async (args) => {
+      // the handoff runs while the letter is still claimed (sending), as in a real send
+      const handoff = args.sendOptions.withProviderHandoff;
+      const dispatch = jest.fn(async () => {});
+      const to = 'cust1@example.com';
+      expect(await handoff(dispatch, { to })).toEqual({ ok: true });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      // the recipient is judged under the fence: a corrected address, or a billing contact that moved, is refused
+      mockDb.store.customers[0].email = 'corrected1@example.com';
+      const moved = jest.fn(async () => {});
+      expect(await handoff(moved, { to })).toEqual({ ok: false, reason: 'recipient_changed' });
+      expect(await handoff(moved)).toEqual({ ok: false, reason: 'recipient_changed' });
+      expect(moved).not.toHaveBeenCalled();
+      mockDb.store.customers[0].email = to;
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
+      const late = jest.fn(async () => {});
+      expect(await handoff(late, { to })).toEqual({ ok: false, reason: 'notice_repointed' });
+      expect(late).not.toHaveBeenCalled();
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
+      return { sent: true, attempted: true };
+    });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    const dispatch = jest.fn(async () => {});
-    const to = 'cust1@example.com';
-    expect(await handoff(dispatch, { to })).toEqual({ ok: true });
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    // the recipient is judged under the fence: a corrected address, or a billing contact that moved, is refused
-    mockDb.store.customers[0].email = 'corrected1@example.com';
-    const moved = jest.fn(async () => {});
-    expect(await handoff(moved, { to })).toEqual({ ok: false, reason: 'recipient_changed' });
-    expect(await handoff(moved)).toEqual({ ok: false, reason: 'recipient_changed' });
-    expect(moved).not.toHaveBeenCalled();
-    mockDb.store.customers[0].email = to;
-    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
-    const late = jest.fn(async () => {});
-    expect(await handoff(late, { to })).toEqual({ ok: false, reason: 'notice_repointed' });
-    expect(late).not.toHaveBeenCalled();
     // the text leg's last abort point re-reads ownership the same way
     const check = smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck;
+    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
     expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
     mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
     expect(await check()).toEqual({ ok: true });
@@ -663,7 +668,7 @@ describe('customer surfaces', () => {
       const verdict = await sendOptions.withProviderHandoff(dispatch, { to: 'cust1@example.com' });
       expect(verdict).toEqual({ ok: false, reason: 'recipient_changed' });
       // customer-comms, then the address key, held in that order
-      expect(mockDb.raw.mock.calls.map((c) => String(c[1][0]))).toEqual([expect.stringMatching(/^customer-comms:/), 'customer-email:cust1@example.com']);
+      expect(mockDb.raw.mock.calls.map((c) => String(c[1][0])).filter((k) => /^customer-(comms|email):/.test(k))).toEqual([expect.stringMatching(/^customer-comms:/), 'customer-email:cust1@example.com']);
       return { sent: false, attempted: true }; // the library's aborted-before-dispatch shape
     });
     const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
@@ -671,6 +676,54 @@ describe('customer surfaces', () => {
     expect(res).toMatchObject({ sent: 0, uncertain: 0, inFlight: 1 });
     expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
     expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'recipient_changed' });
+  });
+
+  test('awaiting_lines: a customer with an approved line not yet prepared gets no partial letter; the bucket counts it; once prepared, one letter carries both lines', async () => {
+    const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1)] });
+    // a second approved positive-delta row, same customer, with no notice yet (a scheduling hold)
+    b.rate_review_snapshots.push(fixture.snapshotRow(2, { id: ROW(2), customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'approved', delta_cents: 300, notice_id: null }));
+    mockDb.reset(b);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts).toMatchObject({ letters: 0, awaitingLines: 1 });
+    expect(out.customers[0]).toMatchObject({ reason: 'awaiting_lines' });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW })).toMatchObject({ ok: false, reason: 'nothing_to_send' });
+    expect(emailLeg).not.toHaveBeenCalled();
+    // the missing line is prepared (notice created and linked): one letter, both lines
+    mockDb.store.price_change_notices.push({ ...second, rate_review_row_id: ROW(2) });
+    mockDb.store.rate_review_snapshots[1].notice_id = second.id;
+    mockDb.store.scheduled_services.push(...openVisitsFor([second]));
+    const after = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(after.counts).toMatchObject({ letters: 1, lines: 2, awaitingLines: 0 });
+  });
+
+  test('send: a rate mutation committed between the post-claim revalidation and the provider handoff lock → no provider call, released with the rule\'s reason (email and text)', async () => {
+    for (const leg of ['email', 'sms']) {
+      mockDb.reset(book(leg === 'sms' ? { customers: [customer(1, { email: null })] } : {}));
+      emailLeg.mockReset();
+      smsLeg.mockReset().mockResolvedValue({ sent: false, attempted: false });
+      const dispatch = jest.fn(async () => ({ ok: true }));
+      if (leg === 'email') {
+        emailLeg.mockImplementation(async ({ sendOptions }) => {
+          mockDb.store.scheduled_services.forEach((v) => { v.estimated_price = '130.00'; }); // repriced after the revalidation
+          expect(await sendOptions.withProviderHandoff(dispatch, { to: 'cust1@example.com' })).toEqual({ ok: false, reason: 'line_gone' });
+          return { sent: false, attempted: true };
+        });
+      } else {
+        emailLeg.mockResolvedValue({ sent: false, attempted: false });
+        smsLeg.mockImplementation(async ({ sendOptions }) => {
+          mockDb.store.scheduled_services.forEach((v) => { v.estimated_price = '130.00'; });
+          const verdict = await sendOptions.withSmsHandoff(dispatch);
+          expect(verdict).toMatchObject({ ok: false, code: 'ELIGIBILITY:line_gone' });
+          return { sent: false, attempted: false, blockedCode: verdict.code };
+        });
+      }
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ sent: 0, uncertain: 0 });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+      expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('line_gone');
+    }
   });
 
   test('send: the text pointer counts as delivered only on provider acceptance', async () => {
@@ -1216,6 +1269,16 @@ describe('customer surfaces', () => {
       expect(mockDb.store.rate_review_sms_failures).toEqual([]);
     });
 
+    test('a retained unrelated sid is gone after the 72-hour expiry (the next failure callback sweeps it)', async () => {
+      mockDb.reset(book());
+      mockDb.store.rate_review_sms_failures = [
+        { twilio_sid: 'SM-OLD', status: 'failed', created_at: new Date(Date.now() - 80 * 3600 * 1000) },
+        { twilio_sid: 'SM-FRESH', status: 'failed', created_at: new Date(Date.now() - 2 * 3600 * 1000) },
+      ];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM-NEW', status: 'failed' }, { dbh: mockDb });
+      expect(mockDb.store.rate_review_sms_failures.map((r) => r.twilio_sid).sort()).toEqual(['SM-FRESH', 'SM-NEW']);
+    });
+
     test('a failure reconciled onto a delivered notice removes its sid row', async () => {
       mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: false, sms_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), sms_sid: 'SM1' } })] }));
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'sent' }];
@@ -1292,6 +1355,20 @@ describe('customer surfaces', () => {
       await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
       expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
       expect(meta().prepay_unstaged).toBe(true);
+    });
+
+    test('portal: a STAGED prepaid notice whose predecessor term\'s renewal window was edited afterwards is not advertised', async () => {
+      const prepay = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+      });
+      const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+      b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', next_term_prepay_amount: '484.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+      mockDb.reset(b);
+      expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+      mockDb.store.annual_prepay_terms[0].term_end = '2027-06-14'; // dates edited after staging
+      expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
     });
 
     test('prepaid with the renewal already recorded (a successor term exists): flagged for a hand check, not reset for a re-send', async () => {
@@ -1411,7 +1488,7 @@ describe('customer surfaces', () => {
     });
     const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
     b.annual_prepay_terms = [
-      { id: 'term-1', customer_id: CUSTOMER(1), status: 'active', renewal_decision: null, term_end: '2027-05-14', coverage_service_type: 'Quarterly Pest Control' },
+      { id: 'term-1', customer_id: CUSTOMER(1), status: 'active', renewal_decision: null, term_start: '2026-05-15', term_end: '2027-05-14', prepay_amount: '468.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control' },
     ];
     mockDb.reset(b);
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);

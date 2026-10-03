@@ -82,6 +82,7 @@ const REASONS = Object.freeze({
   renewal_declined: 'Customer declined to renew the prepaid plan',
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
   rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
+  awaiting_lines: 'Another approved line for this customer is not prepared yet (a scheduling hold?) — the letter waits so it goes out once, complete',
   line_gone: 'No open application left on this plan line, or one was repriced since the notice was prepared',
   apply_hold: 'The plan line has a structure the nightly rate change cannot carry out (add-ons, a discount, prepaid money, a parked reschedule, more than one series, a replaced plan) — fix it before sending',
 });
@@ -461,10 +462,15 @@ async function loadBatch(dbh, batchKey, today) {
     .where({ batch_key: batchKey, status: 'approved' })
     .whereNull('notice_id')
     .where('delta_cents', '>', 0)
-    .select('id');
+    .select('id', 'customer_id');
   const noticeIds = snapshots.map((s) => s.notice_id);
   const notices = noticeIds.length ? await dbh('price_change_notices').whereIn('id', noticeIds) : [];
-  return { ...(await loadLineContext(dbh, { snapshots, notices, today })), unscheduled: approvedUnscheduled.length };
+  return {
+    ...(await loadLineContext(dbh, { snapshots, notices, today })),
+    unscheduled: approvedUnscheduled.length,
+    // Customers with an approved line that has no notice yet: their letter waits for it.
+    awaitingCustomers: new Set(approvedUnscheduled.map((r) => String(r.customer_id))),
+  };
 }
 
 // Ordered suppression rules — the first that matches holds the line (or,
@@ -492,6 +498,8 @@ const LINE_RULES = [
   ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 2 : 0)],
 ];
 const ACCOUNT_RULES = [
+  // One complete letter per customer per batch: never a partial letter ahead of a line still being prepared.
+  ['awaiting_lines', ({ awaiting }) => !!awaiting],
   ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
   ['too_many_lines', ({ entry }) => entry.lines.length > LINE_SLOTS],
   ['no_contact', ({ entry }) => !entry.channels.email && !entry.channels.sms],
@@ -513,7 +521,7 @@ function planEntry(data, customerId, notices, { today, now }) {
   entry.lines.sort(byEffective);
   if (!entry.lines.length) return entry;
   if (customer) entry.channels = hasContact(customer, data.prefs.get(customerId));
-  entry.reason = firstMatch(ACCOUNT_RULES, { customer, entry });
+  entry.reason = firstMatch(ACCOUNT_RULES, { customer, entry, awaiting: !!data.awaitingCustomers && data.awaitingCustomers.has(String(customerId)) });
   return entry;
 }
 
@@ -553,6 +561,7 @@ function summarize(entries) {
     email: sendable.filter((e) => e.channels.email).length,
     sms: sendable.filter((e) => e.channels.sms).length,
     suppressedCustomers: entries.filter((e) => e.reason && e.lines.length).length,
+    awaitingLines: entries.filter((e) => e.reason === 'awaiting_lines').length,
     suppressedLines: entries.reduce((s, e) => s + e.suppressedLines.length + (e.reason ? e.lines.length : 0), 0),
     alreadySent: entries.reduce((s, e) => s + e.alreadySent.length, 0),
   };
@@ -752,9 +761,16 @@ const phoneKey = (p) => { const e = toE164(String(p || '').trim()); return e ? S
 // Run INSIDE the customer-comms + phone fence, immediately before the Twilio
 // request: the notice must still belong to the letter's customer and that
 // customer must still own the number being texted. null = clear to send.
-async function smsHandoffRefusal(trx, noticeIds, customerId, phone) {
+async function smsHandoffRefusal(trx, noticeIds, customerId, phone, recheck = null) {
   if (!(await stillOwned(trx, noticeIds, customerId))) {
     return { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer', retryable: false };
+  }
+  // The same eligibility the post-claim revalidation ran, now under the fence and
+  // immediately before the request: a lane, rate, plan or structure change that
+  // committed in between refuses the text with the rule's own reason.
+  if (recheck) {
+    const verdict = await recheck(trx);
+    if (!verdict.ok) return { ok: false, code: `ELIGIBILITY:${verdict.reason}`, reason: `the letter is no longer eligible (${verdict.reason})`, retryable: false };
   }
   const live = await trx('customers').where({ id: customerId }).first();
   if (!live || live.deleted_at || live.active === false) {
@@ -857,6 +873,13 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       }
     }
   }
+  // ONE eligibility function for the post-claim revalidation and for each provider
+  // handoff (so they cannot drift): the shared apply predicates, lane, rate, line,
+  // approval, amounts and dates, read on the connection the caller passes.
+  const recheckEligibility = async (conn) => {
+    const at = clock();
+    return revalidateClaimed(conn, entry, claimed, { today: etDateString(at), now: at });
+  };
   // Set when the handoff refused before dispatch: the request never left, so
   // the letter is definitively unsent (a named hold, not an uncertain send).
   let emailHold = null;
@@ -880,6 +903,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       withProviderHandoff: (dispatch, { to } = {}) => dbh.transaction(async (trx) => {
         await lockCustomerComms(trx, entry.customerId);
         if (!(await stillOwned(trx, claimed, entry.customerId))) { emailHold = 'notice_repointed'; return { ok: false, reason: 'notice_repointed' }; }
+        // Eligibility again, under the fence and immediately before the request.
+        const eligible = await recheckEligibility(trx);
+        if (!eligible.ok) { emailHold = eligible.reason; return { ok: false, reason: eligible.reason }; }
         // Rows first (a contact writer holds the customer row, then the
         // address key), then the address key, held through the request.
         const live = await trx('customers').where({ id: entry.customerId }).whereNull('deleted_at').forShare().first();
@@ -925,7 +951,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // closed with a named code; one that arrives later waits for the
       // request. A notice token therefore never texts a previous customer.
       withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
-        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone);
+        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility);
         return refusal || dispatch(trx);
       }),
     },
@@ -936,7 +962,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     ...(email.messageId ? { email_message_id: String(email.messageId) } : {}),
     ...(sms.sid ? { sms_sid: String(sms.sid) } : {}),
   };
-  const smsHold = SMS_HOLD_REASONS[sms.blockedCode] || null;
+  const smsHold = SMS_HOLD_REASONS[sms.blockedCode] || (String(sms.blockedCode || '').startsWith('ELIGIBILITY:') ? String(sms.blockedCode).slice('ELIGIBILITY:'.length) : null);
   if (smsHold) logger.warn(`[rate-review-comms] text pointer withheld for customer ${entry.customerId}: ${smsHold}`);
   if (!email.sent && !sms.sent) {
     // Never handed to a provider (no contact, every leg policy-blocked):
@@ -1215,6 +1241,9 @@ async function applicableMonthly(dbh, rows, customer, today) {
   return out;
 }
 
+const SMS_FAILURE_TTL_MS = 72 * 3600 * 1000;
+const STAGED_PREPAY_HIDING_REASONS = new Set(['renewal_window_changed', 'term_not_live', 'term_family_changed', 'prepay_term_not_found', 'prepay_term_ambiguous', 'termite_program']);
+
 /**
  * Portal billing line: the customer's delivered, not-yet-applied rate
  * changes — the upcoming rate and the next charge at it. [] when the gate
@@ -1266,6 +1295,19 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const unappliedPrepay = pending.filter((n) => n.billing_lane === 'annual_prepay' && !n.applied_at);
   const moved = await ratesMovedFor(dbh, [...perApp, ...unappliedPrepay], { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp), today });
   for (const id of gone.keys()) moved.add(id);
+  // A prepaid notice the apply already STAGED is still judged against its pinned term:
+  // an edited renewal window (or a term no longer live) makes it not advertisable. Only
+  // the term-identity refusals count here — the amount/reminder checks are the staging's.
+  const { prepayChecks } = require('./rate-review-apply')._private;
+  for (const n of pending.filter((x) => x.billing_lane === 'annual_prepay' && x.applied_at && parseJson(x.metadata, {}).term_id)) {
+    try {
+      const { refusal } = await prepayChecks(dbh, { notice: n, customer: customer || { id: n.customer_id }, today, metadata: parseJson(n.metadata, {}) });
+      if (refusal && STAGED_PREPAY_HIDING_REASONS.has(refusal.reason)) moved.add(String(n.id));
+    } catch (err) {
+      logger.warn(`[rate-review-comms] staged prepaid term unreadable for notice ${n.id}: ${err.message}`);
+      moved.add(String(n.id));
+    }
+  }
   return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane && !gone.has(String(n.id))
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
@@ -1478,6 +1520,10 @@ async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, 
     if (!sid) return [];
     const alerts = [];
     await dbh.transaction(async (trx) => {
+      // Hard expiry: a kept failure is only ever useful for the minutes around one send.
+      // Nothing hooks sms_log inserts to revisit an unrelated retained sid, so the 72-hour
+      // expiry (here, on every insert path and every reconciliation) is what bounds the table.
+      await trx('rate_review_sms_failures').where('created_at', '<', new Date(Date.now() - SMS_FAILURE_TTL_MS)).del();
       const keep = () => trx('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
         .onConflict('twilio_sid').ignore();
       const log = await trx('sms_log').where({ twilio_sid: sid }).first();
