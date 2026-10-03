@@ -586,6 +586,11 @@ const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'tha
 const CORRECTION_FILLERS = new Set(['wait', 'weight', 'it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
 function isCorrectingNo(tokens, j) {
   if (tokens[j] !== 'no') return false;
+  // there must be a quantity just before it to correct ("No two ounces of Taurus
+  // were used" corrects nothing: it is a negation)
+  let before = false;
+  for (let k = j - 1; k >= 0 && j - k <= 4; k -= 1) if (readSpokenNumber(tokens, k)) { before = true; break; }
+  if (!before) return false;
   let k = j + 1;
   while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
   return Boolean(readSpokenNumber(tokens, k));
@@ -660,21 +665,6 @@ function pushUnclear(unclear, heard, reason) {
   if (!entry.heard && !entry.reason) return;
   if (unclear.some((u) => u.heard === entry.heard && u.reason === entry.reason)) return;
   unclear.push(entry);
-}
-
-// The spoken sentence a product's heard words sit in. One "same mix as last
-// time, Taurus, Talstar and the surfactant" covers every product it lists, so
-// the same-as-last words are looked for in the whole sentence, never across
-// sentences.
-// With { contrast: true } a contrast ends the span too ("Taurus same as last
-// time, but Talstar was new"): the phrase is looked for there, while a
-// contradiction is looked for in the whole sentence ("... but a different rate").
-function sentenceOf(transcript, heard, { contrast = false } = {}) {
-  // the quote's first phrase (a quote may stitch phrases with an ellipsis or a comma)
-  const first = norm(String(heard).split(/\.{3}|…|(?<=[.!?;,:])\s+/)[0]);
-  if (!first) return '';
-  const split = contrast ? /(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i : /(?<=[.!?])\s+/;
-  return String(transcript || '').split(split).find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
 }
 
 // The amount as the schema carries it: 0 / '' / missing is "not spoken" (nothing
@@ -1163,11 +1153,11 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // (the standard ways and every catalog way the sheet offers)
   const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
   const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
-  // ...and unless the sentence names more than one way: then each way is some
-  // product's own, and none is shared.
-  const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
-  const waysSaid = ways.filter((method) => methodLexicon(method)?.test(sentences));
-  const shared = waysSaid.length === 1 && waysSaid[0] === raw.method;
+  // Shared only when the way is said in the sentence's lead-in, before the first
+  // product name ("Did the perimeter with Taurus, Talstar and surfactant"): a way
+  // said after another product's name ("...and sprayed Talstar around the
+  // perimeter") is that product's.
+  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method)?.test(leadInWords(m, world)));
   if (ownOther || !shared) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
@@ -1182,6 +1172,15 @@ function mentionSentenceWords(mention, world, { contrast = false } = {}) {
     for (let j = mention.end; j < to; j += 1) if (CONTRAST_WORDS.has(world.tokens[j])) { to = j; break; }
   }
   return world.tokens.slice(from, to).join(' ');
+}
+
+// The sentence's words before its first product name, when no contrast word sits
+// between them and this mention; '' otherwise.
+function leadInWords(mention, world) {
+  const { from, to } = sentenceSpan(mention, world);
+  const firstName = Math.min(...world.mentions.filter((m) => m.start >= from && m.end <= to).map((m) => m.start));
+  const crossed = world.tokens.slice(firstName, mention.start).some((token) => CONTRAST_WORDS.has(token));
+  return crossed ? '' : world.tokens.slice(from, firstName).filter((_, i) => !world.negated.has(from + i)).join(' ');
 }
 
 // The words that GOVERN a mention in a sentence naming several products: the

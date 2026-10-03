@@ -1893,3 +1893,26 @@ test('a list lead-in does not carry same-as-last across a "but"', () => {
   const taurus = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Same mix as last time for Taurus' }] }), ctx, t);
   expect(taurus.products[0].sameAsLast).toBe(true);
 });
+
+describe('Codex #5698 round 9', () => {
+  const row = (productId, heard, over = {}) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard, ...over });
+
+  test('a way said after another product\'s name is that product\'s: the Check stays', () => {
+    const t = 'Used Taurus and sprayed Talstar around the perimeter.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'Used Taurus', { method: 'perimeter_spray' })] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('a way said in the lead-in is shared by the list, with no Check', () => {
+    const t = 'Did the perimeter with Taurus, four ounces, and Talstar, four ounces.';
+    const out = validateFill(answer({ products: [row('p-talak', 'Talstar, four ounces', { amount: 4, unit: 'fl_oz', method: 'perimeter_spray' })] }), ctx, t);
+    expect(out.unclear.map((u) => u.reason)).not.toContain('method_not_heard');
+  });
+
+  test('"No two ounces of Taurus were used" is a negation, not a correction', () => {
+    const t = 'No two ounces of Taurus were used. Talstar outside.';
+    const out = validateFill(answer({ products: [row('p-taurus', 'two ounces of Taurus', { amount: 2, unit: 'fl_oz' })] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus' && p.amount === 2)).toBe(false);
+  });
+});
