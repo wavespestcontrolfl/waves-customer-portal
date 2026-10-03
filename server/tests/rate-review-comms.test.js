@@ -81,7 +81,10 @@ jest.mock('../services/email-template-library', () => {
       return {
         template: {
           template_key: TEMPLATE.key, name: TEMPLATE.name, mode: 'service', status: 'active', active_version_id: 'v1', send_stream: 'transactional_required',
-          required_variables: JSON.stringify(TEMPLATE.required), allowed_variables: JSON.stringify([...TEMPLATE.required, ...TEMPLATE.optional, subjectMigration.VAR]),
+          ...(() => {
+            const v = subjectMigration.shiftVariables({ allowed: [...TEMPLATE.required, ...TEMPLATE.optional], required: TEMPLATE.required, optional: TEMPLATE.optional }, true);
+            return { required_variables: JSON.stringify(v.required), allowed_variables: JSON.stringify(v.allowed) };
+          })(),
         },
         activeVersion: { id: 'v1', subject: subjectMigration.NEW_SUBJECT, preview_text: TEMPLATE.preview, blocks: TEMPLATE.blocks, text_body: null },
       };
@@ -1451,6 +1454,25 @@ describe('customer surfaces', () => {
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       expect(notices()[0].status).toBe('send_uncertain');
       expect(meta().send_attempts).toBeUndefined();
+    });
+
+    test('three consecutive ambiguous sends, each with a bounce that lands before settlement, get three distinct attempt identities (the revocation is archived, never overwritten)', async () => {
+      mockDb.reset(book());
+      const keys = [];
+      emailLeg.mockImplementation(async ({ idempotencyKeyBase }) => {
+        keys.push(idempotencyKeyBase);
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: `em-${keys.length}`, idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+        return { sent: false, attempted: true }; // ambiguous to the caller
+      });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      for (let i = 0; i < 3; i += 1) {
+        const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+        expect(res).toMatchObject({ sent: 0, uncertain: 0, failed: 1 });
+        expect(notices()[0].status).toBe('draft');
+      }
+      expect(new Set(keys).size).toBe(3);
+      expect(meta().delivery_revocations).toHaveLength(2);
     });
 
     test('an authorized re-send after a bounce is a NEW attempt: the email idempotency key changes, so the library does not dedupe it against the bounced message', async () => {

@@ -797,20 +797,23 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   for (const l of entry.lines) {
     const live = await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first();
     if (!live) continue;
-    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, ...meta } = parseJson(live.metadata, {});
+    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, ...meta } = parseJson(live.metadata, {});
+    // A revocation from an EARLIER attempt is history, not overwritten: it advances the attempt
+    // identity, so the next send is never deduplicated against a bounced message.
+    const history = priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {};
     const stillUnknown = (emailUnknown && !early.email) || (smsUnknown && !early.sms);
     if (stillUnknown) {
       retryable = false;
       await dbh('price_change_notices').where({ id: live.id }).update({
         status: UNCERTAIN, updated_at: new Date(),
-        metadata: JSON.stringify({ ...meta, ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}), pending_letter: frozen }),
+        metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}), pending_letter: frozen }),
       });
       continue;
     }
     const failure = early.email || early.sms;
     await dbh('price_change_notices').where({ id: live.id }).update({
       status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: new Date(),
-      metadata: JSON.stringify({ ...meta, ...dispatchMeta, channel_failures: early, delivery_revoked: failure, send_hold: { reason: 'delivery_failed_before_stamp', at: new Date().toISOString() } }),
+      metadata: JSON.stringify({ ...meta, ...history, ...dispatchMeta, channel_failures: early, delivery_revoked: failure, send_hold: { reason: 'delivery_failed_before_stamp', at: new Date().toISOString() } }),
     });
     const snap = await dbh('rate_review_snapshots').where({ notice_id: live.id }).first();
     if (snap) {
