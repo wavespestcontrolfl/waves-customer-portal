@@ -592,6 +592,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good("Hi Dana, we're glad our technician was kind and the ants are gone."), notKind)).toBe('negated_review_claim');
     expect(verify(good('Hi Dana, that is kind of you. We are glad the ants are gone.'), notKind)).toBeNull();
     expect(verify(good('Hi Dana, our technician was kind enough to help and the ants are gone.'), notKind)).toBe('negated_review_claim');
+    // Only reviewer-directed thank-you shapes pass (codex #5788 r2): staff
+    // "kind words / note / message" would invent an interaction.
+    for (const line of ['our team had kind words for you', 'our team wrote a kind note', 'the team sent a kind message']) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
+    for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words']) {
+      expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
+    }
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
