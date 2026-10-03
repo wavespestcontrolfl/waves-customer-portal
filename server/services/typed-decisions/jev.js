@@ -80,7 +80,14 @@ function imagesProblem(pkg, provider, images) {
   return null;
 }
 
-async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER.TYPESAFE, images } = {}) {
+// fitImagesForClef returns `{ dataUrl, ... }` records; callers may pass those
+// or bare data-URL strings. The adapter takes strings only.
+const imageDataUrls = (images) => (Array.isArray(images)
+  ? images.map((image) => (image && typeof image === 'object' && typeof image.dataUrl === 'string' ? image.dataUrl : image))
+  : images);
+
+async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER.TYPESAFE, images: given } = {}) {
+  const images = imageDataUrls(given);
   if (!typedDecisionsLive()) return { ok: false, reason: 'gate_off' };
   if (!KNOWN_PROVIDERS.includes(provider)) return { ok: false, reason: 'unknown_provider', provider };
   const clef = provider === MODELS.PROVIDER.CLOUDFLARE;

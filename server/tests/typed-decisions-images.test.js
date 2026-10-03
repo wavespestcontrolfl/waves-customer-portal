@@ -57,6 +57,13 @@ describe('askPackage images', () => {
     expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ images: [IMG, IMG], laneId: 'typed_decisions_clef' }));
   });
 
+  test('fitImagesForClef records ({ dataUrl, ... }) are accepted and sent as data-URL strings', async () => {
+    const record = { dataUrl: IMG, bytes: 3, width: 1, height: 1, sha256: 'x' };
+    const result = await askPackage('photo_check_2.v1', STATE, { provider: 'cloudflare', images: [record] });
+    expect(result.ok).toBe(true);
+    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ images: [IMG] }));
+  });
+
   test('without images the dispatch payload has no images key at all (existing callers unchanged)', async () => {
     for (const images of [undefined, null, []]) {
       mockDispatch.mockClear();

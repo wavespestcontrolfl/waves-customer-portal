@@ -94,16 +94,26 @@ describe('callWorkersAIDecision images', () => {
     expect(await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: two })).toMatchObject({ ok: false, reason: 'cloudflare_images_too_large' });
     expect(global.fetch).not.toHaveBeenCalled();
 
-    // a string of exactly the budget: prefix + base64 of a whole number of 3-byte groups
+    // The limit is the SERIALIZED body: images + state + questions.
     const prefix = 'data:image/jpeg;base64,';
-    const exact = `${prefix}${'A'.repeat(CLEF_IMAGES_BUDGET_BYTES - prefix.length)}`;
-    expect(exact.length).toBe(CLEF_IMAGES_BUDGET_BYTES);
-    expect((await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: [exact] })).ok).toBe(true);
+    const overhead = JSON.stringify({ images: [prefix], state: STATE, questions: QUESTIONS }).length;
+    const fits = `${prefix}${'A'.repeat(Math.floor((CLEF_IMAGES_BUDGET_BYTES - overhead) / 4) * 4)}`;
+    expect(JSON.stringify({ images: [fits], state: STATE, questions: QUESTIONS }).length).toBeLessThanOrEqual(CLEF_IMAGES_BUDGET_BYTES);
+    expect((await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: [fits] })).ok).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].body.length).toBeLessThanOrEqual(CLEF_IMAGES_BUDGET_BYTES);
+  });
+
+  test('the state counts toward the limit: images that fit alone are refused beside a large state', async () => {
+    const image = urlOf(rawBytes(90 * 1024, 7));
+    expect((await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images: [image] })).ok).toBe(true);
+    const bigState = { note: 'x'.repeat(40 * 1024) };
+    expect(await callWorkersAIDecision({ model: 'clef-flash', state: bigState, questions: QUESTIONS, images: [image] })).toEqual({ ok: false, reason: 'cloudflare_images_too_large' });
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
   test('entries that are not image data URLs, or a non-array, are refused before any network call', async () => {
-    for (const images of ['data:image/jpeg;base64,AAAA', ['https://example.test/a.jpg'], [42], ['data:text/plain;base64,AAAA'], ['data:image/jpeg;base64,not base64!']]) {
+    for (const images of ['data:image/jpeg;base64,AAAA', ['https://example.test/a.jpg'], [42], ['data:text/plain;base64,AAAA'], ['data:image/jpeg;base64,not base64!'], ['data:image/jpeg;base64,A'], ['data:image/jpeg;base64,AA='], ['data:image/jpeg;base64,AB==']]) {
       expect(await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images })).toEqual({ ok: false, reason: 'cloudflare_bad_images' });
     }
     expect(global.fetch).not.toHaveBeenCalled();

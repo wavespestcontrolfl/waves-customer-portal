@@ -50,8 +50,9 @@ const TYPESAFE_PINNED_MODEL_RE = /^jev-\d+\.\d+\.\d+$/;
 const WORKERS_AI_ACCOUNTS_API = 'https://api.cloudflare.com/client/v4/accounts';
 // Clef takes up to four embedded images beside `state` and `questions`; a
 // request over ~150 KB is refused by the provider (HTTP 413, measured
-// 2026-10-02). The budget counts the data-URL strings, i.e. what the JSON body
-// carries. typed-decisions/image-budget.js fits photos under the same numbers.
+// 2026-10-02). The budget is the whole serialized body (images + state +
+// questions); typed-decisions/image-budget.js fits photos under the same
+// number, minus clefBodyOverhead(state, questions).
 const CLEF_MAX_IMAGES = 4;
 const CLEF_IMAGES_BUDGET_BYTES = 150 * 1024;
 const CLEF_DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})$/i;
@@ -497,28 +498,37 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
 }
 
 // What callWorkersAIDecision does with `images`: `present` (any to send),
-// `code` (refusal reason, null when sendable) and `note` (the ledger stand-in:
-// a count and the sha256 of each image, never the bytes).
+// `bad` (an entry that is not a canonical base64 image data URL), `bytes` (the
+// decoded images, for the ledger hashes) and `note` (the ledger stand-in: a
+// count and the sha256 of each image, never the bytes).
 function clefImagesPlan(images) {
-  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, code: null, note: null };
+  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, bad: false, note: null };
   const list = Array.isArray(images) ? images : [];
   const hashes = [];
-  let total = 0;
-  let valid = Array.isArray(images);
+  let bad = !Array.isArray(images);
   for (const image of list) {
     const match = typeof image === 'string' ? CLEF_DATA_URL_RE.exec(image) : null;
-    if (!match) { valid = false; break; }
-    total += image.length;
-    hashes.push(crypto.createHash('sha256').update(Buffer.from(match[1], 'base64')).digest('hex'));
+    const decoded = match && match[1].length % 4 === 0 ? Buffer.from(match[1], 'base64') : null;
+    // Buffer.from silently truncates malformed base64 ("A", "AA="): only a
+    // payload that round-trips byte-for-byte is the image we hash and send.
+    if (!decoded || !decoded.length || decoded.toString('base64') !== match[1]) { bad = true; break; }
+    hashes.push(crypto.createHash('sha256').update(decoded).digest('hex'));
   }
-  const tooMany = list.length > CLEF_MAX_IMAGES || total > CLEF_IMAGES_BUDGET_BYTES;
-  const code = valid ? (tooMany ? 'cloudflare_images_too_large' : null) : 'cloudflare_bad_images';
-  return { present: true, code, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };
+  return { present: true, bad, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };
 }
 // The ledger text for the call (state, then the image stand-in) and the wire
 // body (`images` only when there are some, so an image-free body is unchanged).
 const clefLedgerText = (stateText, plan) => (plan.note ? `${stateText ?? ''}\n${plan.note}` : stateText);
 const clefBody = (plan, images, state, questions) => (plan.present ? { images, state, questions } : { state, questions });
+// The refusal for an image request, checked before any network call: a bad
+// entry, more than four images, or a SERIALIZED body (images + state +
+// questions) over the provider's measured limit.
+function clefImagesRefusal(plan, bodyText, images) {
+  if (!plan.present) return null;
+  if (plan.bad) return 'cloudflare_bad_images';
+  if (images.length > CLEF_MAX_IMAGES || bodyText.length > CLEF_IMAGES_BUDGET_BYTES) return 'cloudflare_images_too_large';
+  return null;
+}
 
 // ── Cloudflare Clef (typed decisions on Workers AI) ───────────────────
 /**
@@ -534,8 +544,9 @@ const clefBody = (plan, images, state, questions) => (plan.present ? { images, s
  * `answers` map and `servedModel` is what the provider reports. Never retries.
  * `images` (optional, <= 4 data-URL strings) ride the body as
  * `{ images, state, questions }`; with none the body is `{ state, questions }`
- * exactly. More than 4, a non-data-URL entry (`cloudflare_bad_images`) or a
- * total over 150 KB (`cloudflare_images_too_large`) fails the leg BEFORE any
+ * exactly. More than 4, a non-data-URL or non-canonical base64 entry
+ * (`cloudflare_bad_images`) or a serialized body over 150 KB
+ * (`cloudflare_images_too_large`) fails the leg BEFORE any
  * network call. The ledger text never holds image bytes: it carries
  * `[images: n, sha256 <hex>,...]` (sha256 of each decoded image) after the state.
  * Credentials: CF_WORKERS_AI_TOKEN (a least-privilege "Workers AI - Read"
@@ -552,13 +563,16 @@ async function callWorkersAIDecision({ model, state, questions, images, timeoutM
   // ledger row: this lane is dark, so the ledger is where a dead key shows.
   if (!token || !account) return failedLeg(base, { latencyMs: 0 }, 'no_key');
   if (!workersAiDecisionModel(model)) return failedLeg(base, { latencyMs: 0 }, 'cloudflare_unknown_model');
-  if (plan.code) return failedLeg(base, { latencyMs: 0 }, plan.code);
+  let bodyText;
+  try { bodyText = JSON.stringify(clefBody(plan, images, state, questions)); } catch { return failedLeg(base, { latencyMs: 0 }, 'error'); }
+  const refusal = clefImagesRefusal(plan, bodyText, images);
+  if (refusal) return failedLeg(base, { latencyMs: 0 }, refusal);
   const t0 = nowMs();
   try {
     const resp = await fetch(`${WORKERS_AI_ACCOUNTS_API}/${encodeURIComponent(account)}/ai/run/@cf/cloudflare/${model}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(clefBody(plan, images, state, questions)),
+      body: bodyText,
       ...abortAfter(timeoutMs),
     });
     if (!resp.ok) {

@@ -3,7 +3,7 @@
 // (synthetic noise, no real photos).
 const sharp = require('sharp');
 const crypto = require('crypto');
-const { fitImagesForClef, isCleanJpeg, LADDER, DEFAULT_BUDGET_BYTES } = require('../services/typed-decisions/image-budget');
+const { fitImagesForClef, clefBodyOverhead, LADDER, DEFAULT_BUDGET_BYTES } = require('../services/typed-decisions/image-budget');
 const { CLEF_MAX_IMAGES, CLEF_IMAGES_BUDGET_BYTES } = require('../services/llm/call');
 
 jest.setTimeout(60000);
@@ -63,7 +63,7 @@ describe('fitImagesForClef', () => {
     expect(Math.max(out.images[0].width, out.images[0].height)).toBe(1600);
   });
 
-  test('a clean JPEG above the top rung edge is not kept verbatim even when it fits', async () => {
+  test('a JPEG above the top rung edge is shrunk even when it already fits', async () => {
     const wide = await sharp(Buffer.alloc(2400 * 100 * 3, 128), { raw: { width: 2400, height: 100, channels: 3 } }).jpeg().toBuffer();
     expect(wide.length).toBeLessThan(DEFAULT_BUDGET_BYTES);
     const out = await fitImagesForClef([wide]);
@@ -71,14 +71,36 @@ describe('fitImagesForClef', () => {
     expect(out.images[0].width).toBe(1600);
   });
 
-  test('a small clean JPEG is kept byte-for-byte and never upscaled', async () => {
+  test('a small JPEG that already fits is still re-encoded (never sent verbatim) and never upscaled', async () => {
     const small = await jpegOf(320, 240, { quality: 60 }).toBuffer();
-    expect(isCleanJpeg(small)).toBe(true);
     const out = await fitImagesForClef([small]);
     expect(out.ok).toBe(true);
-    expect(out.compressed).toBe(false);
-    expect(decodeUrl(out.images[0].dataUrl).equals(small)).toBe(true);
+    expect(decodeUrl(out.images[0].dataUrl).equals(small)).toBe(false);
     expect([out.images[0].width, out.images[0].height]).toEqual([320, 240]);
+  });
+
+  test('a comment hidden after the scan or in trailing bytes never reaches the request', async () => {
+    const plain = await jpegOf(200, 100).toBuffer();
+    const text = Buffer.from('lat=27.0 lon=-82.0');
+    const com = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, text.length + 2]), text]);
+    const eoi = plain.length - 2; // before FF D9
+    const afterScan = Buffer.concat([plain.subarray(0, eoi), com, plain.subarray(eoi)]);
+    const trailing = Buffer.concat([plain, text]);
+    for (const hidden of [afterScan, trailing]) {
+      const out = await fitImagesForClef([hidden]);
+      expect(out.ok).toBe(true);
+      expect(decodeUrl(out.images[0].dataUrl).includes(text)).toBe(false);
+    }
+  });
+
+  test('reserveBytes leaves room for the rest of the body (state + questions)', async () => {
+    const big = await jpegOf(1200, 900).toBuffer();
+    const state = { note: 'x'.repeat(60 * 1024) };
+    const reserveBytes = clefBodyOverhead(state, { q: { type: 'noul', instructions: 'Is there a face?' } });
+    expect(reserveBytes).toBeGreaterThan(60 * 1024);
+    const out = await fitImagesForClef([big], { reserveBytes });
+    expect(out.ok).toBe(true);
+    expect(urlLen(out.images) + reserveBytes).toBeLessThanOrEqual(DEFAULT_BUDGET_BYTES);
   });
 
   test('a small PNG is re-encoded to JPEG without being enlarged', async () => {
@@ -98,7 +120,6 @@ describe('fitImagesForClef', () => {
     const before = await sharp(tagged).metadata();
     expect(before.exif).toBeDefined();
     expect(before.orientation).toBe(6);
-    expect(isCleanJpeg(tagged)).toBe(false);
     const out = await fitImagesForClef([tagged]);
     expect(out.ok).toBe(true);
     const sent = decodeUrl(out.images[0].dataUrl);
@@ -111,17 +132,6 @@ describe('fitImagesForClef', () => {
     // orientation 6 = rotated 90deg: the 400x200 frame arrives upright as 200x400
     expect([out.images[0].width, out.images[0].height]).toEqual([200, 400]);
     expect([meta.width, meta.height]).toEqual([200, 400]);
-  });
-
-  test('a JPEG comment segment is not clean and is not sent verbatim', async () => {
-    const plain = await jpegOf(200, 100).toBuffer();
-    const text = Buffer.from('lat=27.0 lon=-82.0');
-    const com = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, text.length + 2]), text]);
-    const withComment = Buffer.concat([plain.subarray(0, 2), com, plain.subarray(2)]);
-    expect(isCleanJpeg(withComment)).toBe(false);
-    const out = await fitImagesForClef([withComment]);
-    expect(out.ok).toBe(true);
-    expect(decodeUrl(out.images[0].dataUrl).includes(text)).toBe(false);
   });
 
   test('the budget is for the whole batch: four large images share it', async () => {
