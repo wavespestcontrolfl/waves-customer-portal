@@ -49,6 +49,63 @@ async function persistedPortalTurn(channel, identifier, customerId, turn) {
   return runQuery(query.select('conversation.*',
     'message.id as portal_turn_message_id', 'message.content as portal_turn_message_content').first(), turn, 'portal turn recovery');
 }
+async function isolateRecoveredPortalTurn(conversation, channel, identifier, customerId, turn) {
+  if (!conversation.portal_turn_message_id || !turn?.transaction) return conversation;
+  return turn.transaction('portal turn recovery isolation', async (trx) => {
+    const message = await trx('agent_messages').where({
+      id: conversation.portal_turn_message_id,
+      portal_chat_request_id: turn.requestRowId,
+      role: 'user',
+    }).forUpdate().first();
+    if (!message) return conversation;
+
+    const scoped = trx('agent_sessions').where({
+      id: message.conversation_id, channel, channel_identifier: identifier,
+    });
+    if (customerId) scoped.where('customer_id', customerId);
+    else scoped.whereNull('customer_id');
+    const source = await scoped.forUpdate().first();
+    if (!source) return conversation;
+
+    const cutoff = trx('agent_messages').select('created_at').where('id', message.id);
+    const laterUser = await trx('agent_messages')
+      .where({ conversation_id: source.id, role: 'user' })
+      .where((later) => later.where('created_at', '>', cutoff.clone())
+        .orWhere((sameTime) => sameTime.where('created_at', cutoff.clone()).where('id', '>', message.id)))
+      .first('id');
+    const recovered = {
+      ...source,
+      portal_turn_message_id: message.id,
+      portal_turn_message_content: message.content,
+    };
+    if (!laterUser) return recovered;
+
+    const firstName = safeFirstNameFromSnapshot(source.context_snapshot);
+    const [fork] = await trx('agent_sessions').insert({
+      customer_id: source.customer_id || null,
+      channel: source.channel,
+      channel_identifier: source.channel_identifier,
+      status: 'timeout',
+      last_activity_at: trx.fn.now(),
+      timeout_at: trx.fn.now(),
+      message_count: 1,
+      context_snapshot: { version: MINIMAL_CONTEXT_VERSION, ...(firstName ? { firstName } : {}) },
+      resolved_by: 'timeout',
+    }).returning('*');
+    await trx('agent_messages')
+      .where({ conversation_id: source.id, portal_chat_request_id: turn.requestRowId })
+      .update({ conversation_id: fork.id });
+    await trx('agent_sessions').where('id', source.id).update({
+      message_count: trx.raw('GREATEST(COALESCE(message_count, 0) - 1, 0)'),
+    });
+    await trx('portal_chat_requests').where('id', turn.requestRowId).update({ conversation_id: fork.id });
+    return {
+      ...fork,
+      portal_turn_message_id: message.id,
+      portal_turn_message_content: message.content,
+    };
+  });
+}
 function portalReplay(conversation, fallback) {
   if (!conversation.portal_turn_message_id) return { content: fallback, cursor: null, isolate: false };
   const cursor = { id: conversation.portal_turn_message_id, content: conversation.portal_turn_message_content };
@@ -497,6 +554,9 @@ class WavesAssistant {
     let conversation;
     try {
       conversation = await this.resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn);
+      conversation = await isolateRecoveredPortalTurn(
+        conversation, channel, channelIdentifier || customerPhone, customerId, turn,
+      );
     } catch (convErr) {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
       return { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false };
