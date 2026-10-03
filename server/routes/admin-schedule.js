@@ -25924,7 +25924,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category');
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
         const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
         const promptWritesAlias = CompletionRecap.promptAliasTest(fullUserMessage);
         catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);

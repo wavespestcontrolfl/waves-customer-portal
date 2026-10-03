@@ -586,6 +586,18 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
   const entries = catalogScreenLabels(rows)
     .map((labelled) => catalogBrandEntry(labelled, plain, promptHay))
     .filter(Boolean);
+  // The maker's name ("Syngenta", "BASF") is a brand too: capitalized
+  // mid-sentence, or in any case when the prompt itself writes it.
+  const makers = [...new Set(rows.flatMap((row) => screenTokens(row?.manufacturer)))]
+    .filter((token) => token.length >= 4 && !plain.isPlain(token));
+  if (makers.length) {
+    entries.push({
+      name: 'manufacturer',
+      brands: makers,
+      phrases: makers.filter((maker) => promptHay.includes(` ${maker} `)).map((maker) => ` ${maker} `),
+      collapsed: [], pairs: [], exact: null, stem: null,
+    });
+  }
   return (text) => {
     if (!text) return false;
     const read = readScreenText(text);
@@ -610,7 +622,7 @@ function withCatalogAliases(catalogRows, aliasRows) {
 async function readCatalogScreenRows(db) {
   if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
   return withCatalogAliases(
-    await savepointRead(db, (k) => k('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category')),
+    await savepointRead(db, (k) => k('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer')),
     await savepointRead(db, (k) => k('product_aliases').select('product_id', 'alias_name')),
   );
 }

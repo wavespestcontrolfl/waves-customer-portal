@@ -116,7 +116,7 @@ const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, tr
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
-const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases, activeIngredientsMentioned } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -5606,21 +5606,37 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   ).productValues);
                 }
               }
+              // The four-section body is the writer-rules report: no
+              // product may be named, so an edit that adds an unselected
+              // catalog brand is caught by the same catalog-wide screen
+              // generation runs.
+              const writerRulesBody = technicianReportFourSection
+                && require('../config/feature-gates').reportWriterRulesLive();
               const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
                 products: Array.isArray(products) ? products : [],
                 extraNames: typedGuardNames,
                 db,
-                // The four-section body is the writer-rules report: no
-                // product may be named, so an edit that adds an unselected
-                // catalog brand is caught by the same catalog-wide screen
-                // generation runs.
-                wholeCatalog: technicianReportFourSection
-                  && require('../config/feature-gates').reportWriterRulesLive(),
+                wholeCatalog: writerRulesBody,
               });
+              // The whole body against this visit's actives as the catalog
+              // reads now: the edit heads-up skips unchanged sentences, and
+              // an active filled in since the draft was written must not
+              // ride out on one. A failed read throws and drops the copy.
+              const bodyProductIds = writerRulesBody
+                ? (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean)
+                : [];
+              const bodyActives = bodyProductIds.length
+                ? (await savepointRead(db, (k) => k('products_catalog').whereIn('id', bodyProductIds).select('active_ingredient')))
+                  .map((row) => row?.active_ingredient).filter(Boolean)
+                : [];
               if (screenTradeNames(technicianReportBody)) {
                 logger.warn('[completion] technician AI report copy dropped (trade_name)');
                 technicianReportBody = null;
                 technicianReportBodyRejection = 'trade_name';
+              } else if (bodyActives.some((active) => activeIngredientsMentioned(technicianReportBody, active))) {
+                logger.warn('[completion] technician AI report copy dropped (active_ingredient)');
+                technicianReportBody = null;
+                technicianReportBodyRejection = 'active_ingredient';
               }
             } catch (err) {
               logger.warn(`[completion] technician AI report trade-name guard failed — dropping copy: ${err.message}`);

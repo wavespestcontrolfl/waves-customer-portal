@@ -4,7 +4,8 @@
 const { buildReportTradeNameScreen } = require('../services/completion-recap');
 
 const CATALOG = [
-  { name: 'Termidor SC', active_ingredient: 'Fipronil' },
+  { name: 'Termidor SC', active_ingredient: 'Fipronil', manufacturer: 'BASF' },
+  { name: 'Medallion SC', active_ingredient: 'Fludioxonil', manufacturer: 'Syngenta' },
   { name: 'Trapper T-Rex Rat Snap Trap', active_ingredient: null },
   { name: 'Demand CS', active_ingredient: 'Lambda-cyhalothrin' },
   { name: 'Suspend Polyzone', active_ingredient: 'Deltamethrin' },
@@ -37,6 +38,8 @@ describe('catalog-wide brand screen', () => {
     'We applied Talstar around the foundation.',
     'We applied Talstar P around the foundation.',
     'We added Dispatch to the tank.',
+    'We used Syngenta around the lawn.',
+    'We used a BASF product along the thresholds.',
     'We put down Topchoice along the fence.',
     'We added an Organic acidifier to the tank.',
     'We installed Advance Termite Bait Station units along the slab.',
@@ -87,6 +90,9 @@ describe('catalog-wide brand screen', () => {
     expect((await build({ mentionedText: 'Customer asked about talstar p.' }))(copy)).toBe(true);
     expect((await build({ mentionedText: 'Tech note: used DISPATCH wetting agent.' }))(copy)).toBe(true);
     expect((await build({ mentionedText: 'Treated the thresholds.' }))(copy)).toBe(false);
+    const maker = 'Syngenta was discussed, and a syngenta product was not used.';
+    expect((await build())(maker)).toBe(false);
+    expect((await build({ mentionedText: 'Customer asked about syngenta.' }))(maker)).toBe(true);
   });
 
   test('off by default: no catalog-wide screen without wholeCatalog', async () => {
