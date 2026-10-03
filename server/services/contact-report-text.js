@@ -67,7 +67,10 @@ async function loadCustomer(customerId) {
 
 // Record one pending text per confirmed contact. Returns the new row ids.
 // `sourceKey`: `record:<service_records.id>` or `visit:<service_visits.id>`.
-async function queueContactReportTexts({ customerId, sourceKey, reportUrl, scheduledServiceId = null, notBefore = null }) {
+// `excludePhone`: the number the visit-complete text itself went to. It never
+// gets the report text too (the combined-stop summary falls back to Contact 1
+// when the account holder has no phone).
+async function queueContactReportTexts({ customerId, sourceKey, reportUrl, scheduledServiceId = null, notBefore = null, excludePhone = null }) {
   if (!enabled() || !customerId || !sourceKey || !reportUrl) return [];
   const customer = await loadCustomer(customerId);
   if (!customer) return [];
@@ -77,7 +80,7 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const ids = [];
   for (const contact of contacts) {
     const key = phoneKey(contact.phone);
-    if (!key) continue;
+    if (!key || key === phoneKey(excludePhone)) continue;
     const inserted = await db('contact_report_texts').insert({
       customer_id: customerId,
       source_key: String(sourceKey).slice(0, 80),
@@ -215,16 +218,27 @@ async function dispatchContactReportText(id) {
 // The hook for a visit-complete text that went out. Never throws and never
 // blocks the closeout on a provider call: the texts dispatch in the
 // background, and the sweep picks up what a restart drops.
-async function notifyContactsReportReady(args) {
-  try {
-    const ids = await queueContactReportTexts(args);
-    if (ids.length) {
-      void (async () => { for (const id of ids) await dispatchContactReportText(id); })();
+// The queue write is the durable intent, so a failed one is retried here
+// (the unique key makes a repeat safe). The closeout has already recorded its
+// own text as sent and will not come back: if every try fails, the contact
+// text for this report is lost and the error log says so.
+const QUEUE_RETRY_DELAYS_MS = [250, 1000];
+async function notifyContactsReportReady(args, { delaysMs = QUEUE_RETRY_DELAYS_MS } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const ids = await queueContactReportTexts(args);
+      if (ids.length) {
+        void (async () => { for (const id of ids) await dispatchContactReportText(id); })();
+      }
+      return ids.length;
+    } catch (err) {
+      // Ids and an error code only (see dispatchContactReportText).
+      if (attempt >= delaysMs.length) {
+        logger.error(`[contact-report-text] queue failed for ${args?.sourceKey || 'unknown'} after ${attempt + 1} tries (${err.code || err.name || 'error'}); contact report text not sent`);
+        return 0;
+      }
+      await new Promise((resolve) => { setTimeout(resolve, delaysMs[attempt]); });
     }
-    return ids.length;
-  } catch (err) {
-    logger.warn(`[contact-report-text] queue failed for ${args?.sourceKey || 'unknown'} (${err.code || err.name || 'error'})`);
-    return 0;
   }
 }
 

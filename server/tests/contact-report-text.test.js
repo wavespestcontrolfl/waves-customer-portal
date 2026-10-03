@@ -144,6 +144,16 @@ describe('queueContactReportTexts', () => {
     expect(opsFor('contact_report_texts')).toHaveLength(0);
   });
 
+  test('the number the visit-complete text went to never gets the report text too', async () => {
+    queue('customers', CUSTOMER);
+    queue('contact_report_texts', [{ id: 'row-2' }]);
+    const ids = await ContactReportText.queueContactReportTexts({
+      customerId: 'cust-1', sourceKey: 'visit:v-1', reportUrl: 'https://x/visit-summary/t', excludePhone: '+1 (941) 555-0123',
+    });
+    expect(ids).toEqual(['row-2']);
+    expect(opsFor('contact_report_texts').map((c) => c.ops.find((o) => o[0] === 'insert')[1].phone_key)).toEqual(['9415550456']);
+  });
+
   test('an account without the consent stamp queues nothing', async () => {
     queue('customers', { ...CUSTOMER, service_contacts_consent_at: null });
     expect(await ContactReportText.queueContactReportTexts({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' })).toEqual([]);
@@ -342,10 +352,20 @@ describe('sweepContactReportTexts', () => {
 });
 
 describe('notifyContactsReportReady', () => {
-  test('never throws into the closeout', async () => {
-    queue('customers', new Error('connection reset'));
-    await expect(ContactReportText.notifyContactsReportReady({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' }))
-      .resolves.toBe(0);
+  const args = { customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' };
+
+  test('never throws into the closeout; a queue that keeps failing is logged as lost', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    queue('customers', new Error('connection reset'), new Error('connection reset'), new Error('connection reset'));
+    await expect(ContactReportText.notifyContactsReportReady(args, { delaysMs: [0, 0] })).resolves.toBe(0);
+    expect(logger.error.mock.calls[0][0]).toMatch(/queue failed for record:rec-1 after 3 tries .*contact report text not sent/);
+  });
+
+  test('a queue write that fails once is retried', async () => {
+    queue('customers', new Error('connection reset'), { ...CUSTOMER, service_contact2_phone: null });
+    queue('contact_report_texts', [{ id: 'row-1' }], []);
+    await expect(ContactReportText.notifyContactsReportReady(args, { delaysMs: [0, 0] })).resolves.toBe(1);
   });
 });
 
@@ -370,6 +390,7 @@ describe('the approved wording and the hooks', () => {
   test('the combined-stop summary queues it on sent and on a send-window hold', () => {
     const source = read('services/visit-completion-summary.js');
     expect(source.match(/ContactReportText\.notifyContactsReportReady\(/g)).toHaveLength(2);
+    expect(source.match(/excludePhone: recipient\.phone,/g)).toHaveLength(2);
     expect(source).toMatch(/sourceKey: `visit:\$\{visit\.id\}`/);
   });
 });

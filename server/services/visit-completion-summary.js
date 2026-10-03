@@ -650,6 +650,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
       await deferSummarySms({ visit, member, customer, recipient, body, plainBody, link, claim, nextAllowedAt: result.nextAllowedAt });
       await ContactReportText.notifyContactsReportReady({
         customerId: customer.id, sourceKey: `visit:${visit.id}`, reportUrl: summaryUrl, scheduledServiceId: member.id, notBefore: new Date(result.nextAllowedAt),
+        excludePhone: recipient.phone,
       });
       return;
     }
@@ -672,6 +673,9 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
     if (outcome === 'sent') {
       await ContactReportText.notifyContactsReportReady({
         customerId: customer.id, sourceKey: `visit:${visit.id}`, reportUrl: summaryUrl, scheduledServiceId: member.id,
+        // The summary's own recipient (Contact 1 when the account holder has
+        // no phone) never gets the report text too.
+        excludePhone: recipient.phone,
       });
     }
   } catch {

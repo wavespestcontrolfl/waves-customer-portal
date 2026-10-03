@@ -13969,7 +13969,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (reportToken && smsMetadata.report_url) {
               await require('./contact-report-text').notifyContactsReportReady({
                 customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: smsMetadata.report_url,
-                scheduledServiceId: svc.id, notBefore: new Date(smsResult.nextAllowedAt),
+                scheduledServiceId: svc.id, notBefore: new Date(smsResult.nextAllowedAt), excludePhone: svc.cust_phone,
               });
             }
           } else if (!smsResult.sent) {
@@ -14065,7 +14065,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (GATE_CONTACT_REPORT_TEXT; never throws, sends in the background).
             if (reportToken && smsMetadata.report_url) {
               await require('./contact-report-text').notifyContactsReportReady({
-                customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: smsMetadata.report_url, scheduledServiceId: svc.id,
+                customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: smsMetadata.report_url, scheduledServiceId: svc.id, excludePhone: svc.cust_phone,
               });
             }
             await db('service_report_events').insert({
