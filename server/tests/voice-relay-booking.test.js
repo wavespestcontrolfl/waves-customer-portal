@@ -924,9 +924,11 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(availability.acquireSelfBookingDayCapLock).toHaveBeenCalledWith(trx, BOOK_DATE);
     // Rung 6 — owed by EVERY writer that commits a scheduled_services INSERT.
     expect(lockCustomerComms).toHaveBeenCalledWith(trx, CUSTOMER.id);
-    // Second half of the contract: the GLOBAL tech-blind probe, under the lock.
+    // Second half of the contract: the GLOBAL probe, under the lock — scoped to
+    // the technician the offer (and so the row) carries; occupancy.js ignores
+    // it unless GATE_MULTI_TECH_CONFIRM + capacity mode are on.
     expect(occupancy.findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-      db: trx, date: BOOK_DATE, windowStart: '09:00', windowEnd: '10:00',
+      db: trx, date: BOOK_DATE, windowStart: '09:00', windowEnd: '10:00', technicianId: 't-1',
     }));
     // Rungs are coarsest-first — occupancy before the day cap, both before comms.
     const order = [
@@ -936,6 +938,21 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       trxBuilders.scheduled_services.insert.mock.invocationCallOrder[0],
     ];
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  test('the probe carries the technician the row is written with; an unassigned offer probes tech-blind (null)', async () => {
+    await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(trxBuilders.scheduled_services.insert.mock.calls[0][0].technician_id).toBe('t-1');
+    expect(occupancy.findConflictingVisits.mock.calls[0][0].technicianId).toBe('t-1');
+
+    occupancy.findConflictingVisits.mockClear();
+    trxBuilders.scheduled_services.insert.mockClear();
+    booking.buildBookingAvailability.mockResolvedValue({
+      slots: [], days: [{ date: BOOK_DATE, slots: [{ ...SLOT, technician_id: null }] }],
+    });
+    await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(trxBuilders.scheduled_services.insert.mock.calls[0][0].technician_id).toBeNull();
+    expect(occupancy.findConflictingVisits.mock.calls[0][0].technicianId).toBeNull();
   });
 
   test('a committed clash from ANOTHER customer aborts the write (double-booking)', async () => {
