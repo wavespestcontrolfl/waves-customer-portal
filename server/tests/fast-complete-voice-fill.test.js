@@ -1677,7 +1677,9 @@ describe('Codex #5698 round 1', () => {
   test('a stitched quote cannot borrow "same as last time" from another product\'s sentence', () => {
     const t = 'Used Taurus today. Talstar was same as last time.';
     const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus, same as last time' }] }), ctx, t);
-    expect(out.products[0].sameAsLast).toBe(false);
+    // the flag is read from Taurus's own sentence, never from the stitched phrase
+    expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+    expect(out.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
     const own = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was same as last time' }] }), ctx, t);
     expect(own.products[0].sameAsLast).toBe(true);
   });
@@ -1686,8 +1688,11 @@ describe('Codex #5698 round 1', () => {
 test('same-as-last is read where the product is named: a reversed stitched quote borrows nothing', () => {
   const t = 'Used Taurus today. Talstar was same as last time.';
   const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'same as last time, Taurus' }] }), ctx, t);
-  expect(out.products[0].sameAsLast).toBe(false);
-  expect(out.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
+  expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+  // and with a quote that IS one run, the flag is read from Taurus's own sentence
+  const own = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Used Taurus today' }] }), ctx, t);
+  expect(own.products[0].sameAsLast).toBe(false);
+  expect(own.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
 });
 
 test('"Taurus isn\'t the same as last time" is no same-as-last flag', () => {
@@ -1703,4 +1708,37 @@ test('a product\'s own catalog method in its clause is a competing method too', 
   const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Drenched the soil with Taurus' }] }), withDrench, t);
   expect(out.products[0].method).toBe('');
   expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+});
+
+describe('Codex #5698 round 3', () => {
+  test('a quote cut exactly at the end of a word keeps that word', () => {
+    const lead = 'x'.repeat(CAPS.heard - 8);
+    const t = `${lead} Taurus was used outside today.`;
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: t }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+    expect(out.products[0].heard).toContain('Taurus');
+  });
+
+  test('words from different pieces of a stitched quote never combine into a product name', () => {
+    // every word of this name is a generic kind word: only the whole name, in one piece, names it
+    const withPlus = { ...ctx, products: [...ctx.products, { id: 'p-pgp', name: 'Pro Gel Plus', fullName: 'Pro Gel Plus', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const row = (heard) => ({ productId: 'p-pgp', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard });
+    const scattered = 'This was a pro account. Put gel under the sink. Plus the garage.';
+    expect(validateFill(answer({ products: [row('pro, gel, plus')] }), withPlus, scattered).products).toEqual([]);
+    const said = 'Used Pro Gel Plus under the sink.';
+    expect(validateFill(answer({ products: [row('Used Pro Gel Plus')] }), withPlus, said).products.map((p) => p.productId)).toEqual(['p-pgp']);
+  });
+
+  test('a product named twice: a later question never authorizes same-as-last for the application', () => {
+    const t = 'Used Taurus today. I asked whether Taurus should be the same as last time next visit.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});
+
+test('the live model\'s stitched product quote ("Same mix as last time, Talstar") keeps the product and its flag', () => {
+  const t = 'Same mix as last time, Taurus, Talstar and the surfactant. Spot treated the garage.';
+  const row = (productId, heard) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard });
+  const out = validateFill(answer({ products: [row('p-taurus', 'Same mix as last time, Taurus'), row('p-talak', 'Same mix as last time, Talstar'), row('p-surf', 'Same mix as last time, the surfactant')] }), ctx, t);
+  expect(out.products.map((p) => [p.productId, p.sameAsLast])).toEqual([['p-taurus', true], ['p-talak', true], ['p-surf', true]]);
 });

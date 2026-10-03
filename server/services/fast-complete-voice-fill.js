@@ -377,7 +377,9 @@ function clipHeard(value, max = CAPS.heard) {
   const text = cleanText(value, 4000);
   if (text.length <= max) return text;
   const cut = text.slice(0, max - 1);
-  const atWord = cut.slice(0, Math.max(cut.lastIndexOf(' '), 0)) || cut;
+  // drop the last token only when the cut landed inside it
+  const midWord = /[a-z0-9]/i.test(cut.slice(-1)) && /[a-z0-9]/i.test(text.charAt(max - 1));
+  const atWord = midWord ? (cut.slice(0, Math.max(cut.lastIndexOf(' '), 0)) || cut) : cut;
   return `${atWord.replace(/[\s.,;:!?]+$/, '')}…`;
 }
 // Free-form notes keep their line breaks (a tech may dictate a list).
@@ -387,9 +389,13 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 // A heard snippet is real when each of its pieces (the model may join separate
 // quotes with an ellipsis, a bar, or as whole sentences — seen live on Sonnet 5)
 // occurs in the transcript.
+// Pieces also break at sentence ends and commas: the live model joins separate
+// phrases that way ("Same mix as last time, Talstar"). A product's NAME must still
+// sit inside one piece (productPiece), so scattered words are never assembled
+// into a name ("green, guard, pro").
+const HEARD_BREAKS = /\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;,:])\s+/;
 function heardInTranscript(heard, normTranscript) {
-  // (also at commas: the live model joins two separate phrases with one)
-  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;,:])\s+/).map(norm).filter(Boolean);
+  const pieces = String(heard || '').split(HEARD_BREAKS).map(norm).filter(Boolean);
   return pieces.length > 0 && pieces.every((piece) => ` ${normTranscript} `.includes(` ${piece} `));
 }
 
@@ -771,6 +777,12 @@ function hasApplicationContext(run, tokens, breaks, quantities) {
   return quantities.some((q) => q.nameAt === run.start || (q.start >= from && q.end <= to));
 }
 
+// The one piece of a (possibly stitched) quote that names this product on its
+// own; '' when no single piece does.
+function productPiece(product, heard) {
+  return String(heard || '').split(HEARD_BREAKS).find((piece) => nameEvidence(product, tokensOf(piece)).qualifies) || '';
+}
+
 // Every product's evidence against one heard snippet, computed once per row.
 function heardProducts(ctx, heard) {
   const tokens = tokensOf(heard);
@@ -1104,10 +1116,13 @@ function productSameAsLast(raw, amount, heard, transcript, unclear, product, wor
   // Read from the sentence where THIS product is named, never from the quote: a
   // stitched quote ("Taurus, same as last time" / "same as last time, Taurus") could
   // borrow the phrase from another product's sentence.
+  // When the quote does not single out one mention ("Taurus" said twice), every
+  // mention's sentence must carry the phrase: a later question about the product
+  // never authorizes the flag for an earlier application.
   const mentions = productMentions(product, heard, world);
-  const said = mentions.map((m) => mentionSentenceWords(m, world, { contrast: true })).join(' . ');
-  const whole = mentions.map((m) => mentionSentenceWords(m, world)).join(' . ');
-  if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(whole)) return true;
+  const ok = mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(mentionSentenceWords(m, world, { contrast: true }))
+    && !NOT_SAME_AS_LAST_RE.test(mentionSentenceWords(m, world)));
+  if (ok) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
   return false;
 }
@@ -1120,7 +1135,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const evidence = product ? heardProducts(ctx, heard) : null;
+    const evidence = product ? heardProducts(ctx, productPiece(product, heard)) : null;
     const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
