@@ -17078,13 +17078,13 @@ function membershipDuesMintRequest(svc, amount) {
   return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
 }
 
-// The live stamped dues invoice that already bills this plan visit's month, or
-// null. A prepayment marked on such a visit has nowhere to land: the visit mints
-// no invoice of its own (the month's dues are the covering invoice), so cash or
-// Zelle recorded on the visit would sit off the payment ledger while that
-// invoice keeps dunning. Judged by the mint's own dues-shape test
-// (membershipDuesMintRequest) and the shared live-invoice lookup.
-async function duesInvoiceCoveringPlanVisit(serviceId) {
+// The (customer, month) a prepayment on this visit would interact with, from an
+// UNLOCKED read of the visit and customer, or null when the visit is not a
+// membership-dues-shaped plan visit (judged by the mint's own dues-shape test,
+// membershipDuesMintRequest). The caller re-verifies both after it holds the
+// visit row.
+const visitMonthOf = (d) => String(d instanceof Date ? d.toISOString() : d).slice(0, 7);
+async function planVisitDuesScope(serviceId) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -17098,8 +17098,53 @@ async function duesInvoiceCoveringPlanVisit(serviceId) {
   if (!svc) return null;
   const request = membershipDuesMintRequest(svc, Number(svc.cust_monthly_rate));
   if (!request) return null;
+  return { serviceId: svc.id, customerId: String(svc.customer_id), month: request.month };
+}
+
+// The live stamped dues invoice that already bills this plan visit's month, or
+// null. A prepayment marked on such a visit has nowhere to land: the visit mints
+// no invoice of its own (the month's dues are the covering invoice), so cash or
+// Zelle recorded on the visit would sit off the payment ledger while that
+// invoice keeps dunning. Read-only (the prepaid POST itself decides under the
+// month lock, recordPrepaidUnderDuesLock).
+async function duesInvoiceCoveringPlanVisit(serviceId, conn = db) {
+  const scope = await planVisitDuesScope(serviceId);
+  if (!scope) return null;
   const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
-  return findLiveStampedDuesInvoice(db, svc.customer_id, request.month, { excludeScheduledServiceId: svc.id });
+  return findLiveStampedDuesInvoice(conn, scope.customerId, scope.month, { excludeScheduledServiceId: scope.serviceId });
+}
+
+// Records the prepaid marker ATOMICALLY with the dues-coverage decision. For a
+// dues-shaped plan visit the whole thing is one transaction whose FIRST lock is
+// the dues-month lock (THE LOCK RULE, billing-lane.js: it holds nothing yet, so
+// it may wait): coverage is re-read under it, and only an uncovered month takes
+// the marker (the visit-row UPDATE comes after the lock, so a completion holding
+// the visit row only TRIES the month lock and a mint holding it only polls the
+// month lock: neither can wait on this transaction in a cycle). A sibling dues
+// invoice that commits first is seen by the re-read (refused); one that mints
+// after this commits is the reverse order described at the POST route. The
+// scope came from an unlocked read of the visit, so after the UPDATE the visit's
+// month and customer are re-verified (rescheduled / merged since: retryable).
+// `writeStamp(conn)` is the caller's marker UPDATE (all its row predicates).
+async function recordPrepaidUnderDuesLock(serviceId, { amount, writeStamp }) {
+  const scope = amount > 0 ? await planVisitDuesScope(serviceId) : null;
+  if (!scope) return { updated: await writeStamp(db) };
+  const { acquireMembershipDuesMonthLock, findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return db.transaction(async (trx) => {
+    await acquireMembershipDuesMonthLock(trx, scope.customerId, scope.month);
+    const covering = await findLiveStampedDuesInvoice(trx, scope.customerId, scope.month, { excludeScheduledServiceId: serviceId });
+    if (covering) return { covering };
+    const updated = await writeStamp(trx);
+    if (updated.length) {
+      const now = await trx('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      if (!now || String(now.customer_id) !== scope.customerId || visitMonthOf(now.scheduled_date) !== scope.month) {
+        const err = new Error('This visit moved to another month or customer while its prepayment was being recorded — nothing was saved; retry.');
+        err.status = 409;
+        throw err;
+      }
+    }
+    return { updated };
+  });
 }
 function duesCoversPrepaidRefusal(duesInvoice) {
   const label = duesInvoice.invoice_number || duesInvoice.id;
@@ -17473,11 +17518,12 @@ router.post('/:id/prepaid', async (req, res, next) => {
       return res.json({ success: true, ...result });
     }
     // A plan visit whose month a stamped dues invoice already bills takes no
-    // prepaid marker: refused BEFORE anything is written, naming the invoice the
-    // payment belongs on (the covered visit mints no invoice to apply it to).
-    // (A zero amount records no money, so it is never refused.)
-    const coveringDues = amt > 0 ? await duesInvoiceCoveringPlanVisit(req.params.id) : null;
-    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
+    // prepaid marker (the covered visit mints no invoice to apply the payment
+    // to): the coverage check and the marker write are ONE transaction under the
+    // dues-month lock (recordPrepaidUnderDuesLock), so a sibling dues invoice can
+    // neither slip in between them nor be missed when no receipt is requested.
+    // A refusal names the invoice the payment belongs on. A zero amount records
+    // no money and is never refused.
     // Terminal rows never take a stamp (same set the series fan-out
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
@@ -17486,18 +17532,22 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // manual writer next to the series fan-out and the bulk action, and a
     // manual method replacing the annual one would hide paid coverage from
     // the completion billing gate (Codex #4030 r7 P1).
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.id })
-      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
-      .modify(withoutAnnualCoverage)
-      .modify((q) => technicianLiveVisitFilter(req, q))
-      .update({
-        prepaid_amount: amt,
-        prepaid_method: method || null,
-        prepaid_note: note || null,
-        prepaid_at: db.fn.now(),
-      })
-      .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+    const { updated, covering: coveringDues } = await recordPrepaidUnderDuesLock(req.params.id, {
+      amount: amt,
+      writeStamp: (conn) => conn('scheduled_services')
+        .where({ id: req.params.id })
+        .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+        .modify(withoutAnnualCoverage)
+        .modify((q) => technicianLiveVisitFilter(req, q))
+        .update({
+          prepaid_amount: amt,
+          prepaid_method: method || null,
+          prepaid_note: note || null,
+          prepaid_at: db.fn.now(),
+        })
+        .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']),
+    });
+    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
     if (!updated.length) {
       const current = await db('scheduled_services').where({ id: req.params.id })
         .first('status', 'annual_prepay_term_id', 'prepaid_method');
@@ -17529,10 +17579,22 @@ router.post('/:id/prepaid', async (req, res, next) => {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
     }
-    // The month got covered between the check above and the receipt's mint (a
-    // sibling visit's dues invoice): the marker just written has nowhere to
-    // land, so it is undone in this request (only if it is still the one we
-    // wrote) and refused with the same message.
+    // REVERSE ORDER, receipt requested: the marker was written under the month
+    // lock while the month was uncovered, and a sibling visit's dues invoice
+    // then committed before THIS request's receipt mint (which the dues stamp
+    // refuses as already covered). The marker has nowhere to land, so it is
+    // undone here (only if it is still the one we wrote) and refused with the
+    // same message. Not dead code: the lock cannot hold across the receipt mint
+    // (it takes its own locks and may call out), and a sibling mint never looks
+    // at the marker.
+    // KNOWN LIMIT (marker first, sibling's dues mint after, no receipt request):
+    // nothing re-checks after the marker commits. The prepaid plan visit mints no
+    // invoice of its own at completion (its prepaid amount covers the dues amount),
+    // and the sibling's completion mints the month's stamped dues invoice, since
+    // the marker is on a visit, not on the ledger. The month is billed ONCE (no
+    // second invoice), but the cash recorded on the prepaid visit is not applied to
+    // that invoice, which can keep dunning: the office applies the payment to it.
+    // Making the sibling's mint see a prepaid plan visit would be new money logic.
     if (receipt && receipt.reason === 'membership_dues_covered') {
       await db('scheduled_services')
         .where({ id: req.params.id, prepaid_at: updated[0].prepaid_at })
@@ -27570,6 +27632,7 @@ router._test = {
   seriesExtendAnchor,
   mintOrReuseScheduledServiceInvoice,
   duesInvoiceCoveringPlanVisit,
+  recordPrepaidUnderDuesLock,
   duesCoversPrepaidRefusal,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,

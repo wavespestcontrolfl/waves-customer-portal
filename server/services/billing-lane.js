@@ -978,9 +978,11 @@ function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
 // a mint and a credit-applied void). A transaction may WAIT (this blocking form)
 // on the dues-month lock only if it holds NO other lock yet: it is the FIRST
 // lock of the transaction. Takers: voidInvoice and the cancelled-visit void
-// (lockMembershipDuesMonthOfInvoice), the stamped-invoice edit, and the
-// completion's early confirmation transaction; each then goes on to take
-// invoice / statement / customer FOR UPDATE rows while holding it. A
+// (lockMembershipDuesMonthOfInvoice), the stamped-invoice edit, the
+// completion's early confirmation transaction, and the prepaid-marker POST
+// (recordPrepaidUnderDuesLock: month lock, coverage re-read, then the visit-row
+// UPDATE); each then goes on to take invoice / statement / customer / visit
+// rows while holding it. A
 // transaction that ALREADY holds a customer, visit, mint-advisory or invoice
 // lock must NEVER wait on it, because the holder may be queued behind that very
 // lock (a void holds the month, then wants the customer FOR UPDATE that a mint's

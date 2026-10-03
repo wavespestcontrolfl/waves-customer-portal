@@ -123,10 +123,14 @@ describe('returnAppliedCreditOnRefund — deposit restore', () => {
 // after the caller's transaction commits and never on a rollback.
 describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
   beforeEach(() => jest.clearAllMocks());
-  const stamped = () => invoice({
+  // Postgres returns a jsonb column DECODED (an array of objects): that is the
+  // production shape. A JSON string (a driver or test double that did not decode)
+  // is also read.
+  const duesLines = [{ description: 'Lawn', amount: 49, membership_dues_month: '2026-09' }];
+  const stamped = (lineItems = duesLines) => invoice({
     status: 'paid',
     scheduled_service_id: 'visit-1',
-    line_items: JSON.stringify([{ description: 'Lawn', amount: 49, membership_dues_month: '2026-09' }]),
+    line_items: lineItems,
   });
   function trxWithCommit(row) {
     const trx = makeTrx(row);
@@ -154,6 +158,22 @@ describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
     const trx = trxWithCommit(stamped());
     await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
     trx.settle.reject(new Error('rolled back'));
+    await flush();
+    expect(mockDuesAlert).not.toHaveBeenCalled();
+  });
+
+  it('reads the stamp from a JSON string too', async () => {
+    const trx = trxWithCommit(stamped(JSON.stringify(duesLines)));
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
+    trx.settle.resolve();
+    await flush();
+    expect(mockDuesAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('a decoded array with no stamp on any line raises nothing', async () => {
+    const trx = trxWithCommit(stamped([{ description: 'Lawn', amount: 49 }, { description: 'Fee', amount: 5 }]));
+    await returnAppliedCreditOnRefund({ invoiceId: 'inv-1' }, trx);
+    trx.settle.resolve();
     await flush();
     expect(mockDuesAlert).not.toHaveBeenCalled();
   });

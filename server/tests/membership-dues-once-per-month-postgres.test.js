@@ -1337,7 +1337,7 @@ postgres('membership dues — add-ons totaling the rate never carry the dues sta
 // Round 6: prepaid markers, refunds, payer resolution, owner re-read, completion copy.
 postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (B08 round 6)', () => {
   const InvoiceSvc = require('../services/invoice');
-  const { duesInvoiceCoveringPlanVisit, duesCoversPrepaidRefusal } = require('../routes/admin-schedule')._test;
+  const { duesInvoiceCoveringPlanVisit, recordPrepaidUnderDuesLock, duesCoversPrepaidRefusal } = require('../routes/admin-schedule')._test;
   beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 10 } }); });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   afterEach(() => { jest.restoreAllMocks(); });
@@ -1367,6 +1367,91 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       expect(await duesInvoiceCoveringPlanVisit(priced)).toBeNull();
       await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
       expect(await duesInvoiceCoveringPlanVisit(second)).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  // ── The prepaid marker is recorded atomically with the coverage decision ──
+  const writeMarker = (serviceId, amount = 49) => (conn) => conn('scheduled_services').where({ id: serviceId })
+    .update({ prepaid_amount: amount, prepaid_method: 'cash', prepaid_note: null, prepaid_at: mockPg.fn.now() })
+    .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+  const prepaidOf = async (id) => (await mockPg('scheduled_services').where({ id }).first('prepaid_amount')).prepaid_amount;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const settled = (p) => Promise.race([p.then(() => 'done', () => 'done'), sleep(600).then(() => 'pending')]);
+
+  test('uncovered month: the marker is written; covered month: refused naming the invoice, nothing written', async () => {
+    const f = await seedMember();
+    try {
+      const first = await seedVisit(f, { label: 'Lawn Care' });
+      const written = await recordPrepaidUnderDuesLock(first, { amount: 49, writeStamp: writeMarker(first) });
+      expect(written.covering).toBeUndefined();
+      expect(written.updated).toHaveLength(1);
+      expect(Number(await prepaidOf(first))).toBe(49);
+      await mockPg('scheduled_services').where({ id: first }).update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+      const a = await mintDues(f, 'Pest Control');
+      const second = await seedVisit(f, { label: 'Mosquito' });
+      const refused = await recordPrepaidUnderDuesLock(second, { amount: 49, writeStamp: writeMarker(second) });
+      expect(refused.covering).toMatchObject({ id: a.invoice.id });
+      expect(await prepaidOf(second)).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  test('a sibling dues invoice committing while the marker waits on the month lock is SEEN: refused, no marker (no receipt request involved)', async () => {
+    const f = await seedMember();
+    try {
+      const marked = await seedVisit(f, { label: 'Lawn Care' });
+      const sibling = await seedVisit(f, { label: 'Pest Control' });
+      const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+      const hold = await mockPg.transaction(); // plays the sibling's dues mint: holds the lock, inserts the stamped invoice, then commits
+      try {
+        await acquireMembershipDuesMonthLock(hold, f.customerId, monthOf(etDateString()));
+        const pending = recordPrepaidUnderDuesLock(marked, { amount: 49, writeStamp: writeMarker(marked) });
+        expect(await settled(pending)).toBe('pending'); // it WAITS (first lock of its transaction)
+        expect(await prepaidOf(marked)).toBeNull();
+        await hold('invoices').insert({ id: randomUUID(), token: randomUUID().replace(/-/g, ''), invoice_number: `B08-${randomUUID().slice(0, 8)}`,
+          customer_id: f.customerId, scheduled_service_id: sibling, status: 'sent', total: 49, subtotal: 49,
+          line_items: JSON.stringify([{ description: 'Pest Control', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }]) });
+        await hold.commit();
+        const result = await pending;
+        expect(result.covering).toBeTruthy();
+        expect(await prepaidOf(marked)).toBeNull();
+      } finally { await hold.rollback().catch(() => {}); }
+    } finally { await cleanup(f); }
+  });
+
+  test('the visit moved to another month between the unlocked scope read and the marker write: retryable refusal, the marker is rolled back', async () => {
+    const f = await seedMember();
+    let restore;
+    try {
+      const visit = await seedVisit(f, { label: 'Lawn Care' });
+      const driver = Object.getPrototypeOf(mockPg.client);
+      const originalQuery = driver._query;
+      let armed = true;
+      driver._query = function patched(connection, obj) {
+        if (armed && /pg_advisory_xact_lock/i.test(String(obj?.sql || '')) && JSON.stringify(obj?.bindings || []).includes('membership.dues_month')) {
+          armed = false; // after the scope read, before the lock: the visit is rescheduled to another month
+          return mockPg('scheduled_services').where({ id: visit }).update({ scheduled_date: previousMonthDay() })
+            .then(() => originalQuery.call(this, connection, obj));
+        }
+        return originalQuery.call(this, connection, obj);
+      };
+      restore = () => { driver._query = originalQuery; };
+      await expect(recordPrepaidUnderDuesLock(visit, { amount: 49, writeStamp: writeMarker(visit) })).rejects.toMatchObject({ status: 409 });
+      restore(); restore = null;
+      expect(await prepaidOf(visit)).toBeNull();
+    } finally { if (restore) restore(); await cleanup(f); }
+  });
+
+  test('marker first, then a sibling dues mint (reverse order, no receipt): the month is billed once; the prepaid visit mints no invoice of its own and its cash stays on the visit (stated limit)', async () => {
+    const f = await seedMember();
+    try {
+      const marked = await seedVisit(f, { label: 'Lawn Care' });
+      await recordPrepaidUnderDuesLock(marked, { amount: 49, writeStamp: writeMarker(marked) });
+      const sibling = await mintDues(f, 'Pest Control');
+      expect(await complete(f, marked)).toMatchObject({ status: 200 });
+      const live = await mockPg('invoices').where({ customer_id: f.customerId }).whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled']);
+      expect(live.map((r) => r.id)).toEqual([sibling.invoice.id]); // billed once, nothing double-billed
+      expect(Number(await prepaidOf(marked))).toBe(49); // the cash is on the visit, not applied to the sibling's invoice
+      expect(sibling.invoice.status).not.toBe('paid');
     } finally { await cleanup(f); }
   });
 

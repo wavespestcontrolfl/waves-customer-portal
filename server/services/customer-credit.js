@@ -580,7 +580,9 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
     // exactly like a void does: visits that completed under it are unbilled.
     // Raise the same "rebill the month" office alert AFTER the caller's
     // transaction commits (never on a rollback), best effort.
-    if (String(inv.line_items || '').includes('membership_dues_month')) {
+    // The stamp reader accepts the row as Postgres returns it (a decoded array of
+    // objects) and as a JSON string; never a text search of the column.
+    if (require('./invoice').membershipDuesStampMonth(inv.line_items)) {
       afterCommit(trx, async () => {
         try {
           await require('./invoice').alertIfMembershipDuesCoverageReleased({ ...inv, status: 'refunded' }, { releasedBy: 'refunded' });

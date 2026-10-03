@@ -13187,6 +13187,7 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 // Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
 InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
+InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
 // Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
 InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;
 
