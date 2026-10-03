@@ -2372,6 +2372,37 @@ cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
 off the payload and the signature are byte-identical to before.
 
+`GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
+list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
+without that marker is untouched), the service-report payload gains
+`reportV2.photoSet` and `lawnAssessment.photoSet`: `[{ url, shot, label }]`, the
+visit's customer-visible photos in shot order (the order of
+`shared/lawn-photo-shots.json`, then the technician's order inside a shot, an
+untagged photo last). `label` is the fixed customer wording (the `reportLabel`
+values listed above, or "Lawn photo" for an untagged photo); `shot` is the shot
+key or `null`. Each `url` is a signed link built on every view (the same
+24-hour link as `photos`); nothing stores it. The set is all or nothing: the
+key is absent when the photo read fails or when any one photo of the visit will
+not sign (the old strip and gallery rules then apply, as with the gate off), and
+an unsigned photo, a failed photo read on an eligible visit, or a built set that
+never reaches `reportV2` counts into `imageResolutionFailures` so the PDF of that
+view is not cached. The set is read with the eight-photo
+cap whenever the gate is live and the visit carries the marker, even if
+`GATE_LAWN_SHOT_LIST` is off. Two components draw it. The live web report and the
+static build (`LawnReportV2Section`, `LawnPhotoStrip`) show the set as a labeled
+grid in place of the swipe strip, with a tap-to-open link per photo on the web
+and none in print. The PDF (`?mode=pdf`, which the download, the share sheet and
+the email attachment all serve) is `ServiceReportDocument`, whose "Service
+photos" gallery prints the set in shot order with its labels and leaves out the
+`lawn-` turf copies and the `reportV2.photos` strip copies of the same photos;
+service photos, approved moments and the turf-height gauge photo stay. The
+server probe of the printed photos (`collectRenderedImageUrls`) mirrors this: it
+checks the set URLs and not the suppressed copies. The lawn
+PDF cache signature gains `:photoset=1` only while the gate is live AND the
+visit's assessment carries the marker, so a legacy visit keeps its stored PDF.
+With the gate off, or on a visit without the marker, the payload and the
+signature are byte-identical to before.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`

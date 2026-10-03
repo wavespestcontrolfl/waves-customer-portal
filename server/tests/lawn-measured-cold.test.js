@@ -417,7 +417,8 @@ describe('the gate reader', () => {
   });
   test('the reader is exported on its own line at the end of the file and documented in the header, the gates doc and the route contracts', () => {
     const lines = read('config/feature-gates.js').trimEnd().split('\n');
-    expect(lines[lines.length - 1]).toBe('module.exports.lawnMeasuredColdLive = lawnMeasuredColdLive;');
+    // On its own line; not pinned to the LAST line, which moves each time another gate PR merges.
+    expect(lines).toContain('module.exports.lawnMeasuredColdLive = lawnMeasuredColdLive;');
     expect(read('config/feature-gates.js')).toMatch(/\* {3}GATE_LAWN_MEASURED_COLD=true/);
     expect(fs.readFileSync(path.join(__dirname, '../../docs/gates-and-env.md'), 'utf8')).toMatch(/`GATE_LAWN_MEASURED_COLD`/);
     expect(fs.readFileSync(path.join(__dirname, '../../docs/public-route-contracts.md'), 'utf8')).toMatch(/GATE_LAWN_MEASURED_COLD/);

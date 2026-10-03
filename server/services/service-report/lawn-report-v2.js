@@ -857,6 +857,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
+    // GATE_LAWN_REPORT_PHOTO_SET (P23): only a visit with a built set carries the key.
+    ...(Array.isArray(lawnAssessment.photoSet) && lawnAssessment.photoSet.length ? { photoSet: lawnAssessment.photoSet } : {}),
     beforeAfter, progression, progressionNote, aftercare, smsSummary, trends,
   };
 }
