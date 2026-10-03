@@ -797,7 +797,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   for (const l of entry.lines) {
     const live = await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first();
     if (!live) continue;
-    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, ...meta } = parseJson(live.metadata, {});
+    const { pending_letter: _p, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
     // A revocation from an EARLIER attempt is history, not overwritten: it advances the attempt
     // identity, so the next send is never deduplicated against a bounced message.
     const history = priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {};
@@ -806,7 +806,10 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
       retryable = false;
       await dbh('price_change_notices').where({ id: live.id }).update({
         status: UNCERTAIN, updated_at: new Date(),
-        metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}), pending_letter: frozen }),
+        metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}),
+          // the channels whose outcome is still unknown, so a late bounce can settle them
+          uncertain_channels: { ...(emailUnknown && !early.email ? { email: true } : {}), ...(smsUnknown && !early.sms ? { sms: true } : {}) },
+          uncertain_claim_key: frozen.key, pending_letter: frozen }),
       });
       continue;
     }
@@ -1136,7 +1139,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
-      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, ...meta } = parseJson(live.metadata, {});
+      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
       const early = { ...earlyRecorded };
       // Twilio's verdict may already be in sms_log (its callback beat this stamp):
       // that is an early failure of the text too.
@@ -1153,7 +1156,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && !early.email ? { email: true } : {}),
         ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold && !early.sms ? { sms: true } : {}),
       };
-      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels } : {}) };
+      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels, uncertain_claim_key: frozen.key } : {}) };
       if (!emailOk && !smsOk) {
         // Every confirmed channel failed before the stamp. With an UNKNOWN channel left the
         // letter may still have arrived: parked as send_uncertain with its words. Otherwise
@@ -1492,6 +1495,10 @@ function noticeMatchesDispatch(n, key, value, claimKey) {
   // that attempt's claim key — never by a provider id left from an earlier
   // attempt, which would charge a delayed old failure to the new letter.
   if (String(n.status) === 'sending') return !!claimKey && !!meta.pending_letter && String(meta.pending_letter.key) === String(claimKey);
+  // A channel of unknown outcome may carry no provider id (the call failed before one came
+  // back): its late events find the notice through that attempt's claim key.
+  const channel = key === 'email_message_id' ? 'email' : 'sms';
+  if (claimKey && (meta.uncertain_channels || {})[channel] && String(meta.uncertain_claim_key || '') === String(claimKey)) return true;
   return String(meta[key] || '') === String(value);
 }
 
@@ -1536,14 +1543,24 @@ async function recordChannelFailure(trx, notice, channel, detail) {
     await trx('price_change_notices').where({ id: live.id }).update({ metadata: JSON.stringify({ ...meta, early_failures: { ...early, [channel]: failure } }), updated_at: new Date() });
     return null;
   }
-  if (meta.delivery_revoked || live[flag] !== true) return null;
+  // A late failure of a channel whose outcome was UNKNOWN (an ambiguous email, now bounced) is
+  // evidence too, though its flag was never set: it settles that channel, and may settle the whole
+  // letter (stamped, or parked as send_uncertain).
+  const wasUnknown = !!(meta.uncertain_channels || {})[channel];
+  if (wasUnknown ? !['sent', 'viewed', UNCERTAIN].includes(String(live.status)) : (meta.delivery_revoked || live[flag] !== true)) return null;
+  if (wasUnknown && meta.channel_failures && meta.channel_failures[channel]) return null; // already recorded
   const next = { ...meta, channel_failures: { ...(meta.channel_failures || {}), [channel]: failure } };
+  if (wasUnknown) {
+    const rest = { ...meta.uncertain_channels };
+    delete rest[channel];
+    if (Object.keys(rest).length) next.uncertain_channels = rest; else { delete next.uncertain_channels; delete next.uncertain_claim_key; }
+  }
   const patch = { [flag]: false, updated_at: new Date() };
   if (live[otherFlag] === true) {
     await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
     return null;
   }
-  next.delivery_revoked = failure;
+  next.delivery_revoked = meta.delivery_revoked || failure;
   const prepay = live.billing_lane === 'annual_prepay';
   // A prepaid renewal already RECORDED (a successor term exists, possibly invoiced at the
   // increased amount) cannot be reversed here: flagged for a hand check, as a written rate is.
@@ -1558,16 +1575,20 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   // Re-evaluated on the live row: a channel with failure evidence (channel_failures, or the one
   // failing now) is no longer unknown. No unknown channel left and none delivered → a clean,
   // retryable draft with the revocation recorded.
-  const failedChannels = new Set([...Object.keys(meta.channel_failures || {}), channel]);
-  const stillUnknown = Object.keys(meta.uncertain_channels || {}).filter((ch) => !failedChannels.has(ch));
+  const failedChannels = new Set(Object.keys(next.channel_failures || {}));
+  const stillUnknown = Object.keys(next.uncertain_channels || {}).filter((ch) => !failedChannels.has(ch));
   const parked = !rateWritten && stillUnknown.length > 0;
   if (parked) {
     patch.status = UNCERTAIN;
     patch.sent_at = null;
-    next.pending_letter = { key: meta.letter && meta.letter.key ? meta.letter.key : null, letter: meta.letter || null };
+    // An attempt already parked keeps the words it froze.
+    next.pending_letter = meta.pending_letter || { key: meta.letter && meta.letter.key ? meta.letter.key : null, letter: meta.letter || null };
   } else if (!rateWritten) {
     patch.status = 'draft';
     patch.sent_at = null;
+    delete next.pending_letter; // a parked attempt that is now definitively over keeps no pending words
+    delete next.uncertain_channels;
+    delete next.uncertain_claim_key;
   }
   // Either way (clean failure or parked as uncertain) the customer holds no confirmed
   // notice, so a prepaid increase the apply staged from this notice goes with it —

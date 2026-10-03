@@ -1639,6 +1639,65 @@ describe('customer surfaces', () => {
       expect(notices()[0].status).toBe('draft');
     });
 
+    test('a real late bounce of the unknown email (no provider id came back) settles that channel through the claim key; the text failing afterwards is a re-sendable draft', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(meta().uncertain_channels).toEqual({ email: true });
+      const late = message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      // another attempt's bounce never settles this one
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:other-claim:abc` }), bounce())).toEqual([]);
+      expect(meta().uncertain_channels).toEqual({ email: true });
+      expect(await comms.handleEmailDeliveryEvent(mockDb, late, bounce())).toEqual([]); // the text still stands
+      expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true, email_sent: false });
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(meta().channel_failures.email).toMatchObject({ event: 'bounce' });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+    });
+
+    test('the other order: the text fails first (parked uncertain), then the unknown email bounces ⇒ the parked letter becomes a re-sendable draft', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0].status).toBe('send_uncertain');
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+      expect(alerts).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms' }); // the first failure stays the revocation
+      expect(meta().pending_letter).toBeUndefined();
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+      expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    });
+
+    test('both legs of unknown outcome park with both channels remembered; one late bounce keeps the letter parked with its frozen words, the second failure releases it', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async () => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return { sent: false, attempted: true }; });
+      smsLeg.mockResolvedValue({ sent: false, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(meta().uncertain_channels).toEqual({ email: true, sms: true });
+      const frozen = meta().pending_letter;
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), bounce());
+      expect(notices()[0].status).toBe('send_uncertain'); // the text may still have arrived
+      expect(meta().uncertain_channels).toEqual({ sms: true });
+      expect(meta().pending_letter).toEqual(frozen);
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh: mockDb });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+      expect(meta().pending_letter).toBeUndefined();
+    });
+
     test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
       mockDb.reset(book());
       emailLeg.mockResolvedValue({ sent: false, attempted: true });
