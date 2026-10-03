@@ -599,6 +599,10 @@ async function lockHeldByAnySession(jobName, dbi = db) {
   }
 }
 
+// The settle's last_error. deploy-kill-retry.js matches on it to find a job a
+// dead process left behind, so it is a constant, not prose.
+const DEAD_RUN_ERROR = 'process exited mid-run (advisory lock not held at boot)';
+
 async function settleDeadRunningJobs() {
   let rows;
   try {
@@ -622,7 +626,7 @@ async function settleDeadRunningJobs() {
           // run must not read as this run's (codex P1 on #4103).
           last_duration_ms: null,
           updated_at: now,
-          last_error: 'process exited mid-run (advisory lock not held at boot)',
+          last_error: DEAD_RUN_ERROR,
           consecutive_failures: db.raw('consecutive_failures + 1'),
         });
       if (n) settled.push(row.job_name);
@@ -634,4 +638,4 @@ async function settleDeadRunningJobs() {
   return settled;
 }
 
-module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, wasLockSkipped, sanitizeJobError, getHeldConnection };
+module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, DEAD_RUN_ERROR, wasLockSkipped, sanitizeJobError, getHeldConnection };

@@ -265,6 +265,18 @@ async function persistCheckStates(checks, nextCounts) {
   }
 }
 
+// Whether a canary run has written check state at or after `since`. The
+// deploy-kill retry (utils/deploy-kill-retry.js) asks this before re-running a
+// killed canary: state is written last, after the alert, so a written row
+// means the night's alert and streak counters are already recorded. Throws on
+// a read failure — the caller skips that pass and asks again on the next.
+async function canaryStateWrittenSince(since) {
+  const row = await db('property_lookup_canary_state')
+    .where('last_run_at', '>=', since)
+    .first('check_key');
+  return !!row;
+}
+
 async function runPropertyLookupCanaryInner() {
   logger.info('[property-lookup-canary] canary started', {
     parcels: GOLDEN_PARCELS.length, addressChecks: GOLDEN_PARCELS.length, pointChecks: 1,
@@ -415,6 +427,7 @@ async function runPropertyLookupCanary() {
 
 module.exports = {
   runPropertyLookupCanary,
+  canaryStateWrittenSince,
   _private: {
     GOLDEN_PARCELS,
     GOLDEN_POINT,

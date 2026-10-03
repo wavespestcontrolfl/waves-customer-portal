@@ -800,12 +800,14 @@ function initScheduledJobs() {
   // update makes concurrent passes harmless. The sweep reads pg_locks and
   // never takes a work lease, and runs at :03/:18/:33/:48 — off every
   // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
-  // Fire-and-forget, fail-soft. A settled job that registered itself with
-  // registerDeployKillRetry (below, next to its cron) is re-run once — see
-  // utils/deploy-kill-retry.js. An instance with cron jobs off registers
-  // nothing, so it never retries.
+  // Fire-and-forget, fail-soft. After each settle pass, a job that registered
+  // itself with registerDeployKillRetry (below, next to its cron) and whose
+  // row reads "killed mid-run" is re-run — see utils/deploy-kill-retry.js.
+  // The retry reads job_health, not this pass's result, so a pass that dies
+  // before the retry starts leaves the work for the next pass or instance.
+  // An instance with cron jobs off registers nothing, so it never retries.
   const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
-    .then((settled) => retryDeployKilledJobs(settled))
+    .then(() => retryDeployKilledJobs())
     .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
   settleDeadRunning();
   cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
@@ -1315,7 +1317,7 @@ function initScheduledJobs() {
   // sweep — single source of truth; independent of the per-call
   // GATE_CALL_PROPERTY_LOOKUP lane). Real nightly LLM spend — the batch
   // cap is the budget. runExclusive: a deploy overlap must not double-buy
-  // the same batch. Re-run once when a deploy kills it mid-run: the attempt
+  // the same batch. Re-run when a deploy kills it mid-run: the attempt
   // cooldown shields rows the killed run already tried.
   // =========================================================================
   const runPropertyEnrichBackfill = async () => {
@@ -6372,7 +6374,7 @@ function initScheduledJobs() {
   // Property-lookup parser canary — nightly, one golden parcel per county
   // through the real by-parcel pipeline; alerts when a county PAO layout
   // change silently breaks the scrape-based parsers.
-  // See server/services/property-lookup-canary.js. Re-run once when a deploy
+  // See server/services/property-lookup-canary.js. Re-run when a deploy
   // kills it mid-run, so a busy merge night still gets its health check.
   // =========================================================================
   const runPropertyLookupCanaryTick = async () => {
@@ -6387,7 +6389,12 @@ function initScheduledJobs() {
     }
   };
   cron.schedule('17 4 * * *', runPropertyLookupCanaryTick, { timezone: 'America/New_York' });
-  registerDeployKillRetry('property-lookup-canary', runPropertyLookupCanaryTick);
+  // No retry once the killed run wrote its check state: the alert and the
+  // streak counters for the night are already recorded, and a second run
+  // would ring a second bell and count one night twice.
+  registerDeployKillRetry('property-lookup-canary', runPropertyLookupCanaryTick, {
+    shouldRetry: async (row) => !(await require('./property-lookup-canary').canaryStateWrittenSince(row.last_started_at)),
+  });
 
   // =========================================================================
   // WaveGuard inventory forecast — proactive product shortage warning before
