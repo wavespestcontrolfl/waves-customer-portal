@@ -1071,7 +1071,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       };
       if (LOCATION.some((k) => nz(extracted[k]))) dropAccountDetail('address', LOCATION);
       if (nz(input.email)) dropAccountDetail('email', ['email']); // readable or not: they named another
-      if (nz(extracted.first_name) || nz(extracted.last_name)) dropAccountDetail('name', ['first_name', 'last_name']);
+      // A name is not dropped here: a part the caller states simply wins
+      // below, the other part stays (the account's first name with the last
+      // name they add), and a first name that is a DIFFERENT person's fails
+      // the re-proof just after, which takes everything back.
       // …and details kept from an earlier yes are re-proven on every capture
       // that still relies on them: a different person's name given now, or an
       // account that is no longer eligible, takes ALL of them back.

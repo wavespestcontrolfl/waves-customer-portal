@@ -285,6 +285,17 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
   });
 
+  test('the account has no last name: the caller adding it keeps the confirmed first name and completes the request', async () => {
+    holder.last_name = null;
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: last_name/);
+    expect(await ask({ last_name: 'Sample' }, ctx)).toMatch(/IS on the office queue/);
+    const [, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street' });
+    expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
+  });
+
   test('a different person\'s name given after the yes takes back every detail kept from the account', async () => {
     holder.last_name = null; // the yes leaves the last name missing, so the call goes on
     const store = callStore();
