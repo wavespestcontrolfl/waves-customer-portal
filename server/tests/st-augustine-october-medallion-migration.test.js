@@ -1,7 +1,7 @@
-// Guards 20261003120000: the St. Augustine October fungicide row becomes
+// Guards 20261003130000: the St. Augustine October fungicide row becomes
 // conditional Medallion SC. Runs up()/down() against a small in-memory knex
 // (no DB), and pins that protocols.json names the same product for the window.
-const mig = require('../models/migrations/20261003120000_st_augustine_october_fungicide_medallion');
+const mig = require('../models/migrations/20261003130000_st_augustine_october_fungicide_medallion');
 const protocols = require('../config/protocols.json');
 
 const CATALOG = [{ id: 'cat-medallion', name: 'Medallion SC' }, { id: 'cat-velista', name: 'Velista' }];
@@ -12,7 +12,7 @@ const SEEDED_VELISTA = {
   annual_counter: {}, mixing: {}, report_copy: { role: 'fungicide' },
 };
 
-function memoryKnex(rows, { activeProtocol = true } = {}) {
+function memoryKnex(rows, { activeProtocol = true, audits = [] } = {}) {
   const protocol = activeProtocol ? { id: 'proto-sa' } : undefined;
   let seq = 0;
   const matches = (row, cond) => Object.entries(cond).every(([k, v]) => row[k] === v);
@@ -38,7 +38,13 @@ function memoryKnex(rows, { activeProtocol = true } = {}) {
         hit.forEach((row) => Object.assign(row, fields));
         return hit.length;
       },
-      async insert(row) { seq += 1; rows.push({ id: `row-new-${seq}`, ...row }); return [1]; },
+      insert(row) {
+        if (name === 'lawn_protocol_audit_log') { audits.push(row); return Promise.resolve([1]); }
+        seq += 1;
+        const created = { id: `row-new-${seq}`, ...row };
+        rows.push(created);
+        return { returning: async () => [{ id: created.id }] };
+      },
       async del() {
         const keep = rows.filter((row) => !matches(row, ctx.cond));
         const removed = rows.length - keep.length;
@@ -64,8 +70,40 @@ describe('St. Augustine October fungicide → Medallion SC', () => {
       id: 'row-velista', product_id: 'cat-medallion', product_name: 'Medallion SC', role: 'fungicide',
       rate_per_1000: 1, rate_unit: 'fl_oz', default_in_plan: false,
     });
-    expect(gatesOf(rows[0])).toEqual(mig.MEDALLION_GATES);
-    expect(gatesOf(rows[0])).toMatchObject({ frac: '12', trigger: 'large_patch_history' });
+    // Every gate key is rendered to the technician, so the row carries the two
+    // real field gates and no migration bookkeeping.
+    expect(gatesOf(rows[0])).toEqual({ frac: '12', trigger: 'large_patch_history' });
+  });
+
+  test('each write appends a product entry to the protocol audit log', async () => {
+    const audits = [];
+    const rows = [{ ...SEEDED_VELISTA }];
+    await mig.up(memoryKnex(rows, { audits }));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ lawn_protocol_id: 'proto-sa', entity_type: 'product', entity_id: 'row-velista', action: 'update', actor_name: 'migration' });
+    expect(JSON.parse(audits[0].before_snapshot)).toMatchObject({ product_name: 'Velista', rate_per_1000: '0.5000' });
+    expect(JSON.parse(audits[0].after_snapshot)).toMatchObject({ product_name: 'Medallion SC', rate_per_1000: 1 });
+    expect(JSON.parse(audits[0].metadata).migration).toBe(mig.MIGRATION);
+
+    const inserted = [];
+    const created = [];
+    await mig.up(memoryKnex(created, { audits: inserted }));
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({ action: 'create', entity_id: created[0].id });
+
+    await mig.up(memoryKnex(rows, { audits })); // idempotent: no second entry
+    expect(audits).toHaveLength(1);
+  });
+
+  test('a Velista row an administrator remapped to another catalog product is never overwritten', async () => {
+    const rows = [{ ...SEEDED_VELISTA, product_id: 'cat-other-fungicide' }];
+    await mig.up(memoryKnex(rows));
+    expect(rows[0]).toMatchObject({ product_name: 'Velista', product_id: 'cat-other-fungicide' });
+    expect(rows.map((r) => r.product_name)).toEqual(['Velista', 'Medallion SC']);
+    // The seed's own empty mapping (before the catalog link) still counts as seeded.
+    const unlinked = [{ ...SEEDED_VELISTA, product_id: null }];
+    await mig.up(memoryKnex(unlinked));
+    expect(unlinked.map((r) => r.product_name)).toEqual(['Medallion SC']);
   });
 
   test('is idempotent', async () => {
@@ -110,23 +148,14 @@ describe('St. Augustine October fungicide → Medallion SC', () => {
     expect(untouched[0].product_name).toBe('Velista');
   });
 
-  test('down restores the seeded Velista row, removes an added row, and keeps an edited Medallion row', async () => {
-    const rewritten = [{ ...SEEDED_VELISTA }];
-    await mig.up(memoryKnex(rewritten));
-    await mig.down(memoryKnex(rewritten));
-    expect(rewritten[0]).toMatchObject({ id: 'row-velista', product_id: 'cat-velista', product_name: 'Velista', rate_per_1000: 0.5, rate_unit: 'oz' });
-    expect(gatesOf(rewritten[0])).toEqual({ frac: '7', trigger: 'large_patch_history' });
-
-    const beside = [{ ...SEEDED_VELISTA, rate_per_1000: '0.7000' }];
-    await mig.up(memoryKnex(beside));
-    await mig.down(memoryKnex(beside));
-    expect(beside.map((r) => r.product_name)).toEqual(['Velista']);
-
-    const edited = [{ ...SEEDED_VELISTA }];
-    await mig.up(memoryKnex(edited));
-    edited[0].rate_per_1000 = 1.5; // an admin edit after the swap
-    await mig.down(memoryKnex(edited));
-    expect(edited[0]).toMatchObject({ product_name: 'Medallion SC', rate_per_1000: 1.5 });
+  test('down is a non-destructive no-op: it never touches a row', async () => {
+    const rows = [{ ...SEEDED_VELISTA }];
+    const audits = [];
+    await mig.up(memoryKnex(rows, { audits }));
+    const after = JSON.stringify(rows);
+    await mig.down(memoryKnex(rows, { audits }));
+    expect(JSON.stringify(rows)).toBe(after);
+    expect(audits).toHaveLength(1);
   });
 });
 

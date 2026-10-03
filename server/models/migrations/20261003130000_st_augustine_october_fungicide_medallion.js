@@ -15,15 +15,18 @@
  * large patch history. That row becomes Medallion SC 1 fl oz (the catalog
  * default rate, which the mix math reads), still conditional on large patch
  * history and still out of the default plan. Only a row still in the seeded
- * Velista shape is rewritten; an edited row is left alone and Medallion is
- * added beside it. Idempotent.
+ * Velista shape (catalog mapping included) is rewritten; an edited or remapped
+ * row is left alone and Medallion is added beside it. Each write appends a
+ * lawn_protocol_audit_log entry, which is where the protocol admin page reads
+ * its change history. Idempotent.
  */
-const MIGRATION = '20261003120000_st_augustine_october_fungicide_medallion';
+const MIGRATION = '20261003130000_st_augustine_october_fungicide_medallion';
 const WINDOW_KEY = 'oct_recovery_fall_pre_m';
 const MEDALLION = 'Medallion SC';
 const VELISTA = 'Velista';
 
-const MEDALLION_GATES = { frac: '12', trigger: 'large_patch_history', seededBy: MIGRATION };
+// Only real field gates: every key here is rendered to the technician.
+const MEDALLION_GATES = { frac: '12', trigger: 'large_patch_history' };
 const VELISTA_GATES = { frac: '7', trigger: 'large_patch_history' };
 
 exports.MIGRATION = MIGRATION;
@@ -33,7 +36,7 @@ exports.MEDALLION_GATES = MEDALLION_GATES;
 function parseJson(value, fallback) {
   if (value == null) return fallback;
   if (typeof value === 'object') return Array.isArray(value) ? [...value] : { ...value };
-  try { return JSON.parse(value); } catch (e) { return fallback; }
+  try { return JSON.parse(value); } catch { return fallback; }
 }
 
 async function octoberWindow(knex) {
@@ -47,8 +50,33 @@ async function octoberWindow(knex) {
   const window = await knex('lawn_protocol_windows')
     .where({ lawn_protocol_id: protocol.id, window_key: WINDOW_KEY })
     .first();
-  return window || null;
+  return window ? { ...window, lawn_protocol_id: protocol.id } : null;
 }
+
+// The protocol admin page derives its change history from this table only.
+async function audit(knex, { protocolId, entityId, action, before, after }) {
+  if (!(await knex.schema.hasTable('lawn_protocol_audit_log'))) return;
+  await knex('lawn_protocol_audit_log').insert({
+    lawn_protocol_id: protocolId,
+    actor_name: 'migration',
+    entity_type: 'product',
+    entity_id: entityId,
+    action,
+    changed_fields: JSON.stringify(Object.keys(after)),
+    before_snapshot: JSON.stringify(before || {}),
+    after_snapshot: JSON.stringify(after),
+    metadata: JSON.stringify({
+      migration: MIGRATION,
+      reason: 'Torque SC is labeled for golf course turf only; owner chose Medallion SC for October (2026-10-03).',
+    }),
+  });
+}
+
+const SNAPSHOT_KEYS = [
+  'product_id', 'product_name', 'role', 'application_mode', 'rate_per_1000', 'rate_unit',
+  'carrier_gal_per_1000', 'default_in_plan', 'gates',
+];
+const snapshot = (row) => Object.fromEntries(SNAPSHOT_KEYS.map((key) => [key, key === 'gates' ? parseJson(row[key], {}) : row[key]]));
 
 async function catalogId(knex, name) {
   const row = await knex('products_catalog').whereRaw('LOWER(name) = ?', [name.toLowerCase()]).first();
@@ -63,8 +91,13 @@ const sameJson = (value, expected) => (
 // product('oct_recovery_fall_pre_m', 'Velista', 'fungicide', 0.50, 'oz', 2, false,
 // { frac: '7', trigger: 'large_patch_history' })). A row with any customized
 // rate, unit, carrier, mode, plan flag, gates, counter or mixing is not this.
-function isSeededVelista(row) {
-  return row.role === 'fungicide'
+function isSeededVelista(row, velistaCatalogId) {
+  // The seed left product_id empty and 20260629000001 linked it to the Velista
+  // catalog row. Any other mapping is an administrator's remap (syncName: false
+  // keeps the name), and that row is not ours to rewrite.
+  const mappedAsSeeded = row.product_id == null || (velistaCatalogId != null && row.product_id === velistaCatalogId);
+  return mappedAsSeeded
+    && row.role === 'fungicide'
     && row.application_mode === 'broadcast'
     && Number(row.rate_per_1000) === 0.5
     && row.rate_unit === 'oz'
@@ -104,55 +137,28 @@ exports.up = async function up(knex) {
   const velista = await knex('lawn_protocol_products')
     .where({ lawn_protocol_window_id: window.id, product_name: VELISTA })
     .first();
-  if (velista && isSeededVelista(velista)) {
+  const after = snapshot(fields);
+  if (velista && isSeededVelista(velista, await catalogId(knex, VELISTA))) {
+    const before = snapshot(velista);
     await knex('lawn_protocol_products').where({ id: velista.id }).update(fields);
+    await audit(knex, {
+      protocolId: window.lawn_protocol_id, entityId: velista.id, action: 'update', before, after,
+    });
     return;
   }
-  await knex('lawn_protocol_products').insert({
+  const [created] = await knex('lawn_protocol_products').insert({
     lawn_protocol_window_id: window.id,
     ...fields,
     created_at: knex.fn.now(),
+  }).returning('id');
+  await audit(knex, {
+    protocolId: window.lawn_protocol_id, entityId: created.id || created, action: 'create', before: null, after,
   });
 };
 
-// Still exactly what up() wrote, in every field it set.
-function isUntouchedMedallion(row) {
-  return row.role === 'fungicide'
-    && row.application_mode === 'broadcast'
-    && Number(row.rate_per_1000) === 1
-    && row.rate_unit === 'fl_oz'
-    && Number(row.carrier_gal_per_1000) === 2
-    && row.default_in_plan === false
-    && sameJson(row.gates, MEDALLION_GATES)
-    && sameJson(row.annual_counter, {})
-    && sameJson(row.mixing, {})
-    && sameJson(row.report_copy, { role: 'fungicide' });
-}
-
-// Only a Medallion row that is still exactly what up() wrote is undone; a row
-// someone has edited since is left alone. A rewritten row goes back to the
-// seeded Velista shape; a row added beside an edited Velista row is removed.
-exports.down = async function down(knex) {
-  const window = await octoberWindow(knex);
-  if (!window) return;
-  const rows = await knex('lawn_protocol_products')
-    .where({ lawn_protocol_window_id: window.id, product_name: MEDALLION });
-  for (const row of rows) {
-    if (!isUntouchedMedallion(row)) continue;
-    const velistaElsewhere = await knex('lawn_protocol_products')
-      .where({ lawn_protocol_window_id: window.id, product_name: VELISTA })
-      .first();
-    if (velistaElsewhere) {
-      await knex('lawn_protocol_products').where({ id: row.id }).del();
-      continue;
-    }
-    await knex('lawn_protocol_products').where({ id: row.id }).update({
-      product_id: await catalogId(knex, VELISTA),
-      product_name: VELISTA,
-      rate_per_1000: 0.5,
-      rate_unit: 'oz',
-      gates: JSON.stringify(VELISTA_GATES),
-      updated_at: knex.fn.now(),
-    });
-  }
-};
+// A data correction, not schema: down is a non-destructive no-op, as in the
+// other protocol corrections (20260701000001). A rollback cannot tell a row
+// this migration wrote from one an administrator made or remapped since, so it
+// touches nothing. To reverse the swap, edit the row on the protocol admin page
+// (the audit entry above holds the prior values) or ship a new migration.
+exports.down = async function down() {};
