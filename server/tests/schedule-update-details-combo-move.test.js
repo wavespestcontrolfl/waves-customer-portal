@@ -142,11 +142,21 @@ describe("comboMove 'together'", () => {
     // 00:00 has always passed; 23:59 never has (the test would need to run in the last minute of the day).
     mockRow = { ...ROW, scheduled_date: TODAY, window_start: '23:58:00', window_end: '23:59:00' };
     const moved = request({ windowStart: '00:00', windowEnd: '00:01', notes: 'x', comboMove: 'together' });
-    await expect(planComboEditMove(moved)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: 'That time has already passed today. Pick a later time. Nothing was changed.' });
+    await expect(planComboEditMove(moved)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: 'That time has already passed today for a service on this stop. Pick a later time. Nothing was changed.' });
     expect(moved.body.windowStart).toBe('00:00');
     mockRow = { ...ROW, scheduled_date: TODAY, window_start: '00:00:00', window_end: '00:01:00' };
     mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '00:00:00', window_end: '00:01:00' }, { id: 'svc-b', window_start: '00:01:00', window_end: '00:02:00' }]);
     await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // A date move to today: the tapped service's window is still ahead, an earlier sibling's has passed.
+    mockRow = { ...ROW, window_start: '23:58:00', window_end: '23:59:00' };
+    mockVisitGroups.openMembers.mockResolvedValue([
+      { id: 'svc-a', scheduled_date: FUTURE, window_start: '23:58:00', window_end: '23:59:00' },
+      { id: 'svc-b', scheduled_date: FUTURE, window_start: '00:00:00', window_end: '00:01:00' },
+    ]);
+    const toToday = request({ scheduledDate: TODAY, notes: 'x', comboMove: 'together' });
+    await expect(planComboEditMove(toToday)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    expect(toToday.body.scheduledDate).toBe(TODAY);
     expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
     // A stop later today is reassigned.
     mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '23:58:00', window_end: '23:59:00' }, { id: 'svc-b', window_start: '23:58:00', window_end: '23:59:00' }]);
@@ -300,6 +310,19 @@ describe('the reassignment is re-checked inside the save transaction', () => {
 });
 
 describe('handler wiring (source guards)', () => {
+  test('the stop lock is taken for a technician change on a row with a visit, and the money preview mirrors the together date strip', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const handler = src.indexOf("router.put('/:id/update-details'");
+    const lock = src.indexOf('if (preReadVisitId || reassignSeenVisitId) {', handler);
+    expect(lock).toBeGreaterThan(handler);
+    expect(src.slice(lock, lock + 200)).toContain('lockStopForRow(trx, req.params.id)');
+    expect(lock).toBeLessThan(src.indexOf('await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);', handler));
+    const preview = src.indexOf("router.post('/:id/update-details/preview'");
+    const strip = src.indexOf("if (req.body.comboMove === 'together') scheduledDate = undefined;", preview);
+    expect(strip).toBeGreaterThan(preview);
+    expect(strip).toBeLessThan(src.indexOf('let appointmentDiscountPreset = null;', preview));
+  });
+
   test('the transaction re-checks membership right before the technician write', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const handler = src.indexOf("router.put('/:id/update-details'");

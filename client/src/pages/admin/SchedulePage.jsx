@@ -3509,6 +3509,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
+    let saveRequestSent = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3527,6 +3528,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (comboTogether && comboRegroupingEdit) {
         throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
       }
+      saveRequestSent = true;
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
@@ -3851,7 +3853,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // stop was grouped since). Nothing was changed. Read the stop now and
       // show the choice.
       const sharedStopNow = e.code === "VISIT_EDIT_SCHEDULE_UNSUPPORTED" && !comboVisit ? await readComboVisit() : null;
-      if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
+      // A shared-stop save is one request that can split or move the stop and
+      // text the customer. No answer at all (the connection dropped) does not
+      // mean nothing happened: never call it a plain failed save.
+      if (saveRequestSent && comboSlotChanged && e.status == null) {
+        setSaveError("The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.");
+      } else if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
         setComboVisitInfo(sharedStopNow);
         setSaveError("This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.");
       } else if (ack?.code === SERIES_ACK_REQUIRED) {
@@ -4040,6 +4047,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // source wins) — a transition here must invalidate any cached preview
     // even when nothing else on the form changed (:3659).
     stackingEnabled, stackingKnown,
+    // The whole-stop choice changes which date the money is planned on.
+    comboTogether,
   });
   useEffect(() => {
     const requestId = ++previewRequestRef.current;
@@ -4055,6 +4064,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           signal: controller.signal,
           body: JSON.stringify({
             ...form,
+            // The save plans the money on the stop's current date when the
+            // whole stop moves together; the preview must do the same.
+            comboMove: comboTogether ? "together" : undefined,
             isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice: parseFinitePrice(form.price) ?? undefined,

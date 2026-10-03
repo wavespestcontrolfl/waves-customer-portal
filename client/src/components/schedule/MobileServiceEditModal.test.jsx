@@ -47,4 +47,23 @@ describe('MobileServiceEditModal save payload', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(lastPutBody().serviceType).toBe('Lawn Care - Track B — Quarterly');
   });
+
+  it('a refused change on a shared stop asks whole stop or separate, and the answer rides the next save', async () => {
+    const answers = [
+      new Response(JSON.stringify({ error: 'This service is grouped with another at the same stop.', code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' }), { status: 409 }),
+      new Response(JSON.stringify({ success: true, comboMove: { moved: true } }), { status: 200 }),
+    ];
+    fetch.mockImplementation(async () => answers.shift());
+    const onSaved = vi.fn();
+    render(<MobileServiceEditModal desktopVisible service={SERVICE} onClose={vi.fn()} onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const ask = await screen.findByRole('group', { name: 'This stop has more than one service' });
+    expect(ask).toHaveTextContent('Nothing was changed.');
+    expect(onSaved).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Change the whole stop' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const puts = fetch.mock.calls.filter(([, opts]) => opts?.method === 'PUT').map(([, opts]) => JSON.parse(opts.body));
+    expect(puts[0]).not.toHaveProperty('comboMove');
+    expect(puts[1].comboMove).toBe('together');
+  });
 });

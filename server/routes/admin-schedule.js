@@ -11102,13 +11102,32 @@ async function planComboEditMove(req) {
 // time change is asked about the new window.
 async function comboTargetElapsed(row, changes, newDate, newWindow) {
   const { sameDayWindowElapsed } = require('../utils/datetime-et');
-  if (changes.date || changes.start) {
-    const cutoff = newWindow ? (newWindow.end || newWindow.start) : (row.window_end || row.window_start);
-    return sameDayWindowElapsed(newDate, cutoff) ? 'That time has already passed today. Pick a later time.' : null;
+  const vg = require('../services/visit-groups');
+  const members = await vg.openMembers(db, row.visit_id);
+  if (!(changes.date || changes.start)) {
+    return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
+      ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+      : null;
   }
-  const members = await require('../services/visit-groups').openMembers(db, row.visit_id);
-  return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
-    ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+  // Every service's own target window, as the unit mover derives it (the
+  // tapped one takes the new slot, the others shift with it): one of them
+  // can have passed when the tapped one has not.
+  const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+  let targets;
+  try {
+    targets = vg.planMemberTargets({
+      members,
+      primary: members.find((m) => String(m.id) === String(row.id)) || row,
+      visitWindowStart: visit?.window_start || null,
+      win: { start: newWindow?.start || null, end: newWindow?.end || null },
+      newDateStr: newDate,
+    });
+  } catch (err) {
+    if (err?.statusCode) return err.message; // the mover would refuse the same way
+    throw err;
+  }
+  return targets.some((t) => sameDayWindowElapsed(newDate, t.end || t.start))
+    ? 'That time has already passed today for a service on this stop. Pick a later time.'
     : null;
 }
 
@@ -14078,7 +14097,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
         }
       }
-      if (preReadVisitId) {
+      // Also for a technician change on a row alone on its visit: joining
+      // that visit serializes on this lock, so the membership re-check
+      // before the assignment write below cannot be raced.
+      if (preReadVisitId || reassignSeenVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -16737,6 +16759,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // without running its ack/grouped/frozen guards: those exist for the
     // actual commit (and can throw/require a disclosure round-trip),
     // never for a read-only dry run.
+    // The same mirror for a shared stop moved 'together': the save takes the
+    // date off the body before the financial planner runs (planComboEditMove;
+    // the whole-stop move commits the date afterwards, on its own).
+    if (req.body.comboMove === 'together') scheduledDate = undefined;
     if (scheduledDate !== undefined && scheduledDate !== '' && collectiveMoveGateOn()) {
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {

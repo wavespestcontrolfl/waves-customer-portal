@@ -428,3 +428,23 @@ it('a shared stop the form did not know about: the server refusal re-reads the s
   expect(body(0)).not.toHaveProperty('comboMove');
   expect(body(1).comboMove).toBe('together');
 });
+
+it('a shared-stop save whose answer never arrives is not called a plain failed save', async () => {
+  putAnswers(() => { throw new TypeError('Failed to fetch'); });
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  await clickSave();
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.');
+  expect(alert).not.toHaveTextContent('Save failed');
+});
+
+it('the money preview is told when the whole stop moves together, so it plans on the same date as the save', async () => {
+  const dialog = openCombo();
+  const previews = () => fetch.mock.calls.filter(([url]) => String(url).includes('/update-details/preview')).map(([, options]) => JSON.parse(options.body));
+  setDate(dialog, '2035-01-03');
+  await waitFor(() => expect(previews().some((b) => b.comboMove === 'together' && b.scheduledDate === '2035-01-03')).toBe(true), { timeout: 3000 });
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  await waitFor(() => expect(previews().at(-1)).not.toHaveProperty('comboMove'), { timeout: 3000 });
+});
+
