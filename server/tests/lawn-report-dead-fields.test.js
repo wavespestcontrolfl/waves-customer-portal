@@ -112,4 +112,23 @@ describe('lawn report seasonal-dip card — P16 routes the approved row sentence
     expect(color.explanation).toBe(ISSUE_ROWS.seasonal_dip.visibleChange);
     expect(color.customerExplanation).not.toMatch(/should green back up/i);
   });
+
+  test('an unapproved seasonal-dip row fails closed to the sentence with no regrowth promise', () => {
+    const row = ISSUE_ROWS.seasonal_dip;
+    const was = row.approved;
+    row.approved = false;
+    try {
+      const v2 = buildLawnReportV2({
+        lawnAssessment: assessment({
+          assessmentDate: '2026-01-15',
+          scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 60, stressDamage: 80, fungusControl: 95, overallScore: 70, season: 'dormant' },
+        }),
+      });
+      const color = v2.diagnosis.find((c) => c.key === 'color_vigor');
+      expect(color.customerExplanation).toBe('Color is a little muted right now, which is normal for this cooler stretch.');
+      expect(color.customerExplanation).not.toContain(row.visibleChange);
+    } finally {
+      row.approved = was;
+    }
+  });
 });

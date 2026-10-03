@@ -288,6 +288,24 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(`${report.expectations.weeds} ${report.expectations.insects}`).not.toMatch(/\d|days?|weeks?/i);
   });
 
+  test('a stored pre-v0.7 summary loses only its timing sentence at egress (P16)', () => {
+    const base = {
+      diagnosis: { primary_finding: 'Weed pressure', confidence: 'moderate', findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }] },
+      watering: {},
+    };
+    const timed = buildPublicLawnReport(sentDiagnostic({
+      report_contract: JSON.stringify({ ...base, customer_summary: 'We saw weed pressure along the sunny edge. Visible weed response often takes 10-14 days. We will keep an eye on it.' }),
+    }));
+    expect(timed.summary).toBe('We saw weed pressure along the sunny edge. We will keep an eye on it.');
+    const clean = 'We saw weed pressure along the sunny edge and will keep an eye on it.';
+    expect(buildPublicLawnReport(sentDiagnostic({ report_contract: JSON.stringify({ ...base, customer_summary: clean }) })).summary).toBe(clean);
+    const all = buildPublicLawnReport(sentDiagnostic({
+      report_contract: JSON.stringify({ ...base, customer_summary: 'Color should return in 2-3 weeks. Density takes 60-90 days.' }),
+    }));
+    expect(all.summary).toMatch(/^Your lawn shows an area worth keeping an eye on\./);
+    expect(all.summary).not.toMatch(/\d/);
+  });
+
   test('cause-specific expectations are suppressed below moderate confidence at egress', () => {
     const diag = sentDiagnostic({
       report_contract: JSON.stringify({

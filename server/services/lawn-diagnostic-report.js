@@ -1,4 +1,5 @@
 const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+const { lawnResultTimingViolation } = require('./service-report/report-writer-rules');
 
 const FLAG_TYPES = new Set([
   'untreated_condition',
@@ -487,8 +488,15 @@ function runQaSafetyCheck({ products = [], findings = [], compliance = {}, water
   return flags;
 }
 
-const WEED_ROW = PRODUCT_ROWS.herbicide_broadleaf;
-const WEEDS_EXPECTATION = `${WEED_ROW.visibleChange} ${WEED_ROW.secondApp.line}`;
+// `approved` is the switch that keeps an unsigned row from a customer, so the
+// weed line reads the row only while it is approved. Unapproved (or missing):
+// fail closed to a line with no timing and no row text.
+const WEEDS_EXPECTATION_UNAPPROVED = 'How fast weeds respond depends on the weed and the weather.';
+function weedsExpectation() {
+  const row = PRODUCT_ROWS.herbicide_broadleaf;
+  if (!row || row.approved !== true || !row.visibleChange) return WEEDS_EXPECTATION_UNAPPROVED;
+  return row.secondApp && row.secondApp.line ? `${row.visibleChange} ${row.secondApp.line}` : row.visibleChange;
+}
 const INSECTS_EXPECTATION = 'The key sign is whether the damaged edge stops expanding.';
 
 // Reports stored before the owner's 2026-10-03 timing ruling still carry the
@@ -497,8 +505,8 @@ const INSECTS_EXPECTATION = 'The key sign is whether the damaged edge stops expa
 // current line; every other stored line passes through untouched.
 const STORED_TIMING_RE = /\d\s*(?:-|–|to)?\s*\d*\s*(?:days?|weeks?|months?)\b|\bnext week\b/i;
 function expectationWithoutStaleTiming(key, text) {
-  const fixed = { weeds: WEEDS_EXPECTATION, insects: INSECTS_EXPECTATION }[key];
-  return fixed && STORED_TIMING_RE.test(String(text || '')) ? fixed : text;
+  const fixed = { weeds: weedsExpectation, insects: () => INSECTS_EXPECTATION }[key];
+  return fixed && STORED_TIMING_RE.test(String(text || '')) ? fixed() : text;
 }
 
 function buildExpectations(findings = []) {
@@ -514,7 +522,7 @@ function buildExpectations(findings = []) {
     // Weed response timing: the owner-approved selective-weed-control row's
     // sentences (no day count; no label or turf source gives one, owner
     // 2026-10-03), never a hand-written number.
-    weeds: names.includes('weed') ? WEEDS_EXPECTATION : null,
+    weeds: names.includes('weed') ? weedsExpectation() : null,
     fungus: names.includes('fung') || names.includes('large_patch') ? 'Disease treatments are aimed at stopping spread first; browned turf must regrow over time.' : null,
     insects: names.includes('chinch') || names.includes('insect') ? INSECTS_EXPECTATION : null,
     turf_recovery: 'Thin or brown turf recovers through new growth, not instant green-up.',
@@ -930,9 +938,24 @@ function residualDefinitiveClaim(text) {
   ));
 }
 
+// P16 egress: a prospect report stored before the owner's 2026-10-03 timing
+// ruling can carry a withdrawn timeline ("10-14 days", "2-3 weeks", "60-90
+// days") in its summary. Drop only the sentences that state result timing,
+// using the P15 detector (lawnResultTimingViolation, fail closed: a sentence
+// with a count is dropped even if a current row carries that number). Text
+// with no timing passes through untouched; null when nothing usable remains.
+function withoutResultTimingSentences(text) {
+  const sentences = String(text).split(/(?<=[.!?])\s+/);
+  const kept = sentences.filter((sentence) => !lawnResultTimingViolation(sentence));
+  if (kept.length === sentences.length) return text;
+  return kept.length ? kept.join(' ') : null;
+}
+
 function safeCustomerSummary(summary, confidence) {
-  const scrubbed = scrubCustomerText(summary);
+  let scrubbed = scrubCustomerText(summary);
   if (!scrubbed) return null;
+  scrubbed = withoutResultTimingSentences(scrubbed);
+  if (scrubbed === null) return GENERIC_LOW_CONFIDENCE_SUMMARY;
   if (confidenceRank(confidence) < CONFIDENCE_ORDER.moderate && SUMMARY_CAUSE_RE.test(scrubbed)) {
     return GENERIC_LOW_CONFIDENCE_SUMMARY;
   }

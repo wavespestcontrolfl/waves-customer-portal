@@ -8,6 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  expectationWithoutStaleTiming,
   residualDefinitiveClaim,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
@@ -927,6 +928,36 @@ describe('lawn diagnostic auto-release ladder', () => {
     });
     expect(insects.expectations.insects).toBeTruthy();
     expect(insects.expectations.insects).not.toMatch(/\d|days?|weeks?|next week/i);
+  });
+
+  test('an unapproved weed row fails closed: no row text and no timing, on build and on egress (P16)', () => {
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    const row = PRODUCT_ROWS.herbicide_broadleaf;
+    const was = row.approved;
+    row.approved = false;
+    try {
+      const weeds = buildDiagnosticReportContract({
+        findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }],
+      }).expectations.weeds;
+      expect(weeds).toBe('How fast weeds respond depends on the weed and the weather.');
+      expect(weeds).not.toContain(row.visibleChange);
+      expect(weeds).not.toMatch(/\d|days?|weeks?/i);
+      const stale = expectationWithoutStaleTiming('weeds', 'Visible weed response often takes 10-14 days.');
+      expect(stale).toBe(weeds);
+      // A stored line with no count is untouched either way.
+      expect(expectationWithoutStaleTiming('weeds', 'Weeds fade.')).toBe('Weeds fade.');
+    } finally {
+      row.approved = was;
+    }
+  });
+
+  test('safeCustomerSummary drops only sentences that state result timing (P16 egress)', () => {
+    const summary = 'We saw thinning along the sunny edge. Visible weed response often takes 10-14 days. Keep an eye on any area that spreads.';
+    expect(safeCustomerSummary(summary, 'high')).toBe('We saw thinning along the sunny edge. Keep an eye on any area that spreads.');
+    expect(safeCustomerSummary('Color should return in 2-3 weeks and density in 60-90 days.', 'high'))
+      .toMatch(/^Your lawn shows an area worth keeping an eye on\./);
+    const clean = 'We saw thinning along the sunny edge and will keep an eye on it.';
+    expect(safeCustomerSummary(clean, 'high')).toBe(clean);
   });
 
   test('lowerConfidence returns the more conservative value', () => {

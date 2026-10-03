@@ -215,6 +215,21 @@ describe('RESULT TIMING is generated from the expectation rows (P16 single-sourc
     expect(counts(tampered).filter((c) => !rowCounts.has(c))).toEqual(['10-14 days']);
   });
 
+  test('an unapproved row is left out of the generated block even with a sourced window', () => {
+    const block = prompt.buildResultTimingBlock({
+      a: { approved: false, appliesTo: 'a thing', visibleChange: 'Shows in 5 days.', windows: { full: { source: 'catalog' } } },
+    });
+    expect(block).not.toContain('5 days');
+    const real = prompt.buildResultTimingBlock();
+    ISSUE_ROWS.dry_spot.approved = false;
+    try {
+      expect(prompt.buildResultTimingBlock()).not.toContain(ISSUE_ROWS.dry_spot.visibleChange);
+    } finally {
+      ISSUE_ROWS.dry_spot.approved = true;
+    }
+    expect(prompt.buildResultTimingBlock()).toBe(real);
+  });
+
   test('a row with only a proposed window is left out of a generated block', () => {
     const block = prompt.buildResultTimingBlock({
       a: { approved: true, appliesTo: 'a thing', visibleChange: 'Shows in 5 days.', windows: { first: { source: 'proposed' } } },
