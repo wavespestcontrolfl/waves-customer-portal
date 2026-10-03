@@ -88,7 +88,7 @@ export default function TechFieldHome({ section, stops, nextStop, loading, refre
             ? <StopCard stop={nextStop} featured onOpen={onOpen} disabled={busy} />
             : <div className="tf-card tf-card-main"><MapPin aria-hidden="true" /><h2>{stops.length === 0 ? 'No stops scheduled today' : completed === stops.length ? 'All stops completed' : 'No remaining stops'}</h2><p className="tf-muted">Refresh to check for schedule updates.</p></div>)}
         </div>
-        {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-section-title">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} />)}</div></section>}
+        {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} />)}</div></section>}
         </div>
         <div className="tf-col">
           {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
