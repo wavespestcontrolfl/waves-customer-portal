@@ -195,10 +195,14 @@ async function recheckContactReportText(meta = {}, { conn = db } = {}) {
   // A combined-stop summary link: the summary must still be the one issued
   // and not revoked (the predicate its own queued text uses).
   if (meta.visit_id) {
-    const visit = await conn('service_visits')
+    // In the locked handoff the visit row is held FOR SHARE through the
+    // provider request, as the summary's own handoff holds it: a revoke
+    // either commits first (refused here) or waits for the request.
+    const visitQuery = conn('service_visits')
       .where({ id: meta.visit_id, summary_token_hash: meta.summary_token_hash || null })
-      .whereNull('summary_token_revoked_at')
-      .first('id');
+      .whereNull('summary_token_revoked_at');
+    if (conn.isTransaction) visitQuery.forShare();
+    const visit = await visitQuery.first('id');
     if (!visit) return { eligible: false, reason: 'contact-report-summary-revoked' };
   }
   const customer = await loadCustomer(meta.customer_id, conn);

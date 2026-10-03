@@ -278,6 +278,23 @@ describe('recheckContactReportText: is the queued text still right to send', () 
     expect(visitRead).toContainEqual(['whereNull', 'summary_token_revoked_at']);
   });
 
+  test('in the locked handoff the summary row is held FOR SHARE, so a revoke waits for the request', async () => {
+    const meta = { ...META, visit_id: 'v-1', summary_token_hash: 'hash-1' };
+    queue('service_visits', { id: 'v-1' });
+    queue('customers', CUSTOMER);
+    await ContactReportText.recheckContactReportText(meta);
+    expect(opsFor('service_visits')[0].ops).not.toContainEqual(['forShare']);
+    db.isTransaction = true;
+    try {
+      queue('service_visits', { id: 'v-1' });
+      queue('customers', CUSTOMER);
+      await ContactReportText.recheckContactReportText(meta, { conn: db });
+    } finally {
+      db.isTransaction = false;
+    }
+    expect(opsFor('service_visits')[1].ops).toContainEqual(['forShare']);
+  });
+
   test('a live combined-stop summary and a confirmed contact: eligible', async () => {
     queue('service_visits', { id: 'v-1' });
     queue('customers', CUSTOMER);
