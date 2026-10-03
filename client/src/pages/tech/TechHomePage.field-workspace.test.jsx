@@ -274,7 +274,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     rows = [row('one')];
     mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Queue report photo' }));
     await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear report photos' }));
@@ -289,7 +289,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const initialReads = scheduleReads();
     fireEvent.click(report);
     rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
-    fireEvent.click(screen.getByRole('button', { name: 'Finish partial report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish partial report' }));
 
     expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
     await waitFor(() => expect(scheduleReads()).toBeGreaterThan(initialReads));

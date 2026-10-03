@@ -127,12 +127,13 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
 
 // What the tech sees once the visit is saved; `children` carries a sheet's
 // own line under the summary (the pest sheet's sent-text result).
-export function SavedView({ service, summary, onCompleted, children }) {
+export function SavedView({ service, summary, notice, onCompleted, children }) {
   return (
     <div className="tech-visit-body">
       <div className="tech-visit-card">
         <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
         <p>{summary}</p>
+        {notice && <p className="tech-visit-muted tech-visit-status--warn" role="status">{notice}</p>}
         {children}
       </div>
       <div className="tech-visit-actions">
@@ -255,6 +256,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
+      {submission.storageWarning && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.storageWarning}</ActionFeedback>}
       {missingReason && !submission.failure && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
@@ -264,12 +266,64 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           className="tech-visit-action tech-visit-complete tech-visit-wide"
           onClick={onSubmit}
           loading={submission.submitting}
-          disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+          disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.retryPending ? 'Retry' : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : label}
         </Button>
       </div>
     </footer>
+  );
+}
+
+// A reload may recover a committed request before (or even when) its live
+// context can be read. The retry does not rebuild from that context: this
+// compact view sends only the exact stored body when the tech taps Retry.
+export function RecoveredCompletion({ submission }) {
+  if (submission.prompt) {
+    return (
+      <div className="tech-visit-form-area">
+        <div className="tech-visit-body">
+          <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
+            <p className="tech-visit-section-title">Before this goes out</p>
+            {String(submission.prompt.message || '').split('\n').filter(Boolean).map((line) => (
+              <p key={line} className="tech-visit-muted">{line}</p>
+            ))}
+            {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+            <div className="tech-visit-tile-grid">
+              <Chip label="Go back" disabled={submission.submitting} onClick={submission.dismissPrompt} />
+              <Chip label="Send as is" disabled={submission.submitting} onClick={submission.confirm} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const canRetry = submission.hasPendingBody() && submission.retryPending;
+  // A request refused for good whose saved copy would not clear keeps it here
+  // to discard, never to retry.
+  const canDiscard = submission.hasPendingBody() && (submission.retryPending || submission.failure === 'terminal');
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body">
+        <ActionFeedback className="tech-visit-feedback">
+          {submission.pendingSummary
+            ? `Saved completion: ${submission.pendingSummary}`
+            : 'An unfinished completion is saved on this device.'}
+        </ActionFeedback>
+      </div>
+      <CompleteFooter
+        submission={submission}
+        label="Retry completion"
+        onSubmit={submission.retry}
+        missingReason={canRetry ? '' : 'Close and reopen this visit to make a new completion.'}
+      >
+        {canDiscard && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        )}
+      </CompleteFooter>
+    </div>
   );
 }
 
