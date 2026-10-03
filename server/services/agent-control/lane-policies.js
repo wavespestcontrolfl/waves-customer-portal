@@ -176,6 +176,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // GATE_LAWN_PAIRED_RECHECK (dark, owner ruling 2026-09-29 round 3b): one background call per visit after the memory freezes;
+  // a closed-enum verdict is written into the frozen visit memory and read by the progress engine (no customer text); a miss writes nothing and never fails a render.
+  lawn_paired_recheck: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // GATE_TS_WATCH_LIST (dark): the T&S sheet's watch-signal read, keys only, shown to the technician and
   // never to a customer; Gemini -> OpenAI in-request with a hard 20 s bound, a miss shows the sheet no read.
   ts_watch_signals: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },

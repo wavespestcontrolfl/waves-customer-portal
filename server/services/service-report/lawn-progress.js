@@ -52,6 +52,8 @@
  *     A photo_pair recheck is a photo read, so low confidence makes it
  *     unclear like any other photo verdict; an office_review is a person's
  *     decision and stands.
+ *     Precedence: office_review (check.recheckOverride) > photo_pair
+ *     (check.recheck); see effectiveRecheck.
  *
  * Thresholds: the band (8 points per category, 4 for the overall) is W5's
  * proposal; tune it with the calibration replay (server/scripts/
@@ -306,8 +308,33 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
   };
 }
 
-function itemForCheck(check, comparable) {
-  const recheck = check?.recheck;
+const hasRecheckVerdict = (record) => Boolean(record) && typeof record === 'object'
+  && Object.prototype.hasOwnProperty.call(RECHECK_STATE, record.verdict);
+
+/**
+ * The recheck record that speaks for a check. Precedence (owner 09-29, SCOPE
+ * round 3b): an office_review override (`check.recheckOverride`, the lawn
+ * review queue's own field) always beats the paired-photo read (`check.recheck`,
+ * source 'photo_pair'), whichever was written first; the model's record stays
+ * beside it untouched. An override that is not a well-formed office_review
+ * verdict is ignored, not trusted.
+ *
+ * Kill switch (P19b): `photoPair: false` means GATE_LAWN_PAIRED_RECHECK is off
+ * for this read, so a stored photo_pair verdict is ignored as if it had never
+ * been written (the check reads unclear, exactly as before the feature). A
+ * person's office_review decision is honored whatever the gate says. The caller
+ * that already reads gates passes it in; this module stays pure. Default true.
+ */
+function effectiveRecheck(check, { photoPair = true } = {}) {
+  const override = check?.recheckOverride;
+  if (hasRecheckVerdict(override) && override.source === 'office_review') return override;
+  const stored = check?.recheck;
+  if (!photoPair && stored && typeof stored === 'object' && stored.source === 'photo_pair') return undefined;
+  return stored;
+}
+
+function itemForCheck(check, comparable, photoPair = true) {
+  const recheck = effectiveRecheck(check, { photoPair });
   const verdict = recheck && typeof recheck === 'object' ? recheck.verdict : null;
   const valid = Boolean(recheck) && RECHECK_SOURCES.includes(recheck.source) && Object.prototype.hasOwnProperty.call(RECHECK_STATE, verdict);
   // A paired-photo read is still a photo read: low confidence = unclear.
@@ -384,7 +411,7 @@ function comparisonGates(current, prior) {
 }
 
 /** One item per judged metric of each prior applied row, then one per prior check. */
-function progressItems({ sinceLast, priorDate, days, current, prior, gates, band }) {
+function progressItems({ sinceLast, priorDate, days, current, prior, gates, band, photoPair }) {
   const { rows, unmapped } = appliedRows(sinceLast?.applied, priorDate, Array.isArray(sinceLast?.issues) ? sinceLast.issues : []);
   const items = rows.flatMap((row) => {
     // Judged metrics when the row has windows; otherwise its one metric, which
@@ -395,7 +422,7 @@ function progressItems({ sinceLast, priorDate, days, current, prior, gates, band
       .map((metric) => itemForMetric({ row, metric, days, cur: current.scores, prior: prior.scores, gates, band }));
   });
   const checks = Array.isArray(sinceLast?.checks) ? sinceLast.checks : [];
-  return { items: [...items, ...checks.map((check) => itemForCheck(check, gates.comparable))], unmapped };
+  return { items: [...items, ...checks.map((check) => itemForCheck(check, gates.comparable, photoPair))], unmapped };
 }
 
 /**
@@ -418,10 +445,11 @@ function sameOverallBasis(current, prior) {
  *   (reason 'prior_mismatch').
  * @param {number} [input.band] category dead-band (default 8)
  * @param {number} [input.overallBand] overall dead-band (default 4)
+ * @param {boolean} [input.photoPair] false = GATE_LAWN_PAIRED_RECHECK is off: stored photo_pair rechecks are ignored (default true)
  * @returns {object} { v, engineVersion, eligible, reason, daysSincePrior, confidence, season, overall, deltas, items, unmapped }
  */
 function buildLawnProgress({
-  current, prior, sinceLast = null, band = CATEGORY_BAND, overallBand = OVERALL_BAND,
+  current, prior, sinceLast = null, band = CATEGORY_BAND, overallBand = OVERALL_BAND, photoPair = true,
 } = {}) {
   const base = {
     v: PROGRESS_VERSION,
@@ -445,7 +473,7 @@ function buildLawnProgress({
 
   const days = curDay - priorDay;
   const gates = comparisonGates(current, prior);
-  const { items, unmapped } = progressItems({ sinceLast, priorDate, days, current, prior, gates, band });
+  const { items, unmapped } = progressItems({ sinceLast, priorDate, days, current, prior, gates, band, photoPair });
   const overall = sameOverallBasis(current, prior)
     ? overallDirection({
       curOverall: scoreOf(current.scores, 'overall'),
@@ -469,9 +497,17 @@ function buildLawnProgress({
   };
 }
 
+/** A photo row's own readability: adequate or limited counts, poor or unrated does not. */
+function photoIsUsable(row) {
+  const bucket = qualityBucket(photoQualityForConfidence(row));
+  return bucket === 'adequate' || bucket === 'limited';
+}
+
 module.exports = {
   divergentMetricsFrom,
   photoQualityForConfidence,
+  photoIsUsable,
+  effectiveRecheck,
   ENGINE_VERSION,
   PROGRESS_VERSION,
   STATES,

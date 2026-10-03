@@ -18,7 +18,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = require('./lawn-visit-memory');
+const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
@@ -5650,6 +5650,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             // snapshot...) is in readFailures. A frozen entry still replays.
             degraded: readFailures.size > 0,
             knex,
+            // GATE_LAWN_PAIRED_RECHECK (P19b): told once, only for the render that
+            // CREATED the entry, so the paired-photo read runs in the background
+            // after the freeze and never inside this render. Gate off = null.
+            onCreated: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive()
+              ? require('../lawn-paired-recheck').scheduleAfterFreeze
+              : null,
           });
           visitMemorySinceLast = outcome.sinceLast;
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
@@ -5692,7 +5698,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : 'unknown',
             };
           }
-          lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
+          lawnProgress = buildLawnProgress({
+            current,
+            prior: priorForProgress,
+            sinceLast: visitMemorySinceLast || null,
+            // P19b kill switch on the READ: gate off = a stored photo_pair recheck is ignored.
+            photoPair: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive(),
+          });
         } catch {
           lawnProgress = null;
         }
@@ -5935,7 +5947,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.
-      if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = visitMemorySinceLast;
+      // publicSinceLast leaves the paired-photo recheck (engine input, P19b) off the
+      // payload; it hands back the same block when there is none.
+      if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = publicSinceLast(visitMemorySinceLast);
       // P13: the progress block rides the report object but NOT the public
       // payload (non-enumerable: JSON, spread and Object.keys never see it), so
       // no state word reaches a customer before P14's guarded copy does.
