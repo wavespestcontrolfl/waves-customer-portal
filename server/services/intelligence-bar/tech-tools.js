@@ -15,7 +15,7 @@ const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
-const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+const { loadActiveAliasRows, activeProductsForAlias } = require('../purchase-receipts/product-matcher');
 
 const TECH_TOOLS = [
   {
@@ -459,67 +459,7 @@ function pickProduct(rows, productName, aliasProducts = []) {
   return { result: { error: `Product "${productName}" not found` } };
 }
 
-// Active products an alias names exactly (product_aliases, the same table
-// and normalisation the purchase matcher reads), one row per product. Every
-// alias is read and compared normalised: a raw SQL text filter would drop an
-// alias that differs only in spacing or punctuation.
-async function activeProductsForAlias(productName) {
-  const wanted = normalizeForMatch(productName);
-  if (!wanted) return [];
-  const rows = await db('product_aliases as pa')
-    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
-    .where('pc.active', true)
-    .select('pa.alias_name', 'pc.*');
-  const byId = new Map();
-  for (const row of rows || []) {
-    if (normalizeForMatch(row.alias_name) === wanted && !byId.has(row.id)) byId.set(row.id, row);
-  }
-  return [...byId.values()];
-}
-
 const isPresent = (value) => value != null && value !== '';
-const ML_TEXT = /\b(ml|millilit(er|re)s?)\b/i;
-
-// Many turf products keep their label rate only in the per-1,000 sq ft
-// columns (default_rate stays null), so those count as a rate on file — but
-// only once the label is verified (label_verified_at, the same contract the
-// job card holds): some rows carry an operating assumption, not a label rate.
-// Only
-// when neither form exists does the answer carry rate_note, so a blank never
-// invites a number from memory. A tech never gets an mL figure.
-function perThousandRate(product, { forTech, hasDefaultRate }) {
-  const fields = {
-    default: product.default_rate_per_1000,
-    min: product.min_label_rate_per_1000,
-    max: product.max_label_rate_per_1000,
-  };
-  // The label's own words travel with the range: min-max is the whole
-  // envelope, and the top of it can be legal only for listed pests or sites
-  // (Bifen XTS).
-  const notes = [product.rate_notes, product.label_source_note]
-    .filter(isPresent)
-    .map((note) => (typeof note === 'string' ? note : JSON.stringify(note)));
-  // A tech never reads an mL figure. A range whose unit is mL, or whose
-  // notes carry one, is withheld whole rather than shown without the
-  // conditions those notes hold: the tech is sent to the label.
-  const mlForTech = forTech && (isMlUnit(product.rate_unit) || notes.some((note) => ML_TEXT.test(note)));
-  const usable = Boolean(product.label_verified_at) && Object.values(fields).some(isPresent) && !mlForTech;
-  const out = {};
-  if (usable) {
-    const rate = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
-    for (const [key, value] of Object.entries(fields)) {
-      if (isPresent(value)) rate[key] = value;
-    }
-    // The yearly cap travels with the per-application range: two
-    // applications at `max` can exceed it (Celsius WG 0.113 vs 0.17).
-    if (isPresent(product.max_annual_per_1000)) rate.max_per_year = product.max_annual_per_1000;
-    if (notes.length) rate.label_notes = notes;
-    rate.conditions = 'min and max are the whole label range. A rate above default may apply only to the pests or sites named in label_notes: state that condition with the rate, or send the tech to the label.';
-    out.label_rate_per_1000 = rate;
-  }
-  if (!hasDefaultRate && !usable) out.rate_note = 'No rate on file. Check the current label before mixing.';
-  return out;
-}
 
 async function getProductInfo(productName, { forTech = false } = {}) {
   // Every match is read: an exact name or a second active match beyond a
@@ -527,7 +467,9 @@ async function getProductInfo(productName, { forTech = false } = {}) {
   const rows = await db('products_catalog')
     .whereILike('name', `%${productName}%`)
     .orderBy('name');
-  const { product, result } = pickProduct(rows || [], productName, await activeProductsForAlias(productName));
+  // Aliases resolve through the purchase matcher's own rule.
+  const aliasProducts = activeProductsForAlias(productName, await loadActiveAliasRows(db));
+  const { product, result } = pickProduct(rows || [], productName, aliasProducts);
   if (!product) return result;
 
   // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
@@ -576,7 +518,12 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     container_size: product.container_size,
     default_rate: withheldRate ? null : product.default_rate,
     default_unit: withheldRate ? null : product.default_unit,
-    ...perThousandRate(product, { forTech, hasDefaultRate: !withheldRate && isPresent(product.default_rate) }),
+    // A blank rate must never invite a number from memory. Per-1,000 sq ft
+    // catalog rates are not returned here: some are planning figures, and
+    // their verification stamp does not prove a label source.
+    rate_note: withheldRate || !isPresent(product.default_rate)
+      ? 'No rate available here. Check the current label before mixing.'
+      : undefined,
     sku: product.sku,
     safety,
   };

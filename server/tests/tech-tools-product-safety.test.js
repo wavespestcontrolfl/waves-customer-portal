@@ -190,27 +190,9 @@ describe('get_product_info product match', () => {
 
   test('a product with no rate carries a rate note; one with a rate does not', async () => {
     mockRows = [{ name: 'Atticus Talak 7.9 F', active: true, default_rate: null }];
-    expect((await ask('Talak')).rate_note).toBe('No rate on file. Check the current label before mixing.');
+    expect((await ask('Talak')).rate_note).toBe('No rate available here. Check the current label before mixing.');
     mockRows = [{ name: 'Sample CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED }];
     expect((await ask('Sample CS')).rate_note).toBeUndefined();
-  });
-
-  test('a per-1,000 label rate counts as a rate on file and is returned with its basis', async () => {
-    mockRows = [{
-      name: 'Acelepryn Xtra', active: true, default_rate: null, label_verified_at: VERIFIED,
-      default_rate_per_1000: '0.46', min_label_rate_per_1000: '0.23', max_label_rate_per_1000: '0.92', rate_unit: 'fl_oz',
-    }];
-    const result = await ask('Acelepryn Xtra');
-    expect(result.rate_note).toBeUndefined();
-    expect(result.label_rate_per_1000).toMatchObject({ unit: 'fl_oz per 1,000 sq ft', default: '0.46', min: '0.23', max: '0.92' });
-  });
-
-  test('for a technician, an mL per-1,000 rate is withheld and the rate note stands', async () => {
-    mockRows = [{ name: 'Sample Liquid', active: true, default_rate: null, default_rate_per_1000: '30', rate_unit: 'ml', label_verified_at: VERIFIED }];
-    const result = await ask('Sample Liquid');
-    expect(result.label_rate_per_1000).toBeUndefined();
-    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
-    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
   });
 
   test('an unverified label withholds every rate from a technician and sends them to the label', async () => {
@@ -221,7 +203,7 @@ describe('get_product_info product match', () => {
     const result = await ask('Velista');
     expect(result.default_rate).toBeNull();
     expect(result.label_rate_per_1000).toBeUndefined();
-    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
+    expect(result.rate_note).toBe('No rate available here. Check the current label before mixing.');
   });
 
   test('an admin workflow keeps an unverified catalog rate as stored but gets no per-1,000 label rate', async () => {
@@ -283,32 +265,17 @@ describe('get_product_info product match', () => {
     expect(result.candidates).toEqual(['Demand CS', 'Demand G']);
   });
 
-  test('the per-1,000 rate carries the yearly cap and the label words that qualify the range', async () => {
-    mockRows = [{
-      name: 'Bifen XTS', active: true, label_verified_at: VERIFIED, rate_unit: 'fl_oz',
-      min_label_rate_per_1000: '0.07', max_label_rate_per_1000: '0.30', max_annual_per_1000: '0.60',
-      label_source_note: 'General lawn band 0.07-0.15 fl oz/1,000 sq ft; up to 0.30 for listed pests.',
-    }];
-    const rate = (await ask('Bifen XTS')).label_rate_per_1000;
-    expect(rate.max_per_year).toBe('0.60');
-    expect(rate.label_notes).toEqual(['General lawn band 0.07-0.15 fl oz/1,000 sq ft; up to 0.30 for listed pests.']);
-    expect(rate.conditions).toMatch(/only to the pests or sites named in label_notes/);
-  });
 
-  test('for a technician, a range whose label note carries an mL figure is withheld whole, never shown without its conditions', async () => {
+  test('per-1,000 sq ft catalog figures are never returned: some are planning rates, whatever their stamp', async () => {
     const row = {
-      name: 'Sample Turf', active: true, label_verified_at: VERIFIED, rate_unit: 'fl_oz',
-      min_label_rate_per_1000: '0.46', max_label_rate_per_1000: '0.6',
-      label_source_note: 'Grubs: 0.46-0.6 fl oz (13.6-17.7 mL) per 1,000 sq ft; higher rate for listed pests only.',
+      name: 'High Mn Combo', active: true, default_rate: null, label_verified_at: VERIFIED,
+      default_rate_per_1000: '0.1975', min_label_rate_per_1000: '0.1', max_label_rate_per_1000: '0.3', rate_unit: 'fl_oz',
     };
-    mockRows = [row];
-    const result = await ask('Sample Turf');
-    expect(result.label_rate_per_1000).toBeUndefined();
-    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
-    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
-    // An admin workflow keeps the range with the whole note.
-    mockRows = [row];
-    const admin = await executeTechTool('get_product_info', { product_name: 'Sample Turf' }, {});
-    expect(admin.label_rate_per_1000.label_notes).toEqual([row.label_source_note]);
+    for (const context of [{ techId: 'tech-1', techName: null }, {}]) {
+      mockRows = [row];
+      const result = await executeTechTool('get_product_info', { product_name: 'High Mn Combo' }, context);
+      expect(JSON.stringify(result)).not.toMatch(/0\.1975|0\.3\b/);
+      expect(result.rate_note).toBe('No rate available here. Check the current label before mixing.');
+    }
   });
 });
