@@ -1137,6 +1137,8 @@ function languageTokens(text, { keepNames = false, dropNames = false } = {}) {
 // not know is foreign ("Perfecto", "Ok. Vale"), as the trial's own prefilter reads it.
 function languageVote(text) {
   const plain = canonText(String(text || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '));
+  // letters outside the Latin script ("Спасибо", "谢谢", "شكرا") are another language, whatever the tokenizer reads
+  if (/(?!\p{Script=Latin})\p{L}/u.test(plain)) return 'foreign';
   const tokens = languageTokens(plain, { dropNames: true });
   if (!tokens.length) return null;
   if (!isEnglishInbound(plain)) return 'foreign';

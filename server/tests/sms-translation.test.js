@@ -621,6 +621,12 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
   });
 
+  test('a history in another script (Russian, Chinese) votes foreign, so the customer stays in the trial', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Спасибо' }, { message_body: 'Хорошо' }, { message_body: '谢谢' }, { message_body: 'Ok' }]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language: 'Russian', language_code: 'ru' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Когда вы придёте?', customer, smsLogId: 's1' })).not.toBeNull();
+  });
+
   test('only the address span is set aside: "123 Main St. Hasta luego" still votes foreign', async () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok thanks' }, { message_body: 'See you then' }, { message_body: 'Gracias' }, { message_body: '123 Main St. Hasta luego' }]);
     scriptModels({ inbound: SPANISH_INBOUND });
