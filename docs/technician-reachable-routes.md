@@ -537,6 +537,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/revenue/settings` | admin-revenue (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/sms-templates/preview` | admin-sms-templates |
 | GET | `/api/admin/triage` | admin-triage |
 | POST | `/api/admin/triage/:id/apply-property-roles` | admin-triage |

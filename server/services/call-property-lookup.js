@@ -706,7 +706,7 @@ const LEFT_CANDIDATE_SET_SKIPS = [
 // latency — comfortably under the 10-minute stale-'pending' window that
 // already bounds a single run; anything past this is another writer.
 const ENRICH_TOUCH_WINDOW_MS = 15 * 60 * 1000;
-async function recentLookupVerdict(row) {
+async function recentLookupVerdict(row, { stalePendingCools = false } = {}) {
   try {
     const { addressKey: cacheKey } = require('./property-lookup/lookup-cache');
     const { hash } = cacheKey(propertyRowAddress(row));
@@ -716,6 +716,10 @@ async function recentLookupVerdict(row) {
       .first('last_attempt_status', 'last_attempt_at');
     if (!attempt) return null;
     const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
+    // The deploy-kill retry: the :03/:18 stale-attempt sweep may already
+    // have turned the killed run's in-flight 'pending' into 'interrupted'.
+    // Same lookup, same rule as the stale 'pending' below — not re-bought.
+    if (stalePendingCools && attempt.last_attempt_status === 'interrupted') return 'cooldown';
     if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) {
       // 'pending' is NONTERMINAL: it cools only while a lookup is
       // genuinely in flight — the same PENDING_ACTIVE_MINUTES bound the
@@ -723,7 +727,11 @@ async function recentLookupVerdict(row) {
       // that will never produce a result; cooling it for the full
       // window stranded the row for weeks while the call-time retry
       // ladder had already (correctly) moved on after ten minutes.
-      if (attempt.last_attempt_status === 'pending'
+      // stalePendingCools (the deploy-kill retry): a stale 'pending' is the
+      // lookup the killed run had in flight and may already have paid for.
+      // The retry leaves it for tomorrow's run, so every lookup a retry buys
+      // is a new ledger row and backfillBudgetLeft counts it.
+      if (attempt.last_attempt_status === 'pending' && !stalePendingCools
           && !(Number.isFinite(attemptedAt) && attemptedAt > Date.now() - PENDING_ACTIVE_MINUTES * 60 * 1000)) {
         return null;
       }
@@ -1074,7 +1082,7 @@ async function reconcileCustomerMirrors() {
 // cooldown shielding anything already attempted.
 const CALL_TIME_RECOVERY_WINDOW_DAYS = 7;
 
-async function sweepUnenrichedProperties({ limit } = {}) {
+async function sweepUnenrichedProperties({ limit, stalePendingCools = false } = {}) {
   const backfillOn = gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL');
   const callTimeOn = gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
   // Reconciliation heals the CALL-TIME lane's enrich↔booking race, so it
@@ -1128,7 +1136,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     let leftSetThisPage = 0;
     for (const row of page) {
       if (processed >= batch) break;
-      const verdict = await recentLookupVerdict(row);
+      const verdict = await recentLookupVerdict(row, { stalePendingCools });
       if (verdict === 'cooldown') { cooled += 1; continue; }
       if (verdict === 'parked') { parked += 1; continue; }
       try {
@@ -1172,12 +1180,46 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   };
 }
 
+// How much of the nightly batch is left, from the attempt ledger (one row
+// per address): every address attempted in the window counts, the killed
+// run's and any earlier retry's alike. The retry never re-buys an address
+// (stalePendingCools), so addresses attempted = lookups bought. Call-time
+// lookups stamp the same ledger, which only lowers what is left.
+// Known limit: the ledger stamp is best effort (markLookupAttempt logs and
+// continues on a write failure). A lookup whose stamp failed is not counted,
+// so a night with BOTH ledger write failures and a deploy kill can buy up to
+// that many lookups past the cap. An exact cap needs a durable spend counter.
+const RETRY_BUDGET_WINDOW_HOURS = 12;
+async function backfillBudgetLeft() {
+  // PROPERTY_LOOKUP_CACHE_DISABLED turns the ledger's writes off, so nothing
+  // the killed run bought was recorded: no figure, no retry spend.
+  if (require('./property-lookup/lookup-cache').isCacheDisabled()) return 0;
+  const res = await db('property_lookups')
+    .whereRaw(`last_attempt_at > NOW() - INTERVAL '${RETRY_BUDGET_WINDOW_HOURS} hours'`)
+    .count({ n: '*' })
+    .first();
+  return Math.max(0, backfillBatchSize() - (Number(res?.n) || 0));
+}
+
+/**
+ * The sweep, re-run after a deploy killed the nightly run mid-batch
+ * (utils/deploy-kill-retry.js). The batch cap is the night's budget, so the
+ * retry gets only what the killed run left. A ledger read failure throws:
+ * no budget figure, no spend.
+ */
+async function sweepUnenrichedPropertiesAfterKill() {
+  const limit = await backfillBudgetLeft();
+  if (limit <= 0) return { skipped: 'budget_spent' };
+  return sweepUnenrichedProperties({ limit, stalePendingCools: true });
+}
+
 module.exports = {
   runCallPropertyLookup,
   enqueueCallPropertyLookup,
   sweepUnenrichedProperties,
+  sweepUnenrichedPropertiesAfterKill,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
-    reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    backfillBudgetLeft, reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };
