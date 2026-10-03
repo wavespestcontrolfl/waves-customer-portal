@@ -65,7 +65,9 @@ function hasCoords(stop) {
 
 /** GATE_COMBO_ROUTE_CHECK: dark unless set, read at call time. On, a caller
  *  that moves a WHOLE visit (`unit: true`) gets the visit placed as one stop
- *  instead of `route_unverified`. Off, `unit` is ignored: byte-identical. */
+ *  instead of `route_unverified`, and a caller that separates one service
+ *  first (`alone: true`) gets that service checked as a single visit. Off,
+ *  both are ignored: byte-identical. */
 function comboRouteCheckLive() {
   return gateEnvValue('GATE_COMBO_ROUTE_CHECK');
 }
@@ -126,7 +128,7 @@ async function resolveVisitUnit(conn, target, stored, serviceId) {
 
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
-  changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false,
+  changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -193,7 +195,10 @@ async function loadArrivalRouteContext({
   // ride the target as one stop. Not one clean stop = `grouped` stands.
   const unitTarget = hasLiveSibling && unit && !prospective
     ? await resolveVisitUnit(conn, target, stored, serviceId) : null;
-  const grouped = hasLiveSibling && !unitTarget;
+  // `alone`: the caller is about to split this service off its visit and
+  // move only it ("Separate" in Edit appointment), so it is an ordinary
+  // single visit for this check. Same gate; off, a grouped row is unverified.
+  const grouped = hasLiveSibling && !unitTarget && !(alone && !prospective && comboRouteCheckLive());
   (unitTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   return { target: unitTarget || target, rows: rows.filter(row => !excluded.has(String(row.id))

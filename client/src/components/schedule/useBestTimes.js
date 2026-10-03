@@ -145,6 +145,9 @@ export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
   pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false,
+  // Edit appointment's choice on a shared stop ('together' | 'separate'):
+  // the route check answers for the move the save will make.
+  moveScope,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -174,7 +177,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -203,6 +206,7 @@ export function useBestTimes({
           body: JSON.stringify({
             hint: true,
             arrivalWindows,
+            moveScope: moveScope || undefined,
             // Existing-visit surfaces pass serviceId so the server ranks at
             // the VISIT's stamped address (secondary/rental properties),
             // not the customer's primary home.
@@ -286,6 +290,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope]);
   return { bestTimes, picked, bestInRange, availability, checking };
 }

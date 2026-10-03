@@ -323,7 +323,7 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
   const res = await post({ ...BASE, serviceId: 'svc-1', hint: true, arrivalWindows });
   expect(res.status).toBe(200);
   const opts = findAvailableSlots.mock.calls[0][0];
-  if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1', unit: true });
+  if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1', unit: true, alone: false });
   else expect(opts).not.toHaveProperty('arrivalWindow');
 });
 
@@ -561,7 +561,14 @@ test('arrival-window mode scores the picked hour with the shared route checker: 
     expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'fixture-service', date: '2026-09-01', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60,
     }));
-    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({ unit: true }));
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({ unit: true, alone: false }));
+    // The operator chose "Separate": the offered hours and the verdict are for this service alone.
+    findAvailableSlots.mockClear();
+    checkArrivalPlacement.mockClear();
+    await post({ ...req, moveScope: 'separate' });
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toMatchObject({ unit: false, alone: true });
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({ unit: false, alone: true }));
+    checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 9, estimatedArrival: '09:44' });
     // A whole visit whose technician cannot do one of its services: no verdict, never a certified fit.
     const capabilities = require('../services/technician-capabilities');
     const inactive = jest.spyOn(capabilities, 'inactiveCapabilitiesForServices');
@@ -663,7 +670,7 @@ test('arrival mode hands the engine and the picked-hour checker the pending edit
     const stamp = { property_id: PROPERTY_ID, address_line1: '9 Rental Way', city: 'Parrish', state: 'FL', zip: '34219', lat: 27.11, lng: -82.22 };
     expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({
       lat: 27.11, lng: -82.22,
-      arrivalWindow: { serviceId: 'fixture-service', changes: { estimated_duration_minutes: 90, ...stamp }, unit: true },
+      arrivalWindow: { serviceId: 'fixture-service', changes: { estimated_duration_minutes: 90, ...stamp }, unit: true, alone: false },
     });
     expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
       windowStart: '09:00', windowEnd: '12:00', durationMinutes: 90,
@@ -685,7 +692,7 @@ test('arrival mode without a pending property still passes the form\'s duration 
   checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 4 });
   try {
     await post({ ...BASE, hint: true, arrivalWindows: true, serviceId: 'fixture-service', technicianId: 't1', slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '11:00', durationEdit: true });
-    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: { estimated_duration_minutes: 60 }, unit: true });
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: { estimated_duration_minutes: 60 }, unit: true, alone: false });
     expect(checkArrivalPlacement.mock.calls[0][0].changes).toEqual({ estimated_duration_minutes: 60, window_start: '09:00', window_end: '11:00' });
   } finally {
     if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
@@ -707,7 +714,7 @@ test('a move without `durationEdit` leaves the stored work estimate alone: `chan
   try {
     const res = await post({ ...BASE, hint: true, arrivalWindows: true, serviceId: 'fixture-service', technicianId: 't1', slotStepMinutes: 60, durationMinutes: 60, pickedStart: '19:00', pickedEnd: '20:00' });
     expect(res.status).toBe(200);
-    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: {}, unit: true });
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: {}, unit: true, alone: false });
     expect(checkArrivalPlacement.mock.calls[0][0].changes).toEqual({ window_start: '19:00', window_end: '20:00' });
     // The checker still receives the span as `durationMinutes` (it takes the larger of that and the stored estimate).
     expect(checkArrivalPlacement.mock.calls[0][0]).toMatchObject({ durationMinutes: 60 });

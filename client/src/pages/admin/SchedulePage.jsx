@@ -2124,8 +2124,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
+  // How a shared stop moves (the choice box near the date and time). Declared
+  // here because the availability search below answers for that move.
+  const [comboMove, setComboMove] = useState("together");
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    moveScope: comboMove,
     // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
     // days around the picked date. Gate off = no `availability`, and the
     // three-line hint below renders exactly as before.
@@ -2197,7 +2201,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // done is an ordinary single visit (the server moves it as one row).
   const comboCount = Number(comboVisitInfo?.liveCount ?? comboVisitInfo?.serviceCount);
   const comboVisit = comboVisitInfo && comboVisitInfo.id && comboCount > 1 ? comboVisitInfo : null;
-  const [comboMove, setComboMove] = useState("together");
   // The slot and technician the form opened on: where the stop is.
   const comboOpened = useRef({
     date: form.scheduledDate,

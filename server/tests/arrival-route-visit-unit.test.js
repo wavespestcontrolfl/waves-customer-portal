@@ -136,6 +136,19 @@ describe('loadArrivalRouteContext({ unit })', () => {
     expect(evaluateArrivalPlacement(mixedTech, { windowStart: '09:00', windowEnd: '11:00', durationMinutes: 60 }).reason).toBe('route_unverified');
   });
 
+  test('alone (the operator separates this service first): it is checked as a single visit under the gate, and stays grouped with the gate off', async () => {
+    const conn = () => fakeConn({ target: stop('a'), siblings: [stop('b')] });
+    expect((await load(conn(), { alone: true })).grouped).toBe(true);
+    process.env.GATE_COMBO_ROUTE_CHECK = 'true';
+    mockDayRows = [stop('b', { scheduled_date: '2035-03-08' })];
+    const context = await load(conn(), { alone: true });
+    expect(context.grouped).toBe(false);
+    expect(context.target.memberIds).toBeUndefined();
+    expect(context.target.siblingWorkMinutes).toBeUndefined();
+    // Its sibling is not folded away: it stays whatever it is on the day.
+    expect(context.rows.map((row) => row.id)).toEqual(['b']);
+  });
+
   test('a visit with no live sibling is not grouped and is untouched by unit', async () => {
     process.env.GATE_COMBO_ROUTE_CHECK = 'true';
     const solo = await load(fakeConn({ target: stop('a'), siblings: [] }), { unit: true });
@@ -152,12 +165,12 @@ describe('who asks for the whole visit', () => {
   test('the staff availability box does (the hint route, on both slot-finder paths, and the picked-hour verdict); nothing else does', () => {
     const hints = read('services/scheduling/find-time-hints.js');
     const verdict = hints.slice(hints.indexOf('async function pickedByArrivalChecker'));
-    expect(verdict.slice(0, verdict.indexOf('if (fit.feasible)'))).toContain('unit: true,');
+    expect(verdict.slice(0, verdict.indexOf('if (fit.feasible)'))).toContain('unit: !moveAlone, alone: !!moveAlone,');
     // The hint route marks its existing-visit request; the slot finder forwards
     // that mark on the capacity path and on the non-capacity path.
-    expect(read('routes/admin-schedule-find-time.js')).toContain('arrivalWindow: { serviceId, changes: hintChanges, unit: true }');
+    expect(read('routes/admin-schedule-find-time.js')).toContain('arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone }');
     const findTime = read('services/scheduling/find-time.js');
-    expect(findTime.split('unit: opts.arrivalWindow.unit === true').length - 1).toBe(2);
+    expect(findTime.split('unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true').length - 1).toBe(2);
     expect(findTime.includes('unit: true')).toBe(false);
     // Both paths skip a technician who cannot do every service on a whole visit.
     expect(findTime.split('context.target.memberServices').length - 1).toBe(3);
