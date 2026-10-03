@@ -34,9 +34,11 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 }));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
+  {/* A week-view row: a visit that is not in the selected day's list. */}
+  <button aria-label="Open week-only visit" onClick={() => onEdit({ id: 'svc-ts-week', customerName: 'Fixture week', address: '200 Example Lane', serviceType: 'Tree & Shrub Program', status: 'on_site', scheduledDate: '2026-09-14', completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' }, treeShrubFastCompleteEnabled: true })}>Week visit</button>
 </div> }));
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
-  default: ({ invoiceId }) => <div>Payment sheet for {invoiceId}</div>,
+  default: ({ invoiceId, service }) => <div>Payment sheet for {invoiceId} ({service?.id || 'no service'})</div>,
 }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
@@ -128,8 +130,16 @@ describe('Dispatch completion routing for Tree & Shrub', () => {
     mount([visit('svc-ts-unpaid')]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-ts-unpaid' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sheet completed unpaid' }));
-    expect(await screen.findByText('Payment sheet for inv-fixture')).toBeInTheDocument();
+    expect(await screen.findByText('Payment sheet for inv-fixture (svc-ts-unpaid)')).toBeInTheDocument();
     expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
+  });
+
+  it('hands off an unpaid invoice for a week-view visit outside the selected day', async () => {
+    mount([visit('svc-ts-today')]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open week-only visit' }));
+    await screen.findByText('Tree and shrub sheet for svc-ts-week');
+    fireEvent.click(screen.getByRole('button', { name: 'Sheet completed unpaid' }));
+    expect(await screen.findByText('Payment sheet for inv-fixture (svc-ts-week)')).toBeInTheDocument();
   });
 
   it('opens no payment sheet when the invoice is already paid', async () => {

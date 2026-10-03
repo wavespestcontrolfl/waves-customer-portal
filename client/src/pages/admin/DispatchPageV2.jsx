@@ -943,7 +943,10 @@ export default function DispatchPageV2({
   // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
   // invalidate the mobile week cache, and stage the payment handoff.
   const applyCompletionResult = useCallback(
-    (serviceId, r, body) => {
+    // `fallbackService`: the visit a caller other than CompletionPanel
+    // completed (the Tree & Shrub sheet), for a week-view row that is not in
+    // the selected day's list.
+    (serviceId, r, body, fallbackService = null) => {
       handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
@@ -969,6 +972,7 @@ export default function DispatchPageV2({
       ) {
         const completedService =
           (data?.services || []).find((s) => s.id === serviceId) ||
+          fallbackService ||
           completingService;
         const handoff = {
           service: completedService,
@@ -1907,9 +1911,9 @@ export default function DispatchPageV2({
             // Same bookkeeping a CompletionPanel completion runs: flip the
             // row to completed, invalidate the mobile week cache, stage the
             // payment handoff for an unpaid invoice, refetch.
-            const serviceId = treeShrubFastService.id;
+            const service = treeShrubFastService;
             setTreeShrubFastService(null);
-            applyCompletionResult(serviceId, response, null);
+            applyCompletionResult(service.id, response, null, service);
             void fetchSchedule(date, { silent: true });
           }}
           onFullForm={() => {
