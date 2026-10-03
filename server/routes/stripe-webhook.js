@@ -6837,36 +6837,44 @@ async function findInvoiceForPayment(payment) {
 }
 
 // B05: a pay-page / saved-card CARD settle rewrites invoices.total to the cash
-// charged plus applied credit (confirmInvoicePayment, chargeInvoiceWithSavedCard),
-// so a credit-card payment's processing surcharge sits in `total` as if it were
-// principal. A chargeback returns the whole charge, surcharge included, and
-// reopens the invoice — which then asks for the surcharge as principal and
-// surcharges it again on the next card payment. The reopen takes the surcharge
-// back out of `total`; a WON dispute puts it back with the paid invoice.
-//   - Nothing is stamped: both decisions read only the invoice row the caller
-//     holds FOR UPDATE and two facts of the payment row that no dispute, refund
-//     or confirm write changes (`amount`, `surcharge_amount_cents` — confirm's
-//     repair update filters out refunded/disputed rows and rewrites the same
-//     cents; refunds touch refund_* / status only). So no metadata write from
-//     another handler can change the outcome, and a replay finds the invoice
-//     already in the target shape and does nothing.
-//   - With C = payments.amount + credit_applied and S = surcharge_amount_cents:
-//     the card settle leaves total == C; the reopen leaves total == C - S.
-//     REMOVE (reopen) subtracts S only when total == C; PUT BACK (won) adds S
-//     only when total == C - S. Any other total (an invoice edited or
-//     re-totalled since the settle) is left alone. Every card settle path
-//     writes total == C: the pay-page confirm, the saved-card charge and the
-//     payment_intent.succeeded webhook all add the invoice's credit_applied to
-//     the cash charged.
+// charged plus applied credit (confirmInvoicePayment, chargeInvoiceWithSavedCard,
+// and the payment_intent.succeeded webhook), so a credit-card payment's
+// processing surcharge sits in `total` as if it were principal. A chargeback
+// returns the whole charge, surcharge included, and reopens the invoice — which
+// then asks for the surcharge as principal and surcharges it again on the next
+// card payment. The reopen takes the surcharge back out of `total`; a WON
+// dispute puts it back with the paid invoice.
+//   - REMOVE (created / lost reopen): with C = payments.amount + credit_applied
+//     and S = payments.surcharge_amount_cents, the settle leaves total == C.
+//     Subtract S only from total == C, never below what the invoice itself bills
+//     (invoice-helpers' invoicePrincipalCents, the expression create() stores as
+//     `total`: subtotal - discount + tax - deposit credit), nor below the credit
+//     applied, nor to zero. At that moment the invoice is paid, so credit_applied
+//     is still the settle-time credit.
 //   - The figure is the payment row's recorded surcharge_amount_cents, never a
 //     recomputed percentage. Rows with no surcharge (ACH, cash, legacy NULL)
 //     and combined-balance rows (their invoices are never re-totalled) are
 //     untouched.
+//   - PUT BACK (won): account credit can be applied to the reopened invoice
+//     (customer-credit.js raises credit_applied without touching total), so the
+//     reopened total cannot be re-derived from the current invoice. The remove
+//     therefore records the exact pair it moved — {from_cents, to_cents} — on
+//     the payment row, and the won restore sets total back to from_cents only
+//     while total is still exactly to_cents. Another total (an edit while
+//     reopened) is left alone with a warning; a total already at from_cents
+//     (replay) does nothing.
+//   - Why this pair is race-free: it is written in the reopen transaction and
+//     read in the won transaction, both holding the invoice lock and then the
+//     payment-row lock, and every dispute writer of that row merges onto a
+//     fresh read under that lock (markPaymentDisputed / the won and lost
+//     final writes) — no handler writes payment metadata from a pre-lock
+//     snapshot any more, which is what lost the earlier stamp. A disputed
+//     payment row is terminal for the other writers of its metadata.
 // Money lock discipline: every caller takes the invoice row FOR UPDATE, re-reads
 // it and re-checks that the disputed payment still owns it BEFORE any write to
-// it, and hands that locked row in; the payment row is a plain read (immutable
-// facts, no write to it here). Nothing after the invoice lock at the three sites
-// touches `customers`, so none waits on a customer lock while holding it.
+// it, and hands that locked row in. Nothing after the invoice lock at the three
+// sites touches `customers`, so none waits on a customer lock while holding it.
+const SURCHARGE_REMOVAL_META_KEY = 'surcharge_removal';
 
 function parsePaymentMeta(row) {
   try {
@@ -6927,14 +6935,15 @@ function lockedInvoiceOwedToWonDispute(invoice, disputedPi) {
   return !pi || (!!disputedPi && pi === disputedPi);
 }
 
-// The facts both directions compare the locked invoice against, or null when
-// this payment carries no card surcharge in an invoice total.
+// The facts the remove compares the locked invoice against, or null when this
+// payment carries no card surcharge in an invoice total.
 async function cardSurchargeShape(trx, invoice, payment) {
   if (!invoice?.id || !payment?.id) return null;
-  const paymentRow = await trx('payments').where({ id: payment.id }).first();
+  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
   const surchargeCents = Math.max(0, Math.round(Number(paymentRow?.surcharge_amount_cents) || 0));
   if (!paymentRow || surchargeCents <= 0 || parsePaymentMeta(paymentRow).combined_payment) return null;
   return {
+    paymentRow,
     surchargeCents,
     totalCents: Math.round((Number(invoice.total) || 0) * 100),
     creditCents: Math.round((Number(invoice.credit_applied) || 0) * 100),
@@ -6948,42 +6957,62 @@ async function setInvoiceTotalCents(trx, invoiceId, cents) {
 }
 
 // `invoice` = the row the caller locked FOR UPDATE and re-checked before its
-// reopen write (its total is still the settled one: the reopen never touches it).
+// reopen write (its total is still the settled one: the reopen never touches
+// it). The caller already holds the payment-row lock.
 async function removeCardSurchargeFromReopenedInvoice(trx, { invoice, payment }) {
   const shape = await cardSurchargeShape(trx, invoice, payment);
   // Not the settle's own rewrite (never inflated, or already removed).
   if (!shape || shape.totalCents !== shape.settledTotalCents) return false;
   const restoredCents = shape.totalCents - shape.surchargeCents;
-  // Never below what the invoice's line items bill, nor below the credit
-  // already applied (amount due would go negative).
-  // What the invoice itself bills: invoice-helpers' invoicePrincipalCents, the
-  // expression create() stores as `total` (subtotal - discount + tax - the
-  // deposit_credit lines), so an estimate deposit never trips this floor.
+  // Never below what the invoice itself bills (invoicePrincipalCents mirrors
+  // create(), deposit credit included), nor below the credit already applied
+  // (amount due would go negative).
   if (restoredCents <= 0 || restoredCents < shape.creditCents
     || (invoice.subtotal != null && restoredCents < invoicePrincipalCents(invoice))) {
     logger.warn(`[stripe-webhook] invoice ${invoice.id}: surcharge ${shape.surchargeCents}c not removed on reopen — restored total ${restoredCents}c would fall below its line items / applied credit`);
     return false;
   }
   await setInvoiceTotalCents(trx, invoice.id, restoredCents);
+  await trx('payments').where({ id: payment.id }).update({
+    metadata: JSON.stringify({
+      ...parsePaymentMeta(shape.paymentRow),
+      [SURCHARGE_REMOVAL_META_KEY]: { from_cents: shape.totalCents, to_cents: restoredCents },
+    }),
+  });
   logger.info(`[stripe-webhook] invoice ${invoice.id}: removed ${shape.surchargeCents}c card surcharge from total on reopen (${shape.totalCents}c -> ${restoredCents}c)`);
   return true;
 }
 
 // Dispute WON: the original card payment stands again, so the invoice goes
-// back to the paid state that payment left it in (total = cash + credit) —
-// only from the exact shape the reopen leaves (total == C - S). `invoice` = the
-// locked row that passed lockedInvoiceOwedToWonDispute, in the transaction that
-// flips it to paid. No floor: it only ever restores what the settle wrote.
+// back to the paid state that payment left it in — the exact total the remove
+// started from — and only while the total is still exactly what the remove
+// left. `invoice` = the locked row that passed lockedInvoiceOwedToWonDispute,
+// in the transaction that flips it to paid; the payment-row lock is held (the
+// caller just wrote the final outcome under it). No floor: it only restores
+// what the settle wrote. Credit applied during the reopen does not matter: it
+// never touches total, and the pair carries no credit.
 async function reinstateCardSurchargeOnWonInvoice(trx, { invoice, payment }) {
-  const shape = await cardSurchargeShape(trx, invoice, payment);
-  if (!shape || shape.totalCents === shape.settledTotalCents) return false; // never removed, or already put back
-  if (shape.totalCents !== shape.settledTotalCents - shape.surchargeCents) {
-    logger.warn(`[stripe-webhook] invoice ${invoice.id}: dispute won but total ${shape.totalCents}c is neither the settled ${shape.settledTotalCents}c nor the reopened ${shape.settledTotalCents - shape.surchargeCents}c — card surcharge left as is`);
+  if (!invoice?.id || !payment?.id) return false;
+  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
+  const meta = parsePaymentMeta(paymentRow);
+  const removal = meta[SURCHARGE_REMOVAL_META_KEY];
+  const fromCents = Math.round(Number(removal?.from_cents));
+  const toCents = Math.round(Number(removal?.to_cents));
+  if (!removal || !Number.isFinite(fromCents) || !Number.isFinite(toCents)) return false; // never removed
+  const totalCents = Math.round((Number(invoice.total) || 0) * 100);
+  const { [SURCHARGE_REMOVAL_META_KEY]: _done, ...rest } = meta;
+  if (totalCents === toCents) {
+    await setInvoiceTotalCents(trx, invoice.id, fromCents);
+    await trx('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(rest) });
+    logger.info(`[stripe-webhook] invoice ${invoice.id}: dispute won — card surcharge back in total (${totalCents}c -> ${fromCents}c)`);
+    return true;
+  }
+  if (totalCents === fromCents) {
+    await trx('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(rest) }); // already put back
     return false;
   }
-  await setInvoiceTotalCents(trx, invoice.id, shape.settledTotalCents);
-  logger.info(`[stripe-webhook] invoice ${invoice.id}: dispute won — card surcharge ${shape.surchargeCents}c back in total (${shape.totalCents}c -> ${shape.settledTotalCents}c)`);
-  return true;
+  logger.warn(`[stripe-webhook] invoice ${invoice.id}: dispute won but total ${totalCents}c is neither the reopened ${toCents}c nor the settled ${fromCents}c (edited while reopened) — card surcharge left as is`);
+  return false;
 }
 
 /**

@@ -1012,4 +1012,54 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_new' });
     expect(AnnualPrepay.syncTermForInvoicePayment).not.toHaveBeenCalled();
   });
+
+  // Finding (round 2): account credit applied while the invoice is reopened raises credit_applied
+  // without touching total, so the put-back must not re-derive the reopened total from the credit.
+  const applyCreditWhileReopened = (cents) => { row('invoices', 'inv_1').credit_applied = String(cents / 100); };
+
+  test('won after $200 credit was applied during the reopen: the surcharge still goes back, the credit is left as applied', async () => {
+    seed(); // $1,000 invoice paid as $1,029
+    await handleDisputeCreated(dispute);
+    expect(total()).toBe(1000);
+    applyCreditWhileReopened(20000); // customer-credit.js: credit_applied up, total unchanged
+    expect(total()).toBe(1000);
+
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_card' });
+    expect(total()).toBe(1029);
+    // Business question, not moved here: the customer is now over-credited by the $200.
+    expect(Number(row('invoices', 'inv_1').credit_applied)).toBe(200);
+    // Replay: nothing moves.
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(total()).toBe(1029);
+  });
+
+  test('credit applied at settle time, then another $50 during the reopen, then won: total returns to cash + settle credit', async () => {
+    seed({ credit: 200, surchargeCents: 2320, cashCents: 82320 });
+    await handleDisputeCreated(dispute);
+    expect(total()).toBe(1000);
+    applyCreditWhileReopened(25000);
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(total()).toBe(1023.2);
+  });
+
+  test('credit applied during the reopen, then LOST: the reopened total stays at the invoice\'s own amount', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    applyCreditWhileReopened(20000);
+    await handleDisputeClosed({ ...dispute, status: 'lost' });
+    expect(row('invoices', 'inv_1').status).toBe('overdue');
+    expect(total()).toBe(1000);
+    expect(Number(row('invoices', 'inv_1').credit_applied)).toBe(200);
+  });
+
+  test('won leaves an invoice re-totalled while reopened alone, credit or not', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    applyCreditWhileReopened(20000);
+    row('invoices', 'inv_1').total = '950.00';
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    expect(row('invoices', 'inv_1').status).toBe('paid');
+    expect(total()).toBe(950);
+  });
 });
