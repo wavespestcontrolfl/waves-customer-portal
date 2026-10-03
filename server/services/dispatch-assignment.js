@@ -304,6 +304,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   void require('./tech-visit-notifications').notifyAssignmentChange({
     visitId: jobId, fromTechId, toTechId: newTechId, actorId: noticeActorId === undefined ? actorId : noticeActorId, trx,
     snapshot: { ...rowSnapshot, ...overrides },
+    // A same-save schedule change (noticeSnapshot) moves the visit off the
+    // row's slot: that slot is the card's previous day, so a move off
+    // today/tomorrow stays a today/tomorrow change (Codex #5783 P2).
+    previous: Object.keys(overrides).length ? rowSnapshot : null,
   });
 
   if (emit) {

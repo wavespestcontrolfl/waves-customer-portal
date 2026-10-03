@@ -465,6 +465,21 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
+  test('a summary gate turned off mid-run discards that run\'s held cards; a later run never inherits them', async () => {
+    await move('auto_dispatch');
+    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 0 });
+    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r2' })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('discardHeldAutoDispatchCards (each run\'s start) drops a crashed run\'s held cards', async () => {
+    await move('auto_dispatch');
+    notices.discardHeldAutoDispatchCards();
+    expect(await notices.pushAutoDispatchSummary({ runId: 'next' })).toEqual({ pushed: 0 });
+  });
+
   test('a dropped (stale) card is never counted', async () => {
     prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
     await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: 'auto_dispatch' });
