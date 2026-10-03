@@ -2671,12 +2671,13 @@ async function lawnUpcomingVisitsStamp(service, knex) {
       .limit(LAWN_NEXT_VISIT_SCAN)
       .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
     const days = (Array.isArray(rows) ? rows : [])
+      // Every lawn row the render's scan reads, with every property column
+      // the resolver reads (a unit or locality edit moves the match too).
       .filter((row) => isSameLineVisit(row, { serviceLine: 'lawn' }))
-      .slice(0, 6)
       .map((row) => {
         const raw = row.scheduled_date;
         const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-        return `${iso}@${row.property_id || row.service_address_line1 || row.source_estimate_id || ''}`;
+        return `${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}`;
       });
     return `:nv=${crypto.createHash('sha1').update(days.join('|')).digest('hex').slice(0, 8)}`;
   } catch {
