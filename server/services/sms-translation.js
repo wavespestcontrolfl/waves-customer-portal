@@ -874,9 +874,9 @@ function isReactionToOurText(body, outbound) {
   return outbound.some((o) => squash(o).startsWith(quote));
 }
 
-// An address reply: a house number, one to four words, then a street word ("123 Bayshore Dr", "830 Main St
-// Apt 4"). "2 hours works" is not one.
-const ADDRESS_REPLY_RE = /^\d{1,6}\s+(?:[\p{L}'-]+\s+){0,3}(?:st|street|rd|road|dr|drive|ln|lane|ave|avenue|blvd|boulevard|ct|court|cir|circle|pl|place|ter|terrace|way|pkwy|parkway|hwy|highway|trl|trail|loop|cv|cove|pt|point|sq|square)\b/iu;
+// An address span: a house number, up to four words, then a street word ("123 Bayshore Dr", "830 Main St").
+// Only the span is set aside ("123 Main St. Hasta luego" still votes on "Hasta luego"); "2 hours works" has none.
+const ADDRESS_SPAN_RE = /\b\d{1,6}\s+(?:[\p{L}'-]+\s+){0,3}(?:st|street|rd|road|dr|drive|ln|lane|ave|avenue|blvd|boulevard|ct|court|cir|circle|pl|place|ter|terrace|way|pkwy|parkway|hwy|highway|trl|trail|loop|cv|cove|pt|point|sq|square)\b\.?/giu;
 
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
@@ -888,12 +888,12 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
     const { isSmsReaction } = require('./sms-intent');
     const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
     // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
-    // contact details are not language: an email or link is set aside, and an address reply ("123 Bayshore Dr") or
-    // a reply with nothing left does not vote
+    // contact details are not language: an email, a link and an address span are set aside, and a reply with no
+    // words left does not vote
     const bodies = rows.map((r) => r.message_body)
       .filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound))
-      .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').trim())
-      .filter((b) => /\p{L}/u.test(b) && !ADDRESS_REPLY_RE.test(b));
+      .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').replace(ADDRESS_SPAN_RE, ' ').trim())
+      .filter((b) => /\p{L}/u.test(b));
     // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
     // (a capitalized word mid-sentence is a name - "Thanks Nadia" stays English; "Perfecto" or "Ok. Perfecto" does not)
     const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b, { namesExempt: 'mid-sentence' })).length;

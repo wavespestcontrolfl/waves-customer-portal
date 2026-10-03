@@ -601,6 +601,12 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
   });
 
+  test('only the address span is set aside: "123 Main St. Hasta luego" still votes foreign', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok thanks' }, { message_body: 'See you then' }, { message_body: 'Gracias' }, { message_body: '123 Main St. Hasta luego' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
+  });
+
   test('"Ok. Perfecto" counts as foreign: a word after a full stop is not a name', async () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok. Perfecto' }, { message_body: 'Ok. Vale' }, { message_body: 'Ok thanks' }]);
     scriptModels({ inbound: SPANISH_INBOUND });
