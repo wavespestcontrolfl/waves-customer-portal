@@ -30,6 +30,7 @@ const {
   SEND_FINALIZABLE_STATUSES,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
+  invoiceDepositCreditCents,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -4433,15 +4434,7 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
 // pinned JSON number compare equal.
 function cancelVoidInvoiceAmounts(row) {
   const cents = (v) => Math.round(Number(v || 0) * 100);
-  let items = [];
-  try {
-    const raw = row?.line_items;
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    items = Array.isArray(arr) ? arr : [];
-  } catch { items = []; }
-  const depositCents = items
-    .filter((item) => item?.category === "deposit_credit")
-    .reduce((sum, line) => sum + Math.abs(cents(line.amount ?? line.unit_price ?? 0)), 0);
+  const depositCents = invoiceDepositCreditCents(row);
   return {
     total: row?.total != null ? cents(row.total) / 100 : null,
     credit_applied: cents(row?.credit_applied) / 100,
