@@ -30,7 +30,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-const { phoneMatchDigits } = require('../utils/phone');
+const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { phoneIdentitySql } = require('./sms-response-policy');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
@@ -88,9 +89,12 @@ function decideLive() {
   return gateEnvValue('GATE_SMS_SCHEDULING_DECIDE');
 }
 
+// The canonical identity of a US number. An international sender is not
+// decided: offers are only recorded for US numbers (sms-offers.js), and a
+// last-ten-digits match could otherwise merge two people's conversations.
 function phoneLast10(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : null;
+  const key = phoneIdentityKey(String(value || ''));
+  return key && !key.startsWith('+') ? key : null;
 }
 
 function parseJson(value, fallback) {
@@ -171,6 +175,13 @@ function resolvePick(offers, decision) {
   return decision.slot_number >= 1 && decision.slot_number <= numbered.length ? numbered[decision.slot_number - 1] : null;
 }
 
+/** Pure: another standing offer carries the picked slot's date and start. */
+function slotIsAmbiguous(offers, pick) {
+  if (!pick?.slot?.date || !pick.slot.start) return false;
+  return numberSlots(offers).some((o) => o !== pick && o.offer.id !== pick.offer.id
+    && o.slot?.date === pick.slot.date && o.slot?.start === pick.slot.start);
+}
+
 /** Pure: the checks every answer must pass, whatever its action. */
 function groundingRefusals({ offer, decision, inboundBody, customer, fromPhone }) {
   const refusals = [];
@@ -184,74 +195,106 @@ function groundingRefusals({ offer, decision, inboundBody, customer, fromPhone }
   return refusals;
 }
 
-/**
- * Pure: the checks on one decision, and what the executor would do.
- *   offer, slot      the picked offer and its slot (accept), or the newest offer
- *   decision         readDecision output
- *   inboundBody      the customer's latest text
- *   customer         the customer row (phone columns)
- *   fromPhone        the number the text came from
- *   visit            the offer's visit read before the model answered (move_visit)
- *   visitAfter       the same visit read again after it answered
- *   movedSinceOffer  a reschedule_log row for the visit after the offer went out
- *   slotStillOpen    { ok, reason } from the picker recheck, or null when not run
- *   now              Date
- * → { outcome, refusals[], would_have|null }
- */
-function evaluateDecision({ offer, slot = null, decision, inboundBody, customer, fromPhone, visit = null, visitAfter = null, movedSinceOffer = false, slotStillOpen = null, now = new Date() }) {
-  if (!decision) return { outcome: 'error', refusals: [], would_have: null };
-  if (decision.action === 'unclear') return { outcome: 'staff', refusals: ['unclear'], would_have: null };
-  const refusals = groundingRefusals({ offer, decision, inboundBody, customer, fromPhone });
-  if (decision.action === 'decline' || decision.action === 'asks_other_time') {
-    return refusals.length ? { outcome: 'staff', refusals, would_have: null } : { outcome: 'no_action', refusals, would_have: null };
-  }
+// A slot whose start has passed on the Eastern wall clock is as gone as
+// yesterday's.
+function slotStarted(slot, now) {
+  if (!slot?.date) return false;
+  if (slot.date < etDateString(now)) return true;
+  return Boolean(slot.start) && parseETDateTime(`${slot.date}T${slot.start}`).getTime() <= new Date(now).getTime();
+}
 
-  if (!slot) refusals.push('slot_out_of_range');
-  if (slot && (!slot.date || !slot.start)) refusals.push('slot_unresolved');
-  // Already started (Eastern wall clock): a same-day slot whose start has
-  // passed is as gone as yesterday's.
-  if (slot?.date && (slot.date < etDateString(now)
-    || (slot.start && parseETDateTime(`${slot.date}T${slot.start}`).getTime() <= new Date(now).getTime()))) refusals.push('slot_in_past');
-  if (slotStillOpen && slotStillOpen.ok === false) refusals.push('slot_no_longer_open');
+// The visit must be exactly as it stood when the offer went out: any move
+// (including the admin Edit appointment form, which logs none) or status
+// change since means the offer no longer describes it. The snapshot is read
+// just after the send, so any change to the row from shortly before the send
+// until that read may be in it: refused, whatever the change was.
+function snapshotRefusal(offer, visit) {
+  const snapshot = parseJson(offer.visit_snapshot, null);
+  if (!snapshot?.taken_at) return 'no_visit_snapshot';
+  const sentMs = new Date(offer.sent_at).getTime();
+  if (new Date(snapshot.taken_at).getTime() - sentMs > SNAPSHOT_MAX_LAG_MS) return 'visit_snapshot_late';
+  if (!snapshot.updated_at || new Date(snapshot.updated_at).getTime() >= sentMs - SEND_RACE_MARGIN_MS) return 'visit_changed_near_send';
+  return sameVisitShape(visitShape(snapshot), visitShape(visit)) ? null : 'visit_changed_since_offer';
+}
 
-  // The slot's end is the customer-facing arrival window, never the job's
-  // end: the executor derives that from the visit's own duration.
-  const target = slot ? { date: slot.date || null, start: slot.start || null, arrival_end: slot.end || null } : null;
-  let would = null;
-  let confirmOnly = false;
+// Each check: [refusal, does it apply]. Table-driven so every safety check
+// reads as one line.
+const SLOT_CHECKS = [
+  ['slot_out_of_range', (c) => !c.slot],
+  ['slot_unresolved', (c) => Boolean(c.slot) && (!c.slot.date || !c.slot.start)],
+  ['slot_in_past', (c) => slotStarted(c.slot, c.now)],
+  ['slot_no_longer_open', (c) => c.slotStillOpen?.ok === false],
+  // The same time on two standing offers: "Tuesday at 10 works" does not say
+  // which job, whatever number the model picked.
+  ['ambiguous_slot', (c) => Boolean(c.ambiguousSlot)],
+];
+const VISIT_CHECKS = [
+  ['visit_customer_mismatch', (c) => String(c.visit.customer_id) !== String(c.offer.customer_id)],
+  ['visit_not_movable', (c) => !MOVABLE_STATUSES.includes(c.visit.status)],
+  ['grouped_visit', (c) => Boolean(c.visit.visit_id)],
+  ['office_review_unconfirmed', (c) => OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(c.visit.source_action) && c.visit.customer_confirmed !== true],
+  ['dispatch_owned_pending', (c) => DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(c.visit.source_action) && c.visit.status === 'pending'],
+  ['moved_since_offer', (c) => Boolean(c.movedSinceOffer)],
+  // A staff-owned schedule-change request for this visit may name a newer
+  // preferred date (the call-reschedule mover's same fence).
+  ['portal_request_open', (c) => Boolean(c.portalRequestOpen)],
+  ['visit_changed_during_decide', (c) => c.visitAfter !== undefined && !sameVisitShape(visitShape(c.visit), visitShape(c.visitAfter))],
+];
+const failing = (checks, c) => checks.filter(([, applies]) => applies(c)).map(([reason]) => reason);
+
+// What the executor would do, and whether the calendar already shows it.
+function plannedAction(c, target) {
+  const { offer, visit } = c;
   if (offer.kind === 'move_visit') {
-    const snapshot = parseJson(offer.visit_snapshot, null);
-    if (!visit) refusals.push('visit_missing');
-    else {
-      if (String(visit.customer_id) !== String(offer.customer_id)) refusals.push('visit_customer_mismatch');
-      if (!MOVABLE_STATUSES.includes(visit.status)) refusals.push('visit_not_movable');
-      if (visit.visit_id) refusals.push('grouped_visit');
-      if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.customer_confirmed !== true) refusals.push('office_review_unconfirmed');
-      if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') refusals.push('dispatch_owned_pending');
-      if (movedSinceOffer) refusals.push('moved_since_offer');
-      // The visit must be exactly as it stood when the offer went out: any
-      // move (including the admin Edit appointment form, which logs none)
-      // or status change since means the offer no longer describes it.
-      if (!snapshot?.taken_at) refusals.push('no_visit_snapshot');
-      else if (new Date(snapshot.taken_at).getTime() - new Date(offer.sent_at).getTime() > SNAPSHOT_MAX_LAG_MS) refusals.push('visit_snapshot_late');
-      else if (!snapshot.updated_at || new Date(snapshot.updated_at).getTime() >= new Date(offer.sent_at).getTime() - SEND_RACE_MARGIN_MS) refusals.push('visit_changed_near_send');
-      else if (!sameVisitShape(visitShape(snapshot), visitShape(visit))) refusals.push('visit_changed_since_offer');
-      if (visitAfter !== undefined && !sameVisitShape(visitShape(visit), visitShape(visitAfter))) refusals.push('visit_changed_during_decide');
-      const from = visitShape(visit);
+    if (!visit) return { refusals: ['visit_missing'], would: null, confirmOnly: false };
+    const snapshot = snapshotRefusal(offer, visit);
+    const from = visitShape(visit);
+    return {
+      refusals: [...failing(VISIT_CHECKS, c), ...(snapshot ? [snapshot] : [])],
+      would: { kind: 'move_visit', scheduled_service_id: offer.scheduled_service_id, ...target, from: { date: from.date, start: from.start, end: from.end } },
       // The calendar already shows the accepted time: nothing to write
       // (the bake-off's wrong moves were all of this kind).
-      confirmOnly = Boolean(target?.date && from.date === target.date && from.start === target.start);
-      would = { kind: 'move_visit', scheduled_service_id: offer.scheduled_service_id, ...target, from: { date: from.date, start: from.start, end: from.end } };
-    }
-  } else if (offer.kind === 'book_estimate' || offer.kind === 'book_new') {
-    would = { kind: offer.kind, estimate_id: offer.estimate_id || null, service_key: offer.service_key || null, ...target };
-  } else {
-    refusals.push('offer_kind_not_actionable');
+      confirmOnly: Boolean(target?.date && from.date === target.date && from.start === target.start),
+    };
   }
+  if (offer.kind === 'book_estimate' || offer.kind === 'book_new') {
+    return { refusals: [], would: { kind: offer.kind, estimate_id: offer.estimate_id || null, service_key: offer.service_key || null, ...target }, confirmOnly: false };
+  }
+  return { refusals: ['offer_kind_not_actionable'], would: null, confirmOnly: false };
+}
 
-  if (refusals.length) return { outcome: 'staff', refusals, would_have: would };
-  if (confirmOnly) return { outcome: 'confirm_only', refusals, would_have: would };
-  return { outcome: offer.kind === 'move_visit' ? 'would_move' : 'would_book', refusals, would_have: would };
+/**
+ * Pure: the checks on one decision, and what the executor would do.
+ *   offer, slot        the picked offer and its slot (accept), or the newest offer
+ *   decision           readDecision output
+ *   inboundBody        the customer's latest text
+ *   customer           the customer row (phone columns)
+ *   fromPhone          the number the text came from
+ *   visit              the offer's visit read before the model answered (move_visit)
+ *   visitAfter         the same visit read again after it answered
+ *   movedSinceOffer    a reschedule_log row for the visit after the offer went out
+ *   portalRequestOpen  an open staff schedule-change request for the visit
+ *   ambiguousSlot      another standing offer carries the same date and start
+ *   slotStillOpen      { ok, reason } from the picker recheck, or null when not run
+ *   now                Date
+ * → { outcome, refusals[], would_have|null }
+ */
+function evaluateDecision(c) {
+  const { decision } = c;
+  if (!decision) return { outcome: 'error', refusals: [], would_have: null };
+  if (decision.action === 'unclear') return { outcome: 'staff', refusals: ['unclear'], would_have: null };
+  const grounding = groundingRefusals(c);
+  if (decision.action !== 'accept_slot') {
+    return { outcome: grounding.length ? 'staff' : 'no_action', refusals: grounding, would_have: null };
+  }
+  // The slot's end is the customer-facing arrival window, never the job's
+  // end: the executor derives that from the visit's own duration.
+  const target = c.slot ? { date: c.slot.date || null, start: c.slot.start || null, arrival_end: c.slot.end || null } : null;
+  const plan = plannedAction(c, target);
+  const refusals = [...grounding, ...failing(SLOT_CHECKS, c), ...plan.refusals];
+  if (refusals.length) return { outcome: 'staff', refusals, would_have: plan.would };
+  if (plan.confirmOnly) return { outcome: 'confirm_only', refusals, would_have: plan.would };
+  return { outcome: c.offer.kind === 'move_visit' ? 'would_move' : 'would_book', refusals, would_have: plan.would };
 }
 
 /**
@@ -275,7 +318,7 @@ async function findOffersAsOf(dbh, phone, at) {
 // customer sent must not colour the decision on this one.
 async function loadThread(dbh, phone, inbound) {
   const rows = await dbh('sms_log')
-    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN direction = 'inbound' THEN from_phone ELSE to_phone END, ''), '[^0-9]', '', 'g'), 10) = ?", [phone])
+    .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN from_phone ELSE to_phone END")} = ?`, [phone])
     .whereIn('status', ['received', 'queued', 'sent', 'delivered'])
     .whereNot('id', inbound.id)
     .where('created_at', '<=', inbound.created_at)
@@ -300,6 +343,68 @@ async function recheckSlot(dbh, offer, slot) {
   });
 }
 
+// Phase 1: what stood when the text arrived. null when there is nothing to decide.
+async function loadDecideContext(dbh, phone, inboundSmsLogId) {
+  const inbound = await dbh('sms_log').where({ id: inboundSmsLogId }).first('id', 'created_at');
+  if (!inbound) return { skip: 'inbound_missing' };
+  const rows = await findOffersAsOf(dbh, phone, inbound.created_at);
+  if (!rows?.length) return { skip: 'no_open_offer' };
+  const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id');
+  if (already) return { skip: 'already_decided', id: already.id };
+  const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
+  const thread = await loadThread(dbh, phone, inbound);
+  // The visits the offers would move, read before the model answers.
+  const visitsBefore = new Map();
+  for (const o of offers) {
+    if (o.kind === 'move_visit' && o.scheduled_service_id && !visitsBefore.has(o.scheduled_service_id)) {
+      visitsBefore.set(o.scheduled_service_id, await dbh('scheduled_services').where({ id: o.scheduled_service_id }).first(VISIT_COLUMNS));
+    }
+  }
+  return { offers, thread, visitsBefore };
+}
+
+// Phase 2: the model's reading of the reply, against every standing offer.
+async function classifyReply(llm, { offers, thread, inboundBody }) {
+  const { ROUTES } = require('../config/models');
+  const route = ROUTES.smsSchedulingDecide;
+  const result = await llm.dispatch(route, {
+    system: SYSTEM_PROMPT,
+    text: buildDecideText({ offers, thread, inboundBody }),
+    jsonMode: true,
+    jsonSchema: DECISION_SCHEMA,
+    maxTokens: 400,
+    timeoutMs: DECIDE_TIMEOUT_MS,
+    laneId: 'sms_scheduling_decide',
+    promptVersion: PROMPT_VERSION,
+  });
+  return { result, route, decision: result?.ok ? readDecision(result.json) : null };
+}
+
+// Phase 3: the facts the code checks the answer against, read after it.
+async function assessFacts(dbh, { offer, decision, customer, visitsBefore }) {
+  // Who the decision is about: the customer of the offer the reply was
+  // judged against (a household phone can hold offers for two records).
+  // The webhook's primary-phone match is reused only when it is that
+  // customer; either way the sender must be on that customer's file. No
+  // customer on the offer: still recorded, and refused as a mismatch.
+  const sameCustomer = customer && offer.customer_id && String(customer.id) === String(offer.customer_id);
+  const who = sameCustomer ? customer
+    : ((offer.customer_id ? await dbh('customers').where({ id: offer.customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS) : null)
+      || customer || { id: null });
+  const facts = { who, visit: null, visitAfter: undefined, movedSinceOffer: false, portalRequestOpen: false };
+  if (decision?.action !== 'accept_slot' || offer.kind !== 'move_visit' || !offer.scheduled_service_id) return facts;
+  facts.visit = visitsBefore.get(offer.scheduled_service_id) || null;
+  // Read again now: a move that landed while the model was answering.
+  facts.visitAfter = await dbh('scheduled_services').where({ id: offer.scheduled_service_id }).first(VISIT_COLUMNS) || null;
+  facts.movedSinceOffer = Boolean(await dbh('reschedule_log')
+    .where({ scheduled_service_id: offer.scheduled_service_id })
+    .where('created_at', '>', offer.sent_at)
+    .first('id'));
+  facts.portalRequestOpen = Boolean(offer.customer_id
+    && await require('./call-reschedule-apply').openPortalRequest(dbh, offer.customer_id, offer.scheduled_service_id));
+  return facts;
+}
+
 /**
  * Run the shadow decide step for one inbound text. `customer` is the
  * webhook's match on the primary phone, or null: a reply from another number
@@ -312,101 +417,57 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
   const phone = phoneLast10(fromPhone);
   if (!phone || !inboundSmsLogId || !String(inboundBody || '').trim()) return { recorded: false, reason: 'missing_input' };
   try {
-    const inbound = await dbh('sms_log').where({ id: inboundSmsLogId }).first('id', 'created_at');
-    if (!inbound) return { recorded: false, reason: 'inbound_missing' };
-    const rows = await findOffersAsOf(dbh, phone, inbound.created_at);
-    if (!rows?.length) return { recorded: false, reason: 'no_open_offer' };
-    const offers = rows.map((o) => ({ ...o, slots: parseJson(o.slots, []) }));
-    const already = await dbh('sms_offer_decisions').where({ inbound_sms_log_id: inboundSmsLogId }).first('id');
-    if (already) return { recorded: false, reason: 'already_decided', id: already.id };
-
-    const thread = await loadThread(dbh, phone, inbound);
-    const { ROUTES } = require('../config/models');
-    const route = ROUTES.smsSchedulingDecide;
-    // The visits the offers would move, read before the model answers.
-    const visitsBefore = new Map();
-    for (const o of offers) {
-      if (o.kind === 'move_visit' && o.scheduled_service_id && !visitsBefore.has(o.scheduled_service_id)) {
-        visitsBefore.set(o.scheduled_service_id, await dbh('scheduled_services').where({ id: o.scheduled_service_id }).first(VISIT_COLUMNS));
-      }
-    }
-    const result = await llm.dispatch(route, {
-      system: SYSTEM_PROMPT,
-      text: buildDecideText({ offers, thread, inboundBody }),
-      jsonMode: true,
-      jsonSchema: DECISION_SCHEMA,
-      maxTokens: 400,
-      timeoutMs: DECIDE_TIMEOUT_MS,
-      laneId: 'sms_scheduling_decide',
-      promptVersion: PROMPT_VERSION,
-    });
-    const decision = result?.ok ? readDecision(result.json) : null;
-    const pick = resolvePick(offers, decision);
-    const offer = pick?.offer || offers[0];
+    const ctx = await loadDecideContext(dbh, phone, inboundSmsLogId);
+    if (ctx.skip) return { recorded: false, reason: ctx.skip, ...(ctx.id ? { id: ctx.id } : {}) };
+    const { result, route, decision } = await classifyReply(llm, { offers: ctx.offers, thread: ctx.thread, inboundBody });
+    const pick = resolvePick(ctx.offers, decision);
+    const offer = pick?.offer || ctx.offers[0];
     const slot = pick?.slot || null;
-    // Who the decision is about: the customer of the offer the reply was
-    // judged against (a household phone can hold offers for two records).
-    // The webhook's primary-phone match is reused only when it is that
-    // customer; either way the sender must be on that customer's file.
-    const who = (customer && offer.customer_id && String(customer.id) === String(offer.customer_id))
-      ? customer
-      : ((offer.customer_id ? await dbh('customers').where({ id: offer.customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS) : null)
-        // No customer on the offer: still recorded, and refused as a mismatch.
-        || customer || { id: null });
-
-    let visit = null;
-    let visitAfter;
-    let movedSinceOffer = false;
-    let slotStillOpen = null;
-    if (decision?.action === 'accept_slot' && offer.kind === 'move_visit' && offer.scheduled_service_id) {
-      visit = visitsBefore.get(offer.scheduled_service_id) || null;
-      // Read again now: a move that landed while the model was answering.
-      visitAfter = await dbh('scheduled_services').where({ id: offer.scheduled_service_id }).first(VISIT_COLUMNS) || null;
-      movedSinceOffer = Boolean(await dbh('reschedule_log')
-        .where({ scheduled_service_id: offer.scheduled_service_id })
-        .where('created_at', '>', offer.sent_at)
-        .first('id'));
-    }
-    let verdict = evaluateDecision({ offer, slot, decision, inboundBody, customer: who, fromPhone, visit, visitAfter, movedSinceOffer, now });
-    // The picker recheck costs a scheduler call: run it only for an accept
-    // every other check already passed.
-    // (A confirm-only accept writes nothing, so it needs no recheck.)
-    if (verdict.outcome === 'would_move' || verdict.outcome === 'would_book') {
-      try {
-        slotStillOpen = await slotRecheck(dbh, offer, slot);
-      } catch {
-        slotStillOpen = { ok: false, reason: 'recheck_failed' };
-      }
-      verdict = evaluateDecision({ offer, slot, decision, inboundBody, customer: who, fromPhone, visit, visitAfter, movedSinceOffer, slotStillOpen, now });
-    }
-
-    const row = {
-      sms_offer_id: offer.id,
-      inbound_sms_log_id: inboundSmsLogId,
-      customer_id: who.id || null,
-      mode: 'shadow',
-      model: result?.servedModel || route?.model || null,
-      prompt_version: PROMPT_VERSION,
-      action: decision?.action || null,
-      slot_number: decision ? decision.slot_number : null,
-      customer_quote: decision?.customer_quote || null,
-      confidence: decision?.confidence || null,
-      outcome: verdict.outcome,
-      refusals: JSON.stringify(verdict.refusals),
-      would_have: verdict.would_have ? JSON.stringify(verdict.would_have) : null,
-      error: verdict.outcome === 'error' ? String(result?.ok ? 'malformed_answer' : (result?.reason || 'no_result')).slice(0, 60) : null,
+    const facts = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore });
+    const base = {
+      offer, slot, decision, inboundBody, customer: facts.who, fromPhone, now,
+      visit: facts.visit, visitAfter: facts.visitAfter, movedSinceOffer: facts.movedSinceOffer,
+      portalRequestOpen: facts.portalRequestOpen, ambiguousSlot: slotIsAmbiguous(ctx.offers, pick),
     };
-    const [inserted] = await dbh('sms_offer_decisions').insert(row)
-      .onConflict(['sms_offer_id', 'inbound_sms_log_id']).ignore()
-      .returning('id');
-    if (!inserted) return { recorded: false, reason: 'already_decided' };
-    logger.info(`[sms-scheduling-decide] offer ${offer.id} → ${verdict.outcome}${verdict.refusals.length ? ` (${verdict.refusals.join(',')})` : ''}`);
-    return { recorded: true, id: inserted.id || inserted, outcome: verdict.outcome };
+    let verdict = evaluateDecision(base);
+    // The picker recheck costs a scheduler call: run it only for an accept
+    // every other check already passed (a confirm-only accept writes nothing).
+    if (verdict.outcome === 'would_move' || verdict.outcome === 'would_book') {
+      const slotStillOpen = await slotRecheck(dbh, offer, slot).catch(() => ({ ok: false, reason: 'recheck_failed' }));
+      verdict = evaluateDecision({ ...base, slotStillOpen });
+    }
+    return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict });
   } catch (err) {
     // Code only, never the message: a Knex error embeds bound values.
     logger.warn(`[sms-scheduling-decide] not recorded: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
     return { recorded: false, reason: 'error' };
   }
+}
+
+// Phase 4: one shadow row per (offer, text); a race to the same row records once.
+async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route, decision, verdict }) {
+  const row = {
+    sms_offer_id: offer.id,
+    inbound_sms_log_id: inboundSmsLogId,
+    customer_id: who.id || null,
+    mode: 'shadow',
+    model: result?.servedModel || route?.model || null,
+    prompt_version: PROMPT_VERSION,
+    action: decision?.action || null,
+    slot_number: decision ? decision.slot_number : null,
+    customer_quote: decision?.customer_quote || null,
+    confidence: decision?.confidence || null,
+    outcome: verdict.outcome,
+    refusals: JSON.stringify(verdict.refusals),
+    would_have: verdict.would_have ? JSON.stringify(verdict.would_have) : null,
+    error: verdict.outcome === 'error' ? String(result?.ok ? 'malformed_answer' : (result?.reason || 'no_result')).slice(0, 60) : null,
+  };
+  const [inserted] = await dbh('sms_offer_decisions').insert(row)
+    .onConflict(['sms_offer_id', 'inbound_sms_log_id']).ignore()
+    .returning('id');
+  if (!inserted) return { recorded: false, reason: 'already_decided' };
+  logger.info(`[sms-scheduling-decide] offer ${offer.id} → ${verdict.outcome}${verdict.refusals.length ? ` (${verdict.refusals.join(',')})` : ''}`);
+  return { recorded: true, id: inserted.id || inserted, outcome: verdict.outcome };
 }
 
 // The AI assistant line answers its own texts; the webhook skips it too.
@@ -455,11 +516,31 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .whereNotExists(function decidedAlready() {
           this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');
         })
+        // Only what the webhook could not decide: a reply that arrived
+        // before the offer it answers was RECORDED (the post-send ledger
+        // write, or its backfill, landed after it). Anything later was the
+        // webhook's to decide (or to leave, when another handler took it).
         .whereExists(function offered() {
           this.select(dbh.raw('1')).from('sms_offers as o')
-            .whereRaw("o.phone_last10 = RIGHT(REGEXP_REPLACE(COALESCE(sl.from_phone, ''), '[^0-9]', '', 'g'), 10)")
-            .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
+            .whereRaw(`o.phone_last10 = ${phoneIdentitySql('sl.from_phone')}`)
+            .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at AND o.created_at > sl.created_at')
             .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
+        })
+        // A reply the reminder reply-1/2 handler answered (its own durable
+        // record: the reply text and when it came), even when the webhook's
+        // best-effort retype of the row failed.
+        .whereNotExists(function rescheduleReply() {
+          this.select(dbh.raw('1')).from('reschedule_log as rl')
+            .whereRaw('rl.customer_id = sl.customer_id')
+            .whereRaw('rl.customer_response_text = sl.message_body')
+            .whereRaw("rl.sms_responded_at BETWEEN sl.created_at - interval '1 minute' AND sl.created_at + interval '10 minutes'");
+        })
+        // A customer in the lead-intake machine: its replies are intake's.
+        .whereNotExists(function inIntake() {
+          this.select(dbh.raw('1')).from('customers as c')
+            .whereRaw('c.id = sl.customer_id')
+            .whereNotNull('c.lead_intake_status')
+            .whereNot('c.lead_intake_status', 'estimate_drafted');
         });
       if (cursor) query.whereRaw('(sl.created_at, sl.id) > (?, ?)', [cursor.created_at, cursor.id]);
       rows = await query
@@ -492,6 +573,7 @@ module.exports = {
   evaluateDecision,
   readDecision,
   resolvePick,
+  slotIsAmbiguous,
   buildDecideText,
   normalizeForQuote,
   visitShape,

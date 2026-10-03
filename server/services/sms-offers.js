@@ -36,9 +36,12 @@ function offerLedgerLive() {
   return gateEnvValue('GATE_SMS_OFFER_LEDGER');
 }
 
+// The canonical identity of a US number (its ten digits). An international
+// number is not recorded: its last ten digits could collide with a US
+// number, and the decide step would then mix two conversations.
 function phoneLast10(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : null;
+  const key = require('../utils/phone').phoneIdentityKey(String(value || ''));
+  return key && !key.startsWith('+') ? key : null;
 }
 
 function parseJson(value) {

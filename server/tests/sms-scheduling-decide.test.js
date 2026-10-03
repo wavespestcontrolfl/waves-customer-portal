@@ -100,6 +100,8 @@ describe('evaluateDecision', () => {
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, date: '2026-10-04' } } }],
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, status: 'pending' } } }],
     ['no_visit_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
+    ['portal_request_open', { portalRequestOpen: true }],
+    ['ambiguous_slot', { ambiguousSlot: true }],
     ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: '2026-10-02T13:00:00.500Z' } } }],
     ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: null } } }],
     ['visit_snapshot_late', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, taken_at: '2026-10-02T14:00:00Z' } } }],
@@ -140,6 +142,21 @@ describe('evaluateDecision', () => {
 describe('several open offers', () => {
   const BOOK = { ...OFFER, id: 'offer-2', kind: 'book_new', scheduled_service_id: null, service_key: 'pest_control', visit_snapshot: null,
     slots: [{ date_label: 'Friday, October 9', window_label: '1:00 PM - 3:00 PM', date: '2026-10-09', start: '13:00', end: '15:00' }] };
+
+  test('a time carried by two standing offers is ambiguous; a time on one offer is not', () => {
+    const twin = { ...BOOK, id: 'offer-3', slots: [{ ...SLOTS[0] }] };
+    const offers = [twin, OFFER];
+    expect(decide.slotIsAmbiguous(offers, decide.resolvePick(offers, accept(1)))).toBe(true);
+    expect(decide.slotIsAmbiguous(offers, decide.resolvePick(offers, accept(3)))).toBe(false);
+  });
+
+  test('an international sender is never decided (its last ten digits could be someone else\'s)', async () => {
+    process.env[GATE] = 'true';
+    const dbh = jest.fn();
+    await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+447700900123', dbh, llm: { dispatch: jest.fn() } }))
+      .resolves.toEqual({ recorded: false, reason: 'missing_input' });
+    expect(dbh).not.toHaveBeenCalled();
+  });
 
   test('slots are numbered across every open offer and a pick maps back to its own offer', () => {
     const offers = [BOOK, OFFER];

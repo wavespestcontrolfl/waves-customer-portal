@@ -846,6 +846,9 @@ module.exports = {
   applyCallReschedule,
   planRescheduleFromCall,
   loadCandidates,
+  // The staff-owned schedule-change request fence, shared with the SMS
+  // scheduling decide step (sms-scheduling-decide.js).
+  openPortalRequest,
   resolveRescheduleCards,
   MIN_SCHEDULING_CONFIDENCE,
   CANDIDATE_SPAN_DAYS,

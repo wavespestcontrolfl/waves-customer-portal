@@ -45,6 +45,8 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
       kind: 'book_new', service_key: 'pest_control',
       slots: JSON.stringify([{ date_label: 'Tuesday, March 6', window_label: '10:00 AM - 12:00 PM', date: '2040-03-06', start: '10:00', end: '12:00' }]),
       sent_at: new Date('2040-03-01T13:00:00Z'), expires_at: new Date('2040-03-03T13:00:00Z'), status: 'open',
+      // Recorded after the 14:59 reply: the case the reply sweep exists for.
+      created_at: new Date('2040-03-01T15:05:00Z'),
     }).returning('id');
     const [inbound] = await trx('sms_log').insert({
       customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
@@ -130,6 +132,22 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const run = jest.fn(async () => ({ recorded: true }));
     await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run, batchSize: 1 });
     expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
+  }));
+
+  test('the sweep leaves a reply the webhook could have decided (its offer was recorded before it)', () => inTrx(async (trx) => {
+    const { offerId } = await seed(trx);
+    await trx('sms_offers').where({ id: offerId }).update({ created_at: new Date('2040-03-01T13:00:01Z') });
+    const run = jest.fn(async () => ({ recorded: true }));
+    await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+    expect(run).not.toHaveBeenCalled();
+  }));
+
+  test('the sweep leaves a reply the reminder reply handler answered, even when its retype failed', () => inTrx(async (trx) => {
+    const { customerId } = await seed(trx);
+    await trx('reschedule_log').insert({ customer_id: customerId, customer_response: 'option_1', customer_response_text: 'Tuesday works', sms_responded_at: new Date('2040-03-01T14:59:02Z'), created_at: new Date('2040-03-01T12:00:00Z') });
+    const run = jest.fn(async () => ({ recorded: true }));
+    await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+    expect(run).not.toHaveBeenCalled();
   }));
 
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {
