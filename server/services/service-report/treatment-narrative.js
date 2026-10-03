@@ -28,6 +28,10 @@ const PROMPT_VERSION = 'treatment_narrative_v5';
 // pest and tree & shrub rows are untouched, and gate off reads v5 as before.
 const LAWN_NO_TIMING_PROMPT_VERSION = 'treatment_narrative_v6_lawn_no_timing';
 
+// Every timing phrase the no-timing prompt names is checked, including the
+// ones outside the P11 closed world ("over time"); the list is the prompt's.
+const PROMPT_NAMED_TIMING_RE = /\bover\s+time\b|\bover\s+the\s+coming\b/i;
+
 function lawnNoTiming(serviceLine) {
   return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live();
 }
@@ -134,7 +138,7 @@ function validateNarrative(text, productNames = [], activeIngredients = [], { no
   // Lawn under GATE_LAWN_REPORT_COPY_V6: any time language (the P11 closed
   // world: days, weeks, within, soon, next...) fails, and the deterministic
   // summary is served instead. The prompt asks for none; this is the backstop.
-  if (noTiming && checkTimingLanguage(t).length) return 'lawn_timing';
+  if (noTiming && (checkTimingLanguage(t).length || PROMPT_NAMED_TIMING_RE.test(t))) return 'lawn_timing';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
   // The prompt REQUIRES actives language, and many catalog names embed the

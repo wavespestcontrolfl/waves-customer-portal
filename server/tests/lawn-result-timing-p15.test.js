@@ -60,6 +60,10 @@ describe('lawn treatment paragraph: no timing', () => {
     expect(validateNarrative(timed, [], [], { noTiming: true })).toBe('lawn_timing');
     expect(validateNarrative(clean, [], [], { noTiming: true })).toBeNull();
     expect(validateNarrative(timed)).toBeNull();
+    // Every phrase the prompt names is caught, "over time" included.
+    for (const phrase of ['over time', 'over the coming weeks', 'soon', 'in a few days', 'within weeks', 'next month']) {
+      expect(validateNarrative(`The treated weeds should fade ${phrase}.`, [], [], { noTiming: true })).toBe('lawn_timing');
+    }
   });
 
   test('its own prompt version, and the PDF signature reads rows of either version', async () => {
