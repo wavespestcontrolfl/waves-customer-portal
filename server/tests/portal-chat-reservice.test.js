@@ -126,6 +126,66 @@ test('a coordinated already-booked result keeps the move check on its bounded ex
   expect(actions).toHaveLength(1);
 });
 
+test('a coordinated booked lookup rolls back but keeps the completed booked facts', async () => {
+  mockOpen.mockResolvedValue({ pest: BOOKED_PEST });
+  const rolledBack = [];
+  const turn = {
+    transaction: jest.fn(async (stage, read) => {
+      const database = jest.fn((table) => {
+        if (table !== 'scheduled_services') return db(table);
+        const chain = {};
+        chain.where = jest.fn(() => chain);
+        chain.first = jest.fn(async () => {
+          database.aborted = true;
+          throw new Error('db down');
+        });
+        return chain;
+      });
+      try {
+        const result = await read(database);
+        if (database.aborted) throw Object.assign(new Error('transaction is aborted'), { code: '25P02' });
+        return result;
+      } catch (err) {
+        rolledBack.push(stage);
+        throw err;
+      }
+    }),
+    assertActive: jest.fn(),
+  };
+
+  const { result, actions } = await offer('pest', PRIMARY, [], turn);
+
+  expect(turn.transaction.mock.calls.map(([stage]) => stage)).toEqual(['re-service offer', 'booked re-service move']);
+  expect(rolledBack).toEqual(['booked re-service move']);
+  expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
+  expect(result.instruction).not.toMatch(/button/);
+  expect(actions).toEqual([]);
+  expect(turn.assertActive).not.toHaveBeenCalled();
+});
+
+test('a failed coordinated read rolls back before returning the hand-off', async () => {
+  mockOpen.mockImplementation(async (_customerId, database) => {
+    database.aborted = true;
+    throw new Error('db down');
+  });
+  const turn = {
+    transaction: jest.fn(async (_stage, read) => {
+      const database = { aborted: false };
+      const result = await read(database);
+      if (database.aborted) throw Object.assign(new Error('transaction is aborted'), { code: '25P02' });
+      return result;
+    }),
+    assertActive: jest.fn(),
+  };
+
+  const { result, actions } = await offer('pest', PRIMARY, [], turn);
+
+  expect(turn.transaction).toHaveBeenCalledTimes(1);
+  expect(result).toEqual(expect.objectContaining({ offered: false }));
+  expect(result).not.toHaveProperty('error');
+  expect(actions).toEqual([]);
+});
+
 test.each([
   ['open callback', (deadline) => mockOpen.mockRejectedValue(deadline)],
   ['customer token', (deadline) => { tokenRow = Promise.reject(deadline); tokenRow.catch(() => {}); }],

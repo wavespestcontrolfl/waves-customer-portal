@@ -102,11 +102,29 @@ test('a read failure never throws and still offers the Completed visits page', a
   expect(actions).toEqual([OPEN_COMPLETED]);
 });
 
-test('a cancelled visit read propagates instead of becoming unavailable history', async () => {
-  const cancelled = Object.assign(new Error('cancelled'), { code: '57014' });
-  listPortalServiceHistory.mockRejectedValue(cancelled);
+test.each([
+  ['cancelled read', 'read'],
+  ['deadline after the read', 'assert'],
+])('a %s preserves the completed visit card and actions', async (_label, phase) => {
+  const cancelled = Object.assign(new Error('cancelled'), phase === 'read' ? { code: '57014' } : { code: 'PORTAL_CHAT_DEADLINE' });
+  if (phase === 'read') listPortalServiceHistory.mockRejectedValue(cancelled);
+  else listPortalServiceHistory.mockResolvedValue({ services: VISITS, total: VISITS.length });
 
-  await expect(executeToolCall('get_recent_visits', {}, 'cust-1', [], [])).rejects.toBe(cancelled);
+  const prior = { type: 'visits', title: 'Completed visit card', rows: [{ id: 'old' }] };
+  const actions = [{ type: 'tab', label: 'Open plan', tab: 'plan' }];
+  const cards = [prior];
+  const turn = {
+    transaction: jest.fn((_stage, read) => read({ bounded: true })),
+    assertActive: jest.fn(() => {
+      if (phase === 'assert') throw cancelled;
+    }),
+  };
+
+  await expect(executeToolCall('get_recent_visits', {}, 'cust-1', actions, cards, {}, turn)).rejects.toBe(cancelled);
+  expect(cards).toEqual([prior]);
+  expect(actions).toEqual([{ type: 'tab', label: 'Open plan', tab: 'plan' }]);
+  if (phase === 'assert') expect(turn.assertActive).toHaveBeenCalledWith('visit card');
+  else expect(turn.assertActive).not.toHaveBeenCalled();
 });
 
 test('refuses a model-supplied customer id and a channel without buttons', async () => {
