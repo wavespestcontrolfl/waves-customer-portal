@@ -12,8 +12,22 @@ const { KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES } = require('./customer-safe-cat
 const STAFF_SOURCES = new Set(['tech_field', 'admin_manual']);
 const MAX_SPECIES = 3;
 
-const runRead = (context, query, stage) => context?.read ? context.read(query, stage) : query;
-const runWrite = (context, work, stage) => context?.write ? context.write(work, stage) : work(db);
+function assertActive(context, stage) {
+  context?.signal?.throwIfAborted();
+  context?.assertActive?.(stage);
+}
+async function runRead(context, query, stage) {
+  assertActive(context, stage);
+  const result = await (context?.read ? context.read(query, stage) : query);
+  assertActive(context, stage);
+  return result;
+}
+async function runWrite(context, work, stage) {
+  assertActive(context, stage);
+  const result = await (context?.write ? context.write(work, stage) : work(db));
+  assertActive(context, stage);
+  return result;
+}
 const modelBudget = (context) => context?.remainingMs
   ? { timeoutMs: Math.max(1, context.remainingMs()), signal: context.signal }
   : (context?.signal ? { signal: context.signal } : {});
@@ -79,6 +93,7 @@ class WikiQA {
   // Execution hooks are private caller options, separate from the context JSON
   // accepted by the authenticated knowledge route.
   async query(question, context = {}, execution = {}) {
+    assertActive(execution, 'knowledge query');
     // GATE_KB_CUSTOMER_AUDIENCE: a customer-facing caller reads only the
     // customer-safe categories, on every knowledge_base read below.
     const customerOnly = this.customerAudienceOnly(context.source);
@@ -143,7 +158,7 @@ ${liveIndex}`,
           return listed.every((p) => typeof p === 'string' && knownPaths.has(p)) ? null : 'invalid_output';
         },
       });
-      execution.assertActive?.('knowledge routing');
+      assertActive(execution, 'knowledge routing');
       if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
       paths = routing.json.paths.slice(0, 8);
     } catch (err) {
@@ -199,7 +214,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
       maxTokens: 2000,
       ...modelBudget(execution),
     });
-    execution.assertActive?.('knowledge answer');
+    assertActive(execution, 'knowledge answer');
     if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
     const { answer, coverage } = splitCoverage(answered.text);
@@ -216,6 +231,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    * catalog's own name match. Never throws: a failure is no species context.
    */
   async speciesContext(question, source, context = null) {
+    assertActive(context, 'species context');
     if (!kbSpeciesQaLive()) return [];
     try {
       const catalog = require('../species-catalog');
@@ -276,6 +292,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    * Search articles by text content, title, or tags.
    */
   async search(query, limit = 20, context = null, execution = {}) {
+    assertActive(execution, 'knowledge search');
     const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     if (keywords.length === 0) return [];
 
@@ -375,9 +392,9 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
         ...(coverage ? { coverage } : {}),
       }), 'knowledge query log');
     } catch (err) {
-      if (typeof execution.write === 'function' && (execution.signal?.aborted
-        || ['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
-        || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
+      if (execution.signal?.aborted || (typeof execution.write === 'function'
+        && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+          || ['AbortError', 'KnexTimeoutError'].includes(err?.name)))) throw err;
       logger.error(`Log knowledge query failed: ${err.message}`);
     }
   }
