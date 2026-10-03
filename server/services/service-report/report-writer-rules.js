@@ -355,7 +355,9 @@ const DURATION_PHRASE_RE = new RegExp(
 // "next visit" pass.
 const LAWN_TIME_UNIT_RE = /\b(?:hours?|days?|weeks?|weekends?|fortnights?|months?|years?)\b/gi;
 const PAST_AFTER_RE = /^\s+(?:before|ago|earlier|prior)\b/i;
-const PAST_BEFORE_RE = /\b(?:last|past|previous|prior|preceding)\s+(?:\S+\s+){0,3}$/i;
+// "the last two weeks" is history; the verb "last" ("will last weeks") is not,
+// so "last" counts only after a determiner.
+const PAST_BEFORE_RE = /(?:\b(?:the|these|those)\s+(?:last|past|previous|prior|preceding)|\b(?:past|previous|preceding))\s+(?:\S+\s+){0,3}$/i;
 const LAWN_WEEKDAY_RE = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b/i;
 const LAWN_MONTH_DAY_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/i;
 const LAWN_NUMERIC_DATE_RE = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/;
