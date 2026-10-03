@@ -172,7 +172,7 @@ describe('the dispatcher\'s two decisions', () => {
 
   test('"Not a miss" settles the row as dismissed, keeps the reason, and closes the card', async () => {
     expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF, note: '  customer asked to skip  ' })).toEqual({ ok: true });
-    expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: 'NOW', resolution: 'dismissed', resolved_by: STAFF });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: 'NOW', resolution: 'not_a_miss', resolved_by: STAFF });
     expect(String(mockTables.reschedule_log[0].notes)).toContain('raw:');
     expect(mockResolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-1' }));
   });
@@ -265,7 +265,7 @@ describe('the dispatcher\'s two decisions', () => {
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     expect(mockTables.reschedule_log[0].miss_confirmed_at).toBe('NOW');
     expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
-    expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'dismissed', miss_confirmed_at: null, miss_confirmed_by: null });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'not_a_miss', miss_confirmed_at: null, miss_confirmed_by: null });
     // and the customer's outreach task is re-checked against the misses that remain
     expect(mockWithdrawOutreach).toHaveBeenCalledWith('cust-1', expect.anything());
     // "Done" keeps it: a handled miss was still a miss

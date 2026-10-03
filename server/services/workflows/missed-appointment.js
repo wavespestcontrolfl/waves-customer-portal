@@ -142,17 +142,28 @@ class MissedAppointment {
   // takes this per-customer transaction lock, so two decisions on different visits
   // of one customer run one after the other and each counts what the other
   // committed. Held to the end of the caller's transaction; on a plain pool
-  // connection it is released at once (the lock-free nightly path, as before).
+  // connection it would be released at once, so every caller runs in a transaction
+  // (inOutreachTransaction).
   async lockOutreach(customerId, conn) {
     await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`missed_outreach:${customerId}`]);
   }
 
+  // Run `fn(t)` in the caller's transaction, or in a new one when the caller gave
+  // the pool: the per-customer lock must be held from the count to the write.
+  inOutreachTransaction(conn, fn) {
+    return conn && conn.isTransaction ? fn(conn) : db.transaction(fn);
+  }
+
   // The customer's distinct missed occurrences in the last 90 days (see evaluateThreshold).
+  // A row a person settled as "Not a miss" never counts, with the queue gate on or off.
   async countMisses(customerId, conn = db) {
     const personMarkedOnly = require('../not-closed-out').queueEnabled();
     const skipCount = await conn('reschedule_log')
       .where({ customer_id: customerId, reason_code: 'customer_noshow' })
       .where('created_at', '>', conn.raw("NOW() - INTERVAL '90 days'"))
+      .where(function notExplicitlyDismissed() {
+        this.whereNull('resolution').orWhere('resolution', '<>', 'not_a_miss');
+      })
       .where(function personMarked() {
         if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date');
       })
@@ -164,6 +175,9 @@ class MissedAppointment {
   // `logId`: the flagged row whose confirmation triggered this evaluation, kept on
   // the task for the record.
   async evaluateThreshold(customerId, reason = 'no_show', conn = db, { logId = null } = {}) {
+    if (!conn || !conn.isTransaction) {
+      return this.inOutreachTransaction(conn, (t) => this.evaluateThreshold(customerId, reason, t, { logId }));
+    }
     const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
@@ -236,6 +250,60 @@ class MissedAppointment {
       logger.warn(`MissedAppointment: outreach task for customer ${customerId} not withdrawn: ${err.message}`);
       return { withdrawn: 0 };
     }
+  }
+
+  /**
+   * The nightly repair pass for the outreach task. Raising it (at a confirmation)
+   * and withdrawing it (at a "Not a miss") are best-effort where they run, so a
+   * failure there is repaired here:
+   *   - a pending task this workflow raised in the last `days` days whose customer
+   *     no longer has two misses is cancelled;
+   *   - a customer whose LATEST confirmed miss (last `days` days) has no task, and
+   *     who has two misses, gets the task.
+   * Never throws.
+   * @returns {Promise<{withdrawn: number, raised: number}>}
+   */
+  async reconcileOutreach({ days = 7 } = {}) {
+    let withdrawn = 0;
+    let raised = 0;
+    try {
+      const pending = await db('customer_interactions')
+        .where({ interaction_type: 'task', status: 'pending' })
+        .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
+        .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+        .select('customer_id');
+      for (const customerId of new Set((Array.isArray(pending) ? pending : []).map((r) => r.customer_id).filter(Boolean))) {
+        withdrawn += (await db.transaction((t) => this.withdrawOutreachIfBelowThreshold(customerId, t))).withdrawn;
+      }
+      const confirmed = await db('reschedule_log')
+        .where({ reason_code: 'customer_noshow' })
+        .whereNotNull('miss_confirmed_at')
+        .where('miss_confirmed_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+        .orderBy('miss_confirmed_at', 'desc')
+        .select('id', 'customer_id');
+      const seen = new Set();
+      for (const row of Array.isArray(confirmed) ? confirmed : []) {
+        if (!row.customer_id || seen.has(String(row.customer_id))) continue;
+        seen.add(String(row.customer_id)); // the customer's latest confirmed miss only
+        try {
+          const result = await db.transaction(async (t) => {
+            await this.lockOutreach(row.customer_id, t);
+            const has = await t('customer_interactions')
+              .where({ customer_id: row.customer_id, interaction_type: 'task' })
+              .whereRaw("metadata->>'log_id' = ?", [String(row.id)])
+              .first('id');
+            if (has) return null;
+            return this.evaluateThreshold(row.customer_id, 'confirmed_miss', t, { logId: row.id });
+          });
+          if (result && result.action === 'recommendation_created') raised += 1;
+        } catch (err) {
+          logger.warn(`MissedAppointment: outreach repair failed for customer ${row.customer_id}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`MissedAppointment: outreach repair pass failed: ${err.message}`);
+    }
+    return { withdrawn, raised };
   }
 }
 

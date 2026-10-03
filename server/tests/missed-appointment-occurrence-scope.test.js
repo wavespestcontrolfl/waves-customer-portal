@@ -35,6 +35,7 @@ function fakeConn(service) {
   };
   conn.raw = (sql) => sql;
   conn.transaction = (fn) => fn(conn);
+  conn.isTransaction = true;
   return { conn, inserts, locks };
 }
 
@@ -130,19 +131,34 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     const built = [];
     const conn = (table) => {
       const chain = {
-        where(arg) { if (typeof arg === 'function') { const b = { whereNotNull(c) { built.push(c); return b; }, orWhereNotNull(c) { built.push(c); return b; } }; arg.call(b); } return chain; },
+        where(arg) {
+          if (typeof arg === 'function') {
+            const b = {
+              whereNotNull(c) { built.push(c); return b; },
+              orWhereNotNull(c) { built.push(c); return b; },
+              whereNull(c) { built.push(`null:${c}`); return b; },
+              orWhere(c, op, v) { built.push(`${c}${op}${v}`); return b; },
+            };
+            arg.call(b);
+          }
+          return chain;
+        },
         select() { return chain; },
         first: async () => (table === 'customers' ? { id: 'c1', first_name: 'Sam' } : { count: '1' }),
       };
       return chain;
     };
     conn.raw = (sql) => sql;
+    conn.isTransaction = true;
+    // a row a person settled as "Not a miss" never counts, gate on or off
+    const NOT_DISMISSED = ['null:resolution', 'resolution<>not_a_miss'];
     await MissedAppointment.evaluateThreshold('c1', 'no_show', conn);
-    expect(built).toEqual([]);
+    expect(built).toEqual(NOT_DISMISSED);
+    built.length = 0;
     mockQueueOn = true;
     try {
       await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn);
-      expect(built).toEqual(['miss_confirmed_at', 'new_date']);
+      expect(built).toEqual([...NOT_DISMISSED, 'miss_confirmed_at', 'new_date']);
     } finally { mockQueueOn = false; }
   });
 
@@ -205,8 +221,11 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
     };
     const raws = [];
     conn.raw = (sql, b) => { raws.push([sql, b]); return sql; };
+    // given the pool, the whole count-and-write runs in ONE transaction, so the lock is held to the insert
+    db.transaction = jest.fn(async (fn) => { conn.isTransaction = true; try { return await fn(conn); } finally { conn.isTransaction = false; } });
     expect(await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn, { logId: 'log-9' })).toEqual({ action: 'recommendation_created', skips: 2 });
     expect(raws[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', ['missed_outreach:c1']]);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(JSON.parse(inserts[0].row.metadata)).toEqual({ source: 'missed_appointment_threshold', log_id: 'log-9' });
   });
 
@@ -244,4 +263,57 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
   test('a database failure never reaches the dismissal', async () => {
     expect(await MissedAppointment.withdrawOutreachIfBelowThreshold('c1', { transaction: async () => { throw new Error('db down'); } })).toEqual({ withdrawn: 0 });
   });
+
+  describe('reconcileOutreach (nightly repair)', () => {
+    // tables: pending tasks, recent confirmed rows; `count` = the customer's misses now
+    function world({ pendingTasks = [], confirmed = [], tasksByLog = {}, count = '2' }) {
+      const writes = [];
+      const conn = (table) => {
+        let logIdFilter = null;
+        const chain = {
+          where() { return chain; }, whereNotNull() { return chain; }, orderBy() { return chain; },
+          whereRaw(sql, b) { if (/log_id/.test(sql)) [logIdFilter] = b; return chain; },
+          select: () => (table === 'customer_interactions' ? Promise.resolve(pendingTasks) : (table === 'reschedule_log' ? Object.assign(Promise.resolve(confirmed), { first: async () => ({ count }) }) : chain)),
+          first: async () => {
+            if (table === 'customers') return { id: 'c1', first_name: 'Sam' };
+            if (table === 'customer_interactions') return tasksByLog[logIdFilter] || undefined;
+            return { count };
+          },
+          update: async (patch) => { writes.push(['update', patch.status]); return 1; },
+          insert: async (row) => { writes.push(['insert', JSON.parse(row.metadata).log_id]); },
+        };
+        return chain;
+      };
+      conn.raw = (sql) => sql;
+      conn.isTransaction = true;
+      conn.transaction = (fn) => fn(conn);
+      const dbFn = require('../models/db');
+      dbFn.mockImplementation((table) => conn(table));
+      dbFn.raw = conn.raw;
+      dbFn.transaction = (fn) => fn(conn);
+      return writes;
+    }
+
+    test('a pending task whose customer no longer has two misses is cancelled', async () => {
+      const writes = world({ pendingTasks: [{ customer_id: 'c1' }], count: '1' });
+      expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 1, raised: 0 });
+      expect(writes).toEqual([['update', 'cancelled']]);
+    });
+
+    test('a latest confirmed miss with two misses and no task gets the task; one that has it is left alone', async () => {
+      let writes = world({ confirmed: [{ id: 'log-B', customer_id: 'c1' }, { id: 'log-A', customer_id: 'c1' }], count: '2' });
+      expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 1 });
+      expect(writes).toEqual([['insert', 'log-B']]); // the latest row only: never a second task for the earlier miss
+      writes = world({ confirmed: [{ id: 'log-B', customer_id: 'c1' }], tasksByLog: { 'log-B': { id: 't1' } }, count: '2' });
+      expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+      expect(writes).toEqual([]);
+    });
+
+    test('a database failure never throws', async () => {
+      const dbFn = require('../models/db');
+      dbFn.mockImplementation(() => { throw new Error('db down'); });
+      expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
+    });
+  });
 });
+

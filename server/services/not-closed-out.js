@@ -13,7 +13,9 @@
  *   - the visit is rebooked through the rebooker        → 'rebooked'
  *   - the visit is completed                            → 'completed'
  *   - the visit is cancelled / skipped                  → 'dismissed'
- *   - a person says "Not a miss" on the card            → 'dismissed'
+ *   - a person says "Not a miss" on the card            → 'not_a_miss'
+ *     (its own value: a person's "not a miss" never counts toward the repeated-
+ *     miss outreach, while a visit cancelled later is counted as it always was)
  *   - a person presses "Done" on a confirmed miss       → 'handled'
  *     (a no_show visit is terminal: it cannot be moved, so its rebooking is a
  *     new appointment and only a person can say it was dealt with)
@@ -32,7 +34,7 @@ const { isEnabled } = require('../config/feature-gates');
 
 const ALERT_TYPE = 'visit_not_closed_out';
 const ALERT_SOURCE = 'missed_appointment_check';
-const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed', 'handled']);
+const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed', 'handled', 'not_a_miss']);
 // The status a visit moves TO → how its flagged rows settle. A person marking
 // no_show is a confirmed miss that still needs rebooking: not a resolution.
 const RESOLUTION_BY_STATUS = Object.freeze({ completed: 'completed', cancelled: 'dismissed', skipped: 'dismissed' });
@@ -313,7 +315,7 @@ async function cardAfterSettle(t, log, settledBy) {
 }
 
 /**
- * "Not a miss": settle this one row as dismissed and close the visit's card when
+ * "Not a miss": settle this one row as `not_a_miss` and close the visit's card when
  * no other flagged row of the visit is still open. It also withdraws an earlier
  * "This was a miss" on the row: a person's later call wins, and the row no longer
  * counts as a person-marked miss (the repeated-miss outreach count).
@@ -327,13 +329,13 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
     const by = dismissedBy ? String(dismissedBy).slice(0, 80) : null;
     const reason = String(note || '').trim().slice(0, 200);
     await t('reschedule_log').where({ id: logId }).whereNull('resolved_at').update({
-      resolved_at: t.fn.now(), resolution: 'dismissed', resolved_by: by,
+      resolved_at: t.fn.now(), resolution: 'not_a_miss', resolved_by: by,
       miss_confirmed_at: null, miss_confirmed_by: null,
       ...(reason ? { notes: t.raw("left(concat_ws(' | ', NULLIF(notes, ''), ?::text), 500)", [`not a miss: ${reason}`]) } : {}),
     });
-    // one confirmed miss fewer: a pending outreach task that no longer has its
-    // two misses goes with it
-    if (log.miss_confirmed_at && log.customer_id) {
+    // one counted miss fewer (the row no longer counts, confirmed or not): a
+    // pending outreach task that no longer has its two misses goes with it
+    if (log.customer_id) {
       await require('./workflows/missed-appointment').withdrawOutreachIfBelowThreshold(log.customer_id, t);
     }
     await cardAfterSettle(t, log, dismissedBy);

@@ -8077,6 +8077,9 @@ function initScheduledJobs() {
         // Likewise a flagged row whose visit closed or moved while its settlement failed.
         const repaired = await require('./not-closed-out').reconcileOpenRows();
         if (repaired.raised || repaired.settled) logger.info(`Missed appointment check: ${repaired.raised} missing queue card(s) raised, ${repaired.settled} flagged row(s) settled from the visit`);
+        // And the repeated-miss outreach task: a failed raise or withdrawal is repaired here.
+        const outreach = await missedAppointment.reconcileOutreach();
+        if (outreach.raised || outreach.withdrawn) logger.info(`Missed appointment check: outreach task(s) ${outreach.raised} raised, ${outreach.withdrawn} withdrawn on repair`);
         logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
       });
