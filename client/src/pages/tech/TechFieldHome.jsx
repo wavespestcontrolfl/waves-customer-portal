@@ -40,7 +40,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough }) {
+export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -62,9 +62,9 @@ export default function TechFieldHome({ section, stops, nextStop, loading, refre
   if (visit) return <div className="tf-page">{savedNotice}{visit}</div>;
   const completed = stops.filter((stop) => stop.services.every((service) => service.status === 'completed')).length;
   const serviceCount = stops.reduce((count, stop) => count + stop.services.length, 0);
-  // Phone: up next, route, follow-through, in that order. Computer: up next
-  // + route on the left, follow-through on the right (tech-field.css
-  // .tf-today-grid; approved mockup 2026-10-03).
+  // Phone: schedule changes, up next, time clock, route, follow-through, in
+  // that order. Computer: up next + route on the left, the rest on the right
+  // (tech-field.css .tf-today-grid; approved mockup 2026-10-03).
   return (
     <div className="tf-page">
       <div className="tf-page-heading">
@@ -91,6 +91,8 @@ export default function TechFieldHome({ section, stops, nextStop, loading, refre
         {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} />)}</div></section>}
         </div>
         <div className="tf-col">
+          {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
+          {timeClock && <div className="tf-area-clock">{timeClock}</div>}
           <div className="tf-area-follow">{followThrough}</div>
         </div>
       </div>

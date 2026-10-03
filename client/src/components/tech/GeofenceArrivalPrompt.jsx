@@ -42,6 +42,7 @@
  *   timer events also drive mileage. Confirm a stop here doesn't
  *   double-write the mileage record.
  */
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { formatETDateOnly } from '../../lib/timezone';
@@ -127,7 +128,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview }) {
+export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -136,6 +137,11 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
       fresh.forEach((n) => seenIds.current.add(n.id));
+      // Automatic geofence mode starts and stops job timers server-side and
+      // only posts these notices: the time clock reloads on them too (Codex #5786).
+      if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
+        window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+      }
       // Visit cards never auto-dismiss, so the server feed is their only
       // source of truth: one the feed no longer lists (tapped "Got it" on
       // the tech's other device, or pushed out of the feed window by a
@@ -179,6 +185,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     const otherCards = [];
     const visitCards = [];
     for (const n of active) {
+      // Shown in the page instead (TechScheduleChanges), not floated here.
+      if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
@@ -211,7 +219,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsRanked.length - shownVisits.length,
     };
-  }, [active]);
+  }, [active, inlineScheduleChanges]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so
@@ -272,6 +280,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/confirm-start`, body);
       removeCard(n.id, { silent: true });
+      // The Today page's time clock reloads (TechTimeTrackingCard).
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Could not start timer: ' + String(err).slice(0, 140));
     }
@@ -281,6 +291,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/undo-stop`);
       removeCard(n.id, { silent: true });
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Undo failed: ' + String(err).slice(0, 140));
     }
