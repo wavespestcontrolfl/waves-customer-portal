@@ -445,6 +445,20 @@ describe('resolveReportBlogPostPick', () => {
       .toMatchObject({ url: LIVE.astro_live_url });
   });
 
+  test('a portal pick whose sweep read fails is refused, never linked on the portal stamp (pre-push P1)', async () => {
+    // The completion's fail-soft reader answers null for a failed read.
+    const read = jest.fn(async (fn) => fn((table) => {
+      let byPost = false;
+      const chain = {
+        where: (clause) => { byPost = Object.prototype.hasOwnProperty.call(clause || {}, 'db_blog_id'); return chain; },
+        first: async () => (table === 'blog_posts' ? LIVE : null),
+        select: async () => (byPost ? null : []),
+      };
+      return chain;
+    }));
+    expect(await resolveReportBlogPostPick(read, LIVE.id)).toEqual({ post: null, rejected: true });
+  });
+
   test('a pick from the registry resolves from the registry; one no longer live there is refused', async () => {
     expect(await resolveReportBlogPostPick(readerOf({ content_registry: REGISTRY_LIVE }), REGISTRY_LIVE.id))
       .toEqual({ post: { id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url } });

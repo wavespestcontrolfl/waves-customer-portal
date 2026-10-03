@@ -313,9 +313,12 @@ async function resolveReportBlogPostPick(read, blogPostId) {
   if (fromRegistry) return { post: fromRegistry };
   const row = await read((k) => k('blog_posts').where({ id: blogPostId }).first(COLUMNS));
   if (!row) return { post: null, rejected: true };
-  // A portal pick the sweep has a row for stands on the sweep's verdict.
+  // A portal pick the sweep has a row for stands on the sweep's verdict. A
+  // failed read (the completion's fail-soft reader answers null) refuses the
+  // pick, never falls back to the portal's stamp (pre-push P1).
   const matched = await read((k) => k('content_registry').where({ db_blog_id: blogPostId }).select(REGISTRY_COLUMNS));
-  const post = portalLink(row, Array.isArray(matched) ? matched : []);
+  if (!Array.isArray(matched)) return { post: null, rejected: true };
+  const post = portalLink(row, matched);
   return post ? { post } : { post: null, rejected: true };
 }
 
