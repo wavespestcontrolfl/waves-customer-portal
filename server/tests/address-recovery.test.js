@@ -499,6 +499,13 @@ describe('recoverStreetAddress — numbered-route respelling (gate)', () => {
     expect(numberedRouteRespelling('1234 East Highway 301')).toBeNull();
     // A unit on the street line, an ordinal street, an ordinary street.
     expect(numberedRouteRespelling('1234 East State Road 64 Unit 4')).toBeNull();
+    // The roll key drops text after a comma and a trailing five-digit
+    // number — a unit in any of these forms must stop the retry.
+    expect(numberedRouteRespelling('1234 East State Road 64, Unit 4')).toBeNull();
+    expect(numberedRouteRespelling('1234 East State Road 64 #12345')).toBeNull();
+    expect(numberedRouteRespelling('1234 East State Road 64 12345')).toBeNull();
+    expect(numberedRouteRespelling('1234 East State Road 64 number 415')).toBeNull();
+    expect(numberedRouteRespelling('1234 East State Road 64 Lot 7')).toBeNull();
     expect(numberedRouteRespelling('1234 64th Street East')).toBeNull();
     expect(numberedRouteRespelling('1234 State Street')).toBeNull();
   });

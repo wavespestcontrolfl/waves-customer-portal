@@ -102,6 +102,7 @@ const premiseKey = (street) => String(street || '').toLowerCase().replace(/[^a-z
 // alone: the key reads it as US 64, which is a guess.
 const NUMBERED_ROUTE_KEY_RE = /^(\d+) (SR|US|CR) (\d{1,4}[A-Z]?)(?: (N|S|E|W|NE|NW|SE|SW))?$/;
 const SPOKEN_ROUTE_CLASS_RE = /\b(?:state\s+(?:road|rd|route|rte)|s\.?r\.?|florida|fl|u\.?s\.?|county\s+(?:road|rd)|c\.?r\.?)[\s-]*(?:highway\s+|hwy\s+)?\d/i;
+const STREET_LINE_UNIT_WORD_RE = /\b(?:apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|rm|room|trailer|trlr|no|number)\b/i;
 
 function numberedRouteKey(street) {
   // Lazy: the lookup module is large and only this gated path needs it.
@@ -113,6 +114,14 @@ function numberedRouteKey(street) {
 /** "14360 East State Road 64" → "14360 SR 64 E"; null when not a named numbered route. */
 function numberedRouteRespelling(street) {
   const spoken = String(street || '').trim();
+  // The roll key is LOSSY: it drops everything after a comma and a trailing
+  // five-digit number, so "… Road 64, Unit 4" and "… Road 64 #12345" would
+  // both come back as the bare building and the retry would adopt an address
+  // without the caller's unit. Judge the SPOKEN line first: no punctuation
+  // that can carry a second field, no unit word, and exactly two numbers
+  // (the house and the route).
+  if (/[,#;/]/.test(spoken) || STREET_LINE_UNIT_WORD_RE.test(spoken)) return null;
+  if ((spoken.match(/\d+/g) || []).length !== 2) return null;
   if (!SPOKEN_ROUTE_CLASS_RE.test(spoken)) return null;
   const key = numberedRouteKey(spoken);
   if (!key) return null;
