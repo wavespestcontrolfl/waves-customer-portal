@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
-import { IDBFactory } from 'fake-indexeddb';
+import { IDBFactory, IDBObjectStore } from 'fake-indexeddb';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useFastCompleteSubmit from './useFastCompleteSubmit';
@@ -184,6 +184,31 @@ describe('useFastCompleteSubmit durable attempts', () => {
     const confirmed = JSON.parse(request.mock.calls[1][1].body);
     expect(confirmed).toEqual({ ...original, reportRulesConfirmed: true });
     expect(confirmed.idempotencyKey).toBe('confirm-key');
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
+  it('offers an explicit storage bypass when a confirmation write fails but the original is readable', async () => {
+    const original = { idempotencyKey: 'quota-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: original, summary: 'Report' });
+    const request = vi.fn().mockRejectedValueOnce(Object.assign(new Error('Confirm'), {
+      status: 409, code: 'report_rules_review',
+    })).mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, confirmable: true }));
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    await act(async () => { await view.result.current.retry(); });
+    const put = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (record, key) {
+      if (record.body?.reportRulesConfirmed) throw new DOMException('Full', 'QuotaExceededError');
+      return put.call(this, record, key);
+    });
+    await act(async () => { await view.result.current.confirm(); });
+    expect(view.result.current.storageBypassPending).toBe(true);
+    expect(view.result.current.storageWarning).toContain('reload-safe copy');
+    expect(request).toHaveBeenCalledTimes(1);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(original);
+    await act(async () => { await view.result.current.retry(); });
+    expect(JSON.parse(request.mock.calls[1][1].body)).toEqual({ ...original, reportRulesConfirmed: true });
+    expect(view.result.current.done.summary).toBe('Report');
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
   });
 
