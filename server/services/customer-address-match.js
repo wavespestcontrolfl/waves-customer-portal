@@ -12,6 +12,15 @@
 // a typed "Unit 4" excludes "Apt 7" at the same building while a typed
 // address with no unit still matches every unit there.
 //
+// Set-wide form for the duplicates review queue: `pairCustomersAtSameAddress`
+// runs the SAME comparator over a flat list of address candidates (every
+// live customer's own address plus its active property rows) instead of one
+// typed address, bucketed by house number so the work stays near-linear in
+// the customers table. It is stricter on units on purpose — a unit on one
+// side only is NOT the same premise there (requireExactUnit), because a
+// merge candidate must name one household, where the finder above leans
+// toward over-suggesting.
+//
 // Bounded (50 per leg, deterministic order — codex #3338 r17) so a common
 // house number cannot blow up the scan. Read-only. The property leg is
 // best-effort (environments without the table skip it); the primary leg's
@@ -92,6 +101,42 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   return matches;
 }
 
+/**
+ * Pure. `candidates` = [{ customerId, matchedVia, address_line1, address_line2,
+ * city, zip }] — one row per address a customer is known at. Returns one entry
+ * per unordered CUSTOMER pair with at least one address at the same premise:
+ * `{ a, b, via: { a: matchedVia, b: matchedVia } }` (a < b as strings). Rows
+ * with no street line or no leading house number never pair. No I/O.
+ */
+function pairCustomersAtSameAddress(candidates) {
+  const buckets = new Map();
+  for (const c of candidates) {
+    if (!c || !c.customerId || !c.address_line1) continue;
+    const text = candidateAddressString(c);
+    const houseNumber = houseNumberOf(text);
+    if (!houseNumber) continue;
+    const key = houseNumber.toLowerCase();
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push({ customerId: String(c.customerId), matchedVia: c.matchedVia || 'primary', text });
+  }
+  const pairs = new Map();
+  for (const bucket of buckets.values()) {
+    for (let i = 0; i < bucket.length; i += 1) {
+      for (let j = i + 1; j < bucket.length; j += 1) {
+        const x = bucket[i];
+        const y = bucket[j];
+        if (x.customerId === y.customerId) continue;
+        const [lo, hi] = x.customerId < y.customerId ? [x, y] : [y, x];
+        const pairId = `${lo.customerId}:${hi.customerId}`;
+        if (pairs.has(pairId)) continue;
+        if (!sameStreetAddress(x.text, y.text, { requireExactUnit: true })) continue;
+        pairs.set(pairId, { a: lo.customerId, b: hi.customerId, via: { a: lo.matchedVia, b: hi.matchedVia } });
+      }
+    }
+  }
+  return [...pairs.values()];
+}
+
 const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 const emailKey = (v) => String(v || '').trim().toLowerCase();
 
@@ -114,4 +159,4 @@ function rankByContact(rows, { phone = null, email = null } = {}) {
   return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
 }
 
-module.exports = { findCustomersAtAddress, rankByContact, _private: { houseNumberOf, candidateAddressString } };
+module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, _private: { houseNumberOf, candidateAddressString } };
