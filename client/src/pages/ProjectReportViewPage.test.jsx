@@ -75,6 +75,20 @@ describe('ProjectReportViewPage theme gate', () => {
   });
 });
 
+describe('ProjectReportViewPage greeting', () => {
+  it('greets a blank-first-name customer "Hi there", not their surname', async () => {
+    const { findByRole } = renderProjectReport(payload('termite_treatment', { customerName: 'Example', customerFirstName: null }));
+    const heading = await findByRole('heading', { level: 1 });
+    expect(heading.textContent).toMatch(/^Hi there,/);
+    expect(heading.textContent).not.toContain('Example');
+  });
+
+  it('greets by the customer\'s own first name', async () => {
+    const { findByRole } = renderProjectReport(payload('termite_treatment', { customerName: 'Sample Example', customerFirstName: 'Sample' }));
+    expect((await findByRole('heading', { level: 1 })).textContent).toMatch(/^Hi Sample,/);
+  });
+});
+
 describe('ProjectReportViewPage action bar — same four boxes on every report (owner rule 2026-07-16)', () => {
   it('shows Download / Share / Print / Portal Login even with no filed PDF (print-dialog fallback)', async () => {
     const { findByRole, getByRole } = renderProjectReport(payload('wdo_inspection', { fdacsPdfAvailable: false }));

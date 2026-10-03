@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import InlineAutoPayCapture from './InlineAutoPayCapture';
-import { AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 afterEach(() => cleanup());
 
@@ -403,5 +403,66 @@ describe('InlineAutoPayCapture afterVisitSetup (setup fee billed with the first 
     expect(queryByText(/one-time setup fee/)).toBeNull();
     await act(async () => { getByText('View full terms').click(); });
     expect(getByText(CARD_CONSENT_TEXT)).toBeInTheDocument();
+  });
+});
+
+describe('InlineAutoPayCapture prepayAfterVisit (annual prepay charged after the first visit)', () => {
+  it('card: says nothing is charged today and renders the after_visit_prepay card consent', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} prepay prepayAfterVisit />,
+    );
+    await flush();
+    expect(getByText(/Nothing is charged today\. We show your exact 12-month total — including any card surcharge — before you confirm, and charge this card after your first visit\./)).toBeInTheDocument();
+    expect(getByText(/charge my 12-month annual prepay total after my first visit/)).toBeInTheDocument();
+    expect(queryByText(/annual prepay total now/)).toBeNull();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)).toBeInTheDocument();
+    expect(queryByText(PREPAY_CARD_CONSENT_TEXT)).toBeNull();
+  });
+
+  it('bank: renders the after_visit_prepay ACH consent', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText } = render(
+      <InlineAutoPayCapture
+        intent={{ ...INTENT, setupIntentId: 'seti_1', capturedMethodType: 'us_bank_account', paymentMethodTypes: ['card', 'us_bank_account'] }}
+        loadStripeSdk={loadStripeSdk}
+        prepay
+        prepayAfterVisit
+      />,
+    );
+    await flush();
+    expect(getByText(/debit it from this bank account after your first visit/)).toBeInTheDocument();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT)).toBeInTheDocument();
+  });
+
+  it('a checked box is cleared when the rendered authorization switches to the after-visit prepay variant', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByRole, rerender } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} prepay />,
+    );
+    await flush();
+    await act(async () => { getByRole('checkbox').click(); });
+    expect(getByRole('checkbox')).toBeChecked();
+    rerender(<InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} prepay prepayAfterVisit />);
+    await flush();
+    expect(getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it('flag absent: prepay keeps the charge-now copy and PREPAY consent', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} prepay />,
+    );
+    await flush();
+    expect(getByText(/charge my 12-month annual prepay total now/)).toBeInTheDocument();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(PREPAY_CARD_CONSENT_TEXT)).toBeInTheDocument();
+    expect(queryByText(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)).toBeNull();
   });
 });
