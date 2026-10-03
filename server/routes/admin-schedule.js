@@ -25823,17 +25823,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
-    // visit's: a catalog product the prompt itself mentions (a note saying
-    // "the customer asked about <product>") joins the trade-name screen.
-    const mentionedCatalogNames = [];
+    // visit's: every catalog product name joins the trade-name screen, so a
+    // name the model brings from its own knowledge ("Termidor" for a generic
+    // termite record) is caught, not only one the prompt mentions.
+    const catalogScreenNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
         const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
         for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
+          if (row?.name) catalogScreenNames.push(row.name);
           const named = Boolean(row?.name)
             && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
-          if (named) mentionedCatalogNames.push(row.name);
           // Its actives too: a draft must not swap the named product for
           // its active ingredient; and an active the prompt names on its own
           // ("azoxystrobin" in a note) is screened even with no product name.
@@ -25853,7 +25854,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...catalogScreenNames],
         db,
       });
     } catch (err) {

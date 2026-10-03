@@ -270,6 +270,28 @@ test('gate on: a catalog product the note mentions is screened even though it wa
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
+test('gate on: a catalog name the model brings on its own is screened though the prompt never mentions it', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Mechanical snap trap', active_ingredient: 'Mechanical snap trap' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds (unprompted catalog name case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
+test('gate on: screening the whole catalog leaves clean copy alone', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Mechanical snap trap', active_ingredient: 'Mechanical snap trap' }];
+  mockProvider.mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds (whole catalog clean case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+});
+
 test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'In2Care Mosquito Station', active_ingredient: 'Beauveria bassiana; Pyriproxyfen' }];
