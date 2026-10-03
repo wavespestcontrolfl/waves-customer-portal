@@ -59,6 +59,7 @@ const {
   acceptOfficeReviewBody,
   ACCEPT_OFFICE_REVIEW_MESSAGE,
   retireOrDenyDroppedCapture,
+  refuseParkedWrite,
   isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
@@ -234,34 +235,48 @@ function isCommercialAutoEstimate(estimate = {}) {
 
 // The estimate columns the page's slot gate reads (slotBrowseRefusal).
 // The estimate columns the park verdict (contact_review) reads: an unlinked estimate's phone / email / address.
-const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_phone', 'customer_email', 'address'];
+const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address'];
 const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
 
 // B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by
 // the ONE precedence helper in estimate-public.js - the existing quote-required / trenching refusals each caller
 // already makes come first). The same shapes the trenching refusals answer on each path.
+async function contactReviewState(estimate, opts) {
+  const state = await estimatePublicBlockingState(estimate, opts);
+  return state?.state === 'contact_review' ? state : null;
+}
+// (Read paths only need the boolean; write paths use contactReviewState + refuseParkedWrite.)
 async function contactReviewHold(estimate, opts) {
-  return (await estimatePublicBlockingState(estimate, opts))?.state === 'contact_review';
+  return !!(await contactReviewState(estimate, opts));
 }
 // The contact_review check on the LOCKED estimate row, inside the reservation transaction (reserve and extend): the
 // phone candidate is read on THAT transaction FOR SHARE NOWAIT, held to its end, so a staff edit of the lone
 // candidate cannot land between this read and the hold insert. NOWAIT, not a blocking lock: the transaction already
-// holds the estimate row and a customer edit's fan-out locks customer THEN estimate, so waiting could cycle; a row
-// someone else holds right now answers the accept's existing retryable refusal instead.
+// holds the estimate row and a customer edit's fan-out locks customer THEN estimate, so waiting could cycle. A row
+// someone else holds right now: RESERVE answers the accept's existing retryable refusal (nothing was reserved, the
+// client re-tries with the server's sentence); EXTEND skips the lock and extends (`skipOnBusy`) - an extension adds
+// no new capacity claim and the accept remains the gate, so a brief customer edit must never discard a valid hold.
+// A park refusal carries `park` so the ROUTE can run the park side effects after the transaction (alert + hold release).
 const CUSTOMER_BUSY_REFUSAL = {
   status: 409,
   // The sentence and code the accept already answers a busy customer with (no new wording).
   body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
 };
-async function lockedContactReviewRefusal(row, trx) {
+async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {}) {
   try {
-    return (await contactReviewHold(row, { database: trx, lock: !!trx }))
-      ? { status: 409, body: acceptOfficeReviewBody() }
+    const state = await contactReviewState(row, { database: trx, lock: !!trx });
+    return state
+      ? { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } }
       : null;
   } catch (err) {
-    if (err?.code === '55P03') return CUSTOMER_BUSY_REFUSAL;
+    if (err?.code === '55P03') return skipOnBusy ? null : CUSTOMER_BUSY_REFUSAL;
     throw err;
   }
+}
+// Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
+async function respondNoBookingRefusal(res, estimate, refusal) {
+  if (refusal.park) await refuseParkedWrite(estimate, refusal.park.rejectedCustomerId);
+  return res.status(refusal.status).json(refusal.body);
 }
 function parkedSlotBrowseBody() {
   return {
@@ -608,7 +623,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
-    if (await contactReviewHold(estimate)) return res.status(409).json(acceptOfficeReviewBody());
+    {
+      const parkState = await contactReviewState(estimate);
+      if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+    }
 
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
 
@@ -642,7 +660,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       }
       if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
         // The locked revalidation refused: the same status and body the route's own checks above return.
-        return res.status(svcErr.response.status).json(svcErr.response.body);
+        return respondNoBookingRefusal(res, estimate, svcErr.response);
       }
       if (svcErr.code === 'SLOT_UNAVAILABLE') {
         // Refresh slot availability for the estimate so the caller can
@@ -730,7 +748,10 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (the accept
     // refuses it; the office has been told). A failed lookup fails closed (the route's own 500).
-    if (await contactReviewHold(estimate, { estData, quoteRequirement })) return res.status(409).json(acceptOfficeReviewBody());
+    {
+      const parkState = await contactReviewState(estimate, { estData, quoteRequirement });
+      if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+    }
 
     // The hold only applies to a one-time booking — mirror accept's one-time
     // availability gate before minting the intent so a one_time request on an
@@ -783,6 +804,14 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     const intent = await createCardHoldSetupIntentForEstimate(estimate);
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    // B18: the park check above ran BEFORE the DB and Stripe work that minted this intent. Re-run it authoritatively
+    // (not the cached verdict) before a client secret leaves the server: a candidate edited in between parks the
+    // estimate, and no secret is returned. The pending hold row was never exposed (nothing can confirm it); main has
+    // no "abandoned" state for it and the next mint reuses it, so it is left as is.
+    {
+      const parkState = await contactReviewState(estimate, { estData, quoteRequirement, fresh: true });
+      if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
     }
     // The customer reached the save-a-card step — the only local evidence of
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
@@ -839,7 +868,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
-    if (await contactReviewHold(estimate, { estData, quoteRequirement })) {
+    const recurringParkState = await contactReviewState(estimate, { estData, quoteRequirement });
+    if (recurringParkState) {
       // A replace-payment-method request names an already-succeeded capture (`replaceSetupIntentId`) the client drops
       // on this 409: retire it here (main's own helper, the one the accept's park uses) BEFORE the 409, or the
       // abandoned intent stays eligible for later recovery. Stripe unable to confirm = the existing 503.
@@ -851,7 +881,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
           return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
         }
       }
-      return res.status(409).json(acceptOfficeReviewBody());
+      return res.status(409).json(await refuseParkedWrite(estimate, recurringParkState.rejectedCustomerId));
     }
 
     // The Auto Pay card only applies to the recurring lane — a one-time
@@ -940,6 +970,21 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       const stamped = await markAfterVisitCaptureIntent(intent.setupIntentId);
       if (!stamped.ok) {
         return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+      }
+    }
+    // B18: re-run the park authoritatively (not the cached verdict) before a client secret leaves the server - the
+    // check above ran before the DB and Stripe work that minted (or replaced) this intent. A candidate edited in
+    // between parks the estimate: the minted intent is retired with the accept's own helper (503 if Stripe cannot
+    // confirm) and no secret is returned.
+    {
+      const parkState = await contactReviewState(estimate, { estData, quoteRequirement, fresh: true });
+      if (parkState) {
+        try {
+          await retireOrDenyDroppedCapture(estimate, intent.setupIntentId);
+        } catch (retireErr) {
+          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+        }
+        return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
       }
     }
     // The customer reached the save-a-card step — the only local evidence of
@@ -1070,10 +1115,10 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
         return { status: 409, body: TRENCHING_REVIEW_409 };
       }
       // The locked row (the service re-runs this under the estimate's row lock) carries the phone columns too.
-      return lockedContactReviewRefusal(row, trx);
+      return lockedContactReviewRefusal(row, trx, { skipOnBusy: true });
     };
     const preTxnRefusal = await noBookingRefusal(estimate);
-    if (preTxnRefusal) return res.status(preTxnRefusal.status).json(preTxnRefusal.body);
+    if (preTxnRefusal) return respondNoBookingRefusal(res, estimate, preTxnRefusal);
 
     try {
       const { scheduledServiceId: extendedId, expiresAt } = await slotReservation.extendReservation({
@@ -1093,7 +1138,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
         // The locked revalidation refused — same body the pre-txn guard
         // uses, so the client's existing handling applies unchanged.
-        return res.status(svcErr.response.status).json(svcErr.response.body);
+        return respondNoBookingRefusal(res, estimate, svcErr.response);
       }
       if (svcErr.code === 'ESTIMATE_TERMINAL') {
         return res.status(409).json({ error: 'Estimate is no longer active' });

@@ -118,6 +118,12 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/reservationRef\.current\?\.scheduledServiceId\s*\|\| pendingRecoveryHoldRef\.current/);
   });
 
+  it('B18: a CUSTOMER_BUSY_RETRY on reserve is retryable with the server sentence - the picked slot and payment choice are KEPT', () => {
+    expect(src).toMatch(
+      /if \(body\.code === 'CUSTOMER_BUSY_RETRY'\) \{[^}]*setError\(message\);\s*setCtaPhase\('configure'\);\s*return;\s*\}\s*setPaymentPreference\(null\);\s*setSelectedSlotId\(null\);/,
+    );
+  });
+
   it('B18: the one transition drops every captured/minted card, releases the slot hold and refetches /data (the review state)', () => {
     expect(src).toMatch(
       /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,900}await releaseHeldReservation\(heldId\);[\s\S]{0,400}await loadEstimate\(\{ preserveSelection: true \}\);/,

@@ -850,6 +850,25 @@ describe('slot reservation helpers', () => {
     );
   });
 
+  test('releaseEstimateHolds deletes only this estimate\'s uncommitted holds (no customer, a reservation timestamp) and nothing else (B18 park)', async () => {
+    const calls = [];
+    const builder = {
+      where: jest.fn((w) => { calls.push(['where', w]); return builder; }),
+      whereNull: jest.fn((c) => { calls.push(['whereNull', c]); return builder; }),
+      whereNotNull: jest.fn((c) => { calls.push(['whereNotNull', c]); return builder; }),
+      del: jest.fn(async () => 2),
+    };
+    db.mockImplementation((table) => { calls.push(['table', table]); return builder; });
+    await expect(slotReservation.releaseEstimateHolds({ estimateId: 'estimate-9' })).resolves.toEqual({ released: 2 });
+    expect(calls).toEqual([
+      ['table', 'scheduled_services'],
+      ['where', { source_estimate_id: 'estimate-9' }],
+      ['whereNull', 'customer_id'],
+      ['whereNotNull', 'reservation_expires_at'],
+    ]);
+    await expect(slotReservation.releaseEstimateHolds({})).resolves.toEqual({ released: 0 });
+  });
+
   test('releaseReservation scopes deletes by source_estimate_id', async () => {
     const chain = {
       where: jest.fn().mockReturnThis(),

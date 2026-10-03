@@ -30,6 +30,17 @@ jest.mock('../services/estimate-deposits', () => ({
   refundUnconsumedDeposits: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The park side effects (deduped office alert + server-side hold release) are asserted at their seams.
+const mockRaiseAdminAlert = jest.fn(async () => ({ id: 'alert-1' }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: (...a) => mockRaiseAdminAlert(...a),
+}));
+const mockReleaseEstimateHolds = jest.fn(async () => ({ released: 1 }));
+jest.mock('../services/slot-reservation', () => ({
+  ...jest.requireActual('../services/slot-reservation'),
+  releaseEstimateHolds: (...a) => mockReleaseEstimateHolds(...a),
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -96,7 +107,7 @@ async function getData(estimate) {
 }
 const ctaOf = (r) => JSON.parse(r.text).cta;
 
-beforeEach(() => { phoneCandidates = []; });
+beforeEach(() => { phoneCandidates = []; mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear(); });
 
 test('a contradicted lone phone candidate: the page gets the existing review state (no accept, no card step) and no word about the other customer', async () => {
   phoneCandidates = [BOB];
@@ -165,5 +176,65 @@ describe('parked /data derives nothing from the rejected customer', () => {
     phoneCandidates = [];
     const none = await getData(makeEstimate());
     expect(neutralFields(matched)).not.toEqual(neutralFields(none));
+  });
+});
+
+describe('GET /data on a parked estimate runs the park side effects (the page promises office follow-up)', () => {
+  test('a parked customer view files the deduped alert once per view request and returns any live hold\'s capacity; controls do not', async () => {
+    phoneCandidates = [BOB];
+    const est = makeEstimate();
+    const res = await getData(est);
+    expect(ctaOf(res)).toMatchObject({ reviewReason: 'contact_review' });
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockRaiseAdminAlert.mock.calls[0][1]).toMatchObject({ area: 'Customers', severity: 'needs-you', subject: { type: 'estimate', id: est.id } });
+    expect(mockRaiseAdminAlert.mock.calls[0][2]).toMatchObject({ dedupeKey: `accept-phone-contradicted:${est.id}` });
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith({ estimateId: est.id });
+    mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear();
+    phoneCandidates = [];
+    await getData(makeEstimate());
+    phoneCandidates = [BOB];
+    await getData(makeEstimate({ customer_id: 'cust-9' }));
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+  });
+
+  test('a failing alert or release never breaks the page', async () => {
+    phoneCandidates = [BOB];
+    mockRaiseAdminAlert.mockRejectedValueOnce(new Error('alerts down'));
+    mockReleaseEstimateHolds.mockRejectedValueOnce(new Error('db down'));
+    const res = await getData(makeEstimate());
+    expect(res.status).toBe(200);
+    expect(ctaOf(res)).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+  });
+});
+
+describe('estimatePublicBlockingState resolves the quote requirement itself when the caller does not (no precedence level can be skipped)', () => {
+  const { estimatePublicBlockingState } = estimatePublicRouter;
+  test('parked AND quote-required (an enabled commercial proposal) reports quote_required, with or without the caller supplying it; parked alone is contact_review', async () => {
+    phoneCandidates = [BOB];
+    const quoteRequiredEstimate = makeEstimate();
+    quoteRequiredEstimate.estimate_data = { ...quoteRequiredEstimate.estimate_data, proposal: { enabled: true } };
+    expect((await estimatePublicBlockingState(quoteRequiredEstimate, { estData: quoteRequiredEstimate.estimate_data }))?.state).toBe('quote_required');
+    const parkedOnly = makeEstimate();
+    expect(await estimatePublicBlockingState(parkedOnly, { estData: parkedOnly.estimate_data })).toMatchObject({ state: 'contact_review', rejectedCustomerId: 'cust-bob' });
+    // Caller-supplied requirement still wins first.
+    expect((await estimatePublicBlockingState(makeEstimate(), { quoteRequirement: { quoteRequired: true } }))?.state).toBe('quote_required');
+    // Not parked, not review: nothing (and no phone-less surprises).
+    phoneCandidates = [];
+    expect(await estimatePublicBlockingState(makeEstimate())).toBeNull();
+  });
+});
+
+describe('refuseParkedWrite (what every public write path answers a parked estimate with)', () => {
+  const { refuseParkedWrite } = estimatePublicRouter;
+  test('files the deduped alert, releases the estimate\'s holds, and returns the coded review body - never throwing', async () => {
+    phoneCandidates = [BOB];
+    const est = makeEstimate();
+    expect(await refuseParkedWrite(est, 'cust-bob')).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith({ estimateId: est.id });
+    mockRaiseAdminAlert.mockRejectedValueOnce(new Error('alerts down'));
+    mockReleaseEstimateHolds.mockRejectedValueOnce(new Error('db down'));
+    await expect(refuseParkedWrite(est, 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
   });
 });

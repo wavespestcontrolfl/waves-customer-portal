@@ -2147,17 +2147,28 @@ async function commitReservation({
 // visit. Plain chaining rather than .modify() so the builder stays a bare
 // where/whereNull/whereNotNull sequence for callers that pass no estimateId.
 function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
+  // One hold by id (optionally pinned to its estimate), or - with no id - every live hold of the estimate.
   const q = client('scheduled_services')
-    .where({ id: scheduledServiceId })
+    .where(scheduledServiceId ? { id: scheduledServiceId } : { source_estimate_id: estimateId })
     .whereNull('customer_id')
     .whereNotNull('reservation_expires_at');
-  return estimateId ? q.where({ source_estimate_id: estimateId }) : q;
+  return estimateId && scheduledServiceId ? q.where({ source_estimate_id: estimateId }) : q;
 }
 
 async function releaseReservation({ scheduledServiceId, estimateId }) {
   if (!scheduledServiceId) return { released: false };
   const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
   return { released: count > 0 };
+}
+
+// Release EVERY live uncommitted hold of an estimate (the ONE shared uncommittedHoldQuery predicate: no customer, a
+// reservation timestamp, this estimate's source link). Used when an estimate is observed parked for the office
+// (routes/estimate-public.js parkSideEffects), so a hold that slipped in just before the park does not keep
+// capacity until it expires. A committed visit is never touched.
+async function releaseEstimateHolds({ estimateId }) {
+  if (!estimateId) return { released: 0 };
+  const count = await uncommittedHoldQuery(db, { estimateId }).del();
+  return { released: count };
 }
 
 /**
@@ -2685,6 +2696,7 @@ module.exports = {
   prepareReservationCommit,
   commitReservation,
   releaseReservation,
+  releaseEstimateHolds,
   releaseExpiredReservations,
   extendReservation,
   // Commit-time grace window: RESERVATION_COMMIT_GRACE_MINUTES is the

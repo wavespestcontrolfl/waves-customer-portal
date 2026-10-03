@@ -26,6 +26,7 @@ jest.mock('../services/estimate-slot-availability', () => ({
 }));
 jest.mock('../services/slot-reservation', () => ({
   reserveSlot: jest.fn(),
+  extendReservation: jest.fn(),
   releaseReservation: jest.fn(),
 }));
 jest.mock('../services/estimate-membership-context', () => ({
@@ -66,11 +67,13 @@ jest.mock('../routes/estimate-public', () => ({
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  resolveEstimateInvoiceMode: jest.fn(() => false),
   // B18 park (the real implementations are pinned in estimate-public-accept-phone-match / -atomicity).
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   estimatePublicBlockingState: jest.fn(async () => null),
   ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked-message',
   retireOrDenyDroppedCapture: jest.fn(async () => undefined),
+  refuseParkedWrite: jest.fn(async () => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
@@ -482,6 +485,117 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       // Any other failure still propagates (the route's own 500).
       estimatePublicBlockingState.mockRejectedValueOnce(new Error('db down'));
       await expect(predicate(lockedRow, TRX)).rejects.toThrow('db down');
+    });
+  });
+
+  describe('every public WRITE path refuses a parked estimate through the ONE function (office alert + hold release); reads do not', () => {
+    const { refuseParkedWrite } = require('../routes/estimate-public');
+    beforeEach(() => refuseParkedWrite.mockClear());
+
+    test.each([
+      ['card-hold-intent', 'card-hold-intent', {}],
+      ['recurring-card-intent', 'recurring-card-intent', {}],
+      ['reserve (pre-transaction check)', 'reserve', { slotId: '2030-01-01_09-00_unassigned' }],
+    ])('%s', async (_label, leg, body) => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const res = await post(leg, body);
+      expect(res.status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      expect(refuseParkedWrite).toHaveBeenCalledWith(PARKED_ESTIMATE, 'cust-bob');
+    });
+
+    test('reserve (locked row inside the service) and extend (pre-transaction and locked) too - the side effects run after the transaction, in the route', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true });
+        const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('reserve', { slotId: '2030-01-01_09-00_unassigned' })).status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      refuseParkedWrite.mockClear();
+      // extend, pre-transaction read
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const pre = await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      expect(pre.status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      refuseParkedWrite.mockClear();
+      // extend, locked row
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true });
+        const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+      });
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' })).status).toBe(409);
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+    });
+
+    test('the slot READS and the scheduler gate never run the side effects', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await fetch(`${base}/${TOKEN}/available-slots`);
+      expect(refuseParkedWrite).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('EXTEND never discards a valid hold over a briefly held customer row; RESERVE keeps the retryable refusal', () => {
+    const TRX = { isTransaction: true };
+    test('55P03 on the extend predicate extends (null), on the reserve predicate it is CUSTOMER_BUSY_RETRY', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      let extendPredicate;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.extendReservation.mockImplementationOnce(async (args) => { extendPredicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+      await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+      estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+      await expect(extendPredicate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX)).resolves.toBeNull();
+      // A real park on the locked extend row still refuses.
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await expect(extendPredicate({ ...PARKED_ESTIMATE, estimate_data: {} }, TRX)).resolves.toMatchObject({ status: 409, park: { rejectedCustomerId: 'cust-bob' } });
+    });
+  });
+
+  describe('no client secret leaves the server for an estimate parked while the intent was being minted', () => {
+    const { refuseParkedWrite } = require('../routes/estimate-public');
+    test('card-hold-intent re-runs the park AUTHORITATIVELY (fresh) after minting and withholds the secret', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+      createCardHoldSetupIntentForEstimate.mockResolvedValue({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      refuseParkedWrite.mockClear();
+      estimatePublicBlockingState.mockClear();
+      estimatePublicBlockingState.mockResolvedValueOnce(null).mockResolvedValueOnce(PARKED); // pre-check clean, post-mint parked
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(estimatePublicBlockingState).toHaveBeenCalledTimes(2);
+      expect(estimatePublicBlockingState.mock.calls[0][1]).not.toHaveProperty('fresh');
+      expect(estimatePublicBlockingState.mock.calls[1][1]).toEqual(expect.objectContaining({ fresh: true }));
+      expect(refuseParkedWrite).toHaveBeenCalledTimes(1);
+      // Control: still clean at the re-check -> the secret is returned as before.
+      estimatePublicBlockingState.mockResolvedValue(null);
+      const ok = await post('card-hold-intent', {});
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).clientSecret).toBe('cs_SECRET');
+    });
+
+    test('recurring-card-intent: the same fresh re-check sits after minting and stamping and before any secret, and retires the minted intent first (source order)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
+      const mint = route.indexOf('createRecurringCardSetupIntentForEstimate(estimate)');
+      const recheck = route.indexOf('fresh: true });');
+      const retire = route.indexOf('await retireOrDenyDroppedCapture(estimate, intent.setupIntentId);');
+      const secret = route.indexOf('clientSecret: intent.clientSecret');
+      expect(mint).toBeGreaterThan(0);
+      expect(recheck).toBeGreaterThan(mint);
+      expect(retire).toBeGreaterThan(recheck);
+      expect(secret).toBeGreaterThan(retire);
+      expect(route.slice(retire, secret)).toContain('RECURRING_CARD_RETIRE_FAILED');
     });
   });
 

@@ -618,9 +618,10 @@ function acceptOfficeReviewBody() {
 
 // Preflight verdict for an UNLINKED, phone-bearing estimate (root handle, cached for this request): null, or
 // { rejectedCustomerId } when its lone phone candidate is contradicted. Throws on a failed lookup (callers decide).
-async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false } = {}) {
+// `fresh` skips the request's cached preflight verdict (an authoritative re-read, e.g. just before a client secret is returned).
+async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false, fresh = false } = {}) {
   if (!estimate || estimate.customer_id || !estimate.customer_phone) return null;
-  const verdict = await matchAcceptCustomerByPhone(estimate, database, { lockShare: lock });
+  const verdict = await matchAcceptCustomerByPhone(estimate, database, { lockShare: lock, authoritative: fresh });
   return verdict.contradicted ? { rejectedCustomerId: verdict.rejectedCustomerId } : null;
 }
 
@@ -633,11 +634,38 @@ async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false 
 // 'quote_required' | 'termite_trenching_review' | 'contact_review' (the last carries rejectedCustomerId, for the
 // office alert only). `database` + `lock` (a transaction handle, FOR SHARE NOWAIT) are for the slot reserve / extend
 // revalidation on the locked estimate row. Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
-async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock } = {}) {
+async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock, fresh } = {}) {
+  const data = estData || parseEstimateDataSafe(estimate);
   if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
-  if (estimateTrenchingReviewRequired(estData || parseEstimateDataSafe(estimate))) return { state: 'termite_trenching_review' };
-  const parked = await acceptPhoneParkedVerdict(estimate, { database, lock });
-  return parked ? { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId } : null;
+  const trenching = estimateTrenchingReviewRequired(data);
+  const parked = trenching ? null : await acceptPhoneParkedVerdict(estimate, { database, lock, fresh });
+  if (!trenching && !parked) return null;
+  // A caller that did not resolve the quote requirement never skips that precedence level: it is resolved HERE (the
+  // same resolver /data uses), and only when one of the review states below would otherwise be reported, so the
+  // common clean estimate costs nothing extra. Quote-required wins over both.
+  let quote = quoteRequirement;
+  if (quote === undefined) quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);
+  if (quote?.quoteRequired) return { state: 'quote_required' };
+  if (trenching) return { state: 'termite_trenching_review' };
+  return { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId };
+}
+
+// What a PUBLIC WRITE path does when it refuses a parked estimate (the accept, both card-intent routes, reserve and
+// extend), through this ONE function: the deduped office alert (so a stale tab that parks at a pre-accept step, and
+// then leaves booking for the review card, still files it), and the server-side release of any live slot hold of the
+// estimate (capacity is returned as soon as ANY request observes the park). Never throws. GET /data calls it too -
+// the page shows the review card on a plain view and tells the customer a specialist will follow up, so the alert
+// must exist for that promise. Slot reads, the texting scheduler's gate and the reminder recheck do not (they are
+// never what the customer is promised against, and /data accompanies every page load).
+async function parkSideEffects(estimate, rejectedCustomerId) {
+  try { await raiseAcceptParkedAlert({ estimate, rejectedCustomerId }); } catch { /* never throws; logged inside */ }
+  try { await require('../services/slot-reservation').releaseEstimateHolds({ estimateId: estimate.id }); } catch (e) {
+    logger.warn(`[estimate-accept] parked-estimate hold release failed for estimate ${estimate.id}: ${e.message}`);
+  }
+}
+async function refuseParkedWrite(estimate, rejectedCustomerId) {
+  await parkSideEffects(estimate, rejectedCustomerId);
+  return acceptOfficeReviewBody();
 }
 
 // The ONE office alert for a parked accept (Customers, needs-you, a person acts), deduped per estimate so
@@ -10251,8 +10279,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
           }
         }
-        await raiseAcceptParkedAlert({ estimate, rejectedCustomerId: blocking.rejectedCustomerId });
-        return res.status(409).json(acceptOfficeReviewBody());
+        return res.status(409).json(await refuseParkedWrite(estimate, blocking.rejectedCustomerId));
       }
     }
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
@@ -16080,8 +16107,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // office alert is raised HERE, after the decision and outside any transaction, then the same coded 409 the
     // preflight park returns.
     if (err && err.code === ACCEPT_NEEDS_OFFICE_REVIEW && err.parkedRejectedCustomerId && err.parkedEstimate) {
-      await raiseAcceptParkedAlert({ estimate: err.parkedEstimate, rejectedCustomerId: err.parkedRejectedCustomerId });
-      return res.status(409).json(acceptOfficeReviewBody());
+      return res.status(409).json(await refuseParkedWrite(err.parkedEstimate, err.parkedRejectedCustomerId));
     }
     if (err && err.code === 'RECURRING_CARD_RETIRE_FAILED' && err.status === 503) {
       return res.status(503).json({ error: err.message, code: err.code });
@@ -29079,7 +29105,11 @@ async function composeEstimateDataPayload(estimate, {
     let phoneReviewHold = false;
     if (terminalState === null && !adminDraftPreview) {
       try {
-        phoneReviewHold = (await estimatePublicBlockingState(estimate, { estData: estimateDataForIntelligence, quoteRequirement }))?.state === 'contact_review';
+        const blockingState = await estimatePublicBlockingState(estimate, { estData: estimateDataForIntelligence, quoteRequirement });
+        phoneReviewHold = blockingState?.state === 'contact_review';
+        // The page is about to tell the customer a specialist will follow up: file the (deduped) alert and return any
+        // live hold's capacity. Not for a staff preview or a PDF render pass, which are not a customer view.
+        if (phoneReviewHold && !verifiedStaffPreview && !isPdfRenderPass) await parkSideEffects(estimate, blockingState.rejectedCustomerId);
       } catch (parkErr) {
         logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
       }
@@ -30556,6 +30586,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;
+module.exports.refuseParkedWrite = refuseParkedWrite;
 module.exports.ACCEPT_OFFICE_REVIEW_MESSAGE = ACCEPT_OFFICE_REVIEW_MESSAGE;
 module.exports.acceptOfficeReviewBody = acceptOfficeReviewBody;
 module.exports.acceptLoneCandidateContradicted = acceptLoneCandidateContradicted;

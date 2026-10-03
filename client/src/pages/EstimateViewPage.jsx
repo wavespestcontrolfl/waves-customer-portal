@@ -7171,6 +7171,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return;
         }
         const message = body.error || 'Unable to reserve this slot.';
+        if (body.code === 'CUSTOMER_BUSY_RETRY') {
+          // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
+          // server's own sentence - the customer's picked slot and payment choice stay, so they just tap again.
+          setError(message);
+          setCtaPhase('configure');
+          return;
+        }
         setPaymentPreference(null);
         setSelectedSlotId(null);
         setSelectedSlotMeta(null);

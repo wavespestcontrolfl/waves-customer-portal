@@ -56,6 +56,7 @@ jest.mock('../routes/estimate-public', () => ({
   estimatePublicBlockingState: jest.fn(async () => null),
   acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked',
+  refuseParkedWrite: jest.fn(async () => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
 }));
@@ -378,7 +379,7 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
     ['isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))', 'invoiceOnlyAcceptance: true'],
     ['estimateTrenchingReviewRequired(parseEstimateData(row))', 'TRENCHING_REVIEW_409'],
     // B18 park: judged on the LOCKED row too (same predicate), after the existing review refusals.
-    ['lockedContactReviewRefusal(row, trx)', 'lockedContactReviewRefusal'],
+    ['lockedContactReviewRefusal(row, trx, { skipOnBusy: true })', 'lockedContactReviewRefusal'],
   ])('%s is refused before the service call', (guard, body) => {
     expect(guardBlock).toContain(guard);
     expect(guardBlock).toContain(body);

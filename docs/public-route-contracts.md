@@ -1733,7 +1733,24 @@ answers:
   submitted `replaceSetupIntentId` (the intent a replace-payment-method request abandons) BEFORE the 409, with the
   accept's own helper and the same 503 `RECURRING_CARD_RETIRE_FAILED` when Stripe cannot confirm;
   `/card-hold-intent` has no such field. If the client's slot-hold release fails during the transition it retries
-  once and keeps the hold id in the page's pending-recovery ref; `available-slots` and `find-slots` answer an empty
+  once and keeps the hold id in the page's pending-recovery ref; Every public WRITE path that refuses a parked estimate (the accept, both card-intent routes, `reserve`
+  and `extend`, including the locked-row refusals after their transaction) does so through ONE function: the deduped
+  office alert is filed (a stale tab that parks at a pre-accept step and then leaves booking still files it) and any
+  live uncommitted slot hold of the estimate is released server-side, so capacity returns as soon as ANY request
+  observes the park. `GET /data` runs the same two side effects for a customer view of a parked estimate (the page
+  tells the customer a specialist will follow up); staff previews, PDF render passes, slot reads, the texting
+  scheduler's gate and the reminder recheck do not. Both card-intent routes re-run the park authoritatively (not the
+  cached verdict) AFTER minting and before any client secret is returned: a recurring intent minted for a
+  just-parked estimate is retired with the accept's helper (503 `RECURRING_CARD_RETIRE_FAILED` if Stripe cannot
+  confirm) and a card-hold intent's secret is withheld (its pending row was never exposed and is reused by the next
+  mint); no client secret leaves the server for a parked estimate. On `extend` a briefly held customer row never
+  fails the extension (it skips the lock and extends: an extension adds no capacity claim and the accept stays the
+  gate), while `reserve` answers the retryable `CUSTOMER_BUSY_RETRY` 409, which the page treats as retryable with
+  the server's sentence and keeps the picked slot. `estimatePublicBlockingState` resolves the quote requirement
+  itself when a caller does not supply it, so quote-required outranks the park on every surface. The locked
+  reserve / extend read protects the candidate rows that exist; a customer created on that phone in the instant
+  before the hold insert is not seen there, and is bounded rather than fenced (no phone fence): the hold is not a
+  booking, the accept still refuses, and the next request that observes the park releases the hold; `available-slots` and `find-slots` answer an empty
   review shape (`reviewBeforeBooking: true`, `reason: 'contact_review'`, no times); the reminder sweep skips
   it. The legacy server-rendered estimate page is never served for such an estimate: `handleEstimateView` forces it to
 the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the
