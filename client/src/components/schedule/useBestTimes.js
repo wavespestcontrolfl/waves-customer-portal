@@ -26,7 +26,7 @@
 // and is not asked again for SUMMARY_RETRY_MS, so a dark gate costs one
 // extra request per ten minutes, not one per keystroke.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -91,6 +91,7 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
     days: days.map((day) => ({
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
+      ...(day.closed === true ? { closed: true } : {}),
       hours: (day.hours || []).map((h) => ({
         date: day.date,
         start: h.start_time,
@@ -148,7 +149,9 @@ export function useBestTimes({
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
   const [bestInRange, setBestInRange] = useState(null);
-  const [availability, setAvailability] = useState(null);
+  // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
+  const [answer, setAnswer] = useState(null);
+  const setAvailability = (data, keys) => setAnswer(data ? { data, ...keys } : null);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
@@ -162,15 +165,33 @@ export function useBestTimes({
   // is scored over the whole window, like the live conflict check.
   const pickedEndKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedEnd || '')) ? String(pickedEnd).slice(0, 5) : '';
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
+  // Who a summary is for, and exactly which request it answered. A re-check
+  // for the SAME visit/customer and place keeps the previous days on screen,
+  // marked stale, so the strip (and the route warning it replaces) does not
+  // blink off and on with every pick. Staleness is derived in RENDER from
+  // these keys, not set in the effect: the first paint after an input
+  // changes must already treat the old answer as stale (Codex #5746 r1).
+  const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
+  const requestKey = [
+    enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary,
+  ].map((v) => v ?? '').join('|');
+  const availability = useMemo(() => {
+    if (!answer || !enabled) return null;
+    if (answer.requestKey === requestKey) return answer.data;
+    return answer.subjectKey === subjectKey ? { ...answer.data, stale: true } : null;
+  }, [answer, enabled, requestKey, subjectKey]);
   useEffect(() => {
     setBestTimes([]);
     setPicked(null);
     setBestInRange(null);
-    setAvailability(null);
     if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
+      setAvailability(null);
       setChecking(false);
       return undefined;
     }
+    // A held answer survives only while a summary is about to replace it.
+    if (!(summary && date >= etDateString() && Date.now() >= summaryUnavailableUntil)) setAvailability(null);
     const controller = new AbortController();
     setChecking(true);
     const timer = setTimeout(async () => {
@@ -235,13 +256,15 @@ export function useBestTimes({
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
           if (summarized) {
-            setAvailability(summarized);
+            setAvailability(summarized, { requestKey, subjectKey });
             setChecking(false);
             return;
           }
           // Answered, but with no summary: the gate is off. A failed
           // request (null) says nothing about the gate — ask again next time.
           if (data) summaryUnavailableUntil = Date.now() + SUMMARY_RETRY_MS;
+          // No summary this time: a held (stale) one must not outlive it.
+          setAvailability(null);
           // Hints gated altogether: the fallbacks would be gated too.
           if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
         }
@@ -255,7 +278,11 @@ export function useBestTimes({
         setBestTimes(normalized.bestTimes);
         setPicked(normalized.picked);
         setBestInRange(range?.slots?.length ? mapSlot(range.slots[0], scoped) : null);
-      } catch { /* advisory only — a failed search just shows no hint */ }
+      } catch {
+        // Advisory only — a failed search just shows no hint (and drops a
+        // held summary, unless a newer pick already owns the state).
+        if (!controller.signal.aborted) setAvailability(null);
+      }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };

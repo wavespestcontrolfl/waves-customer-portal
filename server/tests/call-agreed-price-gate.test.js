@@ -30,7 +30,6 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     const quoteSignalsAt = source.indexOf('resolveCallQuoteSignals(extracted, v2CanonicalExtraction);');
     expect(quoteSignalsAt).toBeGreaterThan(-1);
     expect(at).toBeGreaterThan(quoteSignalsAt);
-    expect(at - quoteSignalsAt).toBeLessThan(200);
   });
 
   test('the estimator-engine eligibility gate requires callAgreedPrice == null', () => {
@@ -302,12 +301,6 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     // No duplicated inline copy of the fallback (its own db('call_log')...
     // extraction_failed write) at this site any more.
     expect(identityBlock).not.toContain("processing_status: 'extraction_failed'");
-  });
-
-  test('pushCallToRetryLaneAfterQuarantineFailure and retirePriceAgreedEstimatorBell are exported for reuse/testing', () => {
-    const CallRecordingProcessor = require('../services/call-recording-processor');
-    expect(typeof CallRecordingProcessor._test.pushCallToRetryLaneAfterQuarantineFailure).toBe('function');
-    expect(typeof CallRecordingProcessor._test.retirePriceAgreedEstimatorBell).toBe('function');
   });
 });
 

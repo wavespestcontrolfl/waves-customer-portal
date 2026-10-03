@@ -542,6 +542,19 @@ function residentialUnitLookupVerdict({
 // Record types that name ONE unit in a stacked building. Townhome/duplex
 // are deliberately absent: those units own their ground and their stories.
 const RESIDENTIAL_CONDO_PRICING_TYPES = new Set(['condo_ground', 'condo_upper']);
+
+/**
+ * True when a record's property type names ONE unit in a stacked building (the
+ * condo types above, after the canonical property-type normalization). The
+ * repo's single "this type shares a street address with its neighbours"
+ * classifier: callers that match records by address use it to demand a named
+ * unit. Apartment / multi-family / HOA are commercial under
+ * normalizePropertyType and never reach residential matching. Pure.
+ */
+function isStackedUnitPropertyType(value) {
+  const { normalizePropertyType } = require('../pricing-engine/commercial-helpers');
+  return RESIDENTIAL_CONDO_PRICING_TYPES.has(normalizePropertyType(value));
+}
 // Confident satellite reads that the addressed structure is NOT one stacked
 // unit. A detached "site condo" villa or a townhome-style condo row is a
 // whole building on its own ground — condo is its legal form, not its shape
@@ -683,6 +696,7 @@ module.exports = {
   lookupCategoryConflict,
   residentialUnitLookupVerdict,
   residentialCondoUnitLookupVerdict,
+  isStackedUnitPropertyType,
   _private: {
     resolvePropertyUse,
     resolveCustomerRelationship,

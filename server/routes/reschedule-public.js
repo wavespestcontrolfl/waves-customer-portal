@@ -221,19 +221,21 @@ function label12(t) {
 // moveVisitAsUnit refuses customer-initiated grouped moves): the surfaces
 // must say so BEFORE the customer picks a slot, not 409 at commit
 // (codex #3609 r4). Reason 'grouped' renders the call/text guidance.
-async function groupedVisit(svc) {
+async function groupedVisit(svc, database = db) {
   if (!svc || !svc.visit_id) return false;
   try {
-    const row = await db('scheduled_services').where({ visit_id: svc.visit_id })
+    const row = await database('scheduled_services').where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .count({ n: 'id' }).first();
     if (Number(row?.n || 0) >= 2) return true;
     // One live member on a FROZEN visit (codex #3609 r26 P2): the unit mover
     // refuses it before its lone-member exit, so self-service must not be
     // advertised only to reject the pick at commit. Same verdict.
-    const { frozen } = await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id);
+    const { frozen } = await require('../services/visit-groups').frozenVisitVerdict(database, svc.visit_id, { propagateCancellation: database !== db });
     return frozen;
   } catch (err) {
+    if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+      || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
     // Unknown membership is NOT "ungrouped" (local codex audit): the surfaces
     // would advertise self-service for a possibly grouped visit and the
     // rebooker would refuse the picked slot at commit. Fail closed.
@@ -242,10 +244,10 @@ async function groupedVisit(svc) {
   }
 }
 
-async function eligibilityAsync(svc, now = new Date()) {
+async function eligibilityAsync(svc, now = new Date(), database = db) {
   const elig = eligibility(svc, now);
   if (!elig.ok) return elig;
-  const grouped = await groupedVisit(svc);
+  const grouped = await groupedVisit(svc, database);
   if (grouped === 'unknown') return { ok: false, reason: 'not_available' };
   return grouped ? { ok: false, reason: 'grouped' } : elig;
 }
@@ -268,8 +270,8 @@ function withSelfServeNotice(elig, svc, now = new Date()) {
 // One column list for every loader of this page's visit row: the token route
 // (loadByToken) and the id loader the texting AI's offers use (loadById), so
 // both read the visit through exactly the same booked-property COALESCEs.
-function selectSvc(column, value) {
-  return db('scheduled_services as s')
+function selectSvc(column, value, database = db) {
+  return database('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where(column, value)
     .first(
@@ -297,12 +299,12 @@ function selectSvc(column, value) {
       // under the same output names, and coords follow the divergence rule —
       // a divergent stamp with no visit coords leaves lat/lng null so
       // buildAvailabilityForService geocodes the (stamped) address text.
-      db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-      db.raw('COALESCE(s.service_address_city, c.city) as city'),
-      db.raw('COALESCE(s.service_address_state, c.state) as state'),
-      db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
-      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+      database.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+      database.raw('COALESCE(s.service_address_city, c.city) as city'),
+      database.raw('COALESCE(s.service_address_state, c.state) as state'),
+      database.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+      database.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+      database.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
       'c.deleted_at as customer_deleted_at',
       // C4 (codex GH r4 P1): the account's activity gates every mutation on
       // this tokenized page — a cancelled customer's portal is read-only,
@@ -315,17 +317,17 @@ async function loadByToken(token) {
   return selectSvc('s.reschedule_token', token);
 }
 
-async function loadById(id) {
-  return selectSvc('s.id', id);
+async function loadById(id, database = db) {
+  return selectSvc('s.id', id, database);
 }
 
 // The page's own GET verdict (account state, eligibility incl. grouped
 // visits, then the self-serve move notice window) as one call — the texting
 // AI's offers must refuse exactly the visits this page refuses.
-async function pageEligibility(svc, now = new Date()) {
+async function pageEligibility(svc, now = new Date(), database = db) {
   return withSelfServeNotice(accountInactive(svc)
     ? { ok: false, reason: 'account_inactive' }
-    : await eligibilityAsync(svc, now), svc, now);
+    : await eligibilityAsync(svc, now, database), svc, now);
 }
 
 // FAIL CLOSED on the account, not just the appointment (C4, codex GH r4

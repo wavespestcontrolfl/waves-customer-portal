@@ -998,8 +998,8 @@
           "customers[cust-murphy-a].email"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Notes and lead source are on the owner-direct field list, so the edit executes without a card and with a receipt; only the two named fields change, and notes were named so clearing it is intended."
+        "card": true,
+        "say": "Notes replace the whole field and this customer has notes, so the edit keeps its card, which names the notes it deletes; after the confirm only the two named fields change."
       },
       "call": {
         "tool": "update_customer",
@@ -1008,6 +1008,11 @@
           "updates": {
             "notes": "",
             "lead_source": "referral"
+          }
+        },
+        "preview": {
+          "notes_replaced": {
+            "before": "Side gate sticks; knock first"
           }
         }
       },

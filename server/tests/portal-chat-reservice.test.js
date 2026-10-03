@@ -21,6 +21,7 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
+    RESERVICE_LAWN_SERVICE_WORDS: actual.RESERVICE_LAWN_SERVICE_WORDS,
     reserviceSelfServeEnabled: (...a) => mockSelfServe(...a),
     openReserviceCallbacks: (...a) => mockOpen(...a),
   };
@@ -254,3 +255,99 @@ describe('the customer\'s own message this turn decides what is covered, not the
   });
 
   });
+
+describe('GATE_PORTAL_CHAT_RESERVICE_LAWN: the model judges a current lawn problem and quotes the customer; the code verifies', () => {
+  const MESSAGE = 'Hi, the weeds are coming back all over my front lawn since the last visit.';
+  const QUOTE = 'the weeds are coming back all over my front lawn';
+  const lawnOffer = (input, context = {}) => {
+    const actions = [];
+    return executeToolCall('offer_reservice', { service_line: 'lawn', ...input }, 'cust-1', actions, null, { secondaryProperty: false, lawn: true, customerMessage: MESSAGE, ...context })
+      .then((result) => ({ result, actions }));
+  };
+
+  test('the lawn line and its two fields are in the tool only under the lawn gate', () => {
+    const tool = (flags) => portalToolsFor(flags).find((t) => t.name === 'offer_reservice');
+    expect(tool({ reservice: true }).input_schema.properties.service_line.enum).toEqual(['pest']);
+    expect(tool({ reservice: true }).input_schema.properties).not.toHaveProperty('customer_quote');
+    expect(tool({ reservice: true, reserviceLawn: true }).input_schema.properties.service_line.enum).toEqual(['pest', 'lawn']);
+    expect(Object.keys(tool({ reservice: true, reserviceLawn: true }).input_schema.properties)).toEqual(['service_line', 'current_problem', 'customer_quote']);
+    // The lawn gate alone adds nothing: the offer's own gate comes first.
+    expect(tool({ reserviceLawn: true })).toBeUndefined();
+  });
+
+  test('a current lawn problem with the customer\'s exact words opens the lawn offer', async () => {
+    const { result, actions } = await lawnOffer({ current_problem: true, customer_quote: QUOTE });
+
+    expect(result.offered).toBe(true);
+    expect(result.instruction).toMatch(/free lawn care re-service/);
+    expect(result.instruction).toMatch(/covers lawn care only/);
+    expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: `/reservice/${'a'.repeat(64)}` }]);
+  });
+
+  test('the quote is matched without regard to case, spacing or curly quotes', async () => {
+    const { result } = await lawnOffer(
+      { current_problem: true, customer_quote: "The  grass  ISN'T green anymore, it's dying" },
+      { customerMessage: 'Honestly the grass isn’t green anymore, it’s dying out back.' },
+    );
+    expect(result.offered).toBe(true);
+  });
+
+  test.each([
+    ['not marked current', { current_problem: false, customer_quote: QUOTE }, /not marked as a lawn problem happening now/],
+    ['current_problem left out', { customer_quote: QUOTE }, /not marked as a lawn problem happening now/],
+    ['a truthy non-boolean', { current_problem: 'true', customer_quote: QUOTE }, /not marked as a lawn problem happening now/],
+    ['no quote', { current_problem: true }, /not the customer's own words/],
+    ['a quote the customer never wrote', { current_problem: true, customer_quote: 'my lawn is full of weeds and dying' }, /not the customer's own words/],
+    ['a quote too short to mean anything', { current_problem: true, customer_quote: 'lawn' }, /not the customer's own words/],
+    ['a real quote that names no lawn subject', { current_problem: true, customer_quote: 'since the last visit' }, /not the customer's own words/],
+  ])('%s: no offer and no page read', async (_label, input, instruction) => {
+    const { result, actions } = await lawnOffer(input);
+
+    expect(result.offered).toBe(false);
+    expect(result.instruction).toMatch(instruction);
+    expect(result.instruction).toMatch(/Do not offer or imply a free visit|do not offer or imply a free visit/);
+    expect(actions).toEqual([]);
+    expect(mockOpen).not.toHaveBeenCalled();
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
+  });
+
+  test('a separately priced specialty in the message refuses the lawn offer whatever the model says', async () => {
+    const message = 'the shrubs look sick and the weeds are coming back all over my lawn';
+    const { result } = await lawnOffer({ current_problem: true, customer_quote: 'the weeds are coming back all over my lawn' }, { customerMessage: message });
+
+    expect(result.instruction).toMatch(/separately priced/);
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
+  });
+
+  test('the page still decides: a plan with no lawn lane gets no button', async () => {
+    mockPage.pageLaneState.mockResolvedValue(pageState({ pest: null }));
+
+    const { result, actions } = await lawnOffer({ current_problem: true, customer_quote: QUOTE });
+
+    expect(result.offered).toBe(false);
+    expect(actions).toEqual([]);
+  });
+
+  test('a lawn re-service already booked: its date, no new offer', async () => {
+    mockOpen.mockResolvedValue({ lawn: { date: '2026-10-12', windowStart: null, serviceType: 'Lawn Care Re-Service', rescheduleUrl: null } });
+
+    const { result } = await lawnOffer({ current_problem: true, customer_quote: QUOTE });
+
+    expect(result.already_booked).toEqual({ date: 'Oct 12, 2026', window: 'TBD' });
+    expect(result.instruction).toMatch(/free lawn care re-service is already on the schedule/);
+  });
+
+  test('lawn gate off: the lawn line is refused even with a verified quote', async () => {
+    const { result } = await lawnOffer({ current_problem: true, customer_quote: QUOTE }, { lawn: false });
+
+    expect(result.offered).toBe(false);
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
+  });
+
+  test('pest under the lawn gate still uses the server\'s own classifier, not the model\'s fields', async () => {
+    const { result } = await executeToolCall('offer_reservice', { service_line: 'pest', current_problem: true, customer_quote: 'Do you cover ants?' }, 'cust-1', [], null, { secondaryProperty: false, lawn: true, customerMessage: 'Do you cover ants?' })
+      .then((r) => ({ result: r }));
+
+    expect(result.offered).toBe(false);
+  });
+});
