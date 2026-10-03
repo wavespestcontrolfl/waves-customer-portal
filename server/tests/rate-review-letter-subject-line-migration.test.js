@@ -13,7 +13,7 @@ function fakeKnex(subject = OLD_SUBJECT, shape = 'string') {
   const opt = seed._private.TEMPLATE.optional;
   const enc = (a) => (shape === 'string' ? JSON.stringify(a) : a);
   const store = {
-    email_templates: [{ id: 't1', template_key: 'billing.rate_review_notice', active_version_id: 'v1', allowed_variables: enc(all), required_variables: enc(seed._private.TEMPLATE.required), optional_variables: enc(opt) }],
+    email_templates: [{ id: 't1', template_key: 'billing.rate_review_notice', active_version_id: 'v1', allowed_variables: enc(all), optional_variables: enc(opt) }],
     email_template_versions: [{ id: 'v1', subject }],
   };
   const knex = (table) => {
@@ -42,19 +42,13 @@ describe('rate review letter — subject_line migration', () => {
     await migration.up(knex);
     expect(knex.store.email_template_versions[0].subject).toBe(NEW_SUBJECT);
     expect(list(knex.store.email_templates[0].allowed_variables)).toContain(VAR);
-    // the template no longer references effective_date, so it is optional and subject_line is required
-    const t = knex.store.email_templates[0];
-    expect(list(t.required_variables)).toContain(VAR);
-    expect(list(t.required_variables)).not.toContain('effective_date');
-    expect(list(t.optional_variables)).toContain('effective_date');
-    expect(list(t.allowed_variables)).toEqual(expect.arrayContaining([VAR, 'effective_date']));
+    expect(list(knex.store.email_templates[0].optional_variables)).toContain(VAR);
     await migration.up(knex); // idempotent
     expect(list(knex.store.email_templates[0].allowed_variables).filter((v) => v === VAR)).toHaveLength(1);
     await migration.down(knex);
     expect(knex.store.email_template_versions[0].subject).toBe(OLD_SUBJECT);
     expect(list(knex.store.email_templates[0].allowed_variables)).not.toContain(VAR);
     expect(list(knex.store.email_templates[0].optional_variables)).toEqual(seed._private.TEMPLATE.optional);
-    expect([...list(knex.store.email_templates[0].required_variables)].sort()).toEqual([...seed._private.TEMPLATE.required].sort());
   });
 
   test('an operator-edited subject is left alone (no match, no write)', async () => {

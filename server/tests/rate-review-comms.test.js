@@ -82,7 +82,8 @@ jest.mock('../services/email-template-library', () => {
         template: {
           template_key: TEMPLATE.key, name: TEMPLATE.name, mode: 'service', status: 'active', active_version_id: 'v1', send_stream: 'transactional_required',
           ...(() => {
-            const v = subjectMigration.shiftVariables({ allowed: [...TEMPLATE.required, ...TEMPLATE.optional], required: TEMPLATE.required, optional: TEMPLATE.optional }, true);
+            const variables = require('../models/migrations/20261003150000_rate_review_letter_subject_variables')._private;
+            const v = variables.shiftVariables({ allowed: [...TEMPLATE.required, ...TEMPLATE.optional, subjectMigration.VAR], required: TEMPLATE.required, optional: [...TEMPLATE.optional, subjectMigration.VAR] }, true);
             return { required_variables: JSON.stringify(v.required), allowed_variables: JSON.stringify(v.allowed) };
           })(),
         },
