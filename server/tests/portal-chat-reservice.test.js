@@ -21,7 +21,6 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
-    isActiveLawnReport: actual.isActiveLawnReport,
     reserviceSelfServeEnabled: (...a) => mockSelfServe(...a),
     openReserviceCallbacks: (...a) => mockOpen(...a),
   };
@@ -232,13 +231,12 @@ describe('the customer\'s own message this turn decides what is covered, not the
   test.each([
     'Weeds are coming back all over the lawn',
     'the grass is looking bad again',
-    'my yard treatment did not work',
-  ])('an active lawn report opens the lawn offer: %s', async (text) => {
+  ])('pest only for now: a lawn report opens nothing, even under the lawn line: %s', async (text) => {
     const { result, actions } = await offer('lawn', { secondaryProperty: false, customerMessage: text });
 
-    expect(result.offered).toBe(true);
-    expect(result.instruction).toMatch(/lawn care re-service/);
-    expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]);
+    expect(result.offered).toBe(false);
+    expect(actions).toEqual([]);
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
   });
 
   test('a lawn report never opens a pest offer', async () => {
@@ -248,10 +246,6 @@ describe('the customer\'s own message this turn decides what is covered, not the
 
   
   
-  test('a plain yard-condition report opens the lawn offer', async () => {
-    const { result } = await offer('lawn', { secondaryProperty: false, customerMessage: 'my yard is brown' });
-    expect(result.offered).toBe(true);
-  });
 
   test('no customer words at all: no offer', async () => {
     const { result } = await offer('pest', { secondaryProperty: false });

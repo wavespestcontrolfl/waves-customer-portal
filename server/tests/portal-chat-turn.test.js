@@ -31,7 +31,6 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
-    isActiveLawnReport: actual.isActiveLawnReport,
     reserviceSelfServeEnabled: () => true,
     openReserviceCallbacks: async () => ({}),
   };
@@ -369,7 +368,8 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
 
     const text = mockCreate.mock.calls[0][0].system[0].text;
     expect(text).not.toMatch(/reports a problem since the visit or says something was missed, escalate/);
-    expect(text).toMatch(/Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS/);
+    expect(text).toMatch(/Pests back since the visit follow PESTS BACK BETWEEN VISITS/);
+    expect(text).toMatch(/A lawn problem \(weeds, brown or thin grass\) is not this tool's: escalate it with topic pest_problem/);
   });
 
   test('the gates compose: every portal section in one prompt', async () => {

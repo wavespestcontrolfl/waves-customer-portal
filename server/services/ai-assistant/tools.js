@@ -152,10 +152,11 @@ const GET_RECENT_VISITS_TOOL = {
 // the customer named; the model is never the one deciding a visit is free.
 const OFFER_RESERVICE_TOOL = {
   name: 'offer_reservice',
-  description: 'For a customer reporting pests, or a lawn problem, back between scheduled visits: checks whether their plan covers a free re-service for that service line and, when it does, shows a button that opens the booking page with the real open times. If one is already booked, shows a button to move it instead. You are told which case applies.',
+  description: 'For a customer reporting household pests back between scheduled visits: checks whether their plan covers a free pest re-service and, when it does, shows a button that opens its booking page. If one is already booked, shows a button to move it instead. You are told which case applies. Not for lawn problems.',
   input_schema: {
     type: 'object',
-    properties: { service_line: { type: 'string', enum: ['pest', 'lawn'], description: 'pest: household insects and spiders. lawn: weeds, turf insects, brown or thin grass. The server checks the customer\'s own words; rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' } },
+    // Pest only for now (owner ruling 2026-10-02): the lawn check ships in its own PR.
+    properties: { service_line: { type: 'string', enum: ['pest'], description: 'pest: household insects and spiders. The server checks the customer\'s own words; rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' } },
     required: ['service_line'],
     additionalProperties: false,
   },
@@ -468,7 +469,8 @@ async function getRecentVisits(customerId, actions, cards) {
   };
 }
 
-const RESERVICE_LINE_WORDS = { pest: 'pest control', lawn: 'lawn care' };
+// Pest only for now (owner ruling 2026-10-02); lawn reports hand off.
+const RESERVICE_LINE_WORDS = { pest: 'pest control' };
 const RESERVICE_SPECIALTY = {
   offered: false,
   instruction: 'What the customer describes includes a separately priced service (such as rodents, termites, mosquitoes or a tree and shrub problem), which a free re-service does not cover. Do not offer or imply a free visit. Acknowledge what they are seeing and use the escalate tool with topic pest_problem so the team follows up.',
@@ -523,21 +525,14 @@ function bookedReserviceFacts(line, booked, movable) {
 // texting AI's classifier, never from the line the model picked and never
 // carried forward from an earlier message (a later "they're gone now" must
 // not leave an old report standing). A separately priced specialty in it
-// means no free offer, and so does anything short of an active report in
-// this line ("Do you cover ants?" names a line but reports nothing):
-// isActivePestReport (the SMS flow's own predicate) for pest; for lawn,
-// isActiveLawnReport, which names its own lawn subject ("my yard is brown";
-// the lane reader treats a plain "yard" as a location), or a turf insect the
-// pest test catches.
+// means no free offer, and so does anything short of an active pest report
+// (isActivePestReport, the SMS flow's own predicate) in the pest line:
+// "Do you cover ants?" names a pest but reports nothing.
 function reportRefusal(customerMessage, line) {
-  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport, isActiveLawnReport } = require('../reservice-scheduler');
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport } = require('../reservice-scheduler');
   const text = String(customerMessage || '');
   if (reportedReserviceExcludedSpecialty(text)) return RESERVICE_SPECIALTY;
-  const pest = isActivePestReport(text);
-  const inLine = line === 'lawn'
-    ? isActiveLawnReport(text) || (pest && reportedReserviceLanes(text).includes('lawn'))
-    : pest && reportedReserviceLanes(text).includes('pest');
-  return inLine ? null : RESERVICE_HAND_OFF;
+  return isActivePestReport(text) && reportedReserviceLanes(text).includes(line) ? null : RESERVICE_HAND_OFF;
 }
 
 async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerMessage = '' } = {}) {
@@ -580,7 +575,7 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
     offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${line === 'pest' ? 'general pest control' : 'lawn care'} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers general pest control only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
   };
 }
 

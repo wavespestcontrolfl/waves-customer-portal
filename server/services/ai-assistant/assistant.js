@@ -275,10 +275,10 @@ function withReservice(prompt) {
     // The one plan fact this lane is given: whether offer_reservice found a
     // free re-service covered.
     .replace('plan details', 'plan details (apart from what offer_reservice tells you)')
-    .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS below.')
-    .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
+    .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests back since the visit follow PESTS BACK BETWEEN VISITS below.')
+    .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:
-When the customer reports pests, or a lawn problem, back or still there between scheduled visits, call offer_reservice in that same turn, with the service line (pest or lawn), and follow its instruction. It reads the customer's message from that turn only. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead.
+When the customer reports household pests back or still there between scheduled visits, call offer_reservice in that same turn, with service line pest, and follow its instruction. It reads the customer's message from that turn only. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead. A lawn problem (weeds, brown or thin grass) is not this tool's: escalate it with topic pest_problem.
 
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
 }

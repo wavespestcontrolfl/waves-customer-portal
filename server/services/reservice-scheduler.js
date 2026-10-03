@@ -710,9 +710,7 @@ function reservicePestReportFacts(text) {
   // Round-1 R2: the pest NOUNS a later pronoun return can refer to — a clause that names a pest and is itself resolved, or that a subjectless
   // departure just dropped ("The ants came back, then went away, but now they're back": "The ants came back" is dropped yet still the antecedent).
   const antecedents = segs.filter((seg) => !seg.blank && RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.eff) && (seg.reachDropped || reserviceClauseResolved(seg.eff))).map((seg) => seg.eff);
-  // Every clause in order with its verdict, for readers that need what came after a clause.
-  const ordered = segs.filter((seg) => !seg.blank).map((seg) => ({ text: seg.eff, dropped: seg.dropped, question: seg.question }));
-  return { kept, asserted, clauses, antecedents, ordered, survivingText: surviving };
+  return { kept, asserted, clauses, antecedents, survivingText: surviving };
 }
 // A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun
 // (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
@@ -752,61 +750,6 @@ function isActivePestReport(text) {
   if (activePestClauses(asserted).length) return true;
   return asserted.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause))
     && (kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause)) || pronounReturnAntecedents(facts).length > 0);
-}
-
-// An ACTIVE lawn report (owner ruling 2026-10-02, portal chat re-service offer): the pest test above is
-// pest-noun shaped, so "weeds all over my lawn" or "the grass is looking bad again" never counts there. This
-// reads the SAME clauses (reservicePestReportFacts: questions, negated / resolved and historical clauses
-// already out) and needs, in one clause, a lawn problem: weeds or a turf insect back / spreading / everywhere,
-// the turf itself in bad shape, or a lawn treatment that is not working. A negator just before the problem
-// word ("the grass isn't brown", "no weeds") does not count. Turf insects are also caught by the pest test.
-const RESERVICE_LAWN_INVADER = `(?:weeds?|${TURF_INSECT_NOUN_SOURCES.join('|')})`;
-const RESERVICE_LAWN_TURF = '(?:lawn|grass|turf|sod|yard)';
-const RESERVICE_LAWN_SPREAD = '(?:back|again|still|everywhere|return(?:s|ed|ing)?|all\\s+over|taking\\s+over|(?:coming|came|come|popping|showing|growing)\\s+(?:back|up|in)|spread(?:ing|s)?|keep\\s+(?:coming|growing|popping|spreading)|(?:killing|eating|destroying|damaging|ruining))';
-const RESERVICE_LAWN_CONDITION = '(?:brown(?:ing)?|yellow(?:ing)?|dying|dead|dried\\s+(?:out|up)|thin(?:ning)?|bare|patch(?:y|es)|spots|(?:looks?|looking)\\s+(?:bad|rough|awful|sick|worse|horrible)|getting\\s+worse|not\\s+(?:green|growing))';
-const RESERVICE_LAWN_FAILURE_RE = new RegExp(
-  `\\b(?:${RESERVICE_LAWN_TURF}|weeds?|fertili[sz]\\w*)\\s+(?:treatment|application|service|spray(?:ing)?|program|control)s?\\b`
-  + `(?:\\W+[\\w'’-]+){0,3}?\\W+(?:(?:did|does|do|is|was|has|have)\\s*n[o'’]?t|not|never|stopped)\\s+(?:work(?:ed|ing|s)?|help(?:ed|ing|s)?|do(?:ing)?\\s+anything)\\b`,
-  'i',
-);
-const RESERVICE_LAWN_PROBLEM_RES = [
-  new RegExp(`\\b${RESERVICE_LAWN_INVADER}\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_LAWN_SPREAD}\\b`, 'i'),
-  new RegExp(`\\b${RESERVICE_LAWN_SPREAD}\\W+(?:[\\w'’-]+\\W+){0,3}?${RESERVICE_LAWN_INVADER}\\b`, 'i'),
-  new RegExp(`\\b${RESERVICE_LAWN_TURF}\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_LAWN_CONDITION}\\b`, 'i'),
-  new RegExp(`\\b${RESERVICE_LAWN_CONDITION}\\W+(?:[\\w'’-]+\\W+){0,3}?${RESERVICE_LAWN_TURF}\\b`, 'i'),
-];
-const RESERVICE_LAWN_NEGATED_RE = new RegExp(
-  `\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+(?:${RESERVICE_LAWN_SPREAD}|${RESERVICE_LAWN_CONDITION}|${RESERVICE_LAWN_INVADER})\\b`,
-  'i',
-);
-// A later clause saying the lawn has recovered ("but it is green now", "the
-// weeds are under control") resolves an earlier problem clause.
-const RESERVICE_LAWN_RECOVERED_RE = /\b(?:green|fine|healthy|recovered|better|good|under\s+control|cleared\s+up|came\s+back\s+(?:green|nicely))\b/i;
-// "not getting better", "isn't green": a negated recovery resolves nothing.
-const RESERVICE_LAWN_RECOVERY_NEGATED_RE = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+(?:green|fine|healthy|recovered|better|good|under\\s+control|cleared)\\b`, 'i');
-// "terrible" is left out of the condition words on purpose: the portal
-// assistant hands any message carrying it to the team as a complaint before
-// a tool runs, so the lawn check never claims it.
-function isActiveLawnReport(text) {
-  const { ordered } = reservicePestReportFacts(text);
-  const problem = (clause) => !reserviceClauseIsHistorical(clause) && (
-    RESERVICE_LAWN_FAILURE_RE.test(clause)
-    || (!RESERVICE_LAWN_NEGATED_RE.test(clause) && RESERVICE_LAWN_PROBLEM_RES.some((re) => re.test(clause)))
-  );
-  const recovered = (clause) => RESERVICE_LAWN_RECOVERED_RE.test(clause) && !RESERVICE_LAWN_RECOVERY_NEGATED_RE.test(clause);
-  // In order: a problem clause sets it; a later recovery, or a later clause
-  // the shared reader dropped as resolved or negated ("but they aren't
-  // anymore"), clears it. Questions count for nothing.
-  let active = false;
-  for (const { text: clause, dropped, question } of ordered) {
-    if (question) continue;
-    // ...except a negated recovery ("not getting better"), which the reader
-    // drops as negated but which says the problem goes on.
-    if (dropped) { if (!RESERVICE_LAWN_RECOVERY_NEGATED_RE.test(clause)) active = false; continue; }
-    if (problem(clause)) active = true;
-    else if (active && recovered(clause)) active = false;
-  }
-  return active;
 }
 
 // Codex round-24 P2: does the message AFFIRM a term (a hand-off word, an anger word)? A clause that mentions
@@ -1030,7 +973,6 @@ module.exports = {
   reportedReserviceLanes,
   reportedReserviceExcludedSpecialty,
   isActivePestReport,
-  isActiveLawnReport,
   namesOtherService,
   mentionsAffirmed,
   openReserviceCallbacks,
