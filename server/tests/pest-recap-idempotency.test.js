@@ -43,6 +43,9 @@ jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-05-29' }));
 jest.mock('../services/compliance', () => ({
   createComplianceRecords: jest.fn().mockResolvedValue([]),
 }));
+jest.mock('../services/service-photos', () => ({
+  promoteStagedServicePhotos: jest.fn().mockResolvedValue([]),
+}));
 // The requirement-freeze resolver is unit-tested in
 // service-closeout-requirements.test.js; a canned snapshot here lets these
 // tests assert the recap WIRING — insert freezes, update fills-if-absent,
@@ -68,6 +71,7 @@ jest.mock('../services/service-closeout-requirements', () => ({
 
 const { transitionJobStatus } = require('../services/job-status');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { promoteStagedServicePhotos } = require('../services/service-photos');
 const { submitRecap } = require('../services/pest-recap');
 
 const SERVICE_ID = 'svc-1';
@@ -274,6 +278,29 @@ const retractionSweeps = (store) => (store.ledgerUpdates || []).filter((u) => u.
 
 describe('pest recap idempotency (Codex P1)', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  test('promotes staged photos to the canonical record inside the recap transaction', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(promoteStagedServicePhotos).toHaveBeenCalledWith({
+      scheduledServiceId: SERVICE_ID,
+      serviceRecordId: 'rec-1',
+      knex,
+    });
+  });
 
   test('a second submit updates the same record and does not re-text the customer', async () => {
     const store = { serviceStatus: 'scheduled', records: [] };
