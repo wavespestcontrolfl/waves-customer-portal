@@ -32,11 +32,17 @@ jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: je
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: false, blocked: true, code: 'test' })),
 }));
-jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
+jest.mock('../services/stripe', () => ({ charge: jest.fn(), chargeOneTime: jest.fn(), chargeInvoiceWithSavedCard: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: jest.fn(() => false),
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
   retrievePaymentIntent: jest.fn(async () => null),
   cancelPaymentIntent: jest.fn(async () => null),
+}));
+jest.mock('../middleware/admin-auth', () => ({
+  ...jest.requireActual('../middleware/admin-auth'),
+  adminAuthenticate: (req, _res, next) => { req.technicianId = null; req.techRole = 'admin'; return next(); },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
@@ -492,6 +498,67 @@ postgres('completion dues mint vs the monthly collectors (B08)', () => {
       });
       await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void' });
       expect(await classify(f, row)).toMatchObject({ collectible: true, disposition: DISPOSITIONS.CHARGE });
+    } finally { await cleanup(f); }
+  });
+});
+
+// Charge now (the admin button) runs the same shared lookup inside its
+// customer lock; real SQL, the real route.
+postgres('Charge now vs a stamped membership-dues invoice (B08)', () => {
+  const express = require('express');
+  const StripeService = require('../services/stripe');
+  let server;
+  let baseUrl;
+  beforeAll(async () => {
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/admin', require('../routes/admin-billing-health'));
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    server = app.listen(0);
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(async () => { await new Promise((r) => server.close(r)); if (mockPg) await mockPg.destroy(); });
+  beforeEach(() => {
+    StripeService.charge.mockReset().mockResolvedValue({ id: randomUUID(), status: 'paid', amount: '49.00', metadata: null });
+    StripeService.chargeOneTime.mockReset().mockResolvedValue({ id: randomUUID(), status: 'paid', amount: '25.00', metadata: null });
+  });
+  const chargeNow = (f, body = {}) => fetch(`${baseUrl}/admin/customers/${f.customerId}/charge-now`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  async function stampedInvoice(f, status) {
+    const id = randomUUID();
+    await mockPg('invoices').insert({ id, token: randomUUID().replace(/-/g, ''), invoice_number: `B08-${id.slice(0, 8)}`,
+      customer_id: f.customerId, status, total: 49, subtotal: 49,
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }]) });
+    return id;
+  }
+
+  test.each(['sent', 'overdue', 'paid'])('a %s stamped dues invoice for the month → refused 409 already_collected, no Stripe call', async (status) => {
+    const f = await seedMember({ autopay: true });
+    try {
+      const invoiceId = await stampedInvoice(f, status);
+      if (status === 'paid') {
+        // Its payment carries invoice_id, not billed_month — invisible to the payments check.
+        await mockPg('payments').insert({ id: randomUUID(), customer_id: f.customerId, amount: 49, status: 'paid',
+          payment_date: etDateString(), description: 'Lawn Care', metadata: JSON.stringify({ invoice_id: invoiceId }) });
+      }
+      const res = await chargeNow(f);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ already_collected: true, dues_invoice_id: invoiceId });
+      expect(StripeService.charge).not.toHaveBeenCalled();
+    } finally { await cleanup(f); }
+  });
+
+  test('a VOIDED stamped dues invoice charges the month; an explicit amount charges regardless of a live invoice', async () => {
+    const f = await seedMember({ autopay: true });
+    try {
+      const invoiceId = await stampedInvoice(f, 'void');
+      expect((await chargeNow(f)).status).toBe(200);
+      expect(StripeService.charge).toHaveBeenCalledTimes(1);
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+      expect((await chargeNow(f, { amount: 25, description: 'Add-on' })).status).toBe(200);
+      expect(StripeService.chargeOneTime).toHaveBeenCalledTimes(1);
     } finally { await cleanup(f); }
   });
 });

@@ -987,7 +987,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
 }
 
 // The live completion-minted dues invoice for a customer + ET month, or null
-// (row: id, status, scheduled_service_id). The ONE definition every collector
+// (row: id, status, scheduled_service_id, invoice_number). The ONE definition every collector
 // shares — completion, the monthly cron, the retry sweep's classifier — so a
 // month a stamped invoice already bills is never charged a second time.
 // `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
@@ -1015,7 +1015,7 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
       this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
     });
   }
-  return (await invoiceQuery.first('id', 'status', 'scheduled_service_id')) || null;
+  return (await invoiceQuery.first('id', 'status', 'scheduled_service_id', 'invoice_number')) || null;
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
