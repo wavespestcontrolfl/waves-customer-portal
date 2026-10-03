@@ -259,13 +259,22 @@ async function selectCandidates(limit, nowMs) {
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
     .where((b) => {
       b.whereNull('detail_status')
-        .orWhere((c) => c.whereNotNull('co_date').whereRaw('detail_co_date IS DISTINCT FROM co_date'))
+        // CO re-read: once per new CO date; a re-read that failed (fetched
+        // after the CO, facts kept) waits out the error backoff.
+        .orWhere((c) => c.whereNotNull('co_date').whereRaw('detail_co_date IS DISTINCT FROM co_date')
+          .where((d) => d.whereNull('detail_fetched_at')
+            .orWhereRaw('detail_fetched_at::date <= co_date')
+            .orWhere('detail_fetched_at', '<', cutoff(RETRY_DAYS.error))))
         .orWhere((c) => c.where('detail_status', 'error').where('detail_fetched_at', '<', cutoff(RETRY_DAYS.error)))
         .orWhere((c) => c.where('detail_status', 'not_found').where('detail_fetched_at', '<', cutoff(RETRY_DAYS.not_found)))
         .orWhere((c) => c.where('detail_status', 'no_fields').where('detail_fetched_at', '<', cutoff(RETRY_DAYS.no_fields)));
     })
+    // First CO re-reads, then never-read permits, then everything that
+    // already failed — including a CO re-read that failed before (fetched
+    // after its CO), so a stubborn page can never starve new work or trip
+    // the outage stop at the head of every run.
     .orderByRaw(`CASE
-      WHEN detail_status = 'ok' THEN 0
+      WHEN detail_status = 'ok' AND (detail_fetched_at IS NULL OR detail_fetched_at::date <= co_date) THEN 0
       WHEN detail_status IS NULL THEN 1
       ELSE 2 END`)
     .orderByRaw('issued_date DESC NULLS LAST')
@@ -277,8 +286,13 @@ async function selectCandidates(limit, nowMs) {
 const toDateOnly = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
 
 async function recordResult(candidate, status, facts, fetchedAt) {
-  // A refetch that fails must not hide the facts an earlier fetch stored.
-  if (candidate.detail_status === 'ok' && status !== 'ok') return;
+  // A refetch that fails must not hide the facts an earlier fetch stored —
+  // but it is recorded (fetched_at only), so the row backs off and sorts
+  // behind fresh work instead of heading every run.
+  if (candidate.detail_status === 'ok' && status !== 'ok') {
+    await db('construction_permit_records').where({ permit_no: candidate.permit_no }).update({ detail_fetched_at: fetchedAt });
+    return;
+  }
   await db('construction_permit_records')
     .where({ permit_no: candidate.permit_no })
     .update({
@@ -300,9 +314,9 @@ function countResult(out, streaks, status) {
   } else if (status === 'no_fields') {
     out.noFields += 1; streaks.noFields += 1; streaks.errors = 0;
   } else if (status === 'not_found') {
-    out.notFound += 1; streaks.errors = 0;
+    out.notFound += 1; streaks.noFields = 0; streaks.errors = 0;
   } else {
-    out.errors += 1; streaks.errors += 1;
+    out.errors += 1; streaks.errors += 1; streaks.noFields = 0;
   }
   if (streaks.noFields >= STOP_AFTER) return 'structure';
   return streaks.errors >= STOP_AFTER ? 'outage' : null;

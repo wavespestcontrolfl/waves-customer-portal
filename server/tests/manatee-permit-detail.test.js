@@ -177,7 +177,7 @@ describe('helpers', () => {
 // Chainable thenable stub: awaiting resolves to `rows`; update/where recorded.
 function stubDb(rows) {
   const b = {};
-  for (const m of ['whereRaw', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'orderByRaw', 'orderBy', 'limit', 'select', 'update']) {
+  for (const m of ['whereRaw', 'orWhereRaw', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'orderByRaw', 'orderBy', 'limit', 'select', 'update']) {
     b[m] = jest.fn((arg) => {
       // Run grouped where(fn) callbacks so their inner chain is exercised.
       if (typeof arg === 'function') arg(b);
@@ -428,6 +428,18 @@ describe('syncPermitDetails', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
+  test('a not_found or a request failure also breaks a no_fields streak (scattered no_fields never stop the run)', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const plan = ['nf', 'nf', 'nf', 'nf', 'missing', 'nf', 'nf', 'nf', 'nf', 'fail', 'nf'];
+    const ids = plan.map((_, i) => `BLD9801-085${String(i).padStart(2, '0')}`);
+    stubDb(ids.map((id) => cand(id)));
+    fakeAca(Object.fromEntries(ids.map((id, i) => [id,
+      plan[i] === 'fail' ? { fail: true } : plan[i] === 'missing' ? { empty: true } : { pages: [noFieldsPage(id)] }])), { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ attempted: 11, noFields: 9, stopped: null });
+  });
+
   test('five consecutive request failures stop the run as an outage', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
     const clock = fakeClock();
@@ -452,9 +464,12 @@ describe('syncPermitDetails', () => {
     }, { clock });
     const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
     expect(out).toMatchObject({ attempted: 2, errors: 1, ok: 1 });
-    expect(b.update).toHaveBeenCalledTimes(1);
+    // The failed re-read only stamps its attempt time (facts and status
+    // untouched, so it backs off); the good one replaces the facts.
+    expect(b.update).toHaveBeenCalledTimes(2);
+    expect(Object.keys(b.update.mock.calls[0][0])).toEqual(['detail_fetched_at']);
     expect(b.where).toHaveBeenCalledWith({ permit_no: 'BLD9801-1002' });
-    expect(b.update.mock.calls[0][0]).toMatchObject({ conditioned_sqft: 2400, bedrooms: 4, under_roof_sqft: null, detail_co_date: '2026-09-11' });
+    expect(b.update.mock.calls[1][0]).toMatchObject({ conditioned_sqft: 2400, bedrooms: 4, under_roof_sqft: null, detail_co_date: '2026-09-11' });
   });
 
   test('a write failure is counted and never throws out of the run', async () => {

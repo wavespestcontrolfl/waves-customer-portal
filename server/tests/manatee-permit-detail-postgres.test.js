@@ -128,13 +128,31 @@ postgres('permit detail collector on PostgreSQL', () => {
 
     const rows = await selectCandidates(50, now);
     expect(rows.map((r) => r.permit_no)).toEqual([
-      // ok rows whose CO changed, newest issued first
-      'BLD9802-0013', 'BLD9802-0011',
+      // ok rows read before their CO: first in line
+      'BLD9802-0011',
       // never tried, newest issued first
       'BLD9802-0002', 'BLD9802-0003', 'BLD9802-0001', 'BLD9802-0004',
-      // failed reads past their window or with a new CO, newest issued first
-      'BLD9802-0025', 'BLD9802-0023', 'BLD9802-0021', 'BLD9802-0026',
+      // failed reads past their window or with a new CO, newest issued first.
+      // 0013 (read AFTER its old CO, CO date moved since) is still re-read,
+      // but behind fresh work: without a dedicated column it looks exactly
+      // like a CO re-read that failed, which must never head a run.
+      'BLD9802-0025', 'BLD9802-0023', 'BLD9802-0021', 'BLD9802-0026', 'BLD9802-0013',
     ]);
+  });
+
+  test('a failed CO re-read keeps the facts, backs off, then queues behind fresh work', async () => {
+    await insert('BLD9805-0001', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: '2026-09-01', issued_date: '2024-01-01' });
+    await insert('BLD9805-0002', { issued_date: '2026-07-01' });
+    let [first] = await selectCandidates(10, now);
+    expect(first.permit_no).toBe('BLD9805-0001');
+    await recordResult(first, 'error', null, new Date(now));
+    const row = await conn('construction_permit_records').where({ permit_no: 'BLD9805-0001' }).first();
+    expect(row).toMatchObject({ detail_status: 'ok', conditioned_sqft: 2000 });
+    // Inside the error backoff: not a candidate.
+    expect((await selectCandidates(10, now)).map((r) => r.permit_no)).toEqual(['BLD9805-0002']);
+    // Past it: re-read again, but after never-read permits.
+    const later = now + 2 * 24 * 3600 * 1000;
+    expect((await selectCandidates(10, later)).map((r) => r.permit_no)).toEqual(['BLD9805-0002', 'BLD9805-0001']);
   });
 
   test('candidate order and cap', async () => {
@@ -161,8 +179,12 @@ postgres('permit detail collector on PostgreSQL', () => {
     expect(Number(row.stories)).toBe(1);
     expect(await selectCandidates(10, now)).toEqual([]);
 
-    // The weekly report sync merges a CO date onto the row (only its own columns).
-    await conn('construction_permit_records').where({ permit_no: 'BLD9804-0001' }).update({ co_date: '2026-09-12' });
+    // The weekly report sync merges a CO date onto the row (only its own
+    // columns). Real order: the CO comes AFTER the first read (a CO dated
+    // before our read looks like a failed re-read and waits the backoff —
+    // see the failed-re-read test).
+    const coDate = new Date(now + 30 * DAY).toISOString().slice(0, 10);
+    await conn('construction_permit_records').where({ permit_no: 'BLD9804-0001' }).update({ co_date: coDate });
     [c] = await selectCandidates(10, now);
     expect(c.permit_no).toBe('BLD9804-0001');
     // A failed re-read keeps the stored facts.
@@ -173,7 +195,7 @@ postgres('permit detail collector on PostgreSQL', () => {
     await recordResult(c, 'ok', { conditioned_sqft: 2300, under_roof_sqft: null, stories: 1, bedrooms: 4, bathrooms: 3 }, new Date(now));
     row = await conn('construction_permit_records').where({ permit_no: 'BLD9804-0001' }).first();
     expect(row.conditioned_sqft).toBe(2300);
-    expect(String(row.detail_co_date.toISOString?.().slice(0, 10) ?? row.detail_co_date)).toBe('2026-09-12');
+    expect(String(row.detail_co_date.toISOString?.().slice(0, 10) ?? row.detail_co_date)).toBe(coDate);
     expect(await selectCandidates(10, now)).toEqual([]);
   });
 
