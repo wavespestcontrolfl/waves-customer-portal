@@ -922,14 +922,15 @@ async function reviewAskDeliveryEvidenceFor(requests) {
   const found = new Map();
   if (!wanted.size) return found;
   try {
-    const rows = await db("sms_log")
+    const accepted = await db("sms_log")
       .where({ direction: "outbound" })
       .whereIn("customer_id", [...new Set(wanted.values())])
       .whereIn("status", ["sent", "delivered"])
       .whereRaw("metadata->>'review_request_id' = ANY(?)", [[...wanted.keys()]])
-      .orderBy("created_at", "asc")
       .select("id", "customer_id", "created_at", "metadata");
-    for (const row of rows) {
+    // Oldest first: a request's evidence is its first accepted send.
+    accepted.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    for (const row of accepted) {
       let meta = row.metadata;
       try { meta = typeof meta === "string" ? JSON.parse(meta) : meta || {}; } catch { continue; }
       const requestId = String(meta?.review_request_id);
