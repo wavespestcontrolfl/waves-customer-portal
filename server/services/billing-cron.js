@@ -804,7 +804,7 @@ const BillingCron = {
           }).catch(() => {});
           // alertAutopayScaParked resolves false (and has already logged at error
           // level, with a health-alert fallback) when no bell row was written.
-          const alerted = await alertAutopayScaParked(customer, err, { amount: customer.monthly_rate, source: 'autopay' });
+          const alerted = await alertAutopayScaParked(customer, err, { amount: customer.monthly_rate, source: 'autopay', kind: 'monthly', billedMonth: monthStart.slice(0, 7) });
           logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — parked, no retry, ${alerted ? 'office alerted' : 'office bell NOT filed (see error above)'}`);
           continue;
         }
@@ -1009,6 +1009,16 @@ const BillingCron = {
       await require('./recurring-card-on-file').sweepStrandedPrepayAutoCharges();
     } catch (err) {
       logger.warn(`[billing-cron] stranded prepay auto-charge sweep failed: ${err.message} — next run retries`);
+    }
+
+    // B16: durable repair for the "autopay parked on card authentication" alerts. Event-time
+    // closes (Charge now, the succeeded webhook) are best-effort and can fail or never fire; this
+    // closes any alert whose debt is now collected, whichever door the money came through. Reads
+    // only the open alerts of that family; never throws into the sweep.
+    try {
+      await require('./autopay-sca-parked').reconcileScaParkedAlerts();
+    } catch (err) {
+      logger.error(`[billing-cron] parked-SCA alert reconcile failed: ${err.message} — next run retries`);
     }
 
     // Collectibility is decided by the shared verdict (retry-collectibility.js)
@@ -1503,7 +1513,12 @@ const BillingCron = {
             paymentId: payment.id,
             details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          const alerted = await alertAutopayScaParked(customer, err, { amount: payment.amount, source: 'autopay_retry' });
+          const alerted = await alertAutopayScaParked(customer, err, {
+            amount: payment.amount,
+            source: 'autopay_retry',
+            kind: verdict.isMonthlyObligation ? 'monthly' : 'one_time',
+            billedMonth: verdict.isMonthlyObligation ? obligationMonth : null,
+          });
           logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked, ${alerted ? 'office alerted' : 'office bell NOT filed (see error above)'}`);
           continue;
         }

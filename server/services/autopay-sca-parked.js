@@ -29,7 +29,7 @@ const scaParkedAlertKey = (customerId, ref) => `${KEY_PREFIX}${customerId}:${ref
 // logged at error level and falls back to a customer_health_alerts row (the same staff
 // surface billing-cron's ambiguous-outcome branch uses), and the caller must not claim
 // the office was told. Never throws: a bell failure must not abort the collection loop.
-async function alertAutopayScaParked(customer, err, { amount, source }) {
+async function alertAutopayScaParked(customer, err, { amount, source, kind = 'monthly', billedMonth = null }) {
   const customerId = String(customer.id);
   const paymentIntentId = err.stripePaymentIntentId || err.paymentRecord?.stripe_payment_intent_id || null;
   const attemptId = err.paymentRecord?.id || null;
@@ -37,6 +37,26 @@ async function alertAutopayScaParked(customer, err, { amount, source }) {
   const dollars = Number.isFinite(owed)
     ? `$${owed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
     : '';
+  // Everything a closer needs rides in the alert's OWN metadata (and the fallback's trigger_data),
+  // so closing never depends on the failed payments row existing (stripe.js can fail to insert it
+  // and still throw this error with paymentRecord null): the obligation month (from the row the
+  // charge wrote, else the caller's month), the amount, and whether it is monthly dues. A one-time
+  // retry row cannot be tied to an explicit-amount replacement (no month stamp; amount-matching a
+  // supersede would be a guess), so its alert is worded to be marked done by a person unless its
+  // own row settles or is superseded.
+  const alertKind = kind === 'one_time' ? 'one_time' : 'monthly';
+  const obligationMonth = alertKind === 'monthly'
+    ? (parseMetadata(err.paymentRecord?.metadata).billed_month || billedMonth || null)
+    : null;
+  const association = {
+    customer_id: customerId,
+    stripe_payment_intent_id: paymentIntentId,
+    payment_id: attemptId,
+    billed_month: obligationMonth,
+    kind: alertKind,
+    amount_cents: Number.isFinite(owed) ? Math.round(owed * 100) : null,
+    source,
+  };
   let alert = null;
   let name = 'this customer';
   try {
@@ -53,17 +73,12 @@ async function alertAutopayScaParked(customer, err, { amount, source }) {
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: customerId },
-      doneWhen: 'charge_collected',
+      doneWhen: alertKind === 'monthly' ? 'charge_collected' : 'collected_and_marked_done',
       who: 'person',
     }, {
-      detail: `Autopay for ${name} (${dollars || 'amount unknown'}) was declined for customer authentication (3D Secure): the cardholder's bank has to approve the charge, and an automatic charge cannot do that. It was not collected and no retry is scheduled, so it will not collect on its own. No message was sent to the customer. Reach the customer to approve it with their bank, or collect it another way. Stripe PaymentIntent ${paymentIntentId || 'unknown'}${attemptId ? `, payment record ${attemptId}` : ''}.`,
+      detail: `Autopay for ${name} (${dollars || 'amount unknown'}) was declined for customer authentication (3D Secure): the cardholder's bank has to approve the charge, and an automatic charge cannot do that. It was not collected and no retry is scheduled, so it will not collect on its own. No message was sent to the customer. Reach the customer to approve it with their bank, or collect it another way. ${alertKind === 'one_time' ? 'This is a one-time charge: it closes by itself only if this charge\'s own payment settles. If you collect it with a different payment, mark this done. ' : ''}Stripe PaymentIntent ${paymentIntentId || 'unknown'}${attemptId ? `, payment record ${attemptId}` : ''}.`,
       dedupeKey: scaParkedAlertKey(customerId, paymentIntentId || attemptId || etDateString().slice(0, 7)),
-      metadata: {
-        customer_id: customerId,
-        stripe_payment_intent_id: paymentIntentId,
-        payment_id: attemptId,
-        source,
-      },
+      metadata: association,
     });
   } catch (alertErr) {
     logger.error(`[autopay-sca] office alert threw for customer ${customerId}: ${alertErr.message}`);
@@ -78,7 +93,7 @@ async function alertAutopayScaParked(customer, err, { amount, source }) {
       severity: 'high',
       title: `Autopay needs card authentication — ${dollars || 'amount unknown'} (${name})`,
       description: 'The cardholder\'s bank has to approve this card charge, so it was NOT collected and no retry is scheduled. Reach the customer to approve it with their bank, or collect it another way. The office bell could not be filed.',
-      trigger_data: JSON.stringify({ payment_id: attemptId, stripe_payment_intent_id: paymentIntentId, source: `${HEALTH_SOURCE_PREFIX}${source}` }),
+      trigger_data: JSON.stringify({ ...association, source: `${HEALTH_SOURCE_PREFIX}${source}` }),
     });
   } catch (fallbackErr) {
     logger.error(`[autopay-sca] CRITICAL: customer ${customerId} autopay is parked on card authentication and neither the office bell nor the health-alert fallback could be written (${fallbackErr.message}); the sca_required autopay_log row is the only record`);
@@ -130,14 +145,14 @@ async function resolveScaFallbackHealthAlerts(rows, { conn = db, resolution = nu
 // bell row (by dedupe key) AND the health-alert fallback row. The two closes are independent, so
 // one failing never blocks the other. Best-effort and never throws: clearing a bell must not
 // fail a collection or a webhook.
-async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null } = {}) {
+async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null, extraKeys = [] } = {}) {
   try {
     await resolveScaFallbackHealthAlerts(rows, { conn, resolution });
   } catch (err) {
     logger.error(`[autopay-sca] could not resolve the parked-charge health alert (a replay of the settlement retries it): ${err.message}`);
   }
   try {
-    const keys = [];
+    const keys = [...extraKeys];
     for (const row of rows || []) {
       if (!row?.customer_id) continue;
       if (row.stripe_payment_intent_id) keys.push(scaParkedAlertKey(row.customer_id, row.stripe_payment_intent_id));
@@ -238,4 +253,99 @@ async function settleParkedForPaidPayment(payment, { conn = db } = {}) {
   }
 }
 
-module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment };
+// The durable closer. Every event-time close above (Charge now, the succeeded webhook, the
+// already-collected retry) is the fast path and stays best-effort, but each hangs off one event and
+// each can fail or never fire (a webhook redelivery is deduped, a customer can pay another way). This
+// reconciler makes closure EVENTUALLY CORRECT regardless of the door the money came through: the
+// daily retry sweep runs it, it reads only the OPEN alerts of this family (a small set found by the
+// dedupe-key prefix / source tag, never a payments scan), and for each decides from the alert's own
+// metadata whether the debt is still owed:
+//   - the parked payments row (by id or PI) is now paid, or superseded by another payment: collected;
+//   - a MONTHLY alert and the customer has a paid payment stamped with that billed_month: collected,
+//     and the parked rows of that month are superseded to it (resolveParkedMonthlyRows) if still open;
+//   - otherwise still owed: left open. A one-time alert is judged on its own row only (no guessing
+//     from an amount).
+// Collected -> close the bell row and resolve the health-alert fallback. Idempotent (closed alerts are
+// no longer selected), isolated per alert, and it never throws: it must never abort collections.
+async function scaAlertIsCollected(item, conn) {
+  const { customerId, paymentIntentId, paymentId, billedMonth, kind } = item;
+  if (paymentId || paymentIntentId) {
+    const rows = await conn('payments')
+      .where({ customer_id: customerId })
+      .where(function () {
+        if (paymentId) this.where('id', paymentId);
+        if (paymentId && paymentIntentId) this.orWhere('stripe_payment_intent_id', paymentIntentId);
+        else if (paymentIntentId) this.where('stripe_payment_intent_id', paymentIntentId);
+      })
+      .select('id', 'status', 'superseded_by_payment_id');
+    for (const r of rows || []) {
+      const supersededByOther = r.superseded_by_payment_id != null && String(r.superseded_by_payment_id) !== String(r.id);
+      if (String(r.status) === 'paid' || supersededByOther) return { collected: true };
+    }
+  }
+  if (kind === 'monthly' && /^\d{4}-\d{2}$/.test(String(billedMonth || ''))) {
+    const paid = await conn('payments')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereRaw("metadata->>'billed_month' = ?", [billedMonth])
+      .first('id');
+    if (paid?.id != null) return { collected: true, paidPaymentId: paid.id };
+  }
+  return { collected: false };
+}
+
+async function reconcileScaParkedAlerts({ conn = db } = {}) {
+  const summary = { examined: 0, collected: 0, failed: 0 };
+  try {
+    const { openAdminAlertMetadata } = require('./admin-alert-episodes');
+    const items = [];
+    for (const m of await openAdminAlertMetadata(conn, KEY_PREFIX)) {
+      items.push({
+        dedupeKey: m.dedupeKey || null, customerId: m.customer_id, paymentIntentId: m.stripe_payment_intent_id || null,
+        paymentId: m.payment_id ?? null, billedMonth: m.billed_month || null, kind: m.kind === 'one_time' ? 'one_time' : 'monthly',
+      });
+    }
+    const healthRows = await conn('customer_health_alerts')
+      .where({ alert_type: 'payment_failure' })
+      .whereIn('status', HEALTH_ACTIVE)
+      .whereRaw("starts_with(trigger_data->>'source', ?)", [HEALTH_SOURCE_PREFIX])
+      .select('customer_id', 'trigger_data');
+    for (const h of healthRows || []) {
+      const t = parseMetadata(h.trigger_data);
+      items.push({
+        dedupeKey: null, customerId: t.customer_id || h.customer_id, paymentIntentId: t.stripe_payment_intent_id || null,
+        paymentId: t.payment_id ?? null, billedMonth: t.billed_month || null, kind: t.kind === 'one_time' ? 'one_time' : 'monthly',
+      });
+    }
+    for (const item of items) {
+      if (!item.customerId) continue;
+      summary.examined += 1;
+      try {
+        const verdict = await scaAlertIsCollected(item, conn);
+        if (!verdict.collected) continue;
+        if (verdict.paidPaymentId != null) {
+          const [y, mo] = item.billedMonth.split('-').map(Number);
+          const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+          await resolveParkedMonthlyRows(item.customerId, {
+            monthKey: item.billedMonth, monthStart: `${item.billedMonth}-01`,
+            monthEnd: `${item.billedMonth}-${String(lastDay).padStart(2, '0')}`,
+          }, verdict.paidPaymentId, { conn });
+        }
+        await closeScaParkedAlerts(
+          [{ id: item.paymentId, customer_id: item.customerId, stripe_payment_intent_id: item.paymentIntentId }],
+          'charge_collected',
+          { conn, extraKeys: item.dedupeKey ? [item.dedupeKey] : [] },
+        );
+        summary.collected += 1;
+      } catch (err) {
+        summary.failed += 1;
+        logger.error(`[autopay-sca] reconcile failed for customer ${item.customerId} (PI ${item.paymentIntentId || 'none'}): ${err.message}`);
+      }
+    }
+  } catch (err) {
+    summary.failed += 1;
+    logger.error(`[autopay-sca] parked-alert reconcile could not read open alerts: ${err.message}`);
+  }
+  return summary;
+}
+
+module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment, reconcileScaParkedAlerts };

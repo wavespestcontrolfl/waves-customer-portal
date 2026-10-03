@@ -265,6 +265,9 @@ describe('B16: monthly autopay parked on card authentication (3DS)', () => {
         area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'charge_collected',
         subject: { type: 'customer', id: 'cust-held' },
         stripe_payment_intent_id: 'pi_sca_1', payment_id: 'pay-sca-1', source: 'autopay',
+        // the closer's association rides in the alert itself (obligation month, amount, kind)
+        customer_id: 'cust-held', kind: 'monthly', amount_cents: 8900,
+        billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
       }),
     });
     expect(opts.detail).toMatch(/No message was sent to the customer/);

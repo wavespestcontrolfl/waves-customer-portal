@@ -515,8 +515,11 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
     mockFailedPayments = [monthlyFailedPayment()];
     mockOrphanRow = { id: 'orphan-1', stripe_payment_intent_id: 'pi_orphan' };
     const db = require('../models/db');
+    // The B16 parked-alert reconciler READS customer_health_alerts every sweep; this test is about
+    // the orphan row writing no alert, so keep the reconciler out of the db-call assertion below.
+    const reconcileSpy = jest.spyOn(require('../services/autopay-sca-parked'), 'reconcileScaParkedAlerts').mockResolvedValue({});
 
-    await BillingCron.processPaymentRetries();
+    try { await BillingCron.processPaymentRetries(); } finally { reconcileSpy.mockRestore(); }
 
     expect(StripeService.charge).not.toHaveBeenCalled();
     expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
@@ -685,7 +688,13 @@ describe('B16: retry ladder parked on card authentication (3DS)', () => {
     expect(opts).toMatchObject({
       link: '/admin/customers?customerId=cust-1',
       dedupeKey: 'autopay-sca-parked:cust-1:pi_retry_sca',
-      metadata: expect.objectContaining({ subject: { type: 'customer', id: 'cust-1' }, source: 'autopay_retry' }),
+      metadata: expect.objectContaining({
+        subject: { type: 'customer', id: 'cust-1' }, source: 'autopay_retry',
+        // the closer's association rides in the alert itself
+        customer_id: 'cust-1', stripe_payment_intent_id: 'pi_retry_sca', payment_id: 'pay-retry-sca',
+        kind: 'monthly', billed_month: '2026-06', amount_cents: 3300,
+        doneWhen: 'charge_collected',
+      }),
     });
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -741,6 +750,33 @@ describe('B16: retry ladder parked on card authentication (3DS)', () => {
     expect(result.retried).toBe(2); // the first row's failed park did not abort the sweep
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'sca_required', expect.anything());
+  });
+
+  // B: a retry row that is not a WaveGuard Monthly row cannot be tied to an explicit-amount
+  // replacement, so its alert is worded to be marked done by a person unless its own row settles.
+  test('a ONE-TIME retry row raises an honest alert: kind one_time, no month, does not promise automatic closure', async () => {
+    mockFailedPayments = [monthlyFailedPayment({ description: 'Pest add-on — Test Retry — FAILED', metadata: JSON.stringify({ base_amount: 33 }) })];
+    rejectAllCharges(scaErr());
+    await BillingCron.processPaymentRetries();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(opts.metadata).toMatchObject({ kind: 'one_time', billed_month: null, doneWhen: 'collected_and_marked_done' });
+    expect(opts.detail).toMatch(/mark this done/);
+  });
+
+  // The durable repair: the daily sweep runs the parked-alert reconciler, and it can never abort it.
+  test('the daily retry sweep runs the parked-alert reconciler; a reconciler failure never aborts the sweep', async () => {
+    const Sca = require('../services/autopay-sca-parked');
+    const spy = jest.spyOn(Sca, 'reconcileScaParkedAlerts').mockRejectedValue(new Error('boom'));
+    try {
+      mockFailedPayments = [monthlyFailedPayment()];
+      StripeService.charge.mockResolvedValue({ id: 'pay-ok', status: 'paid', amount: '33.00' });
+      StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-ok', status: 'paid', amount: '33.00' });
+      StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-ok', status: 'paid', amount: '33.00' });
+      const result = await BillingCron.processPaymentRetries();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(result.retried).toBe(1); // the sweep still ran its retries
+    } finally { spy.mockRestore(); }
   });
 
   test('a decline on the retry is not an SCA park: no SCA office alert', async () => {
