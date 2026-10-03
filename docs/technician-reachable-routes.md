@@ -58,7 +58,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/dispatch/:serviceId/completion-profile` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/completion-status` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/default-products` | admin-dispatch |
-| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/lane-facts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/lawn-reservice/fast-context` | admin-dispatch |
 | PATCH | `/api/admin/dispatch/:serviceId/note` | admin-dispatch |
