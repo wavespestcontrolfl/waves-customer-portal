@@ -9740,8 +9740,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             svc.paf_held_term_id = null;
           }
         } else {
-          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
-            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
+          // `claim`: a termite plan holds exactly one installation visit, so
+          // its decision is stamped under the term's lock inside the call.
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, claim: true })
+            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true, claim: true });
           const heldTermId = heldTerm?.id || null;
           if (String(svc.paf_held_term_id || '') !== String(heldTermId || '')) {
             await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: heldTermId });

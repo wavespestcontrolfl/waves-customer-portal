@@ -4198,6 +4198,9 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.
+          {acceptResult?.annualChargeAfterInstallation
+            ? ' Nothing is charged when you sign. Billing for your plan starts after your station installation is completed.'
+            : ''}
         </div>
       </div>
     );
@@ -4320,6 +4323,14 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               // "up to": the acknowledged total is a ceiling (GitHub Codex #5595 r1).
               const ceilingText = chargedText ? ` of up to ${fmtMoney(chargedTotal)}` : '';
               return `Your plan is approved. Nothing was charged today — your annual prepay${ceilingText} is charged to your saved card (or debited from your saved bank account) after your first visit. Any account credit lowers it.`;
+            }
+            if (acceptResult.prepayChargeStatus === 'after_installation') {
+              // GATE_PAF_TERMITE: signed and active, charged after the
+              // station installation. No amount, no pay link. Neutral about
+              // WHO is billed and how: the same agreement wording also goes
+              // to an account billed through a third-party payer, or with no
+              // saved method (GitHub Codex #5816 r5).
+              return 'Your plan agreement is signed. Nothing is charged yet. Billing for your plan starts after your station installation is completed.';
             }
             if (acceptResult.prepayChargeStatus === 'processing') {
               return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;

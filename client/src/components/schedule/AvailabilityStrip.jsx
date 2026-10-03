@@ -171,21 +171,24 @@ export function stripCoversRouteWarning(availability, current) {
   return !!verdict && verdict.tone !== 'ok';
 }
 
-const TONES = {
-  ok: { background: '#F4F4F5', color: '#18181B' },
-  miss: { background: '#FCEBEB', color: '#C8312F' },
-  warn: { background: '#FEF3C7', color: '#854D0E' },
+// Admin look: one hairline card. Color is only the verdict sentence and its
+// dot (alert red for a verified miss, warn for "could not check").
+const TONE_INK = { ok: '#18181B', miss: '#C8312F', warn: '#854D0E' };
+export const noticeCardStyle = {
+  borderRadius: 6, padding: 12, lineHeight: 1.5, background: '#FAFAFA', border: '0.5px solid #D4D4D8',
 };
+export const noticeDotStyle = { flex: '0 0 auto', width: 6, height: 6, marginTop: 8, borderRadius: '50%' };
+// Equal-width cells, so the offered hours line up instead of wrapping ragged.
+const chipGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(136px, 1fr))', gap: 6 };
 const chipStyle = {
-  display: 'inline-flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2,
-  minHeight: 44, padding: '5px 12px', borderRadius: 4, border: '0.5px solid #D4D4D8', background: '#fff',
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, textAlign: 'center',
+  minHeight: 44, padding: '5px 10px', borderRadius: 4, border: '0.5px solid #D4D4D8', background: '#fff', fontFamily: 'inherit',
   color: '#18181B', fontSize: 14, fontWeight: 500, lineHeight: 1.2, fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
 };
 const chipCurrent = { background: '#18181B', color: '#fff', border: '0.5px solid #18181B', cursor: 'default' };
 const subStyle = { fontSize: 14, fontWeight: 400, color: '#52525B' };
 const pillStyle = {
-  // minWidth, not width: "unchecked" at 14px is wider than a date pill.
-  flex: '0 0 auto', minWidth: 56, minHeight: 54, padding: '6px 8px', whiteSpace: 'nowrap', borderRadius: 6, border: '0.5px solid #D4D4D8',
+  minWidth: 0, minHeight: 54, padding: '6px 4px', whiteSpace: 'nowrap', borderRadius: 6, border: '0.5px solid #D4D4D8', fontFamily: 'inherit',
   background: '#fff', color: '#18181B', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
 };
 
@@ -229,7 +232,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   useEffect(() => { setViewDate(currentDate); }, [currentDate]);
   const verdict = availabilityVerdict(availability, { currentDate, currentStart });
   if (!verdict) return null;
-  const tone = TONES[verdict.tone];
+  const ink = TONE_INK[verdict.tone];
   const viewed = availability.days.find((day) => day.date === viewDate) || null;
   // Same rule as BestTimeHint's isCurrentPick: the hour is only "current"
   // when taking it would change nothing. An hour scored for a technician the
@@ -243,21 +246,31 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
 
   return (
     <div data-testid="availability-strip" style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14, ...style }}>
-      <div role="status" data-tone={verdict.tone} style={{ borderRadius: 6, padding: '10px 12px', lineHeight: 1.5, ...tone }}>
-        <div>
-          <strong style={{ fontWeight: 600 }}>{verdict.text}</strong>
-          {verdict.detail ? ` ${verdict.detail}` : null}
+      <div role="status" data-tone={verdict.tone} style={noticeCardStyle}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, color: ink }}>
+          {verdict.tone !== 'ok' && <span aria-hidden="true" style={{ ...noticeDotStyle, background: ink }} />}
+          <div>
+            <span style={{ fontWeight: 500 }}>{verdict.text}</span>
+            {verdict.detail ? ` ${verdict.detail}` : null}
+          </div>
         </div>
         {verdict.offers.length > 0 && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6, color: '#52525B' }}>
-            {verdict.lead ? <span>{verdict.lead}</span> : null}
-            {verdict.offers.map((hour) => (
-              <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} />
-            ))}
+          <div style={{ marginTop: 10 }}>
+            {verdict.lead ? <div style={{ marginBottom: 6, color: '#52525B' }}>{verdict.lead}</div> : null}
+            <div style={chipGridStyle}>
+              {verdict.offers.map((hour) => (
+                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} />
+              ))}
+            </div>
           </div>
         )}
       </div>
-      <div role="listbox" aria-label="Days near the picked date" style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 2 }}>
+      <div
+        role="listbox"
+        aria-label="Days near the picked date"
+        // Equal columns: "unchecked" at 14px sets the floor for every pill.
+        style={{ display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(80px, 1fr)', gap: 6, overflowX: 'auto', paddingBottom: 2 }}
+      >
         {availability.days.map((day) => {
           const d = parseYmd(day.date);
           const selected = day.date === viewDate;
@@ -278,7 +291,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
               <span style={{ fontSize: 14, opacity: selected ? 0.8 : 1, color: selected ? '#fff' : '#52525B' }}>
                 {day.date === today ? 'Today' : (d ? DOW[d.getUTCDay()] : '')}
               </span>
-              <span style={{ fontSize: 16, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{d ? d.getUTCDate() : ''}</span>
+              <span style={{ fontSize: 16, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{d ? d.getUTCDate() : ''}</span>
               <span style={{ fontSize: 14, color: selected ? '#fff' : (pillIsFull(day) ? '#C8312F' : '#52525B') }}>
                 {pillCount(day)}
               </span>
@@ -287,15 +300,19 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         })}
       </div>
       {viewed && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: '100%', color: '#52525B' }}>
+        <div>
+          <div style={{ marginBottom: 6, color: '#52525B' }}>
             {viewed.hours.length
               ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}`
               : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
-          </span>
-          {viewed.hours.map((hour) => (
-            <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
-          ))}
+          </div>
+          {viewed.hours.length > 0 && (
+            <div style={chipGridStyle}>
+              {viewed.hours.map((hour) => (
+                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
