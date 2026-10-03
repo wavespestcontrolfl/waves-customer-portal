@@ -138,8 +138,9 @@ describe('shot guide (shot-list captures)', () => {
 });
 
 describe('server-side evidence rules (shot-list captures only)', () => {
-  const two = (overrides) => answer({ photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'adequate', issue: '' }, { photo: 3, quality: 'adequate', issue: '' }], findings: [finding(overrides)] });
-  const run = (zones, overrides, opts) => result.normalizeAssessment(two(overrides), 3, zones, opts).findings[0];
+  const rated = (...qualities) => qualities.map((quality, i) => ({ photo: i + 1, quality, issue: '' }));
+  const two = (overrides, quality = rated('adequate', 'adequate', 'adequate')) => answer({ photo_quality: quality, findings: [finding(overrides)] });
+  const run = (zones, overrides, opts, quality) => result.normalizeAssessment(two(overrides, quality), 3, zones, opts).findings[0];
   const ON = { shotList: true };
 
   test.each([
@@ -179,6 +180,36 @@ describe('server-side evidence rules (shot-list captures only)', () => {
   test('a capped finding keeps determinability and its cited photos; a localized named cause is both localized and capped', () => {
     const f = run(['front', 'close_up', 'blade_crown'], { name: 'Dollar spot', confidence: 'high', photo_refs: [2] }, ON);
     expect(f).toMatchObject({ can_determine: true, photo_refs: [2], localized: true, confidence: 'low', zone: 'close_up' });
+  });
+
+  describe('only usable cited close-ups lift the cap', () => {
+    const zones = ['front', 'blade_crown', 'trouble'];
+    const chinch = (refs) => ({ name: 'Chinch bug damage', confidence: 'high', photo_refs: refs });
+    test.each([
+      ['usable blade_crown lifts it', [1, 2], rated('adequate', 'adequate', 'adequate'), 'high'],
+      ['limited counts as usable', [1, 2], rated('adequate', 'limited', 'adequate'), 'high'],
+      ['unusable (poor) blade_crown does not', [1, 2], rated('adequate', 'poor', 'adequate'), 'low'],
+      ['unrated (no quality for that photo) does not', [1, 2], [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 3, quality: 'adequate', issue: '' }], 'low'],
+      // No quality read at all: the existing unsupported-photo gate already makes it undeterminable (unknown), below the cap.
+      ['no quality info at all does not', [1, 2], [], 'unknown'],
+      ['one unusable trouble + one usable blade_crown lifts it', [1, 2, 3], rated('adequate', 'adequate', 'poor'), 'high'],
+      ['one usable trouble + one unusable blade_crown lifts it', [1, 2, 3], rated('adequate', 'poor', 'limited'), 'high'],
+      ['both close-ups unusable does not', [1, 2, 3], rated('adequate', 'poor', 'poor'), 'low'],
+      ['an out-of-range ref is ignored (cap stays)', [1, 9], rated('adequate', 'adequate', 'adequate'), 'low'],
+      ['a tagged but uncited trouble photo does not lift it', [1], rated('adequate', 'adequate', 'adequate'), 'low'],
+    ])('%s', (_name, refs, quality, expected) => {
+      const f = run(zones, chinch(refs), ON, quality);
+      expect(f.confidence).toBe(expected);
+    });
+
+    test('a finding citing only unusable photos is undeterminable and not localized; an unusable overview does not widen a usable close-up\'s scope', () => {
+      const none = run(['close_up', 'close_up', 'close_up'], { name: 'Thinning turf', confidence: 'moderate', photo_refs: [1] }, ON, rated('poor', 'adequate', 'adequate'));
+      expect(none).toMatchObject({ can_determine: false, localized: false });
+      const f = run(['front', 'close_up', null], { name: 'Thinning turf', confidence: 'moderate', photo_refs: [1, 2] }, ON, rated('poor', 'adequate', 'adequate'));
+      expect(f.localized).toBe(true);
+      const g = run(['front', 'close_up', null], { name: 'Thinning turf', confidence: 'moderate', photo_refs: [1, 2] }, ON, rated('adequate', 'poor', 'adequate'));
+      expect(g.localized).toBe(false);
+    });
   });
 
   test('without the shot-list option the same answer is untouched: no cap, no marker', () => {

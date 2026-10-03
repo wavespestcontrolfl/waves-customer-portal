@@ -65,16 +65,25 @@ function zoneFromRefs(photoRefs, photoZones = []) {
 // asks for but the server does not leave to the model, applied to the
 // normalized findings. Pure, over a finding's cited photos' shot keys (null =
 // untagged, which counts as an overview).
-//   - localized: it cites photos and every one is a detail shot (close_up,
+//   - localized: it rests on photos and every one is a detail shot (close_up,
 //     blade_crown, trouble), so it speaks for one spot, never the whole lawn.
 //   - named-cause cap: a finding naming a specific disease, insect or weed
 //     (the report lane's governed-cause lexicon) with no blade_crown or trouble
-//     photo among its cited photos stays at low confidence at most; its
-//     customer label follows through the naming gate.
+//     photo among its evidence stays at low confidence at most; its customer
+//     label follows through the naming gate.
+// A photo counts as evidence for either rule only when the same answer rated it
+// usable (adequate or limited, the standard the per-finding poor-photo gate and
+// the customer-visible photos use). Poor, unrated, uncited and out-of-range
+// photos count for nothing; with no quality read the cap stays (fail closed).
+// A finding citing only unusable photos has no evidence, so it is not localized
+// (it is already undeterminable through that gate).
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
-function withShotEvidence(findings, photoZones) {
+function evidenceZones(photoRefs, photoZones, usable) {
+  return photoRefs.filter((ref) => usable.has(ref)).map((ref) => photoZones[ref - 1]);
+}
+function withShotEvidence(findings, photoZones, usable) {
   return findings.map((finding) => {
-    const zones = finding.photo_refs.map((ref) => photoZones[ref - 1]);
+    const zones = evidenceZones(finding.photo_refs, photoZones, usable);
     const localized = zones.length > 0 && zones.every(shotList.isDetailShot);
     const namesCause = safeConditionLabel(finding.name) !== NO_STRESS_LABEL && SUMMARY_CAUSE_RE.test(String(finding.name || ''));
     const capped = namesCause && !zones.some(shotList.supportsNamedCause) && CONFIDENCE_RANK[finding.confidence] > CONFIDENCE_RANK.low;
@@ -168,7 +177,7 @@ function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shot
       source: 'model',
     };
   });
-  const findings = shotListOn ? withShotEvidence(normalized, photoZones) : normalized;
+  const findings = shotListOn ? withShotEvidence(normalized, photoZones, usable) : normalized;
   const severities = {};
   for (const key of STRESS_SIGNALS) severities[key] = normalizeSignal(json.severities[key], SEVERITY_LEVELS);
   severities.thatch_visibility = normalizeSignal(json.severities.thatch_visibility, THATCH_LEVELS);
