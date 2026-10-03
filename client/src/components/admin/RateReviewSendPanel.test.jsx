@@ -111,4 +111,17 @@ describe('RateReviewSendPanel', () => {
     fireEvent.click((await screen.findAllByRole('button', { name: 'Send 1 letter' })).at(-1));
     expect(await screen.findByText('1 letter sent (1 emailed, 1 texted).')).toBeInTheDocument();
   });
+
+  it('names the customers waiting for another approved line (awaitingLines) and why they are held', async () => {
+    mockAdminFetch.mockResolvedValue(preview({
+      counts: { letters: 1, lines: 1, email: 1, sms: 1, suppressedCustomers: 1, suppressedLines: 2, awaitingLines: 1, alreadySent: 0 },
+      customers: [
+        { customerId: 'c1', name: 'Testcust One', channels: { email: true, sms: true }, reason: null, reasonLabel: null, lines: [{ noticeId: 'n1', service: 'Pest control', now: '$117 per application', new: '$121 per application (up $4)', effectiveDate: '2026-12-10' }], suppressedLines: [], alreadySent: 0 },
+        { customerId: 'c3', name: 'Testcust Three', channels: { email: true, sms: false }, reason: 'awaiting_lines', reasonLabel: 'Another approved line for this customer is not prepared yet', lines: [{ noticeId: 'n3', service: 'Pest control', now: '$90 per application', new: '$94 per application (up $4)', effectiveDate: '2026-12-12' }], suppressedLines: [], alreadySent: 0 },
+      ],
+    }));
+    render(<RateReviewSendPanel batchKey="2026-12" />);
+    expect(await screen.findByText('waiting for another line')).toBeInTheDocument();
+    expect(screen.getByText('Another approved line for this customer is not prepared yet')).toBeInTheDocument();
+  });
 });
