@@ -19,12 +19,15 @@ function minutesOf(hhmm) {
   return m ? Number(m[1]) * 60 + Number(m[2]) : Infinity;
 }
 
+// The tie-proximity rule (schedule-tie-proximity.js hasCoords): a 0/0 pin
+// is a failed geocode, never a place.
 function hasGeo(s) {
-  return Number.isFinite(s.lat) && Number.isFinite(s.lng);
+  const lat = Number(s?.lat);
+  const lng = Number(s?.lng);
+  return s?.lat != null && s?.lng != null && Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
 }
 
 function samePlace(a, b) {
-  if (a.visitId && a.visitId === b.visitId) return true;
   return hasGeo(a) && hasGeo(b) && a.lat === b.lat && a.lng === b.lng;
 }
 
@@ -48,11 +51,26 @@ function attachDriveLegs(services) {
     s.firstStop = false;
     s.lastStop = false;
   }
-  const stops = [];
+  // A visit group is one stop wherever its rows sort (route-model.js
+  // physicalStops groups every visit_id the same way): gather it first,
+  // placed at its earliest member. Then back-to-back stops at the same pin
+  // merge too (two services at one address without a group).
+  const units = [];
+  const groups = new Map();
   for (const s of [...rows].sort(stopOrder)) {
+    if (!s.visitId) { units.push({ anchor: s, members: [s] }); continue; }
+    if (!groups.has(s.visitId)) {
+      const unit = { anchor: s, members: [] };
+      groups.set(s.visitId, unit);
+      units.push(unit);
+    }
+    groups.get(s.visitId).members.push(s);
+  }
+  const stops = [];
+  for (const unit of units) {
     const last = stops[stops.length - 1];
-    if (last && samePlace(last.anchor, s)) last.members.push(s);
-    else stops.push({ anchor: s, members: [s] });
+    if (last && samePlace(last.anchor, unit.anchor)) last.members.push(...unit.members);
+    else stops.push(unit);
   }
   if (stops.length) {
     stops[0].members.forEach((s) => { s.firstStop = true; });

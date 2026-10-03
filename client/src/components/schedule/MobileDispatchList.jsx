@@ -179,7 +179,7 @@ function DriveLegs({ service }) {
         <span
           key={c.key}
           className={'u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 ' + (c.muted ? 'text-ink-tertiary' : 'text-ink-secondary')}
-          style={{ fontSize: 12, padding: '2px 8px' }}
+          style={{ fontSize: 14, padding: '2px 8px' }}
         >
           {c.text}
         </span>

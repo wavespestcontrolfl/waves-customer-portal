@@ -58,4 +58,25 @@ describe('attachDriveLegs', () => {
     expect(by.nine).toMatchObject({ firstStop: false, driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
     expect(by.noon.lastStop).toBe(true);
   });
+
+  it('keeps a visit group one stop even when another visit sorts between its rows', () => {
+    const services = [
+      stop('g1', '08:00', A, { visitId: 'v1' }),
+      stop('mid', '09:00', B),
+      stop('g2', '10:00', A, { visitId: 'v1' }),
+      stop('c', '13:00', C),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.g1).toMatchObject({ firstStop: true, driveToNextMin: driveMin(A, B) });
+    expect(by.g2).toMatchObject({ firstStop: true, lastStop: false, driveToNextMin: driveMin(A, B) });
+    expect(by.mid).toMatchObject({ driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
+  });
+
+  it('treats a 0/0 pin as no location', () => {
+    const services = [stop('a', '08:00', A), stop('zero', '10:00', { lat: 0, lng: 0 })];
+    attachDriveLegs(services);
+    expect(services[0].driveToNextMin).toBeNull();
+    expect(services[1].driveFromPrevMin).toBeNull();
+  });
 });
