@@ -574,6 +574,23 @@ describe('sendBatch', () => {
     expect(text).not.toContain('{{');
   });
 
+  test('a delivered letter whose stamp fails once is stamped on the retry; if the stamp keeps failing it parks with both provider ids', async () => {
+    mockDb.reset(book());
+    emailLeg.mockImplementation(emailVia({ sent: true, attempted: true, messageId: 'em-1' }));
+    smsLeg.mockImplementation(smsVia({ sent: true, attempted: true, sid: 'SM1' }));
+    const lookup = jest.spyOn(apply._private, 'smsDeliveryFailure');
+    lookup.mockRejectedValueOnce(new Error('connection reset'));
+    try {
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1, failed: 0 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: true });
+      mockDb.reset(book());
+      lookup.mockRejectedValue(new Error('database down'));
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, failed: 1 });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(JSON.parse(notices()[0].metadata)).toMatchObject({ email_message_id: 'em-1', sms_sid: 'SM1', uncertain_channels: { email: true, sms: true } });
+    } finally { lookup.mockRestore(); }
+  });
+
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });

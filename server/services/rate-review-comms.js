@@ -1203,6 +1203,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     ...(email.messageId ? { email_message_id: String(email.messageId) } : {}),
     ...(sms.sid ? { sms_sid: String(sms.sid) } : {}),
   };
+  // Kept for the exception settlement: both provider ids, so a later bounce or failed text
+  // still finds the notice if the stamp below cannot be written.
+  Object.assign(progress.dispatchMeta, dispatchMeta);
   const smsHold = SMS_HOLD_REASONS[sms.blockedCode] || (String(sms.blockedCode || '').startsWith('ELIGIBILITY:') ? String(sms.blockedCode).slice('ELIGIBILITY:'.length) : null);
   if (smsHold) logger.warn(`[rate-review-comms] text pointer withheld for customer ${entry.customerId}: ${smsHold}`);
   if (!email.sent && !sms.sent) {
@@ -1238,6 +1241,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await settleLines(dbh, entry, { status: 'unreachable', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
     return { outcome: 'unreachable' };
   }
+  // The delivery stamp is one transaction: a failure rolls all of it back, so it is tried
+  // once more before the letter is left to the exception settlement (a provider accepted
+  // it — parking a delivered letter as uncertain for a transient write error would stop
+  // its rate from ever applying).
+  const stamp = async () => {
   const sentAt = clock();
   // Every line of one letter is stamped together, under the customer-comms
   // fence: a merge or merge undo (which repoints notices under it) either
@@ -1339,6 +1347,13 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     }
   }
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
+  };
+  try {
+    return await stamp();
+  } catch (err) {
+    logger.warn(`[rate-review-comms] delivery stamp failed for customer ${entry.customerId}, retrying once: ${err.message}`);
+    return stamp();
+  }
 }
 
 // An exception inside sendEntry after the claim. BEFORE the first provider
