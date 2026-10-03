@@ -17975,7 +17975,9 @@ const CallRecordingProcessor = {
                         durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                         lat: existing.lat ?? null,
                         lng: existing.lng ?? null,
-                        serviceType,
+                        // The row's own service: a replay can extract a
+                        // different one while the appointment stays as booked.
+                        serviceType: existing.service_type || serviceType,
                         customerId,
                         excludeServiceIds: [existing.id],
                       }));
@@ -18419,19 +18421,22 @@ const CallRecordingProcessor = {
                 // in their own savepoint so a failed read cannot abort `trx`.
                 let bookingTechnicianId = defaultTechnicianId;
                 let bookingTechnicianName = defaultTechnicianName;
+                let bookingTechnicianPicked = false;
+                const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
+                  conn: pickSp,
+                  date: scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  windowEnd: windowEnd || '10:00',
+                  durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
+                  serviceType,
+                  customerId,
+                }));
                 try {
-                  const pick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
-                    conn: pickSp,
-                    date: scheduledDate,
-                    windowStart: windowStart || '09:00',
-                    windowEnd: windowEnd || '10:00',
-                    durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
-                    lat: propertyLinkage.lat ?? null,
-                    lng: propertyLinkage.lng ?? null,
-                    serviceType,
-                    customerId,
-                  }));
+                  const pick = await pickBookingTechnician();
                   if (pick.active) {
+                    bookingTechnicianPicked = true;
                     bookingTechnicianId = pick.technician?.id || null;
                     bookingTechnicianName = pick.technician?.name || null;
                     logger.info(`[call-proc] technician pick for ${maskSid(callSid)} on ${scheduledDate}: ${bookingTechnicianId || 'unassigned'} (${pick.reason})`);
@@ -18468,6 +18473,59 @@ const CallRecordingProcessor = {
                 } catch (occErr) {
                   logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
                   bookingTimeConflicts = [];
+                }
+                // The pick ran before the fence. A booking that committed in
+                // between can sit on the picked technician's window: the
+                // fenced read above now sees it. Pick once more under the
+                // fence (the other technician may still be free), fence that
+                // technician's day, and read again. Still a clash, or nobody
+                // free: the visit is saved unassigned and the tech-blind read
+                // flags it for the office. try-locks never wait, so the extra
+                // rung cannot deadlock; each step keeps its own savepoint.
+                if (bookingTechnicianPicked && bookingTechnicianId && bookingTimeConflicts.length) {
+                  let nextTechnician = null;
+                  try {
+                    const repick = await pickBookingTechnician();
+                    nextTechnician = repick.active ? (repick.technician || null) : null;
+                  } catch (pickErr) {
+                    logger.warn(`[call-proc] technician re-pick failed for ${maskSid(callSid)} (booking unassigned): ${pickErr.message}`);
+                  }
+                  logger.info(`[call-proc] picked technician ${bookingTechnicianId} taken before the fence for ${maskSid(callSid)}; now ${nextTechnician?.id || 'unassigned'}`);
+                  bookingTechnicianId = nextTechnician?.id || null;
+                  bookingTechnicianName = nextTechnician?.name || null;
+                  try {
+                    const { fenceBookingDay, findConflictingVisits } = require('./scheduling/occupancy');
+                    try {
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId, deadline: bookingFence?.deadline ?? Date.now() }));
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] re-pick fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
+                    bookingTimeConflicts = await trx.transaction((probeSp) => findConflictingVisits({
+                      db: probeSp,
+                      date: scheduledDate,
+                      windowStart: windowStart || '09:00',
+                      windowEnd: windowEnd || '10:00',
+                      excludeCustomerId: customerId,
+                      technicianId: bookingTechnicianId || null,
+                    }));
+                    if (bookingTechnicianId && bookingTimeConflicts.length) {
+                      // Lost the second technician too: unassigned. The
+                      // findings stand (the office card), and the unassigned-day
+                      // rung is the row's own fence.
+                      bookingTechnicianId = null;
+                      bookingTechnicianName = null;
+                      try {
+                        bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
+                      } catch (fenceErr) {
+                        bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      }
+                    }
+                  } catch (occErr) {
+                    logger.warn(`[call-proc] re-pick occupancy check failed for ${maskSid(callSid)} (booking unassigned, first findings kept): ${occErr.message}`);
+                    bookingTechnicianId = null;
+                    bookingTechnicianName = null;
+                  }
                 }
                 // Re-service lane dedupe on the FRESH-INSERT path only,
                 // under the reservice-lane advisory lock taken above and

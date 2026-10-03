@@ -185,6 +185,10 @@ describe('wiring', () => {
     expect(src).toContain('date: callBookingDateOnly(existing.scheduled_date),');
     expect(src).toContain('followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)');
     expect(src).toContain('let reuseTechId = reuseCandidateTechId;');
+    expect(src).toContain('serviceType: existing.service_type || serviceType,');
+    // A pick taken before the fence is re-made under it when the fenced read clashes.
+    expect(src).toContain('if (bookingTechnicianPicked && bookingTechnicianId && bookingTimeConflicts.length) {');
+    expect(src).toContain('const repick = await pickBookingTechnician();');
     // Post-commit recheck judges each fresh row on its own technician.
     expect(src).toContain('technicianId: svc.technician_id || null,');
     expect(src).toContain('technicianId: followUpCreated.technician_id || null,');
