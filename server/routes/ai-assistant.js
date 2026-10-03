@@ -116,19 +116,12 @@ router.post('/chat', authenticate, async (req, res, next) => {
     const rawChannelIdentifier = sessionId || customerId;
     const channelIdentifier = portalConversationIdentifier(rawChannelIdentifier, req.propertyId);
 
-    // The free re-service button books at the account's primary address, so
-    // it is withheld when the session is looking at another saved property
-    // (the Schedule tab's rule). Only read when that tool can run (the chat's
-    // master switch, its own gate and the re-service page's two switches); a
-    // failed read withholds it.
-    let secondaryProperty = true;
-    if (portalChatSelfServeLive() && portalChatReserviceLive() && assistantTools.reservicePageSwitchesOn()) {
-      try {
-        secondaryProperty = isSecondarySelection(await resolveSessionScope(req));
-      } catch (err) {
-        logger.warn(`[ai-assistant] property scope read failed for ${customerId}, no re-service button: ${err.message}`);
-      }
-    }
+    // Only resolve the optional property scope when every re-service switch is
+    // live. The read itself runs inside the coordinated turn below, so it uses
+    // the same deadline and attempt ownership as the model and its tools.
+    const resolveReserviceScope = portalChatSelfServeLive()
+      && portalChatReserviceLive()
+      && assistantTools.reservicePageSwitchesOn();
 
     const result = await runPortalTurn({
       requestId,
@@ -136,15 +129,35 @@ router.post('/chat', authenticate, async (req, res, next) => {
       customerId,
       propertyId: req.propertyId || null,
       channelIdentifier,
-      processTurn: (turn) => WavesAssistant.processMessage({
-        message,
-        channel: 'portal_chat',
-        channelIdentifier,
-        customerId,
-        customerPhone,
-        secondaryProperty,
-        turn,
-      }),
+      processTurn: async (turn) => {
+        // The free re-service button books at the account's primary address,
+        // so a failed read or a secondary selection withholds it. Let deadline
+        // and query-cancellation errors reach the coordinator; swallowing one
+        // would start the assistant after this turn has already been cancelled.
+        let secondaryProperty = true;
+        if (resolveReserviceScope) {
+          try {
+            const scope = await turn.transaction(
+              'portal property scope',
+              (database) => resolveSessionScope(req, database),
+            );
+            secondaryProperty = isSecondarySelection(scope);
+          } catch (err) {
+            if (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+              || ['AbortError', 'KnexTimeoutError'].includes(err?.name)) throw err;
+            logger.warn(`[ai-assistant] property scope read failed for ${customerId}, no re-service button: ${err.message}`);
+          }
+        }
+        return WavesAssistant.processMessage({
+          message,
+          channel: 'portal_chat',
+          channelIdentifier,
+          customerId,
+          customerPhone,
+          secondaryProperty,
+          turn,
+        });
+      },
     });
 
     // Only true model output is reportable — canned fallbacks and the

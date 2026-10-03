@@ -215,7 +215,14 @@ async function resolveSessionScope(req, knex = db) {
     const everHadRow = !!(await knex('customer_properties').where({ customer_id: customerId }).first('id'));
     if (!everHadRow) {
       const customerProperties = require('./customer-properties');
-      await customerProperties.ensurePrimaryProperty(customerId).catch(() => {});
+      try {
+        await customerProperties.ensurePrimaryProperty(customerId, { conn: knex });
+      } catch (err) {
+        // A caller-owned transaction must roll back the lazy creation before
+        // its caller applies a fail-closed fallback. Legacy unbounded reads
+        // keep the existing best-effort behavior.
+        if (knex.isTransaction) throw err;
+      }
       rows = await readActiveRows();
     }
     if (!rows.length) return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };

@@ -13,8 +13,15 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/ai-assistant/assistant', () => ({
   processMessage: jest.fn(),
 }));
+const mockBoundedDatabase = jest.fn();
+mockBoundedDatabase.isTransaction = true;
+const mockTurnTransaction = jest.fn(async (_stage, work) => work(mockBoundedDatabase));
+const mockTurn = {
+  requestRowId: 'portal-request-row',
+  transaction: (...args) => mockTurnTransaction(...args),
+};
 const mockPortalTurn = jest.fn(async (args) => ({
-  ...await args.processTurn({ requestRowId: 'portal-request-row' }),
+  ...await args.processTurn(mockTurn),
   requestId: args.requestId,
 }));
 jest.mock('../services/ai-assistant/portal-turn', () => ({
@@ -492,7 +499,7 @@ describe('POST /ai/chat canReport flag', () => {
       customerPhone: '+19415550100',
       // GATE_PORTAL_CHAT_RESERVICE off: no scope read, the re-service button withheld.
       secondaryProperty: true,
-      turn: { requestRowId: 'portal-request-row' },
+      turn: mockTurn,
     });
     expect(mockResolveScope).not.toHaveBeenCalled();
     expect(mockPortalTurn).toHaveBeenCalledWith(expect.objectContaining({
@@ -534,7 +541,7 @@ describe('POST /ai/chat canReport flag', () => {
     expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1',
       channelIdentifier: 'property:prop-1:shared-session',
-      turn: { requestRowId: 'portal-request-row' },
+      turn: mockTurn,
     }));
   });
 
@@ -561,6 +568,7 @@ describe('POST /ai/chat canReport flag', () => {
       });
 
       expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(mockTurnTransaction).not.toHaveBeenCalled();
     });
 
     test('the chat\'s master switch off: no scope read (the resolver can write)', async () => {
@@ -578,6 +586,7 @@ describe('POST /ai/chat canReport flag', () => {
       });
 
       expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(mockTurnTransaction).not.toHaveBeenCalled();
       expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty: true }));
     });
 
@@ -588,7 +597,11 @@ describe('POST /ai/chat canReport flag', () => {
       ['a failed scope read', async () => { throw new Error('db down'); }, true],
     ])('%s', async (_label, scope, secondaryProperty) => {
       mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
-      mockResolveScope.mockImplementation(scope);
+      mockResolveScope.mockImplementation(async (...args) => {
+        // The coordinator records its invocation before processTurn begins.
+        expect(mockPortalTurn).toHaveBeenCalledTimes(1);
+        return scope(...args);
+      });
       WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
 
       await withServer(async (baseUrl) => {
@@ -600,8 +613,41 @@ describe('POST /ai/chat canReport flag', () => {
         expect(res.status).toBe(200);
       });
 
-      expect(mockResolveScope).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+      expect(mockTurnTransaction).toHaveBeenCalledWith('portal property scope', expect.any(Function));
+      expect(mockResolveScope).toHaveBeenCalledWith(
+        expect.objectContaining({ customerId: 'cust-1' }),
+        mockBoundedDatabase,
+      );
       expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty }));
+    });
+
+    test('a cancelled scope transaction never invokes the assistant', async () => {
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      const cancelled = new Error('query timed out');
+      cancelled.name = 'KnexTimeoutError';
+      mockResolveScope.mockRejectedValue(cancelled);
+      const coordinatorFallback = jest.fn(async (args) => {
+        try {
+          return { ...await args.processTurn(mockTurn), requestId: args.requestId };
+        } catch (err) {
+          expect(err).toBe(cancelled);
+          return { reply: 'Please try again.', generated: false, requestId: args.requestId };
+        }
+      });
+      mockPortalTurn.mockImplementationOnce(coordinatorFallback);
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(coordinatorFallback).toHaveBeenCalledTimes(1);
+      expect(mockTurnTransaction).toHaveBeenCalledWith('portal property scope', expect.any(Function));
+      expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
     });
   });
 
