@@ -885,6 +885,8 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     return { data, log };
   };
   const stored = (recs) => storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur');
+  // A build that freezes the entry but is not the data view (no watch opt-in), as the Ask Waves build is.
+  const freeze = (recs, patch = withProduct()) => serve(recs, patch, 'live', false);
 
   test('gate on, interval over, rain measured: ONE item on the frozen entry and the sentence on the lead; nothing else in the payload moves', async () => {
     setHistory([CUR]);
@@ -895,13 +897,10 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
 
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    const { data } = await serve(recs, withProduct());
-    // The first render of a visit freezes its entry; a breach is judged on a LATER live view.
-    expect(stored(recs)).toBeTruthy();
-    expect(stored(recs).retreatCheck).toBeUndefined();
-    expect(data.reportV2.lead.watching).toBeUndefined();
-
+    // ONE first live view with no prior entry freezes the entry AND judges the watch.
+    expect(stored(recs)).toBeNull();
     const second = await serve(recs, withProduct());
+    expect(stored(recs)).toBeTruthy();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(fetchSpy.mock.calls[0][0]).toMatchObject({ from: new Date('2026-09-30T18:40:00Z'), to: new Date('2026-09-30T21:40:00Z') });
     expect(second.data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
@@ -924,7 +923,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live();
     const recs = records();
-    await serve(recs, withProduct());
+    await freeze(recs);
     const a = JSON.stringify((await serve(recs, withProduct())).data);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(stored(recs).retreatCheck).toBeUndefined();
@@ -949,7 +948,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    await serve(recs, withProduct());
+    await freeze(recs);
     const { data } = await serve(recs, withProduct(), mode);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(data.reportV2.lead.watching).toBeUndefined();
@@ -960,7 +959,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    await serve(recs, withProduct(null));
+    await freeze(recs, withProduct(null));
     const { data } = await serve(recs, withProduct(null));
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(data.reportV2.lead.watching).toBeUndefined();
@@ -970,7 +969,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    await serve(recs, withProduct());
+    await freeze(recs);
     fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.1 });
     expect((await serve(recs, withProduct())).data.reportV2.lead.watching).toBeUndefined();
     fetchSpy.mockResolvedValue({ status: 'unavailable', reason: 'timeout' });
@@ -984,7 +983,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    await serve(recs, withProduct()); // freezes the entry
+    await freeze(recs); // freezes the entry
     const before = JSON.stringify(recs['svc-cur'].structured_notes);
     const { data, log } = await serve(recs, withProduct(), 'live', false);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -1000,7 +999,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     setHistory([CUR]);
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
-    await serve(recs, withProduct()); // freezes the entry from a healthy read
+    await freeze(recs); // freezes the entry from a healthy read
     fetchSpy.mockClear();
     const degraded = await serve(recs, { ...withProduct(), ...broken });
     expect(fetchSpy).not.toHaveBeenCalled();

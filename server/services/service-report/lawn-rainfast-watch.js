@@ -166,11 +166,33 @@ function validRetreatCheck(item) {
     && item.breaches.every((b) => b && Number.isFinite(Number(b.inches)) && Number(b.inches) >= BREACH_INCHES);
 }
 
+const RECHECK_MAX_NAMES = 3;
+
+/**
+ * The fixed technician line for the NEXT lawn visit, from the prior visit's
+ * stored retreat-check, or null (unknown shape = no line). Names come from the
+ * stored item (the products that were inside their rainfast interval), at most
+ * three. This is the consumer that keeps the customer sentence's promise.
+ */
+function reCheckLine(item) {
+  if (!validRetreatCheck(item)) return null;
+  const names = [];
+  for (const breach of item.breaches) {
+    for (const name of Array.isArray(breach.products) ? breach.products : []) {
+      const clean = typeof name === 'string' ? name.replace(/\s+/g, ' ').trim() : '';
+      if (clean && !names.includes(clean)) names.push(clean);
+    }
+  }
+  const listed = names.slice(0, RECHECK_MAX_NAMES).join(', ');
+  return `Re-check last visit's treatment: weather data showed rain soon after it${listed ? ` (${listed})` : ''}.`;
+}
+
 /**
  * The Watching sentence for this visit on a live render, or null.
  * Replays the stored item; otherwise judges once and records the verdict
- * (first writer wins). Needs the visit's frozen memory entry: with none there
- * is nowhere to keep the verdict, so nothing is said (a sentence that could
+ * (first writer wins). Needs the visit's frozen memory entry (read from the
+ * record again when the caller's notes predate this request's own freeze): with
+ * none there is nowhere to keep the verdict, so nothing is said (a sentence that could
  * vanish on the next view is worse than none).
  *
  * @returns {Promise<{line: string}|null>}
@@ -181,7 +203,15 @@ async function resolveRainfastWatch({
   try {
     if (!serviceRecordId || !assessmentId || !knex) return null;
     const { storedVisitMemoryFor, recordRetreatCheck } = require('./lawn-visit-memory');
-    const entry = storedVisitMemoryFor(structuredNotes, assessmentId);
+    let entry = storedVisitMemoryFor(structuredNotes, assessmentId);
+    if (!entry) {
+      // The caller's notes were read BEFORE this render's memory step. When this
+      // very request created the entry, they do not hold it yet: read the record
+      // once more so one request is enough. No entry there either (a degraded
+      // render freezes none) = nowhere to keep a verdict, so nothing is judged.
+      const row = await knex('service_records').where({ id: serviceRecordId }).first('structured_notes');
+      entry = storedVisitMemoryFor(row?.structured_notes, assessmentId);
+    }
     if (!entry) return null;
     if (entry.retreatCheck != null) return validRetreatCheck(entry.retreatCheck) ? { line: RAINFAST_WATCH_LINE } : null;
 
@@ -208,5 +238,6 @@ module.exports = {
   rainfastWindows,
   judgeRainfastBreach,
   validRetreatCheck,
+  reCheckLine,
   resolveRainfastWatch,
 };

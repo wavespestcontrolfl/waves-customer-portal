@@ -2428,7 +2428,7 @@ inch inside any interval, judged on the unrounded total, writes ONE
 visit's frozen memory entry
 (`structured_notes.lawnVisitMemory[assessmentId].retreatCheck`: first writer
 wins, compare-and-set on that entry, never creates an entry, no row lock) and
-the sentence follows. Later views replay the stored item with no weather call.
+the sentence follows. The first eligible `/data` view is enough: it reads the record again after its own memory step, so a request that creates the entry can also judge. Later views replay the stored item with no weather call.
 A missing hour, a failed or slow read, missing coordinates or a missing
 completion time writes nothing and says nothing; the next live view tries
 again; one interval that cannot be read holds back the whole verdict, and so does a failed read of the visit's products or their catalog facts (a stored verdict still replays, nothing new is judged or written until a healthy view). The next
@@ -2436,7 +2436,11 @@ visit's frozen `sinceLast` carries the item as engine input only, even when the
 visit had no applied list or watched topics (a support-product-only visit): that
 internal block is not served, the progress engine and the since-last copy treat
 it as no block, and `reportV2.sinceLast` stays absent for such a visit. The sentence is fixed, carries no number, product name or promise of a
-free visit, and nothing is sent to a customer. No token, eligibility, privacy or
+free visit, and nothing is sent to a customer. The sentence's "re-check at your next
+visit" is kept by the technician sheet, not by this route: the next lawn visit's
+Fast Complete context (an admin route, `GET /admin/dispatch/:serviceId/lawn-fast/context`)
+carries one fixed line read from the prior visit's stored item at the same
+property. No token, eligibility, privacy or
 rate-limit change.
 
 A current watering snapshot can originate from

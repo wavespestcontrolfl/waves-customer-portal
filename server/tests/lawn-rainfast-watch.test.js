@@ -333,6 +333,20 @@ describe('resolveRainfastWatch: judge once, record once, replay after', () => {
     expect(log.updates).toBe(0);
   });
 
+  test('notes read before this request froze the entry: the record is read again, so one request is enough', async () => {
+    const record = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY } } };
+    const { knex, log } = memoryKnex(record);
+    const fetchForecast = breachFetch();
+    // the caller's notes predate the freeze (no entry yet); the record now has it
+    await expect(run(record, knex, { structuredNotes: {}, fetchForecast })).resolves.toEqual({ line: RAINFAST_WATCH_LINE });
+    expect(fetchForecast).toHaveBeenCalledTimes(1);
+    expect(log.updates).toBe(1);
+    // an already stored verdict found on the re-read replays with no weather call
+    const again = breachFetch();
+    await expect(run(record, knex, { structuredNotes: {}, fetchForecast: again })).resolves.toEqual({ line: RAINFAST_WATCH_LINE });
+    expect(again).not.toHaveBeenCalled();
+  });
+
   test('a failed write says nothing (a sentence that could vanish on the next view is worse than none)', async () => {
     const record = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY } } };
     const { knex } = memoryKnex(record, { failUpdate: true });

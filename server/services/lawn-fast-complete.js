@@ -579,6 +579,36 @@ async function loadAssessmentState(svc, knex, readFailures) {
   return { assessmentRow, assessmentReadFailed, assessmentUnusable };
 }
 
+// GATE_LAWN_RAINFAST_WATCH (P31): the consumer that keeps the report's promise
+// ("we will re-check it at your next visit"). When the PRIOR lawn visit at this
+// property recorded a rainfast retreat-check, the technician sees one fixed
+// line on the sheet. The prior visit comes from the property-scoped history
+// (the same resolver the completion defaults and the report copy use; it needs
+// GATE_LAWN_PROPERTY_HISTORY, as the visit memory's own prior does), and its
+// memory is read from THAT visit's record for THIS customer. Advisory and fail
+// closed: any miss, a failed read or an unproven property is no line, and never
+// a refusal or a read failure the sheet has to report.
+async function loadReCheckNote(svc, knex) {
+  if (typeof featureGates.lawnRainfastWatchLive !== 'function' || !featureGates.lawnRainfastWatchLive()
+    || !featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) return undefined;
+  try {
+    const history = require('./lawn-assessment-history');
+    const prior = await history.historyBeforeVisit({
+      customerId: svc.customer_id, scheduledService: svc, throughVisitDate: etCalendarDayOf(svc.scheduled_date),
+    }, knex);
+    const previous = prior?.previous;
+    const recordId = previous?.history_record_id || previous?.service_record_id || null;
+    if (!prior?.scope?.propertyId || !previous?.id || !recordId) return null;
+    const row = await knex('service_records').where({ id: recordId, customer_id: svc.customer_id }).first('structured_notes');
+    const { storedVisitMemoryFor } = require('./service-report/lawn-visit-memory');
+    const line = require('./service-report/lawn-rainfast-watch').reCheckLine(storedVisitMemoryFor(row?.structured_notes, String(previous.id))?.retreatCheck);
+    return line ? { line } : null;
+  } catch (err) {
+    logger.warn(`[lawn-fast] re-check note unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` for a
  * missing visit; an ineligible visit answers `eligible: false` with the reason
@@ -598,6 +628,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const typed = !!profile.findingsType;
   const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
+  const reCheck = await loadReCheckNote(svc, knex);
 
   return {
     ok: true,
@@ -633,6 +664,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // Same-spot pairing needs the previous visit's front photo; no shared
     // lookup for lawn photos exists yet, so the context carries none.
     previousFrontPhoto: null,
+    // P31: the prior visit's rainfast re-check line, or null. The key exists only
+    // while GATE_LAWN_RAINFAST_WATCH is live, so gate off is byte-identical.
+    ...(reCheck !== undefined ? { reCheck } : {}),
     // Names of the reads that failed while building this context ([] when none).
     readFailures: [...readFailures],
   };
