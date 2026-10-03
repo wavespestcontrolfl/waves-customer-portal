@@ -40,6 +40,9 @@ const REGISTRY_COLUMNS = [
 // under it and the keyword the post targets (the article itself lives in the
 // site's repository, not here).
 const REGISTRY_TEXT = ['title', 'h1', 'meta_description', 'target_keyword'];
+// An absolute URL, and one on the hub host, as Postgres patterns.
+const ABSOLUTE_URL_RE = '^https?://';
+const HUB_URL_RE = `^https?://(www\\.)?${SITE_HOST.replace(/\./g, '\\.')}(/|$)`;
 const PORTAL_TEXT = ['title', 'meta_description', 'keyword'];
 
 // Which visits a post may ride (owner ruling 2026-10-02: every service but
@@ -105,9 +108,15 @@ const FILLER_WORDS = new Set([
   'the', 'and', 'for', 'how', 'with', 'your', 'you', 'get', 'rid', 'what', 'why', 'when', 'are', 'can', 'does',
   'from', 'about', 'this', 'that', 'our', 'out', 'into', 'its', 'any', 'all', 'not',
 ]);
+// Plurals no suffix rule makes, as [singular, plural] (GitHub Codex P2 r2 on
+// #5652: "mice" never found a "mouse" post).
+const IRREGULAR_FORMS = new Map([['mouse', 'mice'], ['louse', 'lice'], ['goose', 'geese']]
+  .flatMap((pair) => [[pair[0], pair], [pair[1], pair]]));
 // A word's singular ("roaches" -> roach, "flies" -> fly, "mosquitoes" ->
-// mosquito, "ants" -> ant), and the forms a post may use for it.
+// mosquito, "ants" -> ant, "mice" -> mouse), and the forms a post may use for
+// it.
 function singularOf(word) {
+  if (IRREGULAR_FORMS.has(word)) return IRREGULAR_FORMS.get(word)[0];
   if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
   if (word.length > 4 && /(?:ch|sh|x|z|ss|o)es$/.test(word)) return word.slice(0, -2);
   if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
@@ -115,6 +124,7 @@ function singularOf(word) {
 }
 const pluralOf = (word) => (/(?:ch|sh|x|z|s|o)$/.test(word) ? `${word}es` : /[^aeiou]y$/.test(word) ? `${word.slice(0, -1)}ies` : `${word}s`);
 function formsOf(word) {
+  if (IRREGULAR_FORMS.has(word)) return [...IRREGULAR_FORMS.get(word)];
   const one = singularOf(word);
   // The plural of the word as typed too: a singular that ends in s ("virus",
   // "mantis") keeps its own plural (GitHub Codex P2 on #5652).
@@ -201,7 +211,15 @@ async function searchReportBlogPosts(knex, query) {
   const [registryRows, portalRows] = await Promise.all([
     anyTermIn(knex('content_registry')
       .where({ content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' })
-      .whereRaw('COALESCE(noindex_detected, false) = false'), REGISTRY_TEXT, terms, 'published_at')
+      .whereRaw('COALESCE(noindex_detected, false) = false')
+      // Only a row whose live URL can be on the hub reaches the cap: a spoke
+      // site's posts never crowd the Waves posts out (GitHub Codex P2 r2 on
+      // #5652); registryLink still decides.
+      // (Every pattern is a binding: knex reads a bare ? in the SQL as one.)
+      .whereRaw(
+        "(live_url ~* ? OR (COALESCE(live_url, '') !~* ? AND (COALESCE(canonical_url, '') !~* ? OR canonical_url ~* ?)))",
+        [HUB_URL_RE, ABSOLUTE_URL_RE, ABSOLUTE_URL_RE, HUB_URL_RE],
+      ), REGISTRY_TEXT, terms, 'published_at')
       .select(REGISTRY_COLUMNS),
     anyTermIn(knex('blog_posts')
       .where('status', 'published')

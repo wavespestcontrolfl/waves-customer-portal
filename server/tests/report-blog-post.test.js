@@ -200,6 +200,12 @@ describe('searchTerms', () => {
     expect(searchTerms('pest')[0].forms).toEqual(expect.arrayContaining(['pest', 'pests']));
   });
 
+  test('an irregular plural finds its singular and back: mice and mouse (GitHub Codex P2 r2 on #5652)', () => {
+    expect(searchTerms('mice')).toEqual([{ word: 'mouse', forms: ['mouse', 'mice'] }]);
+    expect(searchTerms('mouse')).toEqual([{ word: 'mouse', forms: ['mouse', 'mice'] }]);
+    expect(searchTerms('mice mouse')).toHaveLength(1);
+  });
+
   test('each word carries the forms a post may use for it', () => {
     expect(searchTerms('roaches')[0].forms).toEqual(expect.arrayContaining(['roach', 'roaches']));
     expect(searchTerms('fly')[0].forms).toEqual(expect.arrayContaining(['fly', 'flies']));
@@ -262,6 +268,24 @@ describe('searchReportBlogPosts', () => {
       expect(bindings).toEqual(expect.arrayContaining(['\\m(?:ghost|ghosts)\\M', '\\m(?:ants|ant|antses)\\M']));
       expect(calls[limit]).toEqual([`${table} limit`, 500]);
     }
+  });
+
+  test('a "mouse" search finds a post about mice', async () => {
+    const knex = recordingKnex({ content_registry: [registryRow('aaaaaaaa-0000-4000-8000-000000000031', 'Mice in the Attic After the First Cold Snap')] });
+    expect((await searchReportBlogPosts(knex, 'mouse')).map((post) => post.title)).toEqual(['Mice in the Attic After the First Cold Snap']);
+  });
+
+  test('only registry rows whose live URL can be on the hub reach the cap (GitHub Codex P2 r2 on #5652)', async () => {
+    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    const calls = knex.calls.filter(([name]) => name.startsWith('content_registry '));
+    const hub = calls.findIndex(([name, sql]) => name === 'content_registry whereRaw' && /live_url ~\* \?/.test(sql));
+    expect(hub).toBeGreaterThanOrEqual(0);
+    const HUB = '^https?://(www\\.)?wavespestcontrol\\.com(/|$)';
+    expect(calls[hub][2]).toEqual([HUB, '^https?://', '^https?://', HUB]);
+    // Every ? in the SQL is a binding (knex reads a bare ? as one).
+    expect((calls[hub][1].match(/\?/g) || []).length).toBe(calls[hub][2].length);
+    expect(hub).toBeLessThan(calls.findIndex(([name]) => name === 'content_registry limit'));
   });
 
   test('a plural finds the singular: "ghost ants" finds a Ghost Ant post, at its live URL', async () => {
