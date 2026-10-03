@@ -522,5 +522,24 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     const row = completeBodies(request)[0].products.find((p) => p.productId === 'talstar');
     expect(row.applicationMethod).toBe('perimeter_spray');
   });
+
+  test('the sheet cannot be closed while the voice mic is live', async () => {
+    const onClose = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest()} onClose={onClose} voiceFillEnabled />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    React.act(() => {
+      dictation.perSlot[0] = { listening: true };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    React.act(() => {
+      dictation.perSlot[0] = { listening: false };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });
 

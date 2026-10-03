@@ -559,10 +559,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // is unknown or refused (it may have saved), so reopening routes from the
   // live schedule rather than the same old row.
   const close = useCallback(() => {
-    if (submitting) return;
+    // Voice still recording, transcribing or filling: closing (×, backdrop or
+    // Escape all come through here) would drop those words and the sheet's edits.
+    if (submitting || voiceBusy) return;
     if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, voiceBusy, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -581,7 +583,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
     </FastCompleteFrame>
   );
