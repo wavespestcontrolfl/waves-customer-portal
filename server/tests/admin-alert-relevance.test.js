@@ -326,6 +326,26 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
   });
 
+  test('bad-review bell: done once its review has a reply, was dismissed, left Google, or is gone', async () => {
+    const REV = uid(520);
+    const bell = note({ category: 'review_low_rating', link: '/admin/reviews', metadata: { dedupeKey: `review-low-rating:${REV}`, reviewId: REV } });
+    const review = (over) => { mockTables.google_reviews = [{ id: REV, review_reply: null, dismissed: false, missing_since: null, ...over }]; };
+    review({});
+    expect(await reasonFor(bell)).toEqual({ cls: 'review_low_rating', reason: null });
+    review({ review_reply: '   ' });
+    expect((await reasonFor(bell)).reason).toBeNull(); // a blank reply is no reply
+    review({ review_reply: 'Sorry about that, we are calling you today.' });
+    expect((await reasonFor(bell)).reason).toBe('The review has a reply');
+    review({ dismissed: true });
+    expect((await reasonFor(bell)).reason).toBe('The review was dismissed');
+    review({ missing_since: new Date('2026-10-02T00:00:00Z') });
+    expect((await reasonFor(bell)).reason).toBe('The review left Google');
+    mockTables.google_reviews = [];
+    expect((await reasonFor(bell)).reason).toBe('The review is gone');
+    // A bell naming no review is never judged.
+    expect((await reasonFor(note({ category: 'review_low_rating', metadata: { dedupeKey: 'review-low-rating:x' } }))).reason).toBeNull();
+  });
+
   const move = (metadata = {}) => note({
     category: 'schedule_conflict', link: '/admin/dispatch?tab=schedule',
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },
