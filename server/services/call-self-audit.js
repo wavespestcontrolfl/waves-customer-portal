@@ -132,6 +132,58 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
   return out;
 }
 
+// Voicemail triage evidence (voicemail.v1, Clef second wave idea 6): every
+// INBOUND voicemail of the last 24 hours (not a sample: ~44 a month), put to
+// the same providers and recorded beside what production did with it:
+//   callback_requested  production = it reached a person (a
+//                       customer_voicemail_callback bell carrying its call id,
+//                       or a lead minted from its call)
+//   is_vendor_or_spam   production = spam status or the extraction's is_spam
+//   needs_attention_today  no baseline: nothing decides urgency today
+// A voicemail longer than the span the models and reviewer see is counted,
+// never asked (as for the gate checks). Never throws; evidence only.
+const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam'];
+async function shadowVoicemails({ now = new Date() } = {}) {
+  const tally = { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
+  if (!typedDecisionsLive()) return tally;
+  try {
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .whereRaw(INBOUND_DIRECTION_SQL)
+      .whereIn('processing_status', VOICEMAIL_STATUSES)
+      .where('created_at', '>', new Date(now.getTime() - 24 * 60 * 60 * 1000))
+      .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
+      .orderBy('created_at', 'asc')
+      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'duration_seconds');
+    // A lead-path voicemail ends 'processed'; only the extraction says it was a voicemail.
+    const voicemails = rows.filter((c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true);
+    if (!voicemails.length) return tally;
+    const ids = voicemails.map((c) => String(c.id));
+    const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
+    const [belled, leads] = await Promise.all([
+      db('notifications').where({ category: 'voicemail_callback' })
+        .whereRaw("metadata -> 'payload' ->> 'callLogId' = ANY(?)", [ids])
+        .select(db.raw("metadata -> 'payload' ->> 'callLogId' AS call_id")),
+      sids.length ? db('leads').whereIn('twilio_call_sid', sids).select('twilio_call_sid') : [],
+    ]);
+    const belledIds = new Set(belled.map((r) => String(r.call_id)));
+    const leadSids = new Set(leads.map((r) => r.twilio_call_sid));
+    const clef = typedDecisionsClefLive();
+    for (const call of voicemails) {
+      if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
+      const ex = safeParse(call.ai_extraction);
+      const baselines = {
+        callback_requested: { production: belledIds.has(String(call.id)) || leadSids.has(call.twilio_call_sid) },
+        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true },
+      };
+      count(tally, clef, await askAndRecord(call, { packageId: 'voicemail.v1', baselines }, clef));
+    }
+  } catch (err) {
+    logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
+  }
+  return tally;
+}
+
 // The sampled calls that carry a live AI-extracted Waves promise. null when
 // commitments are off (no reading, so no baseline). Never throws.
 async function loadWavesPromiseCallIds(calls) {
@@ -263,8 +315,10 @@ async function runSelfAudit(depsIn = {}) {
     sampleDirection(OUTBOUND_DIRECTION_SQL),
   ]);
   const calls = stratifySample({ inbound: inboundRows, outbound: outboundRows, size: SAMPLE_SIZE });
+  // Every voicemail of the day, independent of the call sample (and of whether there is one).
+  const voicemails = await shadowVoicemails();
 
-  if (!calls.length) return { sampled: 0 };
+  if (!calls.length) return { sampled: 0, voicemails };
 
   let disagreements = 0; let checkedFields = 0; let spamFalsePositives = 0; let dispositionMismatches = 0; let audited = 0;
   const jev = { asked: 0, recorded: 0, failed: 0 };
@@ -355,9 +409,9 @@ async function runSelfAudit(depsIn = {}) {
   } else {
     logger.info(`[self-audit] healthy: ${audited} calls, field rate ${(fieldRate * 100).toFixed(1)}%, 0 spam FPs`);
   }
-  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches, jev };
+  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches, jev, voicemails };
 }
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails };

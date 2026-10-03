@@ -13,7 +13,7 @@ const { typedDecisionsLive, typedDecisionsClefLive } = require('../config/featur
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
-const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines } = require('../services/call-self-audit');
+const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
 // Each sampled call is asked call_judge.v2 and call_gate_checks.v1; these
 // read one package's asks, records and tally.
@@ -414,5 +414,86 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
     expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 0, failed: 1, skippedLong: 0 });
     expect(res.audited).toBe(1);
+  });
+});
+
+describe('voicemail triage evidence (voicemail.v1: every inbound voicemail of the day beside what production did)', () => {
+  const JEV = { ok: true, answers: { callback_requested: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+  const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', transcription: 'Hi, this is about my termites, please call me back.', ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
+
+  function vmDb({ rows = [], belled = [], leadSids = [] } = {}) {
+    const seen = {};
+    db.raw = (sql) => sql;
+    db.mockImplementation((table) => {
+      const b = {
+        modify(fn) { fn(b); return b; }, whereRaw(...a) { (seen[table] = seen[table] || []).push(a); return b; }, whereIn(...a) { (seen[table] = seen[table] || []).push(a); return b; },
+        where(...a) { (seen[table] = seen[table] || []).push(a); return b; }, whereNot() { return b; }, orderBy() { return b; },
+        select: async () => {
+          if (table === 'call_log') return rows;
+          if (table === 'notifications') return belled.map((id) => ({ call_id: id }));
+          if (table === 'leads') return leadSids.map((sid) => ({ twilio_call_sid: sid }));
+          return [];
+        },
+      };
+      return b;
+    });
+    return seen;
+  }
+
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(true);
+    typedDecisionsClefLive.mockReturnValue(false);
+    askPackage.mockReset(); recordDecisions.mockReset();
+    askPackage.mockResolvedValue(JEV); recordDecisions.mockResolvedValue({ recorded: 3 });
+  });
+  afterAll(() => typedDecisionsLive.mockReturnValue(false));
+
+  test('gate off: nothing read, asked or recorded', async () => {
+    typedDecisionsLive.mockReturnValue(false);
+    vmDb({ rows: [VM()] });
+    expect(await shadowVoicemails()).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
+    expect(askPackage).not.toHaveBeenCalled();
+  });
+
+  test('a voicemail that rang the callback bell or minted a lead reached a person; one that did neither did not', async () => {
+    vmDb({ rows: [VM({ id: 'vm-1', twilio_call_sid: 'CA_1' }), VM({ id: 'vm-2', twilio_call_sid: 'CA_2' }), VM({ id: 'vm-3', twilio_call_sid: 'CA_3' })], belled: ['vm-1'], leadSids: ['CA_2'] });
+    const tally = await shadowVoicemails();
+    const bySubject = Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
+    expect(bySubject['vm-1'].baselines.callback_requested).toEqual({ production: true });
+    expect(bySubject['vm-2'].baselines.callback_requested).toEqual({ production: true });
+    expect(bySubject['vm-3'].baselines.callback_requested).toEqual({ production: false });
+    expect(bySubject['vm-3']).toMatchObject({ capability: 'voicemail', subjectType: 'call_log', provider: 'typesafe' });
+    // urgency has no production decision today: no baseline, never a false one
+    expect(bySubject['vm-3'].baselines).not.toHaveProperty('needs_attention_today');
+    expect(tally).toEqual({ asked: 3, recorded: 3, failed: 0, skippedLong: 0 });
+  });
+
+  test('spam status or the extraction\'s is_spam is the spam baseline; a processed call is a voicemail only when the extraction says so', async () => {
+    vmDb({ rows: [
+      VM({ id: 'vm-s', processing_status: 'spam' }),
+      VM({ id: 'vm-x', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: true, is_spam: true }) }),
+      VM({ id: 'call-live', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: false }) }),
+    ] });
+    await shadowVoicemails();
+    const bySubject = Object.fromEntries(recordsFor('voicemail.v1').map(([a]) => [a.subjectId, a]));
+    expect(Object.keys(bySubject).sort()).toEqual(['vm-s', 'vm-x']);
+    expect(bySubject['vm-s'].baselines.is_vendor_or_spam).toEqual({ production: true });
+    expect(bySubject['vm-x'].baselines.is_vendor_or_spam).toEqual({ production: true });
+  });
+
+  test('only inbound, a 24-hour window; a voicemail longer than the span is counted, never asked', async () => {
+    const seen = vmDb({ rows: [VM({ id: 'vm-long', transcription: 'Hi please call me back about the termites. '.repeat(200) })] });
+    const tally = await shadowVoicemails({ now: new Date('2026-10-03T08:00:00Z') });
+    expect(tally).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
+    expect(askPackage).not.toHaveBeenCalled();
+    const raws = (seen.call_log || []).map((a) => String(a[0]));
+    expect(raws).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
+    const since = (seen.call_log || []).find((a) => a[0] === 'created_at');
+    expect(since[2]).toEqual(new Date('2026-10-02T08:00:00Z'));
+  });
+
+  test('a read failure is logged, never thrown', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
   });
 });
