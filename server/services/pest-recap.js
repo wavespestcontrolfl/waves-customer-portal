@@ -314,16 +314,16 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
 // The record the Fast Complete sheet reads from a visit's note, each resolved
 // as the completion resolves it: a specialty lane (GATE_LANE_VOICE_FILL,
 // visit-lane-facts.js voiceLaneFor) or a typed form (GATE_TYPED_VOICE_FILL,
-// visit-typed-facts.js voiceTypeFor, the profile's own findingsType; never a
-// combined visit, whose companion sections are required at completion and
-// the sheet has none). Neither for a visit that completes through a project,
+// visit-typed-facts.js sheetTypeFor, the profile's own findingsType when the
+// sheet reads it; never a combined visit, whose companion sections are
+// required at completion and the sheet has none). Neither for a visit that completes through a project,
 // nor when the profile could not be read (whether it does is then unknown).
 function sheetRecordFor(profile, svc) {
   if (!profile || profile.projectBacked || profile.requiresProject) return { lane: null, typedType: null };
   const gates = require('../config/feature-gates');
   return {
     lane: gates.laneVoiceFillLive() ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type }) : null,
-    typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').voiceTypeFor(profile) : null,
+    typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
 }
 
@@ -1682,4 +1682,5 @@ module.exports = {
   recapVisitIdentityChanged,
   recapServiceIdentity,
   loadRecapCatalogProducts,
+  loadCommonProducts,
 };

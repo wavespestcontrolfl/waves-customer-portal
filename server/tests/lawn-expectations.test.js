@@ -89,9 +89,9 @@ describe('lawn expectations config rows', () => {
     ALL_ROWS.forEach((row) => expect(config.ROW_PRIORITY).toContain(row.id));
   });
 
-  it('every row ships unapproved and every window carries a proposed|catalog source', () => {
+  it('every row is owner-approved (2026-10-02) and every window carries a proposed|catalog source', () => {
     for (const row of ALL_ROWS) {
-      expect(row.approved).toBe(false);
+      expect(row.approved).toBe(true);
       for (const win of [row.windows?.first, row.windows?.full, row.contactWindow].filter(Boolean)) {
         expect(['proposed', 'catalog']).toContain(win.source);
         if (win.source === 'catalog') expect(win.catalogRef).toBeTruthy();
@@ -221,12 +221,18 @@ describe('product name map', () => {
 describe('buildLawnExpectations', () => {
   const base = { visitDate: '2026-10-01', nextVisitDate: '2026-11-05' };
 
-  it('ships dark: every row is withheld unless the caller asks for a preview', () => {
-    const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
-    expect(out.rows).toEqual([]);
-    expect(out.lines).toEqual([]);
-    expect(out.primaryRowId).toBeNull();
-    expect(out.withheld).toEqual([{ rowId: 'herbicide_broadleaf', reason: 'not_approved' }]);
+  it('an unapproved row is withheld unless the caller asks for a preview', () => {
+    const original = PRODUCT_ROWS.herbicide_broadleaf;
+    PRODUCT_ROWS.herbicide_broadleaf = { ...original, approved: false };
+    try {
+      const out = buildLawnExpectations({ ...base, applications: [{ name: 'Celsius WG' }] });
+      expect(out.rows).toEqual([]);
+      expect(out.lines).toEqual([]);
+      expect(out.primaryRowId).toBeNull();
+      expect(out.withheld).toEqual([{ rowId: 'herbicide_broadleaf', reason: 'not_approved' }]);
+    } finally {
+      PRODUCT_ROWS.herbicide_broadleaf = original;
+    }
   });
 
   it('an approved row is surfaced without the preview flag', () => {

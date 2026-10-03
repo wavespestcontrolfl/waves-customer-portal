@@ -1138,6 +1138,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const location = useLocation();
   const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  // Deferred sends are office-only: the server replays a queued text later with
+  // no re-check of the sender's route, so a technician login only sends now.
+  const smsIsTechnicianRole = smsOutletContext?.user?.role === "technician";
   const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -1177,6 +1180,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     initialDraft: customer ? { selectedCustomerId: customer.id } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
   });
   previousSenderRef.current = fromNumber;
+  // A restored draft cannot leave a technician on a hidden deferred timing.
+  useEffect(() => {
+    if (smsIsTechnicianRole && sendTiming !== "now") setSendTiming("now");
+  }, [smsIsTechnicianRole, sendTiming, setSendTiming]);
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -1790,6 +1797,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
   const resolveScheduledFor = () => {
     if (sendTiming === "now") return { value: null, error: null };
+    if (smsIsTechnicianRole) return { value: null, error: "Scheduled sends are office-only. Send now instead." };
     if (sendTiming === "tomorrow_8") {
       const [y, m, d] = etDateOnly(new Date()).split("-").map(Number);
       // Build "tomorrow in ET" by adding 1 day at UTC noon (collision-free
@@ -3643,7 +3651,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             e.target.value = "";
           }}
         />{" "}
-        <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
+        {!smsIsTechnicianRole && <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
         <Select
           aria-label="Send timing"
           value={sendTiming}
@@ -3658,8 +3666,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
         </Select>
-        </Field>
-        {sendTiming === "custom" && (
+        </Field>}
+        {!smsIsTechnicianRole && sendTiming === "custom" && (
           <Input
             type="datetime-local"
             aria-label="Scheduled send time (Eastern)"

@@ -1179,10 +1179,34 @@ describe('engine replay guards', () => {
     // the scheduled row's frozen category snapshot outranks the live (mutable) catalog category
     expect(src).toMatch(/COALESCE\(s\.service_category_snapshot, sv\.category,/);
     expect(src).not.toMatch(/COALESCE\(sv\.category, s\.service_category_snapshot/);
-    for (const fn of ['loadFirstCompletedVisits', 'loadCompletedVisitRows']) {
-      const body = src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
-      expect(body).toMatch(/\$\{PLAN_ROW_SQL\}/);
-    }
+    // revenue / $ per hour read purchased-plan rows; the anniversary reads every
+    // completed application of the family (DATING_ROW_SQL): a completed
+    // "Quarterly Pest Control Service" booked without the recurring flag still
+    // dates the line, while an explicit booster, callback or included follow-up
+    // never does.
+    const bodyOf = (fn) => src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
+    expect(bodyOf('loadCompletedVisitRows')).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    expect(bodyOf('loadFirstCompletedVisits')).toMatch(/\$\{DATING_ROW_SQL\}/);
+    expect(bodyOf('loadFirstCompletedVisits')).not.toMatch(/\$\{PLAN_ROW_SQL\}/);
+    // one-off inspections/assessments ('other') never date a line or set the account's import baseline
+    expect(bodyOf('loadFirstCompletedVisits')).toMatch(/\$\{LINE_SQL\} <> 'other'/);
+    // allow-list: a plan row, or a standalone (no parent) non-recurring-flagged booking of a
+    // recurring catalog service that is not an inspection / assessment / WDO
+    expect(P.DATING_ROW_SQL.startsWith(`(${P.PLAN_ROW_SQL} OR (`)).toBe(true);
+    expect(P.DATING_ROW_SQL).toMatch(/s\.is_recurring IS FALSE AND s\.recurring_parent_id IS NULL/);
+    // positive recurring evidence: the catalog says recurring, or (no catalog row) the name carries a cadence —
+    // a service_id-less "One-Time Pest Control" row passes neither
+    expect(P.DATING_ROW_SQL).toMatch(/sv\.billing_type = 'recurring'/);
+    expect(P.DATING_ROW_SQL).toMatch(/sv\.id IS NULL AND COALESCE\(s\.service_type, ''\) ~\* '\(quarterly\|bi-monthly\|bimonthly\|semi-annual\|semiannual\|monthly\|annual\|every \[0-9\]\|recurring\)'/);
+    expect(P.DATING_ROW_SQL).not.toMatch(/\?/); // a `?` in knex raw SQL is a binding placeholder
+    expect(P.DATING_ROW_SQL).not.toMatch(/<> 'one_time'/);
+    const cadence = /(quarterly|bi-monthly|bimonthly|semi-annual|semiannual|monthly|annual|every [0-9]|recurring)/i;
+    for (const name of ['Quarterly Pest Control Service', 'Bi-Monthly Tree & Shrub Care Service', 'Semiannual Pest Control Service', 'Bi-Monthly Pest Control']) expect(cadence.test(name)).toBe(true);
+    for (const name of ['One-Time Pest Control', 'Termite Control Service', 'WDO Inspection', 'Waves Assessment']) expect(cadence.test(name)).toBe(false);
+    for (const word of ['inspection', 'assessment', 'wdo']) expect(P.DATING_ROW_SQL).toMatch(new RegExp(`NOT ILIKE '%${word}%'`));
+    expect(P.DATING_ROW_SQL).not.toMatch(/is_recurring = false/);
+    // the standalone arm carries its own callback / follow-up exclusions (PLAN_ROW_SQL's do not reach it)
+    expect(P.DATING_ROW_SQL.split('COALESCE(s.is_callback, false) = false').length - 1).toBe(2);
     expect(src).not.toMatch(/RECURRING_SQL/);
     expect(planQuery).toMatch(/c\.active = true/);
     expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);

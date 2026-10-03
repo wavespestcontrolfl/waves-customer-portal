@@ -1,22 +1,113 @@
-# Intelligence Bar operator workflows: contracts, matrix and evidence
+# Intelligence Bar operator workflows: contracts, manifests, matrix and evidence
 
-PR 0 of the Intelligence Bar ten-workflow scope (owner-approved October 2, 2026). The scope's hypotheses are written down here, not in an outside document: the per-workflow contracts below, and the expected admin and technician cells in `MATRIX` (`server/tests/fixtures/ib-workflows/execution-matrix.js`), which the test compares with the code. This page holds the ten request contracts, the execution-mode matrix, the evidence status for each workflow and the read-only request tally. It changes no runtime behavior. The 200 scenario cases and the harness that executes them land in a separate PR, which adds the manifest shape to this page.
+PR 0 of the Intelligence Bar ten-workflow scope (owner-approved October 2, 2026). The scope's hypotheses are written down here, not in an outside document: the per-workflow contracts below, and the expected admin and technician cells in `MATRIX` (`server/tests/fixtures/ib-workflows/execution-matrix.js`), which the test compares with the code. This page holds the ten request contracts, the execution-mode matrix, the evidence status for each workflow and the read-only request tally. It changes no runtime behavior. The 200 scenario cases (the manifests) and the harness that executes them are in the same branch as the manifest shape below; the matrix and the tally were split out and merged separately (#5626).
 
 - **Inspected commit:** `60655b1ec9` (origin/main on October 2, 2026, as merged into this branch). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-matrix.test.js`; it is not a claim about production or about any open pull request.
 - **On this commit:** owner-direct mode (#5563) is merged, dark behind `GATE_IB_OWNER_DIRECT` (direct commits also ride on `GATE_IB_PLATFORM`). The owner cells below are derived from `server/services/intelligence-bar/owner-direct.js` (`OWNER_DIRECT_TOOL_NAMES`, `executesWithoutCard`), not typed in. Nothing here says either gate is on in production.
-- **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). They are documented as capability gaps with the scenario cases, which land separately.
-- **No production access** was used to build this.
+- **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). Each is a named gap, listed below; the cases that need one carry it and stay scored targets.
+- **No production access** was used to build this. Nothing in the manifests names a real customer, address, phone number, email or gate code; fixture keys are synthetic.
 
 ## What is in the PR
 
 | Piece | Where |
 | --- | --- |
-| Matrix data and renderer | `server/tests/fixtures/ib-workflows/execution-matrix.js` |
+| Scenario manifests, W1 to W10 (200 cases) | `server/tests/fixtures/ib-workflows/W1.json` to `W10.json` |
+| Matrix data and renderer, plus the case helpers (capability gaps, call lists, the write-call schema check) | `server/tests/fixtures/ib-workflows/execution-matrix.js` |
 | Matrix and tally test | `server/tests/intelligence-bar-workflow-matrix.test.js` |
+| Manifest contract test (shape, row references, write calls, gaps, partition table) | `server/tests/intelligence-bar-workflow-manifest.test.js` |
 | Read-only request tally | `scripts/ib-request-tally.js` |
 | This page | `docs/intelligence-bar-operator-workflows.md` |
 
-Run the test with `npm exec jest -- server/tests/intelligence-bar-workflow-matrix.test.js --runInBand`. After a deliberate matrix change, `UPDATE_IB_MATRIX_DOC=1` rewrites the table between the matrix markers below; without it the test fails if the table is stale.
+Run the matrix test with `npm exec jest -- server/tests/intelligence-bar-workflow-matrix.test.js --runInBand` and the manifest contract test with `npm exec jest -- server/tests/intelligence-bar-workflow-manifest.test.js --runInBand`. After a deliberate matrix change, `UPDATE_IB_MATRIX_DOC=1` rewrites the table between the matrix markers below; without it the test fails if the table is stale.
+
+## Manifest shape
+
+One JSON file per workflow. Top level: `schema_version`, `workflow`, `title`, `inspected_commit`, `contract` (tools and binding rulings), `fixtures` (the synthetic data sets the cases refer to), `required_corrections` (the section 2.2 correction cases that must be covered) and `cases`.
+
+Each case:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `W3-dev-04`: workflow, partition (`dev` or `held`), sequence |
+| `origin` | The originating example. Paraphrases share an origin and stay in one partition |
+| `kind` | `read` or `write` |
+| `request` | Operator wording: no tool names, no ids |
+| `fixture` | Which fixture set the case runs against |
+| `page_context` | `none`, `customer:<key>`, `lead:<key>` or `visit:<key>` (synthetic keys) |
+| `actor` | `owner`, `admin` or `tech` |
+| `mode` | `owner_direct_on` or `owner_direct_off` (the owner-direct gate state; it only changes what the owner login sees) |
+| `inject` | Optional harness event: a dropped response, a timeout, a revoked permission, data that changes between plan and confirm |
+| `requires` | Optional list of capability-gap keys (see Capability gaps): the target behavior needs something that is not on this tree. The case stays a scored target |
+| `expected` | The first step of the case: `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages sent in this step), `card` (a confirmation card is presented in this step; reads never show one; when the outcome is `completed` or `submitted_to_provider` the harness confirms it), `say` (what the answer must state) |
+| `call` | On every write step that commits or shows a card (the case, and each correction that commits): the call the step would make, `{ tool, input, preview? }` with synthetic values, or a list for a compound step. See Write calls |
+| `forbidden` | Rows, fields and sends that must not happen. Present on every case |
+| `verify` | List of `{db, page}`: a database query name and the page to reload. Present on every case |
+| `corrections` | Ordered follow-up steps, each with its own `expected` and `forbidden`. A case is scored on its last step. When the tag is `pre_exec_change` the first step only proposes (`awaiting_operator`, nothing sent or committed) and a later step commits the final version |
+| `tags` | Generic recovery cases from "Corrections and recovery" the case exercises |
+| `covers` | Which section 2.2 specific correction cases it covers |
+| `negative` | True when the case's final outcome (last correction if any, else `expected`) is not `completed` or `submitted_to_provider` |
+
+Generic recovery tags: `wrong_target_switch`, `pre_exec_change`, `post_commit_correction`, `plan_drift`, `lost_response`, `double_submit`, `timeout_unknown`, `second_step_failure`, `permission_revoked`, `clear_or_refresh`.
+
+### Outcome enum (fixed)
+
+`completed`, `submitted_to_provider`, `awaiting_operator`, `unsupported`, `blocked_by_rule`, `failed`, `partial`, `unknown`.
+
+Supported-request completion is scored over cases whose final outcome is `completed` or `submitted_to_provider`. Every other case is `negative: true` and is reported separately, so blanket refusals cannot raise the completion score. `partial` and `unknown` are negative too: a half-done or unverifiable request is never a pass.
+
+### Partitions
+
+Ten development and ten held-out cases per workflow. They are split by originating example: no origin appears in both partitions, and the test also rejects a held-out request or correction that matches a development one word for word or with only the names and numbers swapped. A held-out case may resemble a development case in family, never in scenario.
+
+Booking and move rows record the stored block, not the arrival range: a new booking stores a flat 60-minute `window_end`, and a move keeps the visit's stored block length. The two-hour range a customer sees ("10 AM to 12 PM") is confirmation-text copy, and the test rejects a change row that asserts it as the persisted window.
+
+Row references in `changes` and `unchanged` name real tables and columns (`product_inventory_movements[new].product_id`, `sms_log[x].status`), and the test checks each against the migrations. Five are deliberate logical names for values that are not one column:
+
+| Logical name | Where it lives |
+| --- | --- |
+| `estimates.lawn_applications` | `estimate_data` inputs, `services.lawn.lawnFreq` |
+| `estimates.measurement` | `estimate_data` inputs, the property lawn measurement used |
+| `estimates.price` | the engine total saved with the estimate (`monthly_total` / `annual_total` per cadence) |
+| `scheduled_services.date_window` | `scheduled_date` plus `window_start` / `window_end` |
+| `sms_log.template` | `sms_log.message_type`, the template key the sender used |
+
+A recovery tag describes a step that happens: `pre_exec_change` needs a follow-up correction after the initial proposal, and a fault injected "after the card is shown" means the initial step expects a card.
+
+| Workflow | Dev scored / negative | Held scored / negative | Cases needing a missing capability |
+| --- | --- | --- | --- |
+| W1 | 9 / 1 | 8 / 2 | 0 |
+| W2 | 8 / 2 | 8 / 2 | 0 |
+| W3 | 8 / 2 | 7 / 3 | 0 |
+| W4 | 6 / 4 | 6 / 4 | 0 |
+| W5 | 5 / 5 | 4 / 6 | 1 (`create_appointment_property_pin`) |
+| W6 | 7 / 3 | 6 / 4 | 10 (`reschedule_notice_send`, one also `series_reschedule_writer`) |
+| W7 | 7 / 3 | 6 / 4 | 1 (`secondary_number_customer_link`) |
+| W8 | 6 / 4 | 5 / 5 | 1 (`estimate_measurement_selector`) |
+| W9 | 8 / 2 | 6 / 4 | 10 (`invoice_payment_reader`) |
+| W10 | 6 / 4 | 6 / 4 | 0 |
+
+### Write calls
+
+A manifest describes target behavior, and each review round found another case that expected something the code cannot do today or a card flag that contradicted the code's own policy. So every write step that commits or shows a card names the call it would make, and the contract test holds that call to the code:
+
+1. The call's tool is one of the workflow's contract tools, or the case carries the gap that adds it.
+2. Every key of `call.input` is an input of that tool in the schema the bar sends to the model (the action registry's schema, the same one the model sees), every enum value is inside the schema's enum, types match, and `update_customer.updates` keys are real updatable fields. This is what catches a `send_sms` `message_type` of `appointment_rescheduled`, a `create_appointment` `property_id` or an estimate measurement selector.
+3. The card flag follows the policy. For the owner with the gate on, `expected.card` must equal `!executesWithoutCard(tool, input, preview)` from `owner-direct.js` (any carded call in a compound step shows its card); `call.preview` supplies the facts the policy reads from the proposal (`pinned_appointment.visit_id`, `stops`). For every other actor or mode a write takes its card, and a step with card false changes nothing and sends nothing.
+
+A case whose target behavior needs something that is not on this tree carries `requires`; a gap licenses only the schema additions it lists, and the test fails if a case names a gap its calls do not use.
+
+### Capability gaps
+
+| Gap | What is missing | Owner | Cases |
+| --- | --- | --- | --- |
+| `series_reschedule_writer` | A tool that moves a whole recurring series. `reschedule_appointment` moves one row and refuses a recurring date move when collective moves are on; its series path is deferred | follow-up named in reschedule_appointment (Intelligence Bar series moves) | 1 |
+| `reschedule_notice_send` | A server-rendered move notice (decision D1): `appointment_rescheduled` or `appointment_series_rescheduled` text built from the committed row, on one card. `send_sms` takes manual, reminder, follow_up or billing_reminder and records freeform text | PR 3c (move + notice, decision D1) | 10 |
+| `create_appointment_property_pin` | A property pin on booking. `create_appointment` has no `property_id` and stores the customer's sole active property, which is null for a customer with two | PR 3b (W5 booking service, create_appointment gains property_id) | 1 |
+| `estimate_measurement_selector` | A way to pick which saved lawn measurement the estimate uses. `save_customer_estimate` takes customer, property, estimate and cadence only and derives one measurement from the property | unassigned (W8 follow-up) | 1 |
+| `secondary_number_customer_link` | An authorized secondary contact number linked to the customer. `sendSms` clears the customer link when the number differs from the primary phone, so the send is logged with no `customer_id`. The W7 case keeps the scope's intent (the audit row is linked) and carries this gap | unassigned (W7 follow-up) | 1 |
+| `invoice_payment_reader` | The per-customer invoice, recorded-payment and credit reader (W9) | #5586 (PR 3a) | 10 |
+
+W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, commercial, special-price and half-hour requests are listed as visible negatives rather than silently simplified.
 
 ## The ten contracts
 

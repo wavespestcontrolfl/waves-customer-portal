@@ -82,7 +82,7 @@ describe('tech dictation upload', () => {
     jest.clearAllMocks();
     process.env.GATE_TECH_DICTATION_UPLOAD = 'true';
     process.env.OPENAI_API_KEY = 'test-key';
-    mockFirst.mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1' });
+    mockFirst.mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) });
     mockTranscribe.mockResolvedValue({ text: '  Treated the exterior perimeter. ', provider: 'openai' });
     mockImplausible.mockReturnValue(false);
   });
