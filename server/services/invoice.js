@@ -32,6 +32,7 @@ const {
   isUnpricedPlanVisit,
   acquireMembershipDuesMonthLock,
   tryAcquireMembershipDuesMonthLock,
+  acquireMembershipDuesMonthLockBounded,
   monthlyDuesCollected,
   findLiveStampedDuesInvoice,
   findCollectedDuesPayment,
@@ -1819,7 +1820,19 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
     e.code = "SCHEDULED_BILLING_SOURCE_MOVED";
     throw e;
   }
-  await acquireMembershipDuesMonthLock(conn, customerId, month);
+  // The mint holds the customer FOR SHARE, the visit row and the visit's mint
+  // lock here, so it must not WAIT on the dues-month lock (see THE LOCK RULE at
+  // acquireMembershipDuesMonthLock): a void holding the month can be queued
+  // behind this very customer lock for its credit restore. A bounded try-poll
+  // serializes sibling mints; a miss refuses retryably (rolls this mint back).
+  if (!(await acquireMembershipDuesMonthLockBounded(conn, customerId, month))) {
+    const e = new Error(`Membership dues for ${month} are being billed or changed right now — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "dues_month_busy";
+    throw e;
+  }
   // The monthly cron, its retry sweep and Charge now hold the per-customer
   // collection lock (a SESSION lock held across the Stripe charge): never wait
   // on it. Claim the same key for this transaction without blocking; while a
@@ -1965,12 +1978,13 @@ function membershipDuesStampMonth(lineItems) {
 }
 
 // A writer that REMOVES a month's coverage (a stripping edit, a void, the
-// cancelled-visit void; the invoice row is the writer's own pre-read) holds the dues-month lock while it commits, so it is
-// mutually exclusive with a mint and with a covered completion's locked
-// re-read. FIRST lock of the writer's transaction (before any invoice row
-// lock): the mint takes this lock and then only INSERTS a new invoice, never
-// locking an existing invoice row, and the lock is held only by short
-// transactions (never across Stripe), so a blocking take cannot cycle.
+// cancelled-visit void; the invoice row is the writer's own pre-read) holds the
+// dues-month lock while it commits, so it is mutually exclusive with a mint and
+// with a covered completion's commit-time confirmation. It is the FIRST lock of
+// the writer's transaction, which is what lets it WAIT (THE LOCK RULE at
+// acquireMembershipDuesMonthLock): it then takes invoice / statement / customer
+// FOR UPDATE rows while holding it, so every taker that already holds a row
+// lock (the mint, the completion) only tries the month lock, never waits.
 async function lockMembershipDuesMonthOfInvoice(trx, invoiceRow) {
   const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
   if (month && invoiceRow.customer_id) await acquireMembershipDuesMonthLock(trx, invoiceRow.customer_id, month);

@@ -972,10 +972,22 @@ function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
 
 // Serializes the "is this month's dues covered? then mint" decision per
 // customer + ET month. House pattern: transaction-scoped two-key advisory
-// lock, dotted namespace + id text. Taken inside the mint transaction AFTER
-// the visit-scoped chain (mint advisory → customer KEY SHARE → visit row)
-// and held through the invoice insert, so a second plan visit's mint waits,
-// then re-reads coverage and sees the first one's committed invoice.
+// lock, dotted namespace + id text, held to the end of the taking transaction.
+//
+// THE LOCK RULE (one rule for every taker; B08 pre-push audit, deadlock between
+// a mint and a credit-applied void). A transaction may WAIT (this blocking form)
+// on the dues-month lock only if it holds NO other lock yet: it is the FIRST
+// lock of the transaction. Takers: voidInvoice and the cancelled-visit void
+// (lockMembershipDuesMonthOfInvoice), the stamped-invoice edit, and the
+// completion's early confirmation transaction; each then goes on to take
+// invoice / statement / customer FOR UPDATE rows while holding it. A
+// transaction that ALREADY holds a customer, visit, mint-advisory or invoice
+// lock must NEVER wait on it, because the holder may be queued behind that very
+// lock (a void holds the month, then wants the customer FOR UPDATE that a mint's
+// FOR SHARE blocks): it uses the try form (completion's commit-time
+// confirmation, un-voiding) or the bounded poll below (the mint), and a miss is
+// the same retryable refusal, never a wait. So the lock graph has no edge from
+// a row/advisory lock into a blocking month wait, and no cycle can close.
 async function acquireMembershipDuesMonthLock(trx, customerId, month) {
   await trx.raw(
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -991,6 +1003,27 @@ async function tryAcquireMembershipDuesMonthLock(trx, customerId, month) {
     ['membership.dues_month', `${customerId}:${month}`],
   );
   return res?.rows?.[0]?.acquired === true;
+}
+
+// The mint's take (it holds the customer FOR SHARE, the visit row and the visit's
+// mint lock, so by THE LOCK RULE above it never waits): poll the try form for a
+// short, bounded time so two sibling mints still serialize in the normal case
+// (the first commits in milliseconds, the second then re-reads coverage), and
+// give up with false, never a wait, when a long holder (a void or edit queued
+// behind this mint's customer lock, a packet closeout) has it. The caller
+// refuses retryably on false, which rolls the mint back and frees its locks.
+const DUES_MONTH_MINT_WAIT_MS = 2000;
+const DUES_MONTH_MINT_POLL_MS = 40;
+async function acquireMembershipDuesMonthLockBounded(trx, customerId, month, {
+  timeoutMs = Number(process.env.MEMBERSHIP_DUES_MINT_WAIT_MS) || DUES_MONTH_MINT_WAIT_MS,
+  intervalMs = DUES_MONTH_MINT_POLL_MS,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await tryAcquireMembershipDuesMonthLock(trx, customerId, month)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 // Is THIS ET month's membership dues covered? Mirrors the monthly cron's
@@ -1781,6 +1814,7 @@ module.exports = {
   findLiveStampedDuesInvoice,
   findCollectedDuesPayment,
   tryAcquireMembershipDuesMonthLock,
+  acquireMembershipDuesMonthLockBounded,
   siblingCoverageForSchedule,
   collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,

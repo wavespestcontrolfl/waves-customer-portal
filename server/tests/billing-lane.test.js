@@ -716,6 +716,30 @@ describe('membershipDuesProvenanceHolds — the stamp describes the invoice actu
       ['membership.dues_month', 'cust-1:2026-09'],
     ]]);
   });
+
+  // THE LOCK RULE: the mint holds customer / visit locks, so its take never
+  // waits on the database; it polls the try form and gives up with false.
+  describe('acquireMembershipDuesMonthLockBounded (the mint\'s take)', () => {
+    const { acquireMembershipDuesMonthLockBounded } = require('../services/billing-lane');
+    const trxWith = (answers) => {
+      const sqls = [];
+      const raw = jest.fn(async (sql) => { sqls.push(sql); return { rows: [{ acquired: answers.length ? answers.shift() : false }] }; });
+      return { raw, sqls };
+    };
+    test('true as soon as a try succeeds (polls through a busy lock), only ever the try form', async () => {
+      const trx = trxWith([false, false, true]);
+      await expect(acquireMembershipDuesMonthLockBounded(trx, 'cust-1', '2026-09', { timeoutMs: 1000, intervalMs: 1 })).resolves.toBe(true);
+      expect(trx.raw).toHaveBeenCalledTimes(3);
+      expect(trx.sqls.every((q) => /pg_try_advisory_xact_lock/.test(q) && !/pg_advisory_xact_lock\(/.test(q))).toBe(true);
+    });
+    test('false after the bounded wait when the lock stays held: never a blocking wait', async () => {
+      const trx = trxWith([]);
+      const started = Date.now();
+      await expect(acquireMembershipDuesMonthLockBounded(trx, 'cust-1', '2026-09', { timeoutMs: 60, intervalMs: 10 })).resolves.toBe(false);
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(trx.raw.mock.calls.length).toBeGreaterThan(1);
+    });
+  });
 });
 
 describe('completionInvoiceIsMembershipDues — monthly_rate is what put the number on the invoice', () => {

@@ -1233,6 +1233,134 @@ postgres('membership dues — locked terms, covered-skip commit, void alert (B08
   });
 });
 
+// The dues-month lock rule (billing-lane.js, THE LOCK RULE): a transaction that
+// already holds a customer / visit / mint lock never WAITS on the month lock.
+// The deadlock this pins: a credit-applied stamped invoice's void takes the
+// month lock first and then wants the customer FOR UPDATE for its credit
+// restore, while a sibling same-month mint holds the customer FOR SHARE and (as
+// a blocking take) waited for the month lock. Now the mint polls the try form
+// for a bounded time and refuses retryably.
+postgres('membership dues — a void returning applied credit vs a sibling same-month mint (B08 lock rule)', () => {
+  const InvoiceSvc = require('../services/invoice');
+  const { mintOrReuseScheduledServiceInvoice } = require('../routes/admin-schedule')._test;
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 10 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(() => { jest.restoreAllMocks(); delete process.env.MEMBERSHIP_DUES_MINT_WAIT_MS; });
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function loadSvc(visitId) {
+    return mockPg('scheduled_services').where('scheduled_services.id', visitId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.*', 'customers.monthly_rate as cust_monthly_rate', 'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.billing_mode as cust_billing_mode', 'customers.property_type as cust_property_type')
+      .first();
+  }
+
+  // Run `fn` once, inside the mint's transaction, just before its FIRST try of
+  // the dues-month lock: at that point the mint already holds the customer FOR
+  // SHARE and the visit row.
+  function beforeMintTakesMonthLock(fn) {
+    const driver = Object.getPrototypeOf(mockPg.client);
+    const originalQuery = driver._query;
+    let armed = true;
+    driver._query = function patched(connection, obj) {
+      if (armed && /pg_try_advisory_xact_lock/i.test(String(obj?.sql || ''))
+        && JSON.stringify(obj?.bindings || []).includes('membership.dues_month')) {
+        armed = false;
+        return Promise.resolve(fn()).then(() => originalQuery.call(this, connection, obj));
+      }
+      return originalQuery.call(this, connection, obj);
+    };
+    return () => { driver._query = originalQuery; };
+  }
+
+  // True once some backend is queued on a row lock of a customers statement
+  // (the void's credit restore waiting on the mint's FOR SHARE).
+  async function waitForCustomerLockWaiter() {
+    for (let i = 0; i < 100; i += 1) {
+      const { rows } = await mockPg.raw(
+        "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%customers%'",
+      );
+      if (rows[0].n > 0) return true;
+      await sleep(50);
+    }
+    return false;
+  }
+
+  const runners = [
+    ['voidInvoice', (a) => InvoiceSvc.voidInvoice(a.invoice.id)],
+    ['the cancelled-visit void', (a) => InvoiceSvc.voidOpenInvoicesForCancelledService(a.visit)],
+  ];
+  test.each(runners)('credit-applied stamped invoice voided (%s) while a sibling mint holds the customer share lock: no deadlock, the void commits and returns the credit, the mint refuses retryably and its retry bills the month', async (_name, runVoid) => {
+    process.env.MEMBERSHIP_DUES_MINT_WAIT_MS = '600';
+    const f = await seedMember();
+    let restore;
+    try {
+      const a = await (async () => {
+        const visit = await seedVisit(f, { label: 'Lawn Care' });
+        expect(await complete(f, visit)).toMatchObject({ status: 200 });
+        return { visit, invoice: (await mockPg('invoices').where({ customer_id: f.customerId, scheduled_service_id: visit }).first()) };
+      })();
+      expect(stampedOf(a.invoice)).toBeTruthy();
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ credit_applied: 10 });
+      const creditBefore = Number((await mockPg('customers').where({ id: f.customerId }).first()).account_credits || 0);
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+
+      let voiding;
+      let waiterSeen = false;
+      restore = beforeMintTakesMonthLock(async () => {
+        // The void starts now (it takes the month lock, then queues for the customer row the mint shares).
+        voiding = runVoid(a);
+        voiding.catch(() => {});
+        waiterSeen = await waitForCustomerLockWaiter();
+      });
+      const minted = await mintOrReuseScheduledServiceInvoice(await loadSvc(pest));
+      restore(); restore = null;
+
+      expect(waiterSeen).toBe(true);
+      // The mint did not wait on the month lock while holding the customer lock: retryable refusal, nothing inserted.
+      expect(minted).toEqual({ invoice: null, reason: 'membership_dues_unverified' });
+      // The void was not aborted as a deadlock victim: it committed and returned the credit.
+      await expect(voiding).resolves.toBeDefined();
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first())).toMatchObject({ status: 'void' });
+      expect(Number((await mockPg('invoices').where({ id: a.invoice.id }).first()).credit_applied)).toBe(0);
+      const creditAfter = Number((await mockPg('customers').where({ id: f.customerId }).first()).account_credits || 0);
+      expect(creditAfter).toBeCloseTo(creditBefore + 10, 2);
+      expect(await mockPg('customer_credit_ledger').where({ customer_id: f.customerId, invoice_id: a.invoice.id })).toHaveLength(1);
+
+      // The retry finds the month uncovered and bills it once, stamped.
+      const retry = await mintOrReuseScheduledServiceInvoice(await loadSvc(pest));
+      expect(retry.invoice).toBeTruthy();
+      const live = (await mockPg('invoices').where({ customer_id: f.customerId })
+        .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled']));
+      expect(live.map((r) => r.id)).toEqual([retry.invoice.id]);
+      expect(stampedOf(live[0])).toMatchObject({ membership_dues_month: monthOf(etDateString()) });
+    } finally {
+      if (restore) restore();
+      await mockPg('customer_credit_ledger').where({ customer_id: f.customerId }).del().catch(() => {});
+      await cleanup(f);
+    }
+  });
+
+  test('two sibling mints still serialize: the second waits (polls) for the first to commit, then re-reads coverage and is refused as covered', async () => {
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      const [first, second] = await Promise.all([
+        mintOrReuseScheduledServiceInvoice(await loadSvc(lawn)),
+        mintOrReuseScheduledServiceInvoice(await loadSvc(pest)),
+      ]);
+      const results = [first, second];
+      expect(results.filter((r) => r.invoice)).toHaveLength(1);
+      expect(results.filter((r) => !r.invoice).map((r) => r.reason)).toEqual(['membership_dues_covered']);
+      const live = await mockPg('invoices').where({ customer_id: f.customerId }).whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled']);
+      expect(live).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+});
+
 // The month key itself, straight against the helper: a visit instant late on
 // the last ET day is that month's, even though UTC has already rolled over.
 postgres('monthlyDuesCollected — ET month attribution of a stamped dues invoice (B08)', () => {
