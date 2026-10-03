@@ -758,7 +758,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} onPendingChange={setVoiceMicPending} />
+          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} reviewLocked={formLocked} onPendingChange={setVoiceMicPending} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={formLocked} />
           <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so

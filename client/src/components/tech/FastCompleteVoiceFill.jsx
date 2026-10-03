@@ -215,13 +215,15 @@ function HeardLine({ children }) {
 // The three places the sheet shows voice fill; each shows nothing with it off.
 
 // At the top: the mic, then what the fill could not settle.
-export function VoiceFillTop({ voice, serviceId, locked, onPendingChange }) {
+// `reviewLocked` also holds while the mic is live: a tap on a ✓ would end the
+// speech session and drop its words.
+export function VoiceFillTop({ voice, serviceId, locked, reviewLocked = locked, onPendingChange }) {
   if (!voice.enabled) return null;
   return (
     <>
       {voice.micEnabled && <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />}
-      <ConfirmSection confirms={voice.confirms} locked={locked} onConfirm={voice.confirm} />
-      <ChecksSection checks={voice.checks} locked={locked} onDismiss={voice.dismiss} />
+      <ConfirmSection confirms={voice.confirms} locked={reviewLocked} onConfirm={voice.confirm} />
+      <ChecksSection checks={voice.checks} locked={reviewLocked} onDismiss={voice.dismiss} />
     </>
   );
 }

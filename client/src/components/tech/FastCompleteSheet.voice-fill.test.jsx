@@ -454,5 +454,22 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     });
     expect(screen.getByRole('button', { name: 'Ants' }).disabled).toBe(false);
   });
+
+  test('a second recording locks the Confirm and Check buttons from the first fill', async () => {
+    await openSheet(makeRequest());
+    say('first');
+    await screen.findByRole('region', { name: 'Confirm what I filled' });
+    React.act(() => {
+      dictation.perSlot[0] = { listening: true };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    for (const button of screen.getAllByRole('button', { name: /^Confirm / })) expect(button.disabled).toBe(true);
+    expect(screen.getByRole('button', { name: '✓ Got it' }).disabled).toBe(true);
+    React.act(() => {
+      dictation.perSlot[0] = { listening: false };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: '✓ Got it' }).disabled).toBe(false);
+  });
 });
 
