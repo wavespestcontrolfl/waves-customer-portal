@@ -65,6 +65,7 @@ import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
+import { reportGreetingFirstName } from '../lib/reportGreeting';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -2364,9 +2365,10 @@ function techNoteFirstName(customerName) {
   return raw.length > 1 && raw === raw.toUpperCase() ? raw[0] + raw.slice(1).toLowerCase() : raw;
 }
 
-export function composeTechNote({ tips = [], customerName = '', seed = 0 } = {}) {
+// `firstName` (the payload's greeting first name; '' = none) outranks customerName.
+export function composeTechNote({ tips = [], customerName = '', firstName, seed = 0 } = {}) {
   const count = Math.min(Math.max(tips.length, 1), 3);
-  const first = techNoteFirstName(customerName);
+  const first = techNoteFirstName(firstName !== undefined ? firstName : customerName);
   const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
   const openers = TECH_NOTE_OPENERS[count];
   return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
@@ -2386,7 +2388,7 @@ export function TechNoteCard({ data, mode = 'live' }) {
   const techFirst = String(note.technicianFirstName || '').trim();
   const { greeting, opener } = composeTechNote({
     tips,
-    customerName: data.customerName,
+    firstName: reportGreetingFirstName(data),
     seed: techNoteSeed(data.serviceRecordId || data.token),
   });
   // The photo treatment is its own dark ship (GATE_REPORT_TECH_PHOTO →
@@ -2524,7 +2526,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const smartStatus = smartStatusSummary(data, mode, nowMs);
   // ALL-CAPS records (older customer rows) title-case for display, same rule
   // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const rawFirstName = reportGreetingFirstName(data) || 'there';
   const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
     ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
     : rawFirstName;
@@ -3508,7 +3510,7 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   const location = data?.reviewLocation?.reviewUrl
     ? { key: data.reviewLocation.id, reviewUrl: data.reviewLocation.reviewUrl }
     : reviewLocationForReport(data);
-  const copy = reviewRequestCopy(placement, String(data?.customerName || '').split(/\s+/)[0], data?.technicianName);
+  const copy = reviewRequestCopy(placement, reportGreetingFirstName(data), data?.technicianName);
   return (
     <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
@@ -5855,7 +5857,7 @@ function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
   // ALL-CAPS records (older customer rows) title-case for display, same rule
   // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const rawFirstName = reportGreetingFirstName(data) || 'there';
   const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
     ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
     : rawFirstName;
