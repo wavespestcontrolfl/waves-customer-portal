@@ -29,7 +29,10 @@ const GRID_SIZE_OPTIONS = [3, 5, 7, 9]; // selectable grid sizes (cost = OFFICES
 const GRID_SPACING_MILES = 2; // distance between adjacent pins (≈ 8mi × 8mi area)
 // Default keywords — used until an operator overrides them via system_settings
 // (key 'geo_grid.keywords'). getKeywords()/setKeywords() own the live list.
-const DEFAULT_KEYWORDS = ['pest control', 'exterminator', 'termite control'];
+// 'lawn care' is here for the SEO page's eight-search scoreboard (four priority
+// cities × pest and lawn, geo-grid-named-searches.js): its lawn rows stay empty
+// unless the scan covers the keyword. Each keyword is OFFICES × N² calls a scan.
+const DEFAULT_KEYWORDS = ['pest control', 'lawn care', 'exterminator', 'termite control'];
 const KEYWORDS = DEFAULT_KEYWORDS; // back-compat alias for existing importers
 const KEYWORDS_SETTING_KEY = 'geo_grid.keywords';
 const MAX_KEYWORDS = 6; // spend guard — one run is OFFICES × KEYWORDS × N² live calls
