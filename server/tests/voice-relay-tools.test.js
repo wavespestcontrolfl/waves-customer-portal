@@ -266,6 +266,27 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(out).toMatch(/NO written estimate was queued/);
   });
 
+  test('two captures on one call: the later one keeps the earlier callback number and contact restriction', async () => {
+    let bag = {};
+    const ctx = recognised({ getContactFollowUp: () => ({ ...bag }), noteContactFollowUp: (f) => { bag = { ...f }; } });
+    await executeTool('capture_lead', {
+      call_summary: 'Email only, stop calling.', callback_phone: '+19415550199', preferred_contact_method: 'email',
+      contact_preference: 'email only, stop calling', do_not_contact_request: true,
+    }, ctx);
+    await executeTool('capture_lead', { call_summary: 'Added their email.', email: 'robin@example.com' }, ctx);
+    const second = bell.mock.calls[1][0];
+    expect(second.callbackPhone).toBe('+19415550199'); // not reverted to the inbound number
+    expect(second.notes).toEqual(expect.arrayContaining([
+      'Email: robin@example.com.',
+      'Prefers: email.',
+      'Contact preference: “email only, stop calling”.',
+      expect.stringMatching(/^Asked not to be contacted/),
+    ]));
+    // A new number given later replaces the earlier one.
+    await executeTool('capture_lead', { call_summary: 'Different number.', callback_phone: '+19415550188' }, ctx);
+    expect(bell.mock.calls[2][0].callbackPhone).toBe('+19415550188');
+  });
+
   test('a card number in the summary is scrubbed before it reaches the bell', async () => {
     await executeTool('capture_lead', { call_summary: 'read out 4111 1111 1111 1111 by mistake' }, recognised());
     expect(JSON.stringify(bell.mock.calls[0][0])).not.toMatch(/4111 1111 1111 1111/);

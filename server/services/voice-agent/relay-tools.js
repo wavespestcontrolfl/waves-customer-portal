@@ -1287,16 +1287,32 @@ async function executeTool(name, input = {}, ctx = {}) {
       // still has an artifact to work.
       if (ctx.customerId && callerVerified && matchedCallerTier(ctx) === 'redacted') {
         const { alertOfficeContactFollowUp } = require('./relay-alert');
+        // ⭐ HOW TO REACH THEM IS STICKY FOR THE CALL. Name, email, address and
+        // service already accumulate in `extracted`; the rest is merged here
+        // with what earlier captures on this call gave, so a later capture
+        // that only adds an email cannot revert an alternate callback number
+        // or drop "email only, stop calling". A restriction, once asked for,
+        // stays; a channel or number changes only when a new one is given.
+        const prior = typeof ctx.getContactFollowUp === 'function' ? ctx.getContactFollowUp() : {};
+        const followUp = {
+          callbackPhone: input.callback_phone ? callerPhone : (prior.callbackPhone || callerPhone),
+          method: extracted.preferred_contact_method || prior.method || null,
+          preference: scrubbedField(extracted.contact_preference) || prior.preference || null,
+          timing: extracted.preferred_date_time || prior.timing || null,
+          doNotContact: extracted.do_not_contact_request === true || prior.doNotContact === true,
+          textsStopped: smsSuppressionApplied || prior.textsStopped === true,
+          estimateAsked: estimateRequested || prior.estimateAsked === true,
+        };
+        if (typeof ctx.noteContactFollowUp === 'function') ctx.noteContactFollowUp(followUp);
         const belled = await alertOfficeContactFollowUp({
           customerId: ctx.customerId,
-          callbackPhone: callerPhone,
+          callbackPhone: followUp.callbackPhone,
           summary: extracted.call_summary || extracted.requested_service || '',
           callSid: ctx.callSid || null,
           // ⭐ EVERYTHING THE LEAD ROW WOULD HAVE HELD rides the bell, since
           // the bell is this call's only artifact: who they said they are and
-          // how to reach them (`extracted` already carries what earlier
-          // captures on this call gave), what they want and when, and HOW they
-          // asked to be contacted — with whether the text opt-out landed.
+          // how to reach them, what they want and when, and HOW they asked to
+          // be contacted — with whether the text opt-out landed.
           notes: [
             [extracted.first_name, extracted.last_name].filter(Boolean).length
               ? `Gave their name as ${[extracted.first_name, extracted.last_name].filter(Boolean).join(' ')}.` : null,
@@ -1304,13 +1320,13 @@ async function executeTool(name, input = {}, ctx = {}) {
             [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).length
               ? `Address given: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}.` : null,
             extracted.requested_service ? `Service: ${extracted.requested_service}.` : null,
-            extracted.preferred_date_time ? `Timing: ${extracted.preferred_date_time}.` : null,
+            followUp.timing ? `Timing: ${followUp.timing}.` : null,
             extracted.pain_points ? `Problem: ${extracted.pain_points}.` : null,
-            estimateRequested ? 'Asked for a written estimate — none was queued.' : null,
-            extracted.preferred_contact_method ? `Prefers: ${extracted.preferred_contact_method}.` : null,
-            scrubbedField(extracted.contact_preference) ? `Contact preference: “${scrubbedField(extracted.contact_preference)}”.` : null,
-            extracted.do_not_contact_request
-              ? `Asked not to be contacted — ${smsSuppressionApplied ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
+            followUp.estimateAsked ? 'Asked for a written estimate — none was queued.' : null,
+            followUp.method ? `Prefers: ${followUp.method}.` : null,
+            followUp.preference ? `Contact preference: “${followUp.preference}”.` : null,
+            followUp.doNotContact
+              ? `Asked not to be contacted — ${followUp.textsStopped ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
               : null,
           ].filter(Boolean),
         });

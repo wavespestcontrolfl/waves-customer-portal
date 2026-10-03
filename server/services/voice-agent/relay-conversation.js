@@ -2721,6 +2721,11 @@ class RelayConversation {
         const { isOfficeOpenAt } = require('./relay-context');
         return isOfficeOpenAt(convo._officeHours, new Date());
       },
+      // What a recognised contact has told us on THIS call about how to reach
+      // them (relay-tools capture_lead): kept across captures so a later one
+      // cannot drop an earlier callback number or contact restriction.
+      getContactFollowUp: () => ({ ...(convo._contactFollowUp || {}) }),
+      noteContactFollowUp: (fields = {}) => { convo._contactFollowUp = { ...fields }; },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
       noteEstimateFields: (fields = {}) => {
         const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
