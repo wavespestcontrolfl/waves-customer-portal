@@ -131,6 +131,48 @@ function withDraft(serviceId, scope, operation) {
   return withDraftKey(completionDraftScopeKey(serviceId, scope), operation);
 }
 
+// Compare-and-set mutation for one draft row. A request that outlives its UI
+// can finish after a newer draft has taken the same technician/visit key; the
+// draft id check keeps that late result from overwriting or deleting the new
+// work. The read and mutation share one IndexedDB readwrite transaction.
+function mutateDraftRow(serviceId, scope, mutate) {
+  return withDraft(serviceId, scope, (key) => openDb(DRAFT_DB_NAME).then((db) => {
+    if (!db) return false;
+    return new Promise((resolve) => {
+      let settled = false;
+      let result = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        try { db.close(); } catch { /* ignore */ }
+        resolve(value);
+      };
+      try {
+        const tx = db.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        const read = store.get(key);
+        read.onsuccess = () => {
+          try {
+            const mutation = mutate(read.result);
+            if (!mutation) return;
+            const write = mutation.delete ? store.delete(key) : store.put(mutation.value, key);
+            write.onsuccess = () => { result = true; };
+            write.onerror = () => done(false);
+          } catch {
+            done(false);
+          }
+        };
+        read.onerror = () => done(false);
+        tx.oncomplete = () => done(result);
+        tx.onerror = () => done(false);
+        tx.onabort = () => done(false);
+      } catch {
+        done(false);
+      }
+    });
+  }));
+}
+
 // Rows are { draft, storedAt, serviceId, scope }: storedAt ages the row for
 // the retention sweep independently of the draft's own fields; serviceId
 // and scope let the sweep report what it removed.
@@ -199,6 +241,50 @@ export function deleteRecapClipDraft(serviceId, operatorScope) {
 // full sweep) must not keep abandoned clips — videos included — forever.
 export function pruneRecapClipDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
   return pruneCompletionDrafts(now, maxAgeMs, "recap:");
+}
+
+// Service photos selected in TechServicePhotosModal use the same durable
+// draft database and retention policy as recap clips. Keep a separate
+// namespace because both surfaces can hold work for the same visit at once.
+// The record itself also carries serviceId + technicianId; the scoped key is
+// the first identity fence and the modal validates the record before restore.
+function servicePhotoDraftScope(operatorScope) {
+  return `service-photo:${operatorScope ? String(operatorScope) : "anonymous"}`;
+}
+
+export function putServicePhotoDraft(serviceId, record, operatorScope, now = Date.now()) {
+  return putCompletionDraft(serviceId, record, servicePhotoDraftScope(operatorScope), now);
+}
+
+export function putServicePhotoDraftIfCurrent(serviceId, record, operatorScope, draftId, { allowMissing = false, now = Date.now() } = {}) {
+  if (!serviceId || !record || !operatorScope || !draftId) return Promise.resolve(false);
+  const scope = servicePhotoDraftScope(operatorScope);
+  const row = { draft: record, storedAt: now, serviceId: String(serviceId), scope };
+  return mutateDraftRow(serviceId, scope, (current) => {
+    const currentId = current?.draft?.draftId;
+    if (currentId ? currentId !== draftId : !allowMissing) return null;
+    return { value: row };
+  });
+}
+
+export function getServicePhotoDraft(serviceId, operatorScope) {
+  return getCompletionDraft(serviceId, servicePhotoDraftScope(operatorScope));
+}
+
+export function deleteServicePhotoDraft(serviceId, operatorScope) {
+  return deleteCompletionDraft(serviceId, servicePhotoDraftScope(operatorScope));
+}
+
+export function deleteServicePhotoDraftIfCurrent(serviceId, operatorScope, draftId) {
+  if (!serviceId || !operatorScope || !draftId) return Promise.resolve(false);
+  const scope = servicePhotoDraftScope(operatorScope);
+  return mutateDraftRow(serviceId, scope, (current) => (
+    current?.draft?.draftId === draftId ? { delete: true } : null
+  ));
+}
+
+export function pruneServicePhotoDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+  return pruneCompletionDrafts(now, maxAgeMs, "service-photo:");
 }
 
 // Deletes every draft row older than `maxAgeMs` across all scopes and
