@@ -106,6 +106,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // which itself calls the real AvailabilityEngine — stub the engine here so
 // each recheck test controls what is "currently offered" without a DB.
 jest.mock('../services/availability', () => ({ getAvailableSlots: jest.fn() }));
+const mockTranslationClaim = jest.fn(async () => 'ok');
+jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a) }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
@@ -410,6 +412,40 @@ describe('admin communications SMS route', () => {
     } finally {
       dispatchSpy.mockRestore();
     }
+  });
+
+  // Use Reply on the translation card (GATE_SMS_ANY_LANGUAGE_INBOX): the reply is re-checked and claimed
+  // under the thread lock, and refused rather than sent stale or twice.
+  test.each([
+    ['stale', /out of date/],
+    ['claimed', /teammate is already sending/],
+  ])('a suggested reply whose claim reads %s is refused with 409 and nothing is sent', async (claim, words) => {
+    mockTranslationClaim.mockResolvedValueOnce(claim);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(words);
+      expect(suggestMode.lockSuggestThread).toHaveBeenCalled();
+      expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a suggested reply is never also an Agent Review draft, and is never scheduled', async () => {
+    await withServer(async (baseUrl) => {
+      const post = (path, body) => fetch(`${baseUrl}/admin/communications/${path}`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const both = await post('sms', { to: '+15551234567', body: 'x', messageType: 'manual', translationTrialId: 7, agentDecisionId: 'd1', agentDraft: 'x' });
+      expect(both.status).toBe(400);
+      const later = await post('schedule-sms', { to: '+15551234567', body: 'x', scheduledFor: new Date(Date.now() + 3600e3).toISOString(), translationTrialId: 7 });
+      expect(later.status).toBe(409);
+      expect((await later.json()).error).toMatch(/can only be sent now/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
   });
 
   test('returns a readable error when policy blocks a send', async () => {

@@ -664,14 +664,10 @@ router.post('/sms', async (req, res, next) => {
       providerCoordinationCustomerId = trustedCustomerId;
     };
 
-    // A reply taken from the translation card is re-checked and claimed here, as an Agent Review draft is
-    // below: the customer may have written again, someone may have answered, the reply may have expired, or a
-    // teammate may be sending the same reply right now. Refused rather than sent stale or twice.
-    if (translationTrialId) {
-      const claim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to });
-      if (claim === 'claimed') return res.status(409).json({ error: 'A teammate is already sending this suggested reply. Refresh the thread before replying.' });
-      if (claim !== 'ok') return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
-    }
+    // A reply taken from the translation card (Use Reply) is re-checked and claimed UNDER THE THREAD LOCK
+    // below, as an Agent Review draft is. It is never also an Agent Review draft.
+    if (translationTrialId && agentDecisionId) return res.status(400).json({ error: 'A suggested reply cannot also be an Agent Review draft.' });
+    let translationClaim = translationTrialId ? 'stale' : null;
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
@@ -727,6 +723,13 @@ router.post('/sms', async (req, res, next) => {
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (translationTrialId) {
+            // Same final gate for a translation card's reply: under the thread lock, the customer's latest
+            // text must still be the one it answers, unanswered and unexpired, and one guarded UPDATE lets
+            // only one sender through. Nothing is parked or reserved for a refused send.
+            translationClaim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to });
+            if (translationClaim !== 'ok') return [];
+          }
           if (claimedDecisionId) {
             // FINAL freshness gate, under the thread lock and AFTER the
             // claim: Twilio inbound inserts don't take this lock, so an
@@ -781,6 +784,11 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (translationClaim === 'claimed') return res.status(409).json({ error: 'A teammate is already sending this suggested reply. Refresh the thread before replying.' });
+    if (translationClaim && translationClaim !== 'ok') {
+      return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
     }
 
     if (staleAtClaim) {
