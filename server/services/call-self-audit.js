@@ -166,14 +166,22 @@ async function shadowVoicemails({ now = new Date() } = {}) {
       .whereIn('processing_status', VOICEMAIL_STATUSES)
       .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
       .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
+      // A rejected transcription stores an internal sentinel, not the caller's
+      // words (Codex #5655 r4): never evidence.
+      .where((q) => q.whereNull('transcription_status').orWhereNot('transcription_status', 'rejected'))
       .orderBy('created_at', 'asc')
-      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
+      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome', 'extraction_attempts', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
     // A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only
     // the extraction says it was a voicemail. One whose extraction kept failing
     // ('extraction_failed') has no extraction to say so, so the voice
     // webhook's own durable channel fields decide (Codex #5655 r3).
+    // Only once its retry budget is spent (Codex #5655 r4): before that the
+    // processor retries it, and a retry can still mint the lead, alert or spam
+    // verdict the baselines read.
+    const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+    const extractionExhausted = (c) => Number(c.extraction_attempts) >= CALL_EXTRACTION_MAX_ATTEMPTS;
     const isVoicemail = (c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true
-      || (c.processing_status === 'extraction_failed' && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail'));
+      || (c.processing_status === 'extraction_failed' && extractionExhausted(c) && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail'));
     const candidates = rows.filter(isVoicemail);
     if (!candidates.length) return tally;
     const { callSubjectHash } = require('./typed-decisions/subject-hash');

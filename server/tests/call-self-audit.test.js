@@ -433,7 +433,8 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
       const push = (a) => { (seen[table] = seen[table] || []).push(a); };
       const b = {
         modify(fn) { fn(b); return b; }, whereRaw(...a) { push(a); return b; }, whereIn(...a) { push(a); return b; },
-        where(...a) { push(a); return b; }, whereNot() { return b; }, orderBy() { return b; },
+        where(...a) { if (typeof a[0] === 'function') { a[0](b); return b; } push(a); return b; }, whereNot() { return b; }, orderBy() { return b; },
+        orWhereNot(...a) { push(a); return b; },
         whereNotExists(fn) { const sub = { select() { return sub; }, from(t) { push(['notExists', t]); return sub; }, where(...a) { push(['notExists', ...a]); return sub; }, whereRaw(...a) { push(['notExists', ...a]); return sub; } }; fn.call(sub); return b; },
         select: async () => {
           if (table === 'call_log') return rows;
@@ -542,9 +543,11 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
 
   test('an extraction that kept failing is still a voicemail when the voice webhook says so', async () => {
     vmDb({ rows: [
-      VM({ id: 'vm-ef', processing_status: 'extraction_failed', ai_extraction: null, answered_by: 'voicemail' }),
-      VM({ id: 'vm-ef2', processing_status: 'extraction_failed', ai_extraction: null, call_outcome: 'voicemail' }),
-      VM({ id: 'call-ef', processing_status: 'extraction_failed', ai_extraction: null, answered_by: 'human' }),
+      VM({ id: 'vm-ef', processing_status: 'extraction_failed', extraction_attempts: 3, ai_extraction: null, answered_by: 'voicemail' }),
+      VM({ id: 'vm-ef2', processing_status: 'extraction_failed', extraction_attempts: 3, ai_extraction: null, call_outcome: 'voicemail' }),
+      VM({ id: 'call-ef', processing_status: 'extraction_failed', extraction_attempts: 3, ai_extraction: null, answered_by: 'human' }),
+      // still being retried: a later attempt can still create the lead or alert the baselines read
+      VM({ id: 'vm-retrying', processing_status: 'extraction_failed', extraction_attempts: 1, ai_extraction: null, answered_by: 'voicemail' }),
     ] });
     await shadowVoicemails();
     expect(Object.keys(bySubject()).sort()).toEqual(['vm-ef', 'vm-ef2']);
@@ -584,6 +587,8 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     expect(calls.map((a) => String(a[0]))).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
     expect(calls.find((a) => a[0] === 'created_at')[2]).toEqual(new Date('2026-09-26T08:00:00Z'));
     expect(calls.find((a) => a[0] === 'processing_status')[1]).toEqual(['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed']);
+    // a rejected transcription (the hallucination guard's sentinel) is never evidence
+    expect(calls).toContainEqual(['transcription_status', 'rejected']);
     // answered per provider, from decision_reviews rows for these voicemails
     expect(seen.decision_reviews).toContainEqual([{ capability: 'voicemail', subject_type: 'call_log' }]);
   });
