@@ -19348,7 +19348,7 @@ async function rideLawnExtension(ctx) {
   // visit that is actually still booked: at least the rule's minimum gap after
   // it (never, say, D168 next to a kept off-cadence D160).
   const after = dateOnly(latest.scheduled_date);
-  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.riderGapsFor(parent.recurring_pattern).min);
   const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
