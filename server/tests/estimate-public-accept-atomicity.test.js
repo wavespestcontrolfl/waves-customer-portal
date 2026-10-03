@@ -103,7 +103,11 @@ jest.mock('../models/db', () => {
     b.whereNull = (col) => { ctx.nullCols.push(col); return b; };
     b.whereNotNull = (col) => { ctx.notNullCols.push(col); return b; };
     b.whereNotIn = (col, arr) => { ctx.notIn.push([col, arr]); return b; };
-    b.whereNot = (col, val) => { ctx.notEq.push([col, val]); return b; };
+    b.whereNot = (col, val) => {
+      if (col && typeof col === 'object') Object.entries(col).forEach(([k, v]) => ctx.notEq.push([k, v]));
+      else ctx.notEq.push([col, val]);
+      return b;
+    };
     b.whereIn = (col, arr) => { ctx.eqFilters.push(...[]); ctx.whereIn = [col, arr]; return b; };
     b.orderBy = () => b;
     b.orderByRaw = () => b;
@@ -212,7 +216,9 @@ jest.mock('../models/db', () => {
     // logged so tests can assert rung-1 ordering against table mutations.
     state.ops.push({ type: 'raw', sql, bindings });
     if (sql.includes('pg_try_advisory_xact_lock')) {
-      return { rows: [{ acquired: !(bindings?.[0] === 'estimate.deposit.ledger' && state.tryDepositLedgerBusy) }] };
+      const free = !(bindings?.[0] === 'estimate.deposit.ledger' && state.tryDepositLedgerBusy);
+      // `locked` is the alias tryLockCustomerComms reads; `acquired` the deposit-ledger probe.
+      return { rows: [{ acquired: free, locked: free }] };
     }
     return { __raw: sql, bindings };
   };
@@ -4361,6 +4367,102 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     expect((await putAccept('tok-b18-r2-x0123456789')).status).toBe(200);
     expect((await putAccept('tok-b18-r2-x0123456789')).status).toBe(200);
     expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  // Sequential grouped accepts: the first sibling creates the quarantined profile, the second reuses
+  // it through the grouped-sibling lookup (the phone-match branch is skipped), and neither may text
+  // the disputed number. The accepter's email leg still runs for both.
+  async function withBookingTemplate(fn) {
+    const templateSpy = jest.spyOn(require('../routes/admin-sms-templates'), 'getTemplate').mockResolvedValue('Book your visit: https://example.com/book');
+    try { await fn(); } finally { templateSpy.mockRestore(); }
+  }
+  const groupedOneTime = (id) => ({ ...oneTimeEstimate(id), estimate_group_id: 'grp-b18' });
+
+  test('grouped one-time accepts: the second sibling reuses the quarantined profile and still texts nobody at the disputed number', async () => {
+    await withBookingTemplate(async () => {
+      const Onboarding = require('../services/estimate-accepted-email');
+      resetStore(groupedOneTime('est-b18-g1'));
+      db.__state.tables.estimates.push(groupedOneTime('est-b18-g2'));
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      const byId = (id) => db.__state.tables.estimates.find((e) => e.id === id);
+
+      conversionOk();
+      const first = await putAccept('tok-est-b18-g1-x0123456789', { serviceMode: 'one_time' });
+      expect(first.status).toBe(200);
+      const quarantinedId = byId('est-b18-g1').customer_id;
+      expect(quarantinedId).not.toBe('cust-bob');
+      expect(db.__state.tables.customers.find((c) => c.id === quarantinedId).phone).toBe('');
+      expect(smsToNumber('9415550123')).toHaveLength(0);
+
+      conversionOk();
+      const second = await putAccept('tok-est-b18-g2-x0123456789', { serviceMode: 'one_time' });
+      expect(second.status).toBe(200);
+      // Reused through the grouped-sibling lookup: same customer, no second profile or account.
+      expect(byId('est-b18-g2').customer_id).toBe(quarantinedId);
+      expect(db.__state.tables.customers).toHaveLength(2);
+      expect(db.__state.tables.customer_accounts).toHaveLength(2);
+      expect(smsToNumber('9415550123')).toHaveLength(0);
+      // The accepter's email onboarding ran for both accepts.
+      expect(Onboarding.sendEstimateAcceptedOnboarding).toHaveBeenCalledTimes(2);
+      // Only the first accept (the one that created the profile) raised the office alert.
+      expect(contradictionAlerts()).toHaveLength(1);
+    });
+  });
+
+  test('control: ordinary grouped one-time accepts (no contradiction) still text the typed number on both', async () => {
+    await withBookingTemplate(async () => {
+      resetStore(groupedOneTime('est-b18-g3'));
+      db.__state.tables.estimates.push(groupedOneTime('est-b18-g4'));
+      conversionOk();
+      expect((await putAccept('tok-est-b18-g3-x0123456789', { serviceMode: 'one_time' })).status).toBe(200);
+      const afterFirst = smsToNumber('9415550123').length;
+      expect(afterFirst).toBeGreaterThan(0);
+      conversionOk();
+      expect((await putAccept('tok-est-b18-g4-x0123456789', { serviceMode: 'one_time' })).status).toBe(200);
+      expect(smsToNumber('9415550123').length).toBeGreaterThan(afterFirst);
+      expect(contradictionAlerts()).toHaveLength(0);
+    });
+  });
+
+  test('an estimate already linked to a quarantined customer never texts the disputed number', async () => {
+    await withBookingTemplate(async () => {
+      resetStore({ ...oneTimeEstimate('est-b18-l1'), customer_id: 'cust-pat' });
+      db.__state.tables.customers.push(sharedPhoneRow({
+        id: 'cust-pat', account_id: 'acct-pat', first_name: 'Pat', phone: '', email: 'pat@example.com',
+        internal_notes: 'Phone on the estimate ((941) 555-0123) belongs to another customer, so it was not saved on this profile and this customer is not texted. Estimate est-prior. Other customer id: cust-bob.',
+      }));
+      conversionOk();
+      const res = await putAccept('tok-est-b18-l1-x0123456789', { serviceMode: 'one_time' });
+      expect(res.status).toBe(200);
+      expect(smsToNumber('9415550123')).toHaveLength(0);
+    });
+  });
+
+  test('once the office adds the real phone to a marked profile, accept texts go to THAT number, never the disputed one', async () => {
+    await withBookingTemplate(async () => {
+      resetStore({ ...oneTimeEstimate('est-b18-l2'), customer_id: 'cust-pat' });
+      db.__state.tables.customers.push(sharedPhoneRow({
+        id: 'cust-pat', account_id: 'acct-pat', first_name: 'Pat', phone: '(941) 555-0188', email: 'pat@example.com',
+        internal_notes: 'Phone on the estimate ((941) 555-0123) belongs to another customer, so it was not saved on this profile and this customer is not texted. Estimate est-prior. Other customer id: cust-bob.',
+      }));
+      conversionOk();
+      expect((await putAccept('tok-est-b18-l2-x0123456789', { serviceMode: 'one_time' })).status).toBe(200);
+      expect(smsToNumber('9415550123')).toHaveLength(0);
+      expect(smsToNumber('9415550188').length).toBeGreaterThan(0);
+    });
+  });
+
+  test('control: a linked customer WITHOUT the marker keeps today\'s recipient (the estimate phone), even when the profile is phone-less', async () => {
+    await withBookingTemplate(async () => {
+      resetStore({ ...oneTimeEstimate('est-b18-l3'), customer_id: 'cust-pat' });
+      db.__state.tables.customers.push(sharedPhoneRow({
+        id: 'cust-pat', account_id: 'acct-pat', first_name: 'Pat', phone: '', email: 'pat@example.com', internal_notes: null,
+      }));
+      conversionOk();
+      expect((await putAccept('tok-est-b18-l3-x0123456789', { serviceMode: 'one_time' })).status).toBe(200);
+      expect(smsToNumber('9415550123').length).toBeGreaterThan(0);
+    });
   });
 
   test('a rolled-back contradicted accept raises no alert and leaves no profile or account behind', async () => {

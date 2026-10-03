@@ -1561,7 +1561,9 @@ normal card rules. That profile and its account are stored WITHOUT a phone
 (`customers.phone = ''`, the usual phone-less shape): the number is another
 customer's, so portal login and every text resolve nothing from it, and no
 accept-time text (booking link, appointment confirmation, prepay notice) goes to
-it; the accepter's own email is unchanged. The number staff typed stays on the
+it, including a later grouped-sibling accept or an estimate linked to that profile (decided
+from the profile's persisted marker, whose text recipient is its own phone only); the
+accepter's own email is unchanged. The number staff typed stays on the
 estimate and in the new profile's internal notes, and once the accept commits the
 office gets one Customers needs-you alert (dedupe `accept-phone-contradicted:<estimateId>`)
 to add the accepter's real number or merge the two profiles (the alert is replayed,

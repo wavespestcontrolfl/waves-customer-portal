@@ -630,6 +630,21 @@ function contradictedPhoneNote({ estimate, rejectedCustomerId }) {
     + `Add their real number, or merge the two profiles if they are the same person. Estimate ${estimate.id}. Other customer id: ${rejectedCustomerId}.`;
 }
 
+// THE predicates for a contradicted-phone profile, from persisted state only (the marker note a
+// contradicted accept wrote into internal_notes, plus the phone on the row). Every consumer uses
+// them, so a profile reached by ANY route - the creating accept, a grouped sibling, an estimate
+// already linked by customer_id, a re-accept - is treated the same.
+//   marked      = the marker is on the profile: the estimate's staff-typed phone is the DISPUTED
+//                 number (another customer's), so no accept text may use it, ever.
+//   quarantined = marked AND still phone-less (login and texts resolve nothing until a real
+//                 number is added; the office alert replays only while this holds).
+function customerHasContradictedPhoneMarker(row) {
+  return !!row && String(row.internal_notes || '').includes(CONTRADICTED_PHONE_NOTE_MARK);
+}
+function customerIsContradictedPhoneQuarantine(row) {
+  return customerHasContradictedPhoneMarker(row) && String(row.phone || '').trim() === '';
+}
+
 // Raises (idempotently, by dedupe key) the one Customers needs-you alert for a contradicted accept.
 // Never throws: callers are post-commit. Two attempts, then the replay in the already-accepted
 // branch is the recovery.
@@ -678,8 +693,7 @@ async function replayContradictedPhoneAlert(estimate) {
     if (!estimate?.customer_id) return false;
     const row = await db('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').first('id', 'phone', 'internal_notes');
     const notes = String(row?.internal_notes || '');
-    if (!row || String(row.phone || '').trim() !== ''
-      || !notes.includes(CONTRADICTED_PHONE_NOTE_MARK) || !notes.includes(`Estimate ${estimate.id}.`)) return false;
+    if (!customerIsContradictedPhoneQuarantine(row) || !notes.includes(`Estimate ${estimate.id}.`)) return false;
     const rejectedCustomerId = (notes.match(/Other customer id: ([\w-]+)/) || [])[1];
     if (!rejectedCustomerId) return false;
     return await raiseContradictedPhoneAlert({ estimate, customerId: row.id, rejectedCustomerId });
@@ -15363,9 +15377,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // none but the linked customer row does — or, for a secondary-property
     // row without one, the account primary (same person; #1995) — that
     // number. Fail-open to "no phone", never a guess.
-    // B18: a contradicted accept never texts the disputed number (the profile was stored without it).
-    let acceptSmsPhone = txResult.phoneContradictionRejectedId ? '' : String(estimate.customer_phone || '').trim();
-    if (!acceptSmsPhone && customerId) {
+    // B18: an accept that landed on a contradicted-phone profile never texts the estimate's
+    // staff-typed phone (the disputed number), whichever route resolved the customer (phone match,
+    // grouped sibling, an estimate already linked, a re-accept): decided from the customer's
+    // persisted marker, not from which transaction created it. Such a profile's text recipient is
+    // its OWN phone only - blank while quarantined, the real number once the office adds one. An
+    // unreadable customer row fails closed (no text; the email legs still go). Every other accept
+    // keeps the estimate phone as the recipient exactly as before: switching all accepts to the
+    // customer row's phone would change what a linked customer whose profile phone differs from the
+    // typed estimate phone receives today.
+    let acceptProfilePhoneOnly = !!txResult.phoneContradictionRejectedId;
+    let acceptProfileOwnPhone = '';
+    if (customerId && !acceptProfilePhoneOnly) {
+      try {
+        const markerRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'internal_notes');
+        if (customerHasContradictedPhoneMarker(markerRow)) {
+          acceptProfilePhoneOnly = true;
+          acceptProfileOwnPhone = String(markerRow.phone || '').trim();
+        }
+      } catch (markerErr) {
+        acceptProfilePhoneOnly = true;
+        logger.warn(`[estimate-accept] contradicted-phone marker check failed for customer ${customerId} — no accept text: ${markerErr.message}`);
+      }
+    }
+    let acceptSmsPhone = acceptProfilePhoneOnly ? acceptProfileOwnPhone : String(estimate.customer_phone || '').trim();
+    if (!acceptSmsPhone && customerId && !acceptProfilePhoneOnly) {
       try {
         const { withAccountPrimaryContact } = require('../services/customer-contact');
         const contactRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile');
