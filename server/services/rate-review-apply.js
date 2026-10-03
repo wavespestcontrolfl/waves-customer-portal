@@ -427,10 +427,15 @@ async function activePlanHold(dbh, customerId) {
 // Whether an ACTIVE plan hold still covers `day` (the day a rate would start):
 // it has no return date, or returns after that day. A hold returning on the day
 // itself is resumed ahead of the 03:10 apply (resumeHoldsEndingToday), so it
-// does not block. The comms lane asks this before announcing a start date the
-// apply would answer with plan_on_hold.
-function planHoldCovers(hold, day) {
-  return !!hold && (!hold.resume_on || ymd(hold.resume_on) > day);
+// does not block — but only while the resume lifecycle runs (the cancel-flow
+// gate, as its cron and resumeHoldsEndingToday): with it off nothing clears the
+// hold on its return date, so an active hold blocks whatever that date is. The
+// comms lane asks this before announcing a start date the apply would answer
+// with plan_on_hold.
+function planHoldCovers(hold, day, { resumeLive = require('./cancellation-resolution').cancelFlowV2Enabled() } = {}) {
+  if (!hold) return false;
+  if (!resumeLive) return true;
+  return !hold.resume_on || ymd(hold.resume_on) > day;
 }
 
 // ── scheduling ──────────────────────────────────────────────────────────

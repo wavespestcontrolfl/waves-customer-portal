@@ -150,6 +150,7 @@ const snapshots = () => mockDb.store.rate_review_snapshots;
 
 beforeEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
+  process.env.GATE_CANCEL_FLOW_V2 = 'true'; // the hold resume lifecycle runs
   emailLeg.mockReset().mockResolvedValue({ sent: true, attempted: true });
   smsLeg.mockReset().mockResolvedValue({ sent: true, attempted: true });
   mockDb.reset();
@@ -397,6 +398,30 @@ describe('sendBatch', () => {
     expect(snapshots()[0].status).toBe('approved');
     // the link that email may carry renders the frozen words
     expect(comms.publicReview(n)).toMatchObject({ costBlock: COST_BLOCK, delivered: false, lines: [{ current: '$117', next: '$121' }] });
+  });
+
+  test('a claim still running its pre-dispatch checks exposes nothing on the public page; the frozen words are served only once a provider handoff is recorded', async () => {
+    mockDb.reset(book());
+    const seen = [];
+    emailLeg.mockImplementation(async () => { seen.push(comms.publicReview(notices()[0])); return { sent: true, attempted: true }; });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(seen[0]).toMatchObject({ delivered: false, lines: [{ current: '$117', next: '$121' }] }); // handed off: the link works
+    const claimed = { rate_review_row_id: 'r', status: 'sending', sent_at: null };
+    const letter = { lines: [{ service: 'Pest control', current_cents: 11700, new_cents: 12100 }] };
+    expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter } } })).toEqual({ unavailable: true });
+    expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } }).lines).toHaveLength(1);
+    expect(comms.publicReview({ ...claimed, status: 'draft', metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } })).toEqual({ unavailable: true });
+  });
+
+  test('a multi-property account (an included multi_property exception): the line names no street, in the preview and in the letter', async () => {
+    mockDb.reset(book());
+    mockDb.store.rate_review_snapshots[0].flags = JSON.stringify(['multi_property']);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(JSON.stringify(out)).not.toContain('Example Way');
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
+    expect(JSON.stringify(emailLeg.mock.calls[0][0].vars)).toContain('Pest control');
+    expect(JSON.stringify(emailLeg.mock.calls[0][0].vars)).not.toContain('Example Way');
+    expect(JSON.stringify(comms.publicReview(notices()[0]))).not.toContain('Example Way');
   });
 
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
@@ -1003,6 +1028,10 @@ describe('customer surfaces', () => {
     expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: 'plan_on_hold' });
     mockDb.store.plan_holds[0].resume_on = '2026-12-09'; // back before the 12-10 start
     expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    // with the resume lifecycle off nothing clears that hold on its return date: it still blocks
+    process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(0);
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
     mockDb.store.plan_holds[0].resume_on = null; // open-ended
     expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(0);
     // a hold created between the preview and the claim is caught by the post-claim re-check

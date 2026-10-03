@@ -48,10 +48,11 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
       const at = chargeDate ? new Date(`${chargeDate}T16:00:00Z`) : null;
       // Announced only when that debit will really run on this method: the
       // account still bills monthly dues (the lane the cron charges), Auto
-      // Pay is on, no pause covers the date (the cron's isPaused) and the
-      // method is not a card expired by then (charge() refuses it).
+      // Pay is on, no pause covers the date (the cron's isPaused), service is
+      // not paused after failed payments (the cron skips service_paused_at) and
+      // the method is not a card expired by then (charge() refuses it).
       const runs = monthlyBilling && autopayEnabled && method && chargeCents > 0 && at
-        && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
+        && !customer.service_paused_at && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
       const charge = runs ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
       return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
     }) };
@@ -119,7 +120,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
-        'ach_status',
+        'ach_status', 'service_paused_at',
       )
       .first();
 

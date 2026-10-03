@@ -531,7 +531,7 @@ function ExceptionsCard({ rows, disabled, busyRow, onInclude, onSkip }) {
   );
 }
 
-function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave, costBlockRef }) {
+function SettingsCard({ open, onToggle, draft, onDraft, saving, disabled = false, feedback, onSave, costBlockRef }) {
   return (
     <Card className="p-0 overflow-hidden">
       <button
@@ -565,10 +565,10 @@ function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave
             label="Cost block text"
             help="Written once a year by you, with real figures — technician pay, two or three products by name, fuel, insurance, licensing. The letter prints it under what changed on our side this year. Plain text, nothing generated."
           >
-            <Textarea ref={costBlockRef} rows={6} disabled={saving} value={draft.cost_block} onChange={(e) => onDraft("cost_block", e.target.value)} />
+            <Textarea ref={costBlockRef} rows={6} disabled={saving || disabled} value={draft.cost_block} onChange={(e) => onDraft("cost_block", e.target.value)} />
           </Field>
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="secondary" onClick={onSave} loading={saving}>Save settings</Button>
+            <Button variant="secondary" onClick={onSave} loading={saving} disabled={disabled}>Save settings</Button>
             <span className="text-ui-caption text-ink-secondary">Ranking settings apply to the next build; rows already computed keep the values they were ranked with. The cost block is read live: the current batch's letters use it as soon as it is saved.</span>
             {feedback && <ActionFeedback error={!feedback.ok}>{feedback.text}</ActionFeedback>}
           </div>
@@ -946,7 +946,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
   };
 
   const saveSettings = async () => {
-    if (savingSettings) return;
+    // A send in flight reads the cost block once, before its first letter: no edit mid-send.
+    if (savingSettings || sending) return;
     const { patch, error } = settingsPatch(settingsDraft, config);
     if (error) {
       setSettingsFeedback({ ok: false, text: error });
@@ -1046,6 +1047,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
           draft={settingsDraft}
           onDraft={(key, value) => setSettingsDraft((prev) => ({ ...prev, [key]: value }))}
           saving={savingSettings}
+          disabled={sending}
           feedback={settingsFeedback}
           onSave={saveSettings}
           costBlockRef={costBlockRef}

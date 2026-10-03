@@ -181,7 +181,10 @@ function whyFor(notice, snapshot) {
 function lineFor(notice, snapshot, customer) {
   const meta = parseJson(notice.metadata, {});
   const service = SERVICE_LABELS[notice.family_key];
-  const street = propertyStreetLine(customer || {});
+  // An account with several service properties (an included multi_property exception): the
+  // customer record's street may not be the home this line is about, so no street is named.
+  const streetOmitted = flagList(snapshot && snapshot.flags).includes('multi_property');
+  const street = streetOmitted ? null : propertyStreetLine(customer || {});
   const effective = ymd(notice.effective_date);
   const unit = unitFor(notice);
   const current = Number(notice.noticed_current_cents ?? notice.current_amount_cents);
@@ -191,6 +194,7 @@ function lineFor(notice, snapshot, customer) {
     familyKey: notice.family_key,
     service: [service, street].filter(Boolean).join(' · '),
     serviceLabel: service || null,
+    streetOmitted,
     unit,
     currentCents: current,
     newCents: next,
@@ -969,7 +973,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // one the email carries.
   const prefs = await dbh('notification_prefs').where({ customer_id: entry.customerId }).first().catch(() => null);
   const [resolvedRecipient] = getInvoiceEmailRecipients(customer, prefs || {});
-  const payload = letterPayload({ customer, prefs, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  const payload = letterPayload({ customer, prefs, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, l.streetOmitted ? null : propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
   // Ownership is re-read right before each provider leg: a merge undo
@@ -1002,6 +1006,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // Set when the handoff refused before dispatch: the request never left, so
   // the letter is definitively unsent (a named hold, not an uncertain send).
   let emailHold = null;
+  // The public page serves the frozen words only from here on (publicReview): a claim that
+  // is refused before any provider is called never exposes them.
+  await freezeLetter(dbh, entry, { ...frozen, handoff_at: clock().toISOString() });
   // From here a provider may have the message: an exception is no longer a clean non-send.
   progress.crossed = true;
   const email = await PriceChangeNotices.sendNoticeEmail({
@@ -1318,10 +1325,13 @@ function publicReview(notice) {
   if (!notice?.rate_review_row_id) return null;
   const meta = parseJson(notice.metadata, {});
   // Delivered: the letter frozen at send. Not stamped but handed to a
-  // provider (send_uncertain / a claim mid-send): the words frozen before
-  // the provider call — only a delivered message carries this token, so
-  // the link the customer holds keeps working. Anything else is a 404.
-  const letter = notice.sent_at ? meta.letter : meta.pending_letter?.letter;
+  // provider (send_uncertain, or a claim mid-send that recorded its handoff):
+  // the words frozen before the provider call — only a delivered message
+  // carries this token, so the link the customer holds keeps working. A claim
+  // still running its pre-dispatch checks has handed nothing over: a 404,
+  // like anything else.
+  const handedOff = String(notice.status) === UNCERTAIN || (String(notice.status) === 'sending' && !!meta.pending_letter?.handoff_at);
+  const letter = notice.sent_at ? meta.letter : (handedOff ? meta.pending_letter?.letter : null);
   if (!notice.sent_at && !letter) return { unavailable: true };
   // Delivered without a frozen letter (a notice stamped by another
   // sender): the plain notice page, never a 404 for a received link.

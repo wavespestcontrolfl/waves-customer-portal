@@ -178,6 +178,14 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
     expect(body.rate_changes[0].nextCharge).toBeNull();
   });
 
+  test('service paused after failed payments announces no charge (the cron skips service_paused_at)', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].service_paused_at = '2026-12-20T12:00:00Z';
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+    delete state.customers[0].service_paused_at;
+  });
+
   test('a pause covering the effective date announces no charge (the cron skips it)', async () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([change]);
     state.customers[0].autopay_paused_until = '2027-01-05';
