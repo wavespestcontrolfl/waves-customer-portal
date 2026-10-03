@@ -311,7 +311,10 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
       m.orWhere((legacy) => legacy.whereRaw("metadata->>'alertClass' IS NULL").whereRaw("metadata->>'opsKey' = ?", [key]));
     }
   });
-  return q.orderBy(conn.raw(`${RUNG_AT_EXPR} DESC`)).first('metadata');
+  // orderByRaw, never orderBy(conn.raw(...DESC)): orderBy appends its own
+  // direction, and "DESC asc" is a syntax error that failed every gated
+  // insert and sent the digest to its email fallback (2026-09-28 to 10-03).
+  return q.orderByRaw(`${RUNG_AT_EXPR} DESC`).first('metadata');
 }
 
 // A date-only ops-cron key's set identity (follow-up to #5269, codex r8 P1):
